@@ -11,7 +11,7 @@ ACD provides reliable transaction support without the complexity of full ACID:
 - Durability: Changes survive crashes (via Write-Ahead Log)
 """
 
-import mongolite
+import ironbase
 import os
 import tempfile
 
@@ -24,7 +24,7 @@ def example_basic_transaction():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Start a transaction
         tx_id = db.begin_transaction()
@@ -55,7 +55,7 @@ def example_transaction_rollback():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Insert initial data outside transaction
         users = db.collection("users")
@@ -92,7 +92,7 @@ def example_multiple_transactions():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Setup initial data
         users = db.collection("users")
@@ -134,7 +134,7 @@ def example_error_handling():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Begin transaction affecting multiple collections
         tx_id = db.begin_transaction()
@@ -165,7 +165,7 @@ def example_transaction_lifecycle():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Recommended error handling pattern
         tx_id = db.begin_transaction()

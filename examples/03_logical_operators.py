@@ -10,7 +10,7 @@ Demonstrates all logical operators in MongoLite:
 
 Run: python examples/03_logical_operators.py
 """
-import mongolite
+import ironbase
 import os
 
 DB_FILE = "examples/data/logical_ops_example.db"
@@ -28,7 +28,7 @@ def main():
     print("MongoLite Example 3: Logical Operators")
     print("="*60 + "\n")
 
-    db = mongolite.MongoLite(DB_FILE)
+    db = ironbase.MongoLite(DB_FILE)
     employees = db.collection("employees")
 
     # Insert test data

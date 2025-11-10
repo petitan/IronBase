@@ -4,7 +4,7 @@ MongoLite Delete Operations Test Suite
 
 Test-first approach: Writing tests before implementation.
 """
-import mongolite
+import ironbase
 import os
 
 TEST_DB = "test_delete.db"
@@ -17,7 +17,7 @@ def cleanup_test_db():
 def test_delete_one():
     """Test delete_one() deletes single matching document"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -46,7 +46,7 @@ def test_delete_one():
 def test_delete_many():
     """Test delete_many() deletes all matching documents"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("products")
 
     # Insert test data
@@ -73,7 +73,7 @@ def test_delete_many():
 def test_delete_one_no_match():
     """Test delete_one() when no document matches"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_one({"name": "Alice", "age": 25})
@@ -93,7 +93,7 @@ def test_delete_one_no_match():
 def test_delete_many_no_match():
     """Test delete_many() when no documents match"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_many([
@@ -116,7 +116,7 @@ def test_delete_many_no_match():
 def test_delete_then_find():
     """Test that deleted documents don't appear in find() results"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_many([
@@ -140,7 +140,7 @@ def test_delete_then_find():
 def test_delete_then_update():
     """Test that deleted documents can't be updated"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_one({"name": "Alice", "age": 25})

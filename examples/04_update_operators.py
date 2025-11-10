@@ -9,7 +9,7 @@ Demonstrates all update operators in MongoLite:
 
 Run: python examples/04_update_operators.py
 """
-import mongolite
+import ironbase
 import os
 
 DB_FILE = "examples/data/update_ops_example.db"
@@ -38,7 +38,7 @@ def main():
     print("MongoLite Example 4: Update Operators")
     print("="*60 + "\n")
 
-    db = mongolite.MongoLite(DB_FILE)
+    db = ironbase.MongoLite(DB_FILE)
     users = db.collection("users")
 
     # Insert initial test data

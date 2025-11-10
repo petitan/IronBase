@@ -4,7 +4,7 @@ MongoLite Count Operations Test Suite
 
 Test-first approach: Writing tests before implementation.
 """
-import mongolite
+import ironbase
 import os
 
 TEST_DB = "test_count.db"
@@ -17,7 +17,7 @@ def cleanup_test_db():
 def test_count_all():
     """Test count_documents() without filter returns total count"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -37,7 +37,7 @@ def test_count_all():
 def test_count_with_filter():
     """Test count_documents() with filter"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("products")
 
     # Insert test data
@@ -60,7 +60,7 @@ def test_count_with_filter():
 def test_count_with_comparison():
     """Test count_documents() with comparison operators"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -80,7 +80,7 @@ def test_count_with_comparison():
 def test_count_empty_collection():
     """Test count_documents() on empty collection"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("empty")
 
     count = collection.count_documents({})
@@ -92,7 +92,7 @@ def test_count_empty_collection():
 def test_count_no_match():
     """Test count_documents() when no documents match"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_many([
@@ -110,7 +110,7 @@ def test_count_no_match():
 def test_count_after_delete():
     """Test count_documents() after deleting documents"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert and count

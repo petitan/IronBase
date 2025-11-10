@@ -7,7 +7,7 @@ with MongoLite.
 
 Run: python examples/01_basic_crud.py
 """
-import mongolite
+import ironbase
 import os
 
 # Database file
@@ -27,7 +27,7 @@ def main():
     print("="*60 + "\n")
 
     # Open database
-    db = mongolite.MongoLite(DB_FILE)
+    db = ironbase.MongoLite(DB_FILE)
     users = db.collection("users")
 
     # ==================== CREATE ====================

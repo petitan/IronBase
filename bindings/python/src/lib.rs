@@ -1,5 +1,5 @@
 // bindings/python/src/lib.rs
-// PyO3 wrapper for mongolite-core
+// PyO3 wrapper for ironbase-core
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -7,7 +7,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use mongolite_core::{DatabaseCore, CollectionCore, DocumentId};
+use ironbase_core::{DatabaseCore, CollectionCore, DocumentId};
 
 /// MongoLite Database - Python wrapper
 #[pyclass]
@@ -283,7 +283,7 @@ impl Collection {
         limit: Option<usize>,
         skip: Option<usize>,
     ) -> PyResult<PyObject> {
-        use mongolite_core::find_options::FindOptions;
+        use ironbase_core::find_options::FindOptions;
         use std::collections::HashMap;
 
         // Parse query (empty query = all documents)
@@ -698,7 +698,7 @@ fn json_value_to_python(py: Python, value: &Value) -> PyResult<PyObject> {
 
 /// Python modul inicializálás
 #[pymodule]
-fn mongolite(_py: Python, m: &PyModule) -> PyResult<()> {
+fn ironbase(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<MongoLite>()?;
     m.add_class::<Collection>()?;
     Ok(())

@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
-    "mongolite-core",
+    "ironbase-core",
     "bindings/python",
 ]
 

@@ -4,7 +4,7 @@ MongoLite Distinct Operations Test Suite
 
 Test-first approach: Writing tests before implementation.
 """
-import mongolite
+import ironbase
 import os
 
 TEST_DB = "test_distinct.db"
@@ -17,7 +17,7 @@ def cleanup_test_db():
 def test_distinct_basic():
     """Test distinct() returns unique values"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data with duplicate values
@@ -40,7 +40,7 @@ def test_distinct_basic():
 def test_distinct_strings():
     """Test distinct() with string values"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -63,7 +63,7 @@ def test_distinct_strings():
 def test_distinct_with_filter():
     """Test distinct() with query filter"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("products")
 
     # Insert test data
@@ -86,7 +86,7 @@ def test_distinct_with_filter():
 def test_distinct_empty_collection():
     """Test distinct() on empty collection"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("empty")
 
     values = collection.distinct("field")
@@ -99,7 +99,7 @@ def test_distinct_empty_collection():
 def test_distinct_missing_field():
     """Test distinct() with field that doesn't exist"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_many([
@@ -117,7 +117,7 @@ def test_distinct_missing_field():
 def test_distinct_after_delete():
     """Test distinct() after deleting documents"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data

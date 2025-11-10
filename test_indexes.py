@@ -8,7 +8,7 @@ Test script for MongoLite index functionality:
 - Performance comparison with and without indexes
 """
 
-import mongolite
+import ironbase
 import time
 import os
 
@@ -17,7 +17,7 @@ if os.path.exists("test_indexes.db"):
     os.remove("test_indexes.db")
 
 # Open database
-db = mongolite.MongoLite("test_indexes.db")
+db = ironbase.MongoLite("test_indexes.db")
 users = db.collection("users")
 
 print("=" * 70)

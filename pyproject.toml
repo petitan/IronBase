@@ -3,9 +3,9 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "mongolite"
+name = "ironbase"
 version = "0.2.0"
-description = "Lightweight embedded document database - SQLite for MongoDB"
+description = "Lightweight embedded document database with MongoDB-compatible API - Rust-powered"
 authors = [
     {name = "Your Name", email = "your.email@example.com"}
 ]
@@ -25,14 +25,14 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Software Development :: Libraries",
 ]
-keywords = ["database", "embedded", "document", "mongodb", "nosql", "sqlite"]
+keywords = ["database", "embedded", "document", "mongodb", "nosql", "rust", "ironbase"]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/mongolite"
-Repository = "https://github.com/yourusername/mongolite"
-Documentation = "https://github.com/yourusername/mongolite#readme"
+Homepage = "https://github.com/petitan/MongoLite"
+Repository = "https://github.com/petitan/MongoLite"
+Documentation = "https://github.com/petitan/MongoLite#readme"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
-module-name = "mongolite"
+module-name = "ironbase"
 manifest-path = "bindings/python/Cargo.toml"

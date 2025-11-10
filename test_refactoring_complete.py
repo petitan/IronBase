@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Comprehensive test for refactored MongoLite functionality"""
-import mongolite
+import ironbase
 import os
 
 DB_FILE = 'test_refactoring.db'
@@ -29,7 +29,7 @@ def test_basic_persistence():
     cleanup()
 
     # Create and populate
-    db1 = mongolite.MongoLite(DB_FILE)
+    db1 = ironbase.MongoLite(DB_FILE)
     users = db1.collection('users')
     users.insert_many([
         {'name': 'Alice', 'age': 28},
@@ -39,7 +39,7 @@ def test_basic_persistence():
     db1.close()
 
     # Reopen and verify
-    db2 = mongolite.MongoLite(DB_FILE)
+    db2 = ironbase.MongoLite(DB_FILE)
     users2 = db2.collection('users')
     count2 = users2.count_documents({})
     db2.close()
@@ -53,7 +53,7 @@ def test_multi_collection_persistence():
     cleanup()
 
     # Create multiple collections
-    db1 = mongolite.MongoLite(DB_FILE)
+    db1 = ironbase.MongoLite(DB_FILE)
     users = db1.collection('users')
     posts = db1.collection('posts')
     comments = db1.collection('comments')
@@ -68,7 +68,7 @@ def test_multi_collection_persistence():
     db1.close()
 
     # Reopen and verify all collections
-    db2 = mongolite.MongoLite(DB_FILE)
+    db2 = ironbase.MongoLite(DB_FILE)
     users2 = db2.collection('users')
     posts2 = db2.collection('posts')
     comments2 = db2.collection('comments')
@@ -88,7 +88,7 @@ def test_last_id_persistence():
     cleanup()
 
     # Insert some documents
-    db1 = mongolite.MongoLite(DB_FILE)
+    db1 = ironbase.MongoLite(DB_FILE)
     users = db1.collection('users')
     users.insert_many([{'name': 'Alice'}, {'name': 'Bob'}])
     docs1 = list(users.find({}))
@@ -96,7 +96,7 @@ def test_last_id_persistence():
     db1.close()
 
     # Reopen and insert more
-    db2 = mongolite.MongoLite(DB_FILE)
+    db2 = ironbase.MongoLite(DB_FILE)
     users2 = db2.collection('users')
     users2.insert_one({'name': 'Carol'})
     docs2 = list(users2.find({}))
@@ -112,7 +112,7 @@ def test_create_drop_collection():
     cleanup()
 
     # Create collections (by accessing them)
-    db1 = mongolite.MongoLite(DB_FILE)
+    db1 = ironbase.MongoLite(DB_FILE)
     db1.collection('temp1')
     db1.collection('temp2')
     db1.collection('temp3')
@@ -120,7 +120,7 @@ def test_create_drop_collection():
     db1.close()
 
     # Reopen and verify
-    db2 = mongolite.MongoLite(DB_FILE)
+    db2 = ironbase.MongoLite(DB_FILE)
     collections2 = sorted(db2.list_collections())
 
     # Drop one collection
@@ -129,7 +129,7 @@ def test_create_drop_collection():
     db2.close()
 
     # Reopen and verify drop persisted
-    db3 = mongolite.MongoLite(DB_FILE)
+    db3 = ironbase.MongoLite(DB_FILE)
     collections4 = sorted(db3.list_collections())
     db3.close()
 
@@ -144,14 +144,14 @@ def test_metadata_update_persistence():
     cleanup()
 
     # Insert documents and verify count
-    db1 = mongolite.MongoLite(DB_FILE)
+    db1 = ironbase.MongoLite(DB_FILE)
     users = db1.collection('users')
     users.insert_many([{'name': f'User{i}'} for i in range(5)])
     count1 = users.count_documents({})
     db1.close()
 
     # Reopen and verify count still correct
-    db2 = mongolite.MongoLite(DB_FILE)
+    db2 = ironbase.MongoLite(DB_FILE)
     users2 = db2.collection('users')
     count2 = users2.count_documents({})
 
@@ -161,7 +161,7 @@ def test_metadata_update_persistence():
     db2.close()
 
     # Reopen final time
-    db3 = mongolite.MongoLite(DB_FILE)
+    db3 = ironbase.MongoLite(DB_FILE)
     users3 = db3.collection('users')
     count4 = users3.count_documents({})
     db3.close()
@@ -176,7 +176,7 @@ def test_collection_isolation():
     """Test that collections remain isolated after reopen"""
     cleanup()
 
-    db1 = mongolite.MongoLite(DB_FILE)
+    db1 = ironbase.MongoLite(DB_FILE)
     users = db1.collection('users')
     posts = db1.collection('posts')
 
@@ -185,7 +185,7 @@ def test_collection_isolation():
     db1.close()
 
     # Reopen and verify isolation
-    db2 = mongolite.MongoLite(DB_FILE)
+    db2 = ironbase.MongoLite(DB_FILE)
     users2 = db2.collection('users')
     posts2 = db2.collection('posts')
 

@@ -10,7 +10,7 @@ Demonstrates all comparison operators in MongoLite:
 
 Run: python examples/02_query_operators.py
 """
-import mongolite
+import ironbase
 import os
 
 DB_FILE = "examples/data/query_ops_example.db"
@@ -28,7 +28,7 @@ def main():
     print("MongoLite Example 2: Query Operators")
     print("="*60 + "\n")
 
-    db = mongolite.MongoLite(DB_FILE)
+    db = ironbase.MongoLite(DB_FILE)
     products = db.collection("products")
 
     # Insert test data

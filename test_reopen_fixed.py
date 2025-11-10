@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Test database reopen to verify data persistence fix"""
-import mongolite
+import ironbase
 import os
 
 DB_FILE = 'test_reopen_fixed.db'
@@ -15,7 +15,7 @@ print("=" * 60)
 
 # ==================== Phase 1: Create and populate ====================
 print("\nPhase 1: Creating database and inserting data")
-db = mongolite.MongoLite(DB_FILE)
+db = ironbase.MongoLite(DB_FILE)
 users = db.collection('users')
 
 result = users.insert_many([
@@ -38,7 +38,7 @@ print("✓ Database closed")
 
 # ==================== Phase 2: Reopen and verify ====================
 print("\nPhase 2: Reopening database and verifying data")
-db2 = mongolite.MongoLite(DB_FILE)
+db2 = ironbase.MongoLite(DB_FILE)
 users2 = db2.collection('users')
 
 count2 = users2.count_documents({})

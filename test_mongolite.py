@@ -2,7 +2,7 @@
 """
 MongoLite Test Suite - Test First Development
 
-Run with: python test_mongolite.py
+Run with: python test_ironbase.py
 """
 
 import os
@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 # Test database path
-TEST_DB = "test_mongolite.mlite"
+TEST_DB = "test_ironbase.mlite"
 
 
 def cleanup_test_db():
@@ -26,7 +26,7 @@ def test_find_all_documents():
     cleanup_test_db()
 
     try:
-        from mongolite import MongoLite
+        from ironbase import MongoLite
 
         db = MongoLite(TEST_DB)
         collection = db.collection("users")
@@ -62,7 +62,7 @@ def test_find_with_equality_query():
     cleanup_test_db()
 
     try:
-        from mongolite import MongoLite
+        from ironbase import MongoLite
 
         db = MongoLite(TEST_DB)
         collection = db.collection("users")
@@ -102,7 +102,7 @@ def test_find_with_comparison_operators():
     cleanup_test_db()
 
     try:
-        from mongolite import MongoLite
+        from ironbase import MongoLite
 
         db = MongoLite(TEST_DB)
         collection = db.collection("users")
@@ -146,7 +146,7 @@ def test_find_one():
     cleanup_test_db()
 
     try:
-        from mongolite import MongoLite
+        from ironbase import MongoLite
 
         db = MongoLite(TEST_DB)
         collection = db.collection("users")
@@ -185,7 +185,7 @@ def test_find_with_in_operator():
     cleanup_test_db()
 
     try:
-        from mongolite import MongoLite
+        from ironbase import MongoLite
 
         db = MongoLite(TEST_DB)
         collection = db.collection("users")
@@ -223,7 +223,7 @@ def test_find_empty_collection():
     cleanup_test_db()
 
     try:
-        from mongolite import MongoLite
+        from ironbase import MongoLite
 
         db = MongoLite(TEST_DB)
         collection = db.collection("empty")

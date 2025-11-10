@@ -1,4 +1,4 @@
-# MongoLite - Build és Telepítési Útmutató
+# ironbase - Build és Telepítési Útmutató
 
 ## 🔧 Előfeltételek
 
@@ -46,7 +46,7 @@ pip3 install maturin
 
 ### Development Build (Gyors, Debug)
 ```bash
-cd mongolite_project
+cd ironbase_project
 
 # Build és install Python package-ként
 maturin develop
@@ -62,9 +62,9 @@ maturin build --release
 
 # Wheel fájl (platform szerint):
 ls target/wheels/
-# Linux:   mongolite-0.2.0-cp38-abi3-linux_x86_64.whl
-# Windows: mongolite-0.2.0-cp38-abi3-win_amd64.whl
-# macOS:   mongolite-0.2.0-cp38-abi3-macosx_11_0_universal2.whl
+# Linux:   ironbase-0.2.0-cp38-abi3-linux_x86_64.whl
+# Windows: ironbase-0.2.0-cp38-abi3-win_amd64.whl
+# macOS:   ironbase-0.2.0-cp38-abi3-macosx_11_0_universal2.whl
 ```
 
 ### Csak Rust Build (Python nélkül)
@@ -90,7 +90,7 @@ maturin develop
 ### Wheel-ből
 ```bash
 # Build után
-pip install target/wheels/mongolite-*.whl
+pip install target/wheels/ironbase-*.whl
 ```
 
 ### Editable Install
@@ -254,7 +254,7 @@ cargo publish
 
 set -e  # Exit on error
 
-echo "🔨 Building MongoLite..."
+echo "🔨 Building ironbase..."
 
 # Tisztítás
 cargo clean
@@ -275,7 +275,7 @@ echo "✅ Build complete!"
 ```powershell
 # build.ps1
 
-Write-Host "🔨 Building MongoLite..." -ForegroundColor Green
+Write-Host "🔨 Building ironbase..." -ForegroundColor Green
 
 # Tisztítás
 cargo clean

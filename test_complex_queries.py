@@ -5,7 +5,7 @@ MongoLite Complex Query Operations Test Suite
 Test-first approach: Writing tests before implementation.
 Tests for $and, $or, $not, $ne operators.
 """
-import mongolite
+import ironbase
 import os
 
 TEST_DB = "test_complex_queries.db"
@@ -18,7 +18,7 @@ def cleanup_test_db():
 def test_ne_operator():
     """Test $ne (not equal) operator"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -41,7 +41,7 @@ def test_ne_operator():
 def test_and_operator():
     """Test $and operator"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("products")
 
     # Insert test data
@@ -69,7 +69,7 @@ def test_and_operator():
 def test_or_operator():
     """Test $or operator"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -100,7 +100,7 @@ def test_or_operator():
 def test_not_operator():
     """Test $not operator"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -125,7 +125,7 @@ def test_not_operator():
 def test_complex_and_or():
     """Test combination of $and and $or"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("products")
 
     # Insert test data
@@ -164,7 +164,7 @@ def test_complex_and_or():
 def test_ne_with_missing_field():
     """Test $ne with missing field"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data

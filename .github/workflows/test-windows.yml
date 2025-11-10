@@ -32,10 +32,10 @@ jobs:
 
       - name: Install wheel
         run: |
-          pip install --find-links=target/wheels mongolite
+          pip install --find-links=target/wheels ironbase
 
       - name: Test import
-        run: python -c "import mongolite; print('✓ Import successful')"
+        run: python -c "import ironbase; print('✓ Import successful')"
 
       - name: Run Rust tests
         run: cargo test --workspace --verbose
@@ -43,7 +43,7 @@ jobs:
       - name: Basic functionality test
         run: |
           python -c "
-          from mongolite import MongoLite
+          from ironbase import MongoLite
           import tempfile
           import os
 
@@ -79,7 +79,7 @@ jobs:
       - name: Test file persistence
         run: |
           python -c "
-          from mongolite import MongoLite
+          from ironbase import MongoLite
           import tempfile
           import os
 

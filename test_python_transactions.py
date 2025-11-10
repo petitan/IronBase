@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Test Python transaction bindings for MongoLite ACD transactions"""
 
-import mongolite
+import ironbase
 import tempfile
 import os
 
@@ -9,7 +9,7 @@ def test_basic_transaction():
     """Test basic transaction commit"""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Begin transaction
         tx_id = db.begin_transaction()
@@ -38,7 +38,7 @@ def test_transaction_rollback():
     """Test transaction rollback"""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Insert initial data
         users = db.collection("users")
@@ -72,7 +72,7 @@ def test_multi_operation_transaction():
     """Test transaction with multiple operations"""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Insert initial data
         users = db.collection("users")
@@ -121,7 +121,7 @@ def test_multi_collection_transaction():
     """Test transaction across multiple collections"""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Begin transaction
         tx_id = db.begin_transaction()
@@ -152,7 +152,7 @@ def test_transaction_not_found():
     """Test error handling for invalid transaction ID"""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         try:
             db.insert_one_tx("users", {"name": "Alice"}, 9999)

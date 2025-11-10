@@ -4,7 +4,7 @@ MongoLite Demo - Showcase all implemented features
 
 Run: python demo.py
 """
-import mongolite
+import ironbase
 import os
 
 DB_PATH = "demo.db"
@@ -232,7 +232,7 @@ def main():
     cleanup()
 
     try:
-        db = mongolite.MongoLite(DB_PATH)
+        db = ironbase.MongoLite(DB_PATH)
 
         demo_insert(db)
         demo_find(db)

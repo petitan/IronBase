@@ -4,7 +4,7 @@ MongoLite - Példa használat
 MongoDB-szerű API SQLite-szerű beágyazott adatbázishoz
 """
 
-from mongolite import MongoLite
+from ironbase import MongoLite
 
 def main():
     # 1. Adatbázis megnyitása (vagy létrehozása)
@@ -151,7 +151,7 @@ if __name__ == "__main__":
     print("-" * 60)
     print("""
     # Alapvető használat
-    from mongolite import MongoLite
+    from ironbase import MongoLite
     
     # Adatbázis megnyitása
     db = MongoLite("mydata.mlite")

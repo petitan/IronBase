@@ -3,7 +3,7 @@
 Test script for MongoLite find() options: projection, sort, limit, skip
 """
 
-import mongolite
+import ironbase
 import os
 
 # Clean up test database
@@ -11,7 +11,7 @@ if os.path.exists("test_find_options.db"):
     os.remove("test_find_options.db")
 
 # Open database
-db = mongolite.MongoLite("test_find_options.db")
+db = ironbase.MongoLite("test_find_options.db")
 users = db.collection("users")
 
 print("=" * 70)

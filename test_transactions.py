@@ -4,7 +4,7 @@ Test ACD Transactions - Python Bindings
 Tests the transaction API exposed through PyO3
 """
 
-import mongolite
+import ironbase
 import os
 import tempfile
 
@@ -14,7 +14,7 @@ def test_basic_transaction():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Begin transaction
         tx_id = db.begin_transaction()
@@ -34,7 +34,7 @@ def test_transaction_rollback():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Begin transaction
         tx_id = db.begin_transaction()
@@ -53,7 +53,7 @@ def test_multiple_transactions():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # First transaction
         tx_id1 = db.begin_transaction()
@@ -82,7 +82,7 @@ def test_transaction_error_handling():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Try to commit non-existent transaction
         try:
@@ -107,7 +107,7 @@ def test_transaction_api_availability():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.mlite")
-        db = mongolite.MongoLite(db_path)
+        db = ironbase.MongoLite(db_path)
 
         # Check methods exist
         assert hasattr(db, 'begin_transaction'), "begin_transaction method missing"

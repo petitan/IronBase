@@ -1,18 +1,18 @@
 [package]
-name = "mongolite"
+name = "ironbase"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Python bindings for MongoLite - embedded document database"
+description = "Python bindings for IronBase - Rust-powered embedded document database"
 
 [lib]
-name = "mongolite"
+name = "ironbase"
 crate-type = ["cdylib"]
 
 [dependencies]
 # Core library
-mongolite-core = { path = "../../mongolite-core" }
+ironbase-core = { path = "../../ironbase-core" }
 
 # Python binding
 pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"] }

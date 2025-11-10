@@ -4,7 +4,7 @@ Test script for MongoLite aggregation pipeline functionality.
 Tests all pipeline stages: $match, $group, $project, $sort, $limit, $skip
 """
 
-import mongolite
+import ironbase
 import os
 
 # Clean up test database
@@ -12,7 +12,7 @@ if os.path.exists("test_aggregation.db"):
     os.remove("test_aggregation.db")
 
 # Open database
-db = mongolite.MongoLite("test_aggregation.db")
+db = ironbase.MongoLite("test_aggregation.db")
 users = db.collection("users")
 
 print("=" * 70)

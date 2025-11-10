@@ -9,7 +9,7 @@ Demonstrates MongoLite in a realistic scenario with:
 
 Run: python examples/06_real_world_blog.py
 """
-import mongolite
+import ironbase
 import os
 from datetime import datetime, timedelta
 
@@ -32,7 +32,7 @@ def main():
     print("MongoLite Example 6: Real-World Blog System")
     print("="*60 + "\n")
 
-    db = mongolite.MongoLite(DB_FILE)
+    db = ironbase.MongoLite(DB_FILE)
 
     # ==================== Setup Collections ====================
     users = db.collection("users")

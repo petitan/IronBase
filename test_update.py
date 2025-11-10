@@ -4,7 +4,7 @@ MongoLite Update Operations Test Suite
 
 Test-first approach: Writing tests before implementation.
 """
-import mongolite
+import ironbase
 import os
 
 TEST_DB = "test_update.db"
@@ -17,7 +17,7 @@ def cleanup_test_db():
 def test_update_one_set():
     """Test update_one() with $set operator"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     # Insert test data
@@ -45,7 +45,7 @@ def test_update_one_set():
 def test_update_one_inc():
     """Test update_one() with $inc operator"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("counters")
 
     collection.insert_one({"name": "page_views", "count": 100})
@@ -77,7 +77,7 @@ def test_update_one_inc():
 def test_update_one_unset():
     """Test update_one() with $unset operator"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_one({"name": "Charlie", "age": 35, "email": "charlie@example.com"})
@@ -103,7 +103,7 @@ def test_update_one_unset():
 def test_update_one_no_match():
     """Test update_one() when no document matches"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("users")
 
     collection.insert_one({"name": "Alice", "age": 25})
@@ -122,7 +122,7 @@ def test_update_one_no_match():
 def test_update_one_multiple_operators():
     """Test update_one() with multiple operators"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("products")
 
     collection.insert_one({
@@ -157,7 +157,7 @@ def test_update_one_multiple_operators():
 def test_update_many_set():
     """Test update_many() updates all matching documents"""
     cleanup_test_db()
-    db = mongolite.MongoLite(TEST_DB)
+    db = ironbase.MongoLite(TEST_DB)
     collection = db.collection("employees")
 
     # Insert test data

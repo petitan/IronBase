@@ -36,8 +36,8 @@ jobs:
       - name: Test wheel (x86_64 only)
         if: matrix.target == 'x86_64'
         run: |
-          pip install mongolite --find-links dist --force-reinstall
-          python -c "import mongolite; print('✓ Import successful')"
+          pip install ironbase --find-links dist --force-reinstall
+          python -c "import ironbase; print('✓ Import successful')"
 
   # Windows builds
   windows:
@@ -68,8 +68,8 @@ jobs:
 
       - name: Test wheel
         run: |
-          pip install mongolite --find-links dist --force-reinstall
-          python -c "import mongolite; print('✓ Import successful')"
+          pip install ironbase --find-links dist --force-reinstall
+          python -c "import ironbase; print('✓ Import successful')"
 
   # macOS builds
   macos:
@@ -95,8 +95,8 @@ jobs:
       - name: Test wheel (x86_64 only)
         if: matrix.target == 'x86_64'
         run: |
-          pip install mongolite --find-links dist --force-reinstall
-          python -c "import mongolite; print('✓ Import successful')"
+          pip install ironbase --find-links dist --force-reinstall
+          python -c "import ironbase; print('✓ Import successful')"
 
   # Publish to PyPI on release
   release:

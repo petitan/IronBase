@@ -1,4 +1,4 @@
-# MongoLite
+# ironbase
 
 **Embedded NoSQL document database** with MongoDB-compatible API, written in Rust with Python bindings.
 
@@ -21,7 +21,7 @@
 
 ## 🎯 Célközönség
 
-MongoLite tökéletes választás:
+ironbase tökéletes választás:
 - Desktop alkalmazásokhoz
 - Mobil app backend-ekhez
 - Prototípusokhoz és MVP-khez
@@ -39,7 +39,7 @@ MongoLite tökéletes választás:
 ### Pip-el (Ajánlott - PyPI-ról, minden platform)
 
 ```bash
-pip install mongolite
+pip install ironbase
 ```
 
 Támogatott platformok:
@@ -78,10 +78,10 @@ maturin build --release
 ## 🚀 Gyors Kezdés
 
 ```python
-from mongolite import MongoLite
+from ironbase import ironbase
 
 # Adatbázis megnyitása (létrehozza, ha nem létezik)
-db = MongoLite("myapp.mlite")
+db = ironbase("myapp.mlite")
 
 # Collection lekérése
 users = db.collection("users")
@@ -121,11 +121,11 @@ db.close()
 
 ## 📚 API Dokumentáció
 
-### Database (MongoLite)
+### Database (ironbase)
 
 ```python
 # Adatbázis megnyitása
-db = MongoLite("path/to/database.mlite")
+db = ironbase("path/to/database.mlite")
 
 # Collection lekérése (létrehozza, ha nincs)
 collection = db.collection("collection_name")
@@ -145,7 +145,7 @@ db.close()
 
 ### Transactions (ACD)
 
-MongoLite támogat **ACD tranzakciókat** (Atomicity, Consistency, Durability) Write-Ahead Log (WAL) alapú crash recovery-vel.
+ironbase támogat **ACD tranzakciókat** (Atomicity, Consistency, Durability) Write-Ahead Log (WAL) alapú crash recovery-vel.
 
 ```python
 # Transaction indítása
@@ -405,9 +405,9 @@ results = collection.find({
 ### Cargo Workspace Structure
 
 ```
-MongoLite/
+ironbase/
 ├── Cargo.toml                    # Workspace root
-├── mongolite-core/               # 🦀 Pure Rust Core Library
+├── ironbase-core/               # 🦀 Pure Rust Core Library
 │   ├── Cargo.toml
 │   └── src/
 │       ├── lib.rs                # Clean API exports
@@ -422,7 +422,7 @@ MongoLite/
     ├── python/                   # 🐍 Python Bindings (PyO3)
     │   ├── Cargo.toml
     │   └── src/
-    │       └── lib.rs            # MongoLite, Collection wrappers
+    │       └── lib.rs            # ironbase, Collection wrappers
     └── csharp/                   # (Planned) C# Bindings
         └── ...
 ```
@@ -432,12 +432,12 @@ MongoLite/
 ```
 ┌─────────────────────────────────────────────────────┐
 │     Language Bindings (Python, C#, etc.)            │
-│  - MongoLite, Collection wrappers                   │
+│  - ironbase, Collection wrappers                   │
 │  - Language-specific type conversions               │
 └──────────────┬──────────────────────────────────────┘
                │ (Foreign Function Interface)
 ┌──────────────▼──────────────────────────────────────┐
-│       mongolite-core (Pure Rust)                    │
+│       ironbase-core (Pure Rust)                    │
 │  - DatabaseCore, CollectionCore                     │
 │  - CRUD operations                                  │
 │  - Query engine with MongoDB operators             │
@@ -501,7 +501,7 @@ MongoLite/
 
 **Architecture:**
 - [x] Cargo workspace with clean separation
-- [x] Pure Rust core library (mongolite-core)
+- [x] Pure Rust core library (ironbase-core)
 - [x] Python bindings via PyO3 (bindings/python)
 - [x] Append-only storage with compaction
 - [x] Tombstone pattern for deletes
@@ -561,10 +561,10 @@ Lásd az `example.py` fájlt részletes példákért.
 
 ```bash
 # Core library tests (56 unit + 11 integration tests)
-cargo test --manifest-path mongolite-core/Cargo.toml
+cargo test --manifest-path ironbase-core/Cargo.toml
 
 # Python bindings smoke test
-cd bindings/python && maturin develop && python -c "import mongolite; print('OK')"
+cd bindings/python && maturin develop && python -c "import ironbase; print('OK')"
 
 # Run all workspace tests
 cargo test --workspace
@@ -603,9 +603,9 @@ MIT License - lásd a LICENSE fájlt
 
 ## 📧 Kapcsolat
 
-- GitHub Issues: [github.com/yourusername/mongolite/issues](https://github.com/yourusername/mongolite/issues)
+- GitHub Issues: [github.com/yourusername/ironbase/issues](https://github.com/yourusername/ironbase/issues)
 - Email: your.email@example.com
 
 ---
 
-**MongoLite** - When you need MongoDB simplicity with SQLite's elegance ⚡
+**ironbase** - When you need MongoDB simplicity with SQLite's elegance ⚡

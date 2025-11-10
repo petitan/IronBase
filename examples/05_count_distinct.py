@@ -8,7 +8,7 @@ Demonstrates aggregation-like operations in MongoLite:
 
 Run: python examples/05_count_distinct.py
 """
-import mongolite
+import ironbase
 import os
 
 DB_FILE = "examples/data/count_distinct_example.db"
@@ -26,7 +26,7 @@ def main():
     print("MongoLite Example 5: Count and Distinct Operations")
     print("="*60 + "\n")
 
-    db = mongolite.MongoLite(DB_FILE)
+    db = ironbase.MongoLite(DB_FILE)
     orders = db.collection("orders")
 
     # Insert test data - E-commerce orders
