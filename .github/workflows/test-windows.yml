@@ -1,0 +1,103 @@
+name: Test Windows Build
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test-windows:
+    name: Test on Windows
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build
+        run: maturin build --release --manifest-path bindings/python/Cargo.toml
+
+      - name: Install wheel
+        run: |
+          pip install --find-links=target/wheels mongolite
+
+      - name: Test import
+        run: python -c "import mongolite; print('✓ Import successful')"
+
+      - name: Run Rust tests
+        run: cargo test --workspace --verbose
+
+      - name: Basic functionality test
+        run: |
+          python -c "
+          from mongolite import MongoLite
+          import tempfile
+          import os
+
+          # Create temporary database
+          with tempfile.TemporaryDirectory() as tmpdir:
+              db_path = os.path.join(tmpdir, 'test.mlite')
+              db = MongoLite(db_path)
+
+              # Test CRUD operations
+              collection = db.collection('test')
+              result = collection.insert_one({'msg': 'Windows test', 'value': 42})
+              assert result['acknowledged'] == True
+
+              # Test query
+              doc = collection.find_one({'msg': 'Windows test'})
+              assert doc is not None
+              assert doc['value'] == 42
+
+              # Test update
+              update_result = collection.update_one(
+                  {'msg': 'Windows test'},
+                  {'\$set': {'value': 100}}
+              )
+              assert update_result['modified_count'] == 1
+
+              # Test delete
+              delete_result = collection.delete_one({'msg': 'Windows test'})
+              assert delete_result['deleted_count'] == 1
+
+              print('✓ All Windows functionality tests passed!')
+          "
+
+      - name: Test file persistence
+        run: |
+          python -c "
+          from mongolite import MongoLite
+          import tempfile
+          import os
+
+          with tempfile.TemporaryDirectory() as tmpdir:
+              db_path = os.path.join(tmpdir, 'persist.mlite')
+
+              # Write data
+              db = MongoLite(db_path)
+              coll = db.collection('persist')
+              coll.insert_one({'msg': 'persistence test'})
+              del db  # Close database
+
+              # Reopen and verify
+              db = MongoLite(db_path)
+              coll = db.collection('persist')
+              doc = coll.find_one({})
+              assert doc is not None
+              assert doc['msg'] == 'persistence test'
+
+              print('✓ Windows file persistence test passed!')
+          "
