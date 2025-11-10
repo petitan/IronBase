@@ -72,7 +72,7 @@ jobs:
         run: |
           pip install ironbase --find-links dist --no-index --force-reinstall
           python -c "import ironbase; print('Import successful')"
-          python -c "import ironbase; db = ironbase.MongoLite(':memory:'); print('Database works')"
+          python -c "import ironbase; db = ironbase.MongoLite('test.db'); print('Database works'); import os; os.remove('test.db')"
 
   # macOS builds
   macos:
