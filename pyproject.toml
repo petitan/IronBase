@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "mongolite"
+version = "0.2.0"
+description = "Lightweight embedded document database - SQLite for MongoDB"
+authors = [
+    {name = "Your Name", email = "your.email@example.com"}
+]
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries",
+]
+keywords = ["database", "embedded", "document", "mongodb", "nosql", "sqlite"]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/mongolite"
+Repository = "https://github.com/yourusername/mongolite"
+Documentation = "https://github.com/yourusername/mongolite#readme"
+
+[tool.maturin]
+features = ["pyo3/extension-module"]
+module-name = "mongolite"
+manifest-path = "bindings/python/Cargo.toml"
