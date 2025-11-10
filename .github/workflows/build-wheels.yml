@@ -38,6 +38,7 @@ jobs:
         run: |
           pip install ironbase --find-links dist --no-index --force-reinstall
           python -c "import ironbase; print('Import successful')"
+          python -c "import ironbase; db = ironbase.MongoLite(':memory:'); print('Database works')"
 
   # Windows builds
   windows:
@@ -67,9 +68,11 @@ jobs:
           path: dist
 
       - name: Test wheel
+        shell: bash
         run: |
           pip install ironbase --find-links dist --no-index --force-reinstall
           python -c "import ironbase; print('Import successful')"
+          python -c "import ironbase; db = ironbase.MongoLite(':memory:'); print('Database works')"
 
   # macOS builds
   macos:
@@ -92,11 +95,7 @@ jobs:
           name: wheels-macos-${{ matrix.target }}
           path: dist
 
-      - name: Test wheel (x86_64 only)
-        if: matrix.target == 'x86_64'
-        run: |
-          pip install ironbase --find-links dist --no-index --force-reinstall
-          python -c "import ironbase; print('Import successful')"
+      # Note: Skipping macOS test due to cross-compilation (arm64 runner can't test x86_64 wheels)
 
   # Publish to PyPI on release
   release:
