@@ -62,13 +62,11 @@ impl StorageEngine {
         self.file.write_all(data)?;
 
         // Update catalog in metadata with ABSOLUTE offset
-        let id_key = serde_json::to_string(doc_id)
-            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-
+        // Direct insert using DocumentId (no serialization overhead!)
         let meta = self.get_collection_meta_mut(collection)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
 
-        meta.document_catalog.insert(id_key, absolute_offset);
+        meta.document_catalog.insert(doc_id.clone(), absolute_offset);
 
         Ok(absolute_offset)
     }

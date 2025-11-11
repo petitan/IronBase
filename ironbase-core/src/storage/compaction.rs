@@ -43,7 +43,7 @@ impl StorageEngine {
         stats.size_before = self.file.metadata()?.len();
 
         // Track latest versions of each document by collection and ID
-        let mut all_docs: HashMap<String, HashMap<String, Value>> = HashMap::new();
+        let mut all_docs: HashMap<String, HashMap<crate::document::DocumentId, Value>> = HashMap::new();
 
         // Clone collections to avoid borrow conflicts
         let collections_snapshot = self.collections.clone();
@@ -52,7 +52,7 @@ impl StorageEngine {
         // First pass: collect all latest document versions from ALL collections
         for (coll_name, coll_meta) in &collections_snapshot {
             let mut current_offset = coll_meta.data_offset;
-            let mut docs_by_id: HashMap<String, Value> = HashMap::new();
+            let mut docs_by_id: HashMap<crate::document::DocumentId, Value> = HashMap::new();
 
             // Scan all documents in this collection
             while current_offset < file_len {
@@ -68,9 +68,10 @@ impl StorageEngine {
 
                             if doc_collection == coll_name {
                                 if let Some(id_value) = doc.get("_id") {
-                                    let id_key = serde_json::to_string(id_value)
-                                        .unwrap_or_else(|_| "unknown".to_string());
-                                    docs_by_id.insert(id_key, doc);
+                                    // Deserialize directly to DocumentId (no string conversion!)
+                                    if let Ok(doc_id) = serde_json::from_value::<crate::document::DocumentId>(id_value.clone()) {
+                                        docs_by_id.insert(doc_id, doc);
+                                    }
                                 }
                             }
                         }
@@ -123,7 +124,7 @@ impl StorageEngine {
         let mut write_offset = super::DATA_START_OFFSET;
 
         for (coll_name, docs_by_id) in &all_docs {
-            for (id_key, doc) in docs_by_id {
+            for (doc_id, doc) in docs_by_id {
                 // Skip tombstones (deleted documents)
                 if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
                     stats.tombstones_removed += 1;
@@ -141,9 +142,9 @@ impl StorageEngine {
                 write_offset += 4 + doc_bytes.len() as u64;
                 stats.documents_kept += 1;
 
-                // Update document_catalog with actual offset
+                // Update document_catalog with actual offset (direct DocumentId insert!)
                 if let Some(coll_meta) = new_collections.get_mut(coll_name) {
-                    coll_meta.document_catalog.insert(id_key.clone(), doc_offset);
+                    coll_meta.document_catalog.insert(doc_id.clone(), doc_offset);
                 }
             }
         }

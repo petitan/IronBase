@@ -3,7 +3,7 @@
 Example 1: Basic CRUD Operations
 
 Demonstrates the fundamental Create, Read, Update, Delete operations
-with MongoLite.
+with IronBase.
 
 Run: python examples/01_basic_crud.py
 """
@@ -23,11 +23,11 @@ def main():
     setup()
 
     print("="*60)
-    print("MongoLite Example 1: Basic CRUD Operations")
+    print("IronBase Example 1: Basic CRUD Operations")
     print("="*60 + "\n")
 
     # Open database
-    db = ironbase.MongoLite(DB_FILE)
+    db = ironbase.IronBase(DB_FILE)
     users = db.collection("users")
 
     # ==================== CREATE ====================

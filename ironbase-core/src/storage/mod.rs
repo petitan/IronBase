@@ -58,10 +58,11 @@ pub struct CollectionMeta {
     pub index_offset: u64,         // Indexek kezdő pozíciója
     pub last_id: u64,              // Utolsó _id
 
-    /// Document catalog: DocumentId (as string) -> file offset mapping
+    /// Document catalog: DocumentId -> file offset mapping
     /// This enables persistent document storage and fast retrieval
+    /// BREAKING CHANGE: Changed from HashMap<String, u64> to HashMap<DocumentId, u64>
     #[serde(default)]
-    pub document_catalog: HashMap<String, u64>,
+    pub document_catalog: HashMap<crate::document::DocumentId, u64>,
 
     /// Persisted index metadata for this collection
     #[serde(default)]

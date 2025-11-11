@@ -2,7 +2,7 @@
 """
 Example 2: Query Operators
 
-Demonstrates all comparison operators in MongoLite:
+Demonstrates all comparison operators in IronBase:
 - $eq (equal), $ne (not equal)
 - $gt (greater than), $gte (greater than or equal)
 - $lt (less than), $lte (less than or equal)
@@ -25,10 +25,10 @@ def main():
     setup()
 
     print("="*60)
-    print("MongoLite Example 2: Query Operators")
+    print("IronBase Example 2: Query Operators")
     print("="*60 + "\n")
 
-    db = ironbase.MongoLite(DB_FILE)
+    db = ironbase.IronBase(DB_FILE)
     products = db.collection("products")
 
     # Insert test data

@@ -9,21 +9,21 @@ use std::collections::HashMap;
 
 use ironbase_core::{DatabaseCore, CollectionCore, DocumentId};
 
-/// MongoLite Database - Python wrapper
+/// IronBase Database - Python wrapper
 #[pyclass]
-pub struct MongoLite {
+pub struct IronBase {
     db: DatabaseCore,
 }
 
 #[pymethods]
-impl MongoLite {
+impl IronBase {
     /// Új adatbázis megnyitása vagy létrehozása
     #[new]
     fn new(path: String) -> PyResult<Self> {
         let db = DatabaseCore::open(&path)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
-        Ok(MongoLite { db })
+        Ok(IronBase { db })
     }
 
     /// Collection lekérése (ha nem létezik, létrehozza)
@@ -76,7 +76,7 @@ impl MongoLite {
     }
 
     fn __repr__(&self) -> String {
-        format!("MongoLite('{}')", self.db.path())
+        format!("IronBase('{}')", self.db.path())
     }
 
     // ========== ACD TRANSACTION API ==========
@@ -718,7 +718,7 @@ fn json_value_to_python(py: Python, value: &Value) -> PyResult<PyObject> {
 /// Python modul inicializálás
 #[pymodule]
 fn ironbase(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<MongoLite>()?;
+    m.add_class::<IronBase>()?;
     m.add_class::<Collection>()?;
     Ok(())
 }

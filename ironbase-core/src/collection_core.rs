@@ -222,13 +222,10 @@ impl CollectionCore {
         // Check query cache first
         let query_hash = QueryHash::new(&self.name, query_json);
         if let Some(cached_doc_ids) = self.query_cache.get(&query_hash) {
-            // Cache hit! Convert cached DocumentIds to full documents
+            // Cache hit! Convert cached DocumentIds to full documents (direct lookup!)
             let mut results = Vec::with_capacity(cached_doc_ids.len());
             for doc_id in cached_doc_ids {
-                let id_key = serde_json::to_string(&serde_json::json!(doc_id))
-                    .unwrap_or_else(|_| "unknown".to_string());
-
-                if let Some(doc) = self.read_document_by_id(&id_key)? {
+                if let Some(doc) = self.read_document_by_id(&doc_id)? {
                     results.push(doc);
                 }
             }
@@ -304,17 +301,16 @@ impl CollectionCore {
         if let Some(query_obj) = query_json.as_object() {
             if query_obj.len() == 1 && query_obj.contains_key("_id") {
                 if let Some(id_val) = query_obj.get("_id") {
-                    // Direct O(1) lookup using document_catalog
-                    let id_str = serde_json::to_string(id_val)
-                        .unwrap_or_else(|_| "unknown".to_string());
+                    // Direct O(1) lookup using document_catalog (direct DocumentId conversion!)
+                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                            // Verify query still matches (for consistency)
+                            let doc_json_str = serde_json::to_string(&doc)?;
+                            let document = Document::from_json(&doc_json_str)?;
 
-                    if let Some(doc) = self.read_document_by_id(&id_str)? {
-                        // Verify query still matches (for consistency)
-                        let doc_json_str = serde_json::to_string(&doc)?;
-                        let document = Document::from_json(&doc_json_str)?;
-
-                        if parsed_query.matches(&document) {
-                            return Ok(Some(doc));
+                            if parsed_query.matches(&document) {
+                                return Ok(Some(doc));
+                            }
                         }
                     }
                     return Ok(None);
@@ -367,14 +363,15 @@ impl CollectionCore {
         let docs_by_id = if let Some(query_obj) = query_json.as_object() {
             if query_obj.len() == 1 && query_obj.contains_key("_id") {
                 if let Some(id_val) = query_obj.get("_id") {
-                    // Direct O(1) lookup using document_catalog
-                    let id_str = serde_json::to_string(id_val)
-                        .unwrap_or_else(|_| "unknown".to_string());
-
-                    if let Some(doc) = self.read_document_by_id(&id_str)? {
-                        let mut single_doc_map = HashMap::new();
-                        single_doc_map.insert(id_str, doc);
-                        single_doc_map
+                    // Direct O(1) lookup using document_catalog (direct DocumentId conversion!)
+                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                            let mut single_doc_map = HashMap::new();
+                            single_doc_map.insert(doc_id, doc);
+                            single_doc_map
+                        } else {
+                            HashMap::new()
+                        }
                     } else {
                         HashMap::new()
                     }
@@ -540,14 +537,15 @@ impl CollectionCore {
         let docs_by_id = if let Some(query_obj) = query_json.as_object() {
             if query_obj.len() == 1 && query_obj.contains_key("_id") {
                 if let Some(id_val) = query_obj.get("_id") {
-                    // Direct O(1) lookup using document_catalog
-                    let id_str = serde_json::to_string(id_val)
-                        .unwrap_or_else(|_| "unknown".to_string());
-
-                    if let Some(doc) = self.read_document_by_id(&id_str)? {
-                        let mut single_doc_map = HashMap::new();
-                        single_doc_map.insert(id_str, doc);
-                        single_doc_map
+                    // Direct O(1) lookup using document_catalog (direct DocumentId conversion!)
+                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                            let mut single_doc_map = HashMap::new();
+                            single_doc_map.insert(doc_id, doc);
+                            single_doc_map
+                        } else {
+                            HashMap::new()
+                        }
                     } else {
                         HashMap::new()
                     }
@@ -861,11 +859,8 @@ impl CollectionCore {
         let mut matching_docs = Vec::new();
 
         for doc_id in doc_ids {
-            let id_key = serde_json::to_string(&serde_json::json!(doc_id))
-                .unwrap_or_else(|_| "unknown".to_string());
-
-            // O(1) lookup using document_catalog
-            if let Some(doc) = self.read_document_by_id(&id_key)? {
+            // O(1) lookup using document_catalog (direct DocumentId lookup!)
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 // Apply full query filter (in case index gave us false positives)
                 let doc_json_str = serde_json::to_string(&doc)?;
                 let document = Document::from_json(&doc_json_str)?;
@@ -1016,17 +1011,13 @@ impl CollectionCore {
         // Re-acquire write lock to populate index
         let mut indexes = self.indexes.write();
 
-        for (id_str, doc) in &docs_by_id {
-            // Parse document ID
-            let doc_id: DocumentId = serde_json::from_str(id_str)
-                .unwrap_or_else(|_| DocumentId::Int(0));
-
-            // Extract field value and add to index
+        for (doc_id, doc) in &docs_by_id {
+            // Extract field value and add to index (no DocumentId parsing needed!)
             if let Some(field_value) = doc.get(&field) {
                 let key = IndexKey::from(field_value);
 
                 if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                    let _ = index.insert(key, doc_id);
+                    let _ = index.insert(key, doc_id.clone());
                 }
             }
         }
@@ -1210,13 +1201,13 @@ impl CollectionCore {
 
     /// Read a single document by _id using document_catalog (O(1) lookup)
     /// Returns None if document not found or is tombstone
-    fn read_document_by_id(&self, id_str: &str) -> Result<Option<Value>> {
+    fn read_document_by_id(&self, doc_id: &DocumentId) -> Result<Option<Value>> {
         let mut storage = self.storage.write();
         let meta = storage.get_collection_meta(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        // O(1) lookup in document_catalog
-        if let Some(&offset) = meta.document_catalog.get(id_str) {
+        // O(1) lookup in document_catalog (direct DocumentId lookup - no serialization!)
+        if let Some(&offset) = meta.document_catalog.get(doc_id) {
             let doc_bytes = storage.read_data(offset)?;
             let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
@@ -1233,7 +1224,7 @@ impl CollectionCore {
 
     /// Scan documents via document_catalog instead of full file scan
     /// Much faster than scan_documents() for large collections
-    fn scan_documents_via_catalog(&self) -> Result<HashMap<String, Value>> {
+    fn scan_documents_via_catalog(&self) -> Result<HashMap<DocumentId, Value>> {
         let mut storage = self.storage.write();
 
         // Clone the catalog to avoid borrow checker issues
@@ -1243,17 +1234,17 @@ impl CollectionCore {
             meta.document_catalog.clone()
         };
 
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
+        let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::new();
 
-        // Iterate over catalog instead of sequential file scan
-        for (id_str, offset) in &catalog {
+        // Iterate over catalog instead of sequential file scan (direct DocumentId iteration!)
+        for (doc_id, offset) in &catalog {
             match storage.read_data(*offset) {
                 Ok(doc_bytes) => {
                     let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
                     // Skip tombstones (deleted documents)
                     if !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        docs_by_id.insert(id_str.clone(), doc);
+                        docs_by_id.insert(doc_id.clone(), doc);
                     }
                 }
                 Err(_) => continue, // Skip corrupted entries
@@ -1271,7 +1262,7 @@ impl CollectionCore {
 
     /// Filter documents by query and exclude tombstones
     /// Returns only live documents matching the query
-    fn filter_documents(&self, docs_by_id: HashMap<String, Value>, query: &Query) -> Result<Vec<Value>> {
+    fn filter_documents(&self, docs_by_id: HashMap<DocumentId, Value>, query: &Query) -> Result<Vec<Value>> {
         let mut results = Vec::new();
 
         for (_, doc) in docs_by_id {

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MongoLite Comprehensive Test Runner
+IronBase Comprehensive Test Runner
 Runs all test suites and generates a summary report
 """
 import subprocess
@@ -71,7 +71,7 @@ def run_test(test_file, description):
 
 def main():
     print("=" * 70)
-    print("MongoLite Comprehensive Test Suite")
+    print("IronBase Comprehensive Test Suite")
     print("=" * 70)
 
     results = []

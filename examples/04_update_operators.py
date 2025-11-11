@@ -2,7 +2,7 @@
 """
 Example 4: Update Operators
 
-Demonstrates all update operators in MongoLite:
+Demonstrates all update operators in IronBase:
 - $set - Set field values
 - $inc - Increment/decrement numeric fields
 - $unset - Remove fields from documents
@@ -35,10 +35,10 @@ def main():
     setup()
 
     print("="*60)
-    print("MongoLite Example 4: Update Operators")
+    print("IronBase Example 4: Update Operators")
     print("="*60 + "\n")
 
-    db = ironbase.MongoLite(DB_FILE)
+    db = ironbase.IronBase(DB_FILE)
     users = db.collection("users")
 
     # Insert initial test data

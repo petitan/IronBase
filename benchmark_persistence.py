@@ -31,7 +31,7 @@ def benchmark(num_docs):
 
     # === INSERT PERFORMANCE ===
     print(f"\n📝 Inserting {num_docs} documents...")
-    db = ironbase.MongoLite(db_file)
+    db = ironbase.IronBase(db_file)
     collection = db.collection("users")
 
     start = time.time()
@@ -56,7 +56,7 @@ def benchmark(num_docs):
     # === REOPEN PERFORMANCE ===
     print(f"\n📂 Reopening database...")
     start = time.time()
-    db2 = ironbase.MongoLite(db_file)
+    db2 = ironbase.IronBase(db_file)
     collection2 = db2.collection("users")
     reopen_time = time.time() - start
     print(f"   Time: {reopen_time:.3f}s")

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-MongoLite ACD Transactions - Python Example
+IronBase ACD Transactions - Python Example
 
 This example demonstrates how to use ACD (Atomicity, Consistency, Durability)
-transactions in MongoLite from Python.
+transactions in IronBase from Python.
 
 ACD provides reliable transaction support without the complexity of full ACID:
 - Atomicity: All operations succeed or fail together
@@ -24,7 +24,7 @@ def example_basic_transaction():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = ironbase.MongoLite(db_path)
+        db = ironbase.IronBase(db_path)
 
         # Start a transaction
         tx_id = db.begin_transaction()
@@ -55,7 +55,7 @@ def example_transaction_rollback():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = ironbase.MongoLite(db_path)
+        db = ironbase.IronBase(db_path)
 
         # Insert initial data outside transaction
         users = db.collection("users")
@@ -92,7 +92,7 @@ def example_multiple_transactions():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = ironbase.MongoLite(db_path)
+        db = ironbase.IronBase(db_path)
 
         # Setup initial data
         users = db.collection("users")
@@ -134,7 +134,7 @@ def example_error_handling():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = ironbase.MongoLite(db_path)
+        db = ironbase.IronBase(db_path)
 
         # Begin transaction affecting multiple collections
         tx_id = db.begin_transaction()
@@ -165,7 +165,7 @@ def example_transaction_lifecycle():
 
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "example.mlite")
-        db = ironbase.MongoLite(db_path)
+        db = ironbase.IronBase(db_path)
 
         # Recommended error handling pattern
         tx_id = db.begin_transaction()
@@ -194,7 +194,7 @@ def example_transaction_lifecycle():
 def main():
     """Run all examples"""
     print("=" * 60)
-    print("MongoLite ACD Transactions - Python Examples")
+    print("IronBase ACD Transactions - Python Examples")
     print("=" * 60)
     print("\nACD Features:")
     print("✓ Atomicity: All operations succeed or fail together")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MongoLite Performance Testing
+IronBase Performance Testing
 Measures insert, find, update, delete, and query performance
 """
 import ironbase
@@ -38,7 +38,7 @@ def benchmark_insert(db_path, num_docs):
     if os.path.exists(db_path):
         os.remove(db_path)
 
-    db = ironbase.MongoLite(db_path)
+    db = ironbase.IronBase(db_path)
     coll = db.collection("users")
 
     # Warmup
@@ -79,7 +79,7 @@ def benchmark_find(db_path, num_queries):
     print(f"FIND Benchmark - {num_queries:,} queries")
     print('='*70)
 
-    db = ironbase.MongoLite(db_path)
+    db = ironbase.IronBase(db_path)
     coll = db.collection("users")
 
     # find() all documents
@@ -119,7 +119,7 @@ def benchmark_update(db_path, num_updates):
     print(f"UPDATE Benchmark - {num_updates:,} updates")
     print('='*70)
 
-    db = ironbase.MongoLite(db_path)
+    db = ironbase.IronBase(db_path)
     coll = db.collection("users")
 
     # update_one()
@@ -145,7 +145,7 @@ def benchmark_delete(db_path, num_deletes):
     print(f"DELETE Benchmark - {num_deletes:,} deletes")
     print('='*70)
 
-    db = ironbase.MongoLite(db_path)
+    db = ironbase.IronBase(db_path)
     coll = db.collection("users")
 
     # delete_one()
@@ -168,7 +168,7 @@ def benchmark_count(db_path, num_queries):
     print(f"COUNT Benchmark - {num_queries:,} queries")
     print('='*70)
 
-    db = ironbase.MongoLite(db_path)
+    db = ironbase.IronBase(db_path)
     coll = db.collection("users")
 
     # count_documents()
@@ -191,7 +191,7 @@ def benchmark_compaction(db_path):
     print(f"COMPACTION Benchmark")
     print('='*70)
 
-    db = ironbase.MongoLite(db_path)
+    db = ironbase.IronBase(db_path)
 
     size_before = os.path.getsize(db_path)
 
@@ -212,7 +212,7 @@ def benchmark_compaction(db_path):
 
 def main():
     print("=" * 70)
-    print("MongoLite Performance Benchmark Suite")
+    print("IronBase Performance Benchmark Suite")
     print("=" * 70)
 
     db_path = "perf_test.mlite"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MongoLite Demo - Showcase all implemented features
+IronBase Demo - Showcase all implemented features
 
 Run: python demo.py
 """
@@ -225,14 +225,14 @@ def demo_complex_queries(db):
 def main():
     """Run all demos"""
     print("\n" + "="*60)
-    print("  MongoLite Feature Demo")
+    print("  IronBase Feature Demo")
     print("  All operations with test-first development")
     print("="*60)
 
     cleanup()
 
     try:
-        db = ironbase.MongoLite(DB_PATH)
+        db = ironbase.IronBase(DB_PATH)
 
         demo_insert(db)
         demo_find(db)

@@ -2,7 +2,7 @@
 """
 Example 3: Logical Operators
 
-Demonstrates all logical operators in MongoLite:
+Demonstrates all logical operators in IronBase:
 - $and (logical AND - all conditions must match)
 - $or (logical OR - at least one condition must match)
 - $not (logical NOT - negates a condition)
@@ -25,10 +25,10 @@ def main():
     setup()
 
     print("="*60)
-    print("MongoLite Example 3: Logical Operators")
+    print("IronBase Example 3: Logical Operators")
     print("="*60 + "\n")
 
-    db = ironbase.MongoLite(DB_FILE)
+    db = ironbase.IronBase(DB_FILE)
     employees = db.collection("employees")
 
     # Insert test data

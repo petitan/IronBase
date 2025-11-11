@@ -2,7 +2,7 @@
 """
 Example 5: Count and Distinct Operations
 
-Demonstrates aggregation-like operations in MongoLite:
+Demonstrates aggregation-like operations in IronBase:
 - count_documents() - Count documents matching a filter
 - distinct() - Get unique values from a field
 
@@ -23,10 +23,10 @@ def main():
     setup()
 
     print("="*60)
-    print("MongoLite Example 5: Count and Distinct Operations")
+    print("IronBase Example 5: Count and Distinct Operations")
     print("="*60 + "\n")
 
-    db = ironbase.MongoLite(DB_FILE)
+    db = ironbase.IronBase(DB_FILE)
     orders = db.collection("orders")
 
     # Insert test data - E-commerce orders

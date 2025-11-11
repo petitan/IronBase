@@ -2,7 +2,7 @@
 """
 Example 6: Real-World Application - Simple Blog System
 
-Demonstrates MongoLite in a realistic scenario with:
+Demonstrates IronBase in a realistic scenario with:
 - Multiple collections (users, posts, comments)
 - Relationships between documents
 - Common blog operations (CRUD, search, stats)
@@ -29,10 +29,10 @@ def main():
     setup()
 
     print("="*60)
-    print("MongoLite Example 6: Real-World Blog System")
+    print("IronBase Example 6: Real-World Blog System")
     print("="*60 + "\n")
 
-    db = ironbase.MongoLite(DB_FILE)
+    db = ironbase.IronBase(DB_FILE)
 
     # ==================== Setup Collections ====================
     users = db.collection("users")
@@ -93,10 +93,10 @@ def main():
 
     posts.insert_many([
         {
-            "title": "Getting Started with MongoLite",
+            "title": "Getting Started with IronBase",
             "author_id": alice_id,
             "author_name": "alice_dev",
-            "content": "MongoLite is an embedded NoSQL database with MongoDB-compatible API...",
+            "content": "IronBase is an embedded NoSQL database with MongoDB-compatible API...",
             "tags": ["database", "mongodb", "python"],
             "published": get_timestamp(7),
             "status": "published",
@@ -168,7 +168,7 @@ def main():
     print("3. Adding Comments\n")
 
     # Get some posts
-    mongo_post = posts.find_one({"title": "Getting Started with MongoLite"})
+    mongo_post = posts.find_one({"title": "Getting Started with IronBase"})
     python_tips_post = posts.find_one({"title": "10 Python Tips for Beginners"})
 
     dave = users.find_one({"username": "dave_reader"})
@@ -301,27 +301,27 @@ def main():
     print("7. Update Operations - Engagement tracking\n")
 
     # Someone views a post
-    print("📖 User views 'Getting Started with MongoLite'")
+    print("📖 User views 'Getting Started with IronBase'")
     posts.update_one(
-        {"title": "Getting Started with MongoLite"},
+        {"title": "Getting Started with IronBase"},
         {"$inc": {"views": 1}}
     )
 
     # Someone likes a post
-    print("👍 User likes 'Getting Started with MongoLite'")
+    print("👍 User likes 'Getting Started with IronBase'")
     posts.update_one(
-        {"title": "Getting Started with MongoLite"},
+        {"title": "Getting Started with IronBase"},
         {"$inc": {"likes": 1}}
     )
 
     # Update post - add new tag
     print("🏷️  Adding 'tutorial' tag to post")
     posts.update_one(
-        {"title": "Getting Started with MongoLite"},
+        {"title": "Getting Started with IronBase"},
         {"$set": {"tags": ["database", "mongodb", "python", "tutorial"]}}
     )
 
-    updated_post = posts.find_one({"title": "Getting Started with MongoLite"})
+    updated_post = posts.find_one({"title": "Getting Started with IronBase"})
     print(f"\nUpdated post stats:")
     print(f"  Views: {updated_post['views']}")
     print(f"  Likes: {updated_post['likes']}")

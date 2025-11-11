@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-MongoLite - Példa használat
+IronBase - Példa használat
 MongoDB-szerű API SQLite-szerű beágyazott adatbázishoz
 """
 
-from ironbase import MongoLite
+from ironbase import IronBase
 
 def main():
     # 1. Adatbázis megnyitása (vagy létrehozása)
     print("=" * 60)
-    print("MongoLite Demo - MongoDB-like Embedded Database")
+    print("IronBase Demo - MongoDB-like Embedded Database")
     print("=" * 60)
     
-    db = MongoLite("myapp.mlite")
+    db = IronBase("myapp.mlite")
     print(f"\n✓ Adatbázis megnyitva: {db}")
     
     # 2. Collection lekérése
@@ -118,7 +118,7 @@ def demo_queries():
     Jövőbeli query műveletek demo
     (Ezek még nincsenek teljesen implementálva)
     """
-    db = MongoLite("myapp.mlite")
+    db = IronBase("myapp.mlite")
     users = db.collection("users")
     
     # TODO: Ezek a műveletek még fejlesztés alatt állnak
@@ -151,10 +151,10 @@ if __name__ == "__main__":
     print("-" * 60)
     print("""
     # Alapvető használat
-    from ironbase import MongoLite
+    from ironbase import IronBase
     
     # Adatbázis megnyitása
-    db = MongoLite("mydata.mlite")
+    db = IronBase("mydata.mlite")
     
     # Collection
     users = db.collection("users")
