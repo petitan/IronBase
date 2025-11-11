@@ -503,4 +503,130 @@ mod tests {
         let result = db.commit_transaction(999);
         assert!(result.is_err());
     }
+
+    // ========== Two-Phase Commit Tests ==========
+
+    #[test]
+    fn test_commit_with_indexes_basic() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Create collection and index
+        let collection = db.collection("users").unwrap();
+        collection.create_index("age".to_string(), false).unwrap();
+
+        // Begin transaction
+        let tx_id = db.begin_transaction();
+
+        // Add insert operation with index change
+        db.with_transaction(tx_id, |tx| {
+            tx.add_operation(Operation::Insert {
+                collection: "users".to_string(),
+                doc_id: DocumentId::Int(1),
+                doc: json!({"name": "Alice", "age": 30}),
+            })?;
+
+            // Track index change
+            tx.add_index_change(
+                "users_age".to_string(),
+                crate::transaction::IndexChange {
+                    operation: crate::transaction::IndexOperation::Insert,
+                    key: crate::transaction::IndexKey::Int(30),
+                    doc_id: DocumentId::Int(1),
+                }
+            )?;
+
+            Ok(())
+        }).unwrap();
+
+        // Commit with indexes
+        let result = db.commit_transaction_with_indexes(tx_id);
+        assert!(result.is_ok());
+
+        // Verify transaction removed from active list
+        assert!(db.get_transaction(tx_id).is_none());
+    }
+
+    #[test]
+    fn test_commit_with_indexes_no_index_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Create collection
+        db.collection("users").unwrap();
+
+        // Begin transaction
+        let tx_id = db.begin_transaction();
+
+        // Add operation WITHOUT index changes
+        db.with_transaction(tx_id, |tx| {
+            tx.add_operation(Operation::Insert {
+                collection: "users".to_string(),
+                doc_id: DocumentId::Int(1),
+                doc: json!({"name": "Bob"}),
+            })?;
+            Ok(())
+        }).unwrap();
+
+        // Commit with indexes (should delegate to simple commit)
+        let result = db.commit_transaction_with_indexes(tx_id);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_commit_with_indexes_nonexistent_transaction() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Try to commit non-existent transaction
+        let result = db.commit_transaction_with_indexes(999);
+        assert!(result.is_err());
+
+        // Should be TransactionAborted error
+        match result {
+            Err(crate::error::MongoLiteError::TransactionAborted(_)) => {},
+            _ => panic!("Expected TransactionAborted error"),
+        }
+    }
+
+    #[test]
+    fn test_get_index_file_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("mydb.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        let path = db.get_index_file_path("users", "users_age");
+
+        // Verify path format: {db_path_without_ext}.{index_name}.idx
+        let expected = temp_dir.path().join("mydb.users_age.idx");
+        assert_eq!(path, expected);
+    }
+
+    #[test]
+    fn test_get_collection_from_transaction() {
+        let mut transaction = crate::transaction::Transaction::new(1);
+
+        // Add insert operation
+        transaction.add_operation(Operation::Insert {
+            collection: "users".to_string(),
+            doc_id: DocumentId::Int(1),
+            doc: json!({"name": "Alice"}),
+        }).unwrap();
+
+        // Extract collection name
+        let collection_name = DatabaseCore::get_collection_from_transaction(&transaction);
+        assert_eq!(collection_name, Some("users".to_string()));
+    }
+
+    #[test]
+    fn test_get_collection_from_empty_transaction() {
+        let transaction = crate::transaction::Transaction::new(1);
+
+        // Empty transaction has no operations
+        let collection_name = DatabaseCore::get_collection_from_transaction(&transaction);
+        assert_eq!(collection_name, None);
+    }
 }
