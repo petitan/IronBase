@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use serde_json::Value;
 use crate::error::{Result, MongoLiteError};
 use super::StorageEngine;
@@ -84,24 +84,17 @@ impl StorageEngine {
             all_docs.insert(coll_name.clone(), docs_by_id);
         }
 
-        // Second pass: Calculate final metadata size by doing a dry run
+        // Second pass: Calculate final metadata size using iterative convergence
         let mut new_collections = self.collections.clone();
 
-        // First, calculate where each collection's data will start and how many docs
-        // We need to know this to calculate exact metadata size
-        let mut collection_info: Vec<(String, u64, u64)> = Vec::new(); // (name, offset, count)
-
+        // Calculate document counts for each collection
         for (coll_name, docs_by_id) in &all_docs {
             let doc_count = docs_by_id.iter()
                 .filter(|(_, doc)| !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false))
                 .count() as u64;
-            collection_info.push((coll_name.clone(), 0, doc_count)); // offset will be calculated
-        }
 
-        // Update new_collections with document counts (offsets are still placeholder)
-        for (coll_name, _, doc_count) in &collection_info {
             if let Some(coll_meta) = new_collections.get_mut(coll_name) {
-                coll_meta.document_count = *doc_count;
+                coll_meta.document_count = doc_count;
             }
         }
 
@@ -113,41 +106,24 @@ impl StorageEngine {
             .truncate(true)
             .open(&temp_path)?;
 
-        // Write metadata with correct document counts to get exact metadata size
-        let metadata_end = Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
+        // Use RESERVED SPACE architecture: metadata in first 256KB, documents after DATA_START_OFFSET
+        // This matches the normal storage layout and avoids complex offset calculations
 
-        // Now we know the exact metadata size, calculate collection offsets
-        let mut write_offset = metadata_end;
-        for (coll_name, _, _) in &collection_info {
-            if let Some(coll_meta) = new_collections.get_mut(coll_name) {
-                coll_meta.data_offset = write_offset;
-                // Calculate how much space this collection's documents will take
-                if let Some(docs_by_id) = all_docs.get(coll_name) {
-                    for (_, doc) in docs_by_id {
-                        if !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            let doc_bytes = serde_json::to_vec(&doc)?;
-                            write_offset += 4 + doc_bytes.len() as u64;
-                        }
-                    }
-                }
-            }
+        // Write metadata first (placeholder with document_count but empty catalog)
+        for coll_meta in new_collections.values_mut() {
+            coll_meta.data_offset = super::DATA_START_OFFSET;
+            coll_meta.document_catalog.clear();
         }
 
-        // Rewrite metadata with correct offsets
         new_file.seek(SeekFrom::Start(0))?;
-        let final_metadata_end = Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
+        Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
 
-        // Verify metadata size is stable
-        if final_metadata_end != metadata_end {
-            return Err(MongoLiteError::Corruption(
-                format!("Metadata size unstable during compaction: {} -> {}", metadata_end, final_metadata_end)
-            ));
-        }
+        // Write documents starting at DATA_START_OFFSET and build document_catalog
+        new_file.seek(SeekFrom::Start(super::DATA_START_OFFSET))?;
+        let mut write_offset = super::DATA_START_OFFSET;
 
-        // Third pass: write documents to new file
-        write_offset = metadata_end;
-        for (_coll_name, docs_by_id) in &all_docs {
-            for (_, doc) in docs_by_id {
+        for (coll_name, docs_by_id) in &all_docs {
+            for (id_key, doc) in docs_by_id {
                 // Skip tombstones (deleted documents)
                 if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
                     stats.tombstones_removed += 1;
@@ -155,6 +131,7 @@ impl StorageEngine {
                 }
 
                 // Write document to new file
+                let doc_offset = write_offset;
                 let doc_bytes = serde_json::to_vec(&doc)?;
                 let len = doc_bytes.len() as u32;
 
@@ -163,17 +140,30 @@ impl StorageEngine {
 
                 write_offset += 4 + doc_bytes.len() as u64;
                 stats.documents_kept += 1;
+
+                // Update document_catalog with actual offset
+                if let Some(coll_meta) = new_collections.get_mut(coll_name) {
+                    coll_meta.document_catalog.insert(id_key.clone(), doc_offset);
+                }
             }
         }
 
         new_file.sync_all()?;
 
+        // Now rewrite metadata with the populated document_catalog
+        new_file.seek(SeekFrom::Start(0))?;
+        Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
+        new_file.sync_all()?;
+
         // Get new file size
         stats.size_after = new_file.metadata()?.len();
 
-        // Close old file
-        drop(std::mem::replace(&mut self.file, new_file));
+        // Close new file before renaming
+        drop(new_file);
+
+        // Close old file and mmap
         drop(self.mmap.take());
+        // Don't close self.file yet - we'll replace it after rename
 
         // Replace old file with new file
         fs::rename(&temp_path, &self.file_path)?;
@@ -187,7 +177,7 @@ impl StorageEngine {
         // Reload metadata
         let (header, collections) = Self::load_metadata(&mut file)?;
 
-        // Update self
+        // Update self (this closes the old file)
         self.file = file;
         self.header = header;
         self.collections = collections;

@@ -13,10 +13,9 @@ impl StorageEngine {
         file.seek(SeekFrom::Start(0))?;
 
         // Header beolvasása
-        // FONTOS: Bincode a Header-t 28 byte-ra szerializálja (8+4+4+4+8),
-        // std::mem::size_of::<Header>() viszont 32-t mondana Rust struct padding miatt!
-        // Ezért fix 28 byte-ot olvasunk, ami megfelel a bincode szerializált méretének.
-        const HEADER_SIZE: usize = 28; // 8 (magic) + 4 (version) + 4 (page_size) + 4 (collection_count) + 8 (free_list_head)
+        // FONTOS: Bincode a Header-t szerializálja:
+        // 8 (magic) + 4 (version) + 4 (page_size) + 4 (collection_count) + 8 (free_list_head) + 8 (index_section_offset) = 36 bytes
+        const HEADER_SIZE: usize = 36;
         let mut header_bytes = vec![0u8; HEADER_SIZE];
         file.read_exact(&mut header_bytes)?;
 

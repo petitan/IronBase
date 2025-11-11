@@ -62,6 +62,12 @@ impl DatabaseCore {
         storage.stats()
     }
 
+    /// Storage compaction - removes tombstones and old document versions
+    pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
+        let mut storage = self.storage.write();
+        storage.compact()
+    }
+
     /// Get database path
     pub fn path(&self) -> &str {
         &self.db_path

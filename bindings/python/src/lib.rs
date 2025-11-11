@@ -56,6 +56,25 @@ impl MongoLite {
         Ok(serde_json::to_string_pretty(&self.db.stats()).unwrap())
     }
 
+    /// Storage compaction - removes tombstones and old document versions
+    /// Returns compaction statistics as a dict
+    fn compact(&self) -> PyResult<PyObject> {
+        let stats = self.db.compact()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        Python::with_gil(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("size_before", stats.size_before)?;
+            dict.set_item("size_after", stats.size_after)?;
+            dict.set_item("space_saved", stats.space_saved())?;
+            dict.set_item("documents_scanned", stats.documents_scanned)?;
+            dict.set_item("documents_kept", stats.documents_kept)?;
+            dict.set_item("tombstones_removed", stats.tombstones_removed)?;
+            dict.set_item("compression_ratio", stats.compression_ratio())?;
+            Ok(dict.into())
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!("MongoLite('{}')", self.db.path())
     }
