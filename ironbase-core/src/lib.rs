@@ -15,6 +15,7 @@ pub mod collection_core;
 pub mod database;
 pub mod transaction;
 pub mod wal;
+pub mod catalog_serde;
 
 #[cfg(test)]
 mod transaction_property_tests;

@@ -71,7 +71,8 @@ pub struct CollectionMeta {
     /// Document catalog: DocumentId -> file offset mapping
     /// This enables persistent document storage and fast retrieval
     /// BREAKING CHANGE: Changed from HashMap<String, u64> to HashMap<DocumentId, u64>
-    #[serde(default)]
+    /// Custom serialization preserves DocumentId type information in JSON metadata
+    #[serde(default, with = "crate::catalog_serde")]
     pub document_catalog: HashMap<crate::document::DocumentId, u64>,
 
     /// Persisted index metadata for this collection

@@ -15,6 +15,8 @@ pub struct Document {
 }
 
 /// Dokumentum ID típusok
+/// FONTOS: Untagged, hogy a dokumentumokban egyszerű értékként jelenjen meg: {"_id": 2}
+/// A metadat catalog-ban külön kezeljük a típus megőrzést custom serialization-nel.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum DocumentId {

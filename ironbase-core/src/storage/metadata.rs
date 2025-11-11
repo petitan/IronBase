@@ -28,6 +28,8 @@ impl StorageEngine {
         }
 
         // Collection-ök metaadatainak beolvasása
+        // FONTOS: JSON serialization használja a custom catalog_serde modult,
+        // ami megőrzi a DocumentId típusinformációt [type_tag, value, offset] formátumban
         let mut collections = HashMap::new();
         for _ in 0..header.collection_count {
             let mut len_bytes = [0u8; 4];
@@ -59,6 +61,8 @@ impl StorageEngine {
         writer.write_all(&header_bytes)?;
 
         // Collection metaadatok kiírása
+        // FONTOS: JSON serialization használja a custom catalog_serde modult,
+        // ami megőrzi a DocumentId típusinformációt [type_tag, value, offset] formátumban
         for meta in collections.values() {
             let meta_bytes = serde_json::to_vec(meta)?;
             let len = (meta_bytes.len() as u32).to_le_bytes();
