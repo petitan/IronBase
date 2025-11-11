@@ -43,7 +43,14 @@ impl Document {
     
     /// Dokumentum JSON-ből
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
-        serde_json::from_str(json)
+        let mut doc: Self = serde_json::from_str(json)?;
+
+        // WORKAROUND: serde's #[serde(rename = "_id")] + #[serde(flatten)]
+        // consumes _id and doesn't put it in fields.
+        // For query matching to work, we need _id in fields too.
+        doc.fields.insert("_id".to_string(), serde_json::to_value(&doc.id)?);
+
+        Ok(doc)
     }
     
     /// Dokumentum JSON-be
@@ -51,13 +58,16 @@ impl Document {
         serde_json::to_string(self)
     }
     
-    /// Mező lekérése
+    /// Mező lekérése (includes _id)
+    /// WORKAROUND: Since _id is in doc.id field after deserialization,
+    /// we can't return a reference to it. The query engine must special-case _id matching.
     pub fn get(&self, field: &str) -> Option<&Value> {
-        if field == "_id" {
-            None  // _id külön kezeljük
-        } else {
-            self.fields.get(field)
-        }
+        self.fields.get(field)
+    }
+
+    /// Get the _id value as a JSON Value (for query matching)
+    pub fn get_id_value(&self) -> Value {
+        serde_json::to_value(&self.id).unwrap()
     }
     
     /// Mező beállítása
@@ -80,12 +90,14 @@ impl From<Document> for Value {
     fn from(doc: Document) -> Self {
         let mut map = serde_json::Map::new();
 
-        // _id hozzáadása
-        map.insert("_id".to_string(), serde_json::to_value(&doc.id).unwrap());
-
-        // Többi mező
+        // Többi mező először (including _id if present in fields)
         for (k, v) in doc.fields {
             map.insert(k, v);
+        }
+
+        // _id hozzáadása ONLY if not already present
+        if !map.contains_key("_id") {
+            map.insert("_id".to_string(), serde_json::to_value(&doc.id).unwrap());
         }
 
         Value::Object(map)
@@ -154,6 +166,19 @@ mod tests {
         assert_eq!(doc.fields.len(), 2);
         assert_eq!(doc.fields.get("name").unwrap(), &json!("Alice"));
         assert_eq!(doc.fields.get("age").unwrap(), &json!(30));
+    }
+
+    #[test]
+    fn test_document_deser_id_in_fields() {
+        // Test if _id ends up in fields after deserialization with flatten
+        let json_str = r#"{"_id":1,"age":30,"name":"Alice"}"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        assert_eq!(doc.id, DocumentId::Int(1));
+        // With #[serde(flatten)], _id should NOT be duplicated in fields
+        // because #[serde(rename = "_id")] on id field consumes it
+        assert!(!doc.fields.contains_key("_id"), "_id should NOT be in fields with flatten + rename!");
+        assert_eq!(doc.fields.len(), 2); // Only age and name
     }
 
     #[test]

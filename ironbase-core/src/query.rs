@@ -178,6 +178,7 @@ impl Query {
                     return false;
                 }
             } else {
+                // Get field value (including _id if it's in fields)
                 let field_value = document.get(field);
                 if !Self::matches_operator(field_value, operator, document) {
                     return false;

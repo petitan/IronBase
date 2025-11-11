@@ -111,6 +111,9 @@ impl CollectionCore {
         let doc_id = DocumentId::new_auto(meta.last_id);
         meta.last_id += 1;
 
+        // Add _id to fields for query matching (From<Document> will not duplicate it)
+        fields.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+
         // Add _collection field for multi-collection isolation
         fields.insert("_collection".to_string(), Value::String(self.name.clone()));
 
@@ -341,11 +344,18 @@ impl CollectionCore {
                 Ok(doc_bytes) => {
                     let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
-                    // Track latest version (include tombstones so they overwrite originals)
-                    if let Some(id_value) = doc.get("_id") {
-                        let id_key = serde_json::to_string(id_value)
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        docs_by_id.insert(id_key, doc);
+                    // ✅ FILTER: Only include documents from THIS collection
+                    let doc_collection = doc.get("_collection")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    if doc_collection == self.name {
+                        // Track latest version (include tombstones so they overwrite originals)
+                        if let Some(id_value) = doc.get("_id") {
+                            let id_key = serde_json::to_string(id_value)
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            docs_by_id.insert(id_key, doc);
+                        }
                     }
 
                     current_offset += 4 + doc_bytes.len() as u64;
@@ -423,11 +433,18 @@ impl CollectionCore {
                 Ok(doc_bytes) => {
                     let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
-                    // Track latest version (include tombstones so they overwrite originals)
-                    if let Some(id_value) = doc.get("_id") {
-                        let id_key = serde_json::to_string(id_value)
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        docs_by_id.insert(id_key, doc);
+                    // ✅ FILTER: Only include documents from THIS collection
+                    let doc_collection = doc.get("_collection")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    if doc_collection == self.name {
+                        // Track latest version (include tombstones so they overwrite originals)
+                        if let Some(id_value) = doc.get("_id") {
+                            let id_key = serde_json::to_string(id_value)
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            docs_by_id.insert(id_key, doc);
+                        }
                     }
 
                     current_offset += 4 + doc_bytes.len() as u64;
@@ -502,11 +519,18 @@ impl CollectionCore {
                 Ok(doc_bytes) => {
                     let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
-                    // Track latest version (include tombstones so they overwrite originals)
-                    if let Some(id_value) = doc.get("_id") {
-                        let id_key = serde_json::to_string(id_value)
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        docs_by_id.insert(id_key, doc);
+                    // ✅ FILTER: Only include documents from THIS collection
+                    let doc_collection = doc.get("_collection")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    if doc_collection == self.name {
+                        // Track latest version (include tombstones so they overwrite originals)
+                        if let Some(id_value) = doc.get("_id") {
+                            let id_key = serde_json::to_string(id_value)
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            docs_by_id.insert(id_key, doc);
+                        }
                     }
 
                     current_offset += 4 + doc_bytes.len() as u64;
@@ -569,11 +593,18 @@ impl CollectionCore {
                 Ok(doc_bytes) => {
                     let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
-                    // Track latest version (include tombstones so they overwrite originals)
-                    if let Some(id_value) = doc.get("_id") {
-                        let id_key = serde_json::to_string(id_value)
-                            .unwrap_or_else(|_| "unknown".to_string());
-                        docs_by_id.insert(id_key, doc);
+                    // ✅ FILTER: Only include documents from THIS collection
+                    let doc_collection = doc.get("_collection")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    if doc_collection == self.name {
+                        // Track latest version (include tombstones so they overwrite originals)
+                        if let Some(id_value) = doc.get("_id") {
+                            let id_key = serde_json::to_string(id_value)
+                                .unwrap_or_else(|_| "unknown".to_string());
+                            docs_by_id.insert(id_key, doc);
+                        }
                     }
 
                     current_offset += 4 + doc_bytes.len() as u64;
