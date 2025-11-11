@@ -64,6 +64,13 @@ pub struct CollectionMeta {
     pub document_catalog: HashMap<String, u64>,
 }
 
+/// Index record for persistence
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct IndexRecord {
+    pub collection_name: String,
+    pub index_metadata: crate::index::IndexMetadata,
+}
+
 /// Storage engine - fájl alapú tárolás
 pub struct StorageEngine {
     file: File,
@@ -187,6 +194,11 @@ impl StorageEngine {
         self.flush_metadata()?;
         self.file.sync_all()?;
         Ok(())
+    }
+
+    /// Get mutable reference to the database file (for index persistence)
+    pub fn get_file_mut(&mut self) -> &mut File {
+        &mut self.file
     }
 
     /// Statisztikák
