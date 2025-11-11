@@ -1,5 +1,27 @@
 // ironbase-core/src/collection_core.rs
 // Pure Rust collection logic - NO PyO3 dependencies
+//
+// FILE STRUCTURE (1,244 lines):
+// ├── Constructor (lines 25-125)
+// ├── CRUD Operations (lines 127-595)
+// │   ├── insert_one, update_one, update_many
+// │   ├── delete_one, delete_many
+// │   └── distinct
+// ├── Query Operations (lines 186-664)
+// │   ├── find, find_one, count_documents
+// │   ├── find_with_options, find_with_hint
+// │   └── explain
+// ├── Aggregation (lines 906-917)
+// ├── Index Operations (lines 922-1004)
+// │   ├── create_index, drop_index, list_indexes
+// ├── Transaction Operations (lines 1012-1124)
+// │   ├── insert_one_tx, update_one_tx, delete_one_tx
+// └── Private Helpers (lines 1126-1244)
+//     ├── read_document_by_id, scan_documents_via_catalog
+//     ├── filter_documents, find_with_index
+//     └── apply_update_operators
+//
+// FUTURE REFACTOR: See COLLECTION_DESIGN.md for modular architecture plan
 
 use std::sync::Arc;
 use parking_lot::RwLock;
@@ -12,6 +34,7 @@ use crate::error::{Result, MongoLiteError};
 use crate::query::Query;
 use crate::index::{IndexManager, IndexKey};
 use crate::query_planner::{QueryPlanner, QueryPlan};
+use crate::query_cache::{QueryCache, QueryHash};
 
 /// Pure Rust Collection - language-independent core logic
 pub struct CollectionCore {
@@ -19,9 +42,13 @@ pub struct CollectionCore {
     pub storage: Arc<RwLock<StorageEngine>>,
     /// Index manager for B+ tree indexes
     pub indexes: Arc<RwLock<IndexManager>>,
+    /// Query result cache with LRU eviction (capacity: 1000 queries)
+    pub query_cache: Arc<QueryCache>,
 }
 
 impl CollectionCore {
+    // ========== CONSTRUCTOR ==========
+
     /// Create new collection (or get existing)
     pub fn new(name: String, storage: Arc<RwLock<StorageEngine>>) -> Result<Self> {
         // Collection létrehozása, ha nem létezik
@@ -45,7 +72,7 @@ impl CollectionCore {
 
         // PERSISTENCE FIX: Load persisted indexes and rebuild from document catalog
         {
-            let mut storage_guard = storage.write();
+            let storage_guard = storage.write();
             let meta = storage_guard.get_collection_meta(&name)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
 
@@ -120,8 +147,11 @@ impl CollectionCore {
             name,
             storage,
             indexes: Arc::new(RwLock::new(index_manager)),
+            query_cache: Arc::new(QueryCache::new(1000)),  // LRU cache with 1000 query capacity
         })
     }
+
+    // ========== CRUD OPERATIONS ==========
 
     /// Insert one document - returns inserted DocumentId
     pub fn insert_one(&self, mut fields: HashMap<String, Value>) -> Result<DocumentId> {
@@ -179,30 +209,62 @@ impl CollectionCore {
         let doc_json = doc.to_json()?;
         storage.write_document(&self.name, &doc_id, doc_json.as_bytes())?;
 
+        // Invalidate query cache (collection has changed)
+        self.query_cache.invalidate_collection(&self.name);
+
         Ok(doc_id)
     }
 
+    // ========== QUERY OPERATIONS ==========
+
     /// Find documents matching query
     pub fn find(&self, query_json: &Value) -> Result<Vec<Value>> {
+        // Check query cache first
+        let query_hash = QueryHash::new(&self.name, query_json);
+        if let Some(cached_doc_ids) = self.query_cache.get(&query_hash) {
+            // Cache hit! Convert cached DocumentIds to full documents
+            let mut results = Vec::with_capacity(cached_doc_ids.len());
+            for doc_id in cached_doc_ids {
+                let id_key = serde_json::to_string(&serde_json::json!(doc_id))
+                    .unwrap_or_else(|_| "unknown".to_string());
+
+                if let Some(doc) = self.read_document_by_id(&id_key)? {
+                    results.push(doc);
+                }
+            }
+            return Ok(results);
+        }
+
+        // Cache miss - execute query normally
         let parsed_query = Query::from_json(query_json)?;
 
         // Try to use an index
         let indexes = self.indexes.read();
         let available_indexes = indexes.list_indexes();
 
-        if let Some((_field, plan)) = QueryPlanner::analyze_query(query_json, &available_indexes) {
+        let result_docs = if let Some((_field, plan)) = QueryPlanner::analyze_query(query_json, &available_indexes) {
             // Use index-based execution
-            return self.find_with_index(parsed_query, plan);
-        }
+            drop(indexes);
+            self.find_with_index(parsed_query, plan)?
+        } else {
+            // Fall back to full collection scan
+            drop(indexes); // Release read lock before write lock
 
-        // Fall back to full collection scan
-        drop(indexes); // Release read lock before write lock
+            // OPTIMIZATION: Use catalog iteration instead of full file scan
+            let docs_by_id = self.scan_documents_via_catalog()?;
+            self.filter_documents(docs_by_id, &parsed_query)?
+        };
 
-        // OPTIMIZATION: Use catalog iteration instead of full file scan
-        let docs_by_id = self.scan_documents_via_catalog()?;
-        let matching_docs = self.filter_documents(docs_by_id, &parsed_query)?;
+        // Extract DocumentIds from results and cache them
+        let doc_ids: Vec<DocumentId> = result_docs
+            .iter()
+            .filter_map(|doc| doc.get("_id"))
+            .filter_map(|id_value| serde_json::from_value::<DocumentId>(id_value.clone()).ok())
+            .collect();
 
-        Ok(matching_docs)
+        self.query_cache.insert(query_hash, doc_ids);
+
+        Ok(result_docs)
     }
 
     /// Find documents with options (projection, sort, limit, skip)
@@ -371,6 +433,11 @@ impl CollectionCore {
             }
         }
 
+        // Invalidate query cache if any document was modified
+        if modified > 0 {
+            self.query_cache.invalidate_collection(&self.name);
+        }
+
         Ok((matched, modified))
     }
 
@@ -457,6 +524,11 @@ impl CollectionCore {
             }
         }
 
+        // Invalidate query cache if any document was modified
+        if modified > 0 {
+            self.query_cache.invalidate_collection(&self.name);
+        }
+
         Ok((matched, modified))
     }
 
@@ -517,6 +589,11 @@ impl CollectionCore {
 
                 deleted = 1;
             }
+        }
+
+        // Invalidate query cache if any document was deleted
+        if deleted > 0 {
+            self.query_cache.invalidate_collection(&self.name);
         }
 
         Ok(deleted)
@@ -588,6 +665,11 @@ impl CollectionCore {
 
                 deleted += 1;
             }
+        }
+
+        // Invalidate query cache if any document was deleted
+        if deleted > 0 {
+            self.query_cache.invalidate_collection(&self.name);
         }
 
         Ok(deleted)
@@ -1003,7 +1085,7 @@ impl CollectionCore {
         indexes.list_indexes()
     }
 
-    // ========== TRANSACTION METHODS ==========
+    // ========== TRANSACTION OPERATIONS ==========
 
     /// Insert one document within a transaction
     ///
@@ -1124,6 +1206,7 @@ impl CollectionCore {
     }
 
     // ========== PRIVATE HELPER METHODS ==========
+    // These methods provide internal utility functions for CRUD and query operations
 
     /// Read a single document by _id using document_catalog (O(1) lookup)
     /// Returns None if document not found or is tombstone
@@ -1183,40 +1266,8 @@ impl CollectionCore {
     /// Scan all documents in this collection and return latest version by _id
     /// This helper reduces code duplication across find(), update(), delete(), etc.
     /// DEPRECATED: Use scan_documents_via_catalog() for better performance
-    fn scan_documents(&self) -> Result<HashMap<String, Value>> {
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
-
-        let file_len = storage.file_len()?;
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // Filter by collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
-                    }
-                    current_offset += 4 + doc_bytes.len() as u64;
-                }
-                Err(_) => break,
-            }
-        }
-
-        Ok(docs_by_id)
-    }
+    // Dead code removed - use scan_documents_via_catalog() instead
+    // which is faster (O(n) catalog iteration vs O(n) file scan)
 
     /// Filter documents by query and exclude tombstones
     /// Returns only live documents matching the query

@@ -758,7 +758,7 @@ mod tests {
 
         // Verify data persisted
         {
-            let mut storage = StorageEngine::open(&db_path).unwrap();
+            let storage = StorageEngine::open(&db_path).unwrap();
             let file_len = storage.file_len().unwrap();
             assert!(file_len > 0, "Storage should contain data after commit");
         }

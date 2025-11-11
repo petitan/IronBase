@@ -8,7 +8,7 @@ mod integration_tests {
     use crate::document::DocumentId;
     use serde_json::json;
     use tempfile::TempDir;
-    use std::sync::Arc;
+    
     use std::thread;
 
     #[test]

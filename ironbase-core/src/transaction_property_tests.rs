@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod property_tests {
     use crate::database::DatabaseCore;
-    use crate::transaction::{Operation, Transaction};
+    use crate::transaction::{Operation};
     use crate::document::DocumentId;
     use serde_json::json;
     use proptest::prelude::*;

@@ -3,9 +3,9 @@
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 use serde_json::Value;
-use crate::error::{Result, MongoLiteError};
+use crate::error::{Result};
 use super::StorageEngine;
 
 /// Compaction statistics
