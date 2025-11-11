@@ -17,6 +17,15 @@ use crate::transaction::Transaction;
 // Re-export compaction types
 pub use compaction::CompactionStats;
 
+/// Recovered index change from WAL (for higher-level replay)
+#[derive(Debug, Clone)]
+pub struct RecoveredIndexChange {
+    pub index_name: String,
+    pub operation: crate::transaction::IndexOperation,
+    pub key: crate::transaction::IndexKey,
+    pub doc_id: crate::document::DocumentId,
+}
+
 /// RESERVED SPACE for metadata at the beginning of file (after header)
 /// This ensures documents ALWAYS start at a fixed offset (HEADER_SIZE + RESERVED_METADATA_SIZE)
 /// preventing corruption during metadata growth when document_catalog grows
@@ -377,45 +386,80 @@ impl StorageEngine {
     }
 
     /// Recover from WAL after crash
-    pub fn recover_from_wal(&mut self) -> Result<()> {
+    ///
+    /// Returns (committed_transactions, index_changes) for higher-level recovery
+    pub fn recover_from_wal(&mut self) -> Result<(Vec<Vec<crate::wal::WALEntry>>, Vec<RecoveredIndexChange>)> {
         let recovered = self.wal.recover()?;
 
         if recovered.is_empty() {
-            return Ok(());
+            return Ok((vec![], vec![]));
         }
 
+        let mut all_index_changes = Vec::new();
+
         // Replay each committed transaction
-        for tx_entries in recovered {
+        for tx_entries in &recovered {
             // Deserialize operations from WAL entries
             for entry in tx_entries {
-                if entry.entry_type == crate::wal::WALEntryType::Operation {
-                    let op_str = std::str::from_utf8(&entry.data)
-                        .map_err(|e| MongoLiteError::Serialization(format!("UTF-8 error: {}", e)))?;
-                    let operation: crate::transaction::Operation = serde_json::from_str(op_str)?;
+                match entry.entry_type {
+                    crate::wal::WALEntryType::Operation => {
+                        let op_str = std::str::from_utf8(&entry.data)
+                            .map_err(|e| MongoLiteError::Serialization(format!("UTF-8 error: {}", e)))?;
+                        let operation: crate::transaction::Operation = serde_json::from_str(op_str)?;
 
-                    // Apply operation to storage
-                    match operation {
-                        crate::transaction::Operation::Insert { collection: _, doc_id: _, doc } => {
-                            let doc_json = serde_json::to_string(&doc)
-                                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                            self.write_data(doc_json.as_bytes())?;
-                        }
-                        crate::transaction::Operation::Update { collection: _, doc_id: _, old_doc: _, new_doc } => {
-                            let doc_json = serde_json::to_string(&new_doc)
-                                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                            self.write_data(doc_json.as_bytes())?;
-                        }
-                        crate::transaction::Operation::Delete { collection, doc_id, old_doc: _ } => {
-                            let tombstone = serde_json::json!({
-                                "_id": doc_id,
-                                "_collection": collection,
-                                "_tombstone": true
-                            });
-                            let tombstone_json = serde_json::to_string(&tombstone)
-                                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                            self.write_data(tombstone_json.as_bytes())?;
+                        // Apply operation to storage
+                        match operation {
+                            crate::transaction::Operation::Insert { collection: _, doc_id: _, doc } => {
+                                let doc_json = serde_json::to_string(&doc)
+                                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                                self.write_data(doc_json.as_bytes())?;
+                            }
+                            crate::transaction::Operation::Update { collection: _, doc_id: _, old_doc: _, new_doc } => {
+                                let doc_json = serde_json::to_string(&new_doc)
+                                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                                self.write_data(doc_json.as_bytes())?;
+                            }
+                            crate::transaction::Operation::Delete { collection, doc_id, old_doc: _ } => {
+                                let tombstone = serde_json::json!({
+                                    "_id": doc_id,
+                                    "_collection": collection,
+                                    "_tombstone": true
+                                });
+                                let tombstone_json = serde_json::to_string(&tombstone)
+                                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                                self.write_data(tombstone_json.as_bytes())?;
+                            }
                         }
                     }
+                    crate::wal::WALEntryType::IndexChange => {
+                        // Parse index change from JSON
+                        let change_str = std::str::from_utf8(&entry.data)
+                            .map_err(|e| MongoLiteError::Serialization(format!("UTF-8 error: {}", e)))?;
+                        let change_json: serde_json::Value = serde_json::from_str(change_str)?;
+
+                        // Extract fields
+                        let index_name = change_json["index_name"]
+                            .as_str()
+                            .ok_or_else(|| MongoLiteError::Serialization("Missing index_name".to_string()))?
+                            .to_string();
+
+                        let operation = match change_json["operation"].as_str() {
+                            Some("Insert") => crate::transaction::IndexOperation::Insert,
+                            Some("Delete") => crate::transaction::IndexOperation::Delete,
+                            _ => return Err(MongoLiteError::Serialization("Invalid operation".to_string())),
+                        };
+
+                        let key: crate::transaction::IndexKey = serde_json::from_value(change_json["key"].clone())?;
+                        let doc_id: crate::document::DocumentId = serde_json::from_value(change_json["doc_id"].clone())?;
+
+                        all_index_changes.push(RecoveredIndexChange {
+                            index_name,
+                            operation,
+                            key,
+                            doc_id,
+                        });
+                    }
+                    _ => {}  // Skip Begin, Commit, Abort markers
                 }
             }
         }
@@ -423,7 +467,7 @@ impl StorageEngine {
         // Clear WAL after successful recovery
         self.wal.clear()?;
 
-        Ok(())
+        Ok((recovered, all_index_changes))
     }
 
 }
