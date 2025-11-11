@@ -36,11 +36,61 @@ impl CollectionCore {
         let mut index_manager = IndexManager::new();
 
         // Create automatic _id index (unique)
+        let id_index_name = format!("{}_id", name);
         index_manager.create_btree_index(
-            format!("{}_id", name),
+            id_index_name.clone(),
             "_id".to_string(),
             true  // unique
         )?;
+
+        // PERSISTENCE FIX: Rebuild indexes from persisted document catalog
+        {
+            let mut storage_guard = storage.write();
+            let meta = storage_guard.get_collection_meta(&name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
+
+            // Clone the catalog to avoid borrow issues
+            let catalog = meta.document_catalog.clone();
+
+            // Iterate over document catalog and rebuild indexes
+            for (_id_key, offset) in catalog.iter() {
+                // Read document from disk (absolute offset)
+                match storage_guard.read_document_at(&name, *offset) {
+                    Ok(doc_bytes) => {
+                        match serde_json::from_slice::<Value>(&doc_bytes) {
+                            Ok(doc) => {
+                                // Skip tombstones
+                                if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                    continue;
+                                }
+
+                                // Rebuild _id index
+                                if let Some(id_value) = doc.get("_id") {
+                                    // Deserialize DocumentId from JSON value
+                                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_value.clone()) {
+                                        let index_key = IndexKey::from(id_value);
+
+                                        if let Some(id_index) = index_manager.get_btree_index_mut(&id_index_name) {
+                                            let _ = id_index.insert(index_key, doc_id);
+                                        }
+                                    }
+                                }
+
+                                // TODO: Rebuild other custom indexes if they exist
+                            }
+                            Err(_) => {
+                                // Skip corrupted documents
+                                continue;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Skip if we can't read the document
+                        continue;
+                    }
+                }
+            }
+        }
 
         Ok(CollectionCore {
             name,
@@ -98,9 +148,9 @@ impl CollectionCore {
             }
         }
 
-        // Szerializálás és írás
+        // Szerializálás és írás - USE NEW write_document with catalog tracking
         let doc_json = doc.to_json()?;
-        storage.write_data(doc_json.as_bytes())?;
+        storage.write_document(&self.name, &doc_id, doc_json.as_bytes())?;
 
         Ok(doc_id)
     }
@@ -336,15 +386,15 @@ impl CollectionCore {
                     }
                     let tombstone_json = serde_json::to_string(&tombstone)?;
 
-                    // Write tombstone
+                    // Write tombstone (no catalog tracking for tombstones)
                     storage.write_data(tombstone_json.as_bytes())?;
 
                     // ✅ Ensure updated document has _collection
                     document.set("_collection".to_string(), Value::String(self.name.clone()));
 
-                    // Write updated document
+                    // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
-                    storage.write_data(updated_json.as_bytes())?;
+                    storage.write_document(&self.name, &document.id, updated_json.as_bytes())?;
 
                     modified = 1;
                 }
@@ -415,15 +465,15 @@ impl CollectionCore {
                     }
                     let tombstone_json = serde_json::to_string(&tombstone)?;
 
-                    // Write tombstone
+                    // Write tombstone (no catalog tracking for tombstones)
                     storage.write_data(tombstone_json.as_bytes())?;
 
                     // ✅ Ensure updated document has _collection
                     document.set("_collection".to_string(), Value::String(self.name.clone()));
 
-                    // Write updated document
+                    // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
-                    storage.write_data(updated_json.as_bytes())?;
+                    storage.write_document(&self.name, &document.id, updated_json.as_bytes())?;
 
                     modified += 1;
                 }
@@ -490,8 +540,8 @@ impl CollectionCore {
                 }
                 let tombstone_json = serde_json::to_string(&tombstone)?;
 
-                // Write tombstone
-                storage.write_data(tombstone_json.as_bytes())?;
+                // Write tombstone WITH catalog tracking (updates catalog entry)
+                storage.write_document(&self.name, &document.id, tombstone_json.as_bytes())?;
 
                 deleted = 1;
             }
@@ -554,8 +604,8 @@ impl CollectionCore {
                 }
                 let tombstone_json = serde_json::to_string(&tombstone)?;
 
-                // Write tombstone
-                storage.write_data(tombstone_json.as_bytes())?;
+                // Write tombstone WITH catalog tracking (updates catalog entry)
+                storage.write_document(&self.name, &document.id, tombstone_json.as_bytes())?;
 
                 deleted += 1;
             }

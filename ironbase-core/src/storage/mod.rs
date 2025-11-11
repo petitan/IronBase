@@ -17,6 +17,13 @@ use crate::transaction::Transaction;
 // Re-export compaction types
 pub use compaction::CompactionStats;
 
+/// RESERVED SPACE for metadata at the beginning of file (after header)
+/// This ensures documents ALWAYS start at a fixed offset (HEADER_SIZE + RESERVED_METADATA_SIZE)
+/// preventing corruption during metadata growth when document_catalog grows
+pub const RESERVED_METADATA_SIZE: u64 = 256 * 1024; // 256KB reserved for metadata (supports 10K+ docs)
+pub const HEADER_SIZE: u64 = 256; // Fixed header size
+pub const DATA_START_OFFSET: u64 = HEADER_SIZE + RESERVED_METADATA_SIZE; // Documents start here
+
 /// Adatbázis fájl fejléc
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Header {
@@ -47,6 +54,11 @@ pub struct CollectionMeta {
     pub data_offset: u64,          // Adatok kezdő pozíciója
     pub index_offset: u64,         // Indexek kezdő pozíciója
     pub last_id: u64,              // Utolsó _id
+
+    /// Document catalog: DocumentId (as string) -> file offset mapping
+    /// This enables persistent document storage and fast retrieval
+    #[serde(default)]
+    pub document_catalog: HashMap<String, u64>,
 }
 
 /// Storage engine - fájl alapú tárolás
@@ -123,6 +135,7 @@ impl StorageEngine {
             data_offset: 0,  // Will be set correctly by flush_metadata
             index_offset: 0,
             last_id: 0,
+            document_catalog: HashMap::new(),  // Initialize empty catalog
         };
 
         self.collections.insert(name.to_string(), meta);

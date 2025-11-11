@@ -39,4 +39,43 @@ impl StorageEngine {
     pub fn file_len(&self) -> Result<u64> {
         Ok(self.file.metadata()?.len())
     }
+
+    /// Write document and update catalog
+    /// This is the new persistent write method that tracks document offsets
+    /// Stores ABSOLUTE offsets in catalog for simplicity and correctness
+    pub fn write_document(
+        &mut self,
+        collection: &str,
+        doc_id: &crate::document::DocumentId,
+        data: &[u8]
+    ) -> Result<u64> {
+        use crate::error::MongoLiteError;
+
+        // Ensure we write AFTER the reserved metadata space
+        let file_end = self.file.seek(SeekFrom::End(0))?;
+        let write_pos = std::cmp::max(file_end, super::DATA_START_OFFSET);
+        let absolute_offset = self.file.seek(SeekFrom::Start(write_pos))?;
+
+        // Write length + data (same format as write_data)
+        let len = (data.len() as u32).to_le_bytes();
+        self.file.write_all(&len)?;
+        self.file.write_all(data)?;
+
+        // Update catalog in metadata with ABSOLUTE offset
+        let id_key = serde_json::to_string(doc_id)
+            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+
+        let meta = self.get_collection_meta_mut(collection)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+
+        meta.document_catalog.insert(id_key, absolute_offset);
+
+        Ok(absolute_offset)
+    }
+
+    /// Read document by offset (catalog-based retrieval)
+    /// Takes an ABSOLUTE offset directly from catalog
+    pub fn read_document_at(&mut self, _collection: &str, absolute_offset: u64) -> Result<Vec<u8>> {
+        self.read_data(absolute_offset)
+    }
 }

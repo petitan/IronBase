@@ -73,37 +73,32 @@ impl StorageEngine {
         Ok(metadata_end)
     }
 
-    /// Flush metadata to disk with iterative convergence
+    /// Flush metadata to disk with RESERVED SPACE approach
     pub(super) fn flush_metadata(&mut self) -> Result<()> {
-        // Get current file size to preserve existing data
-        let original_file_size = self.file.metadata()?.len();
+        // Use FIXED data offset = HEADER + RESERVED_METADATA_SIZE
+        // This prevents documents from being overwritten when metadata grows
+        let data_offset = super::DATA_START_OFFSET;
 
-        // Use iterative convergence to handle circular dependency
-        let mut current_metadata_end = Self::write_metadata(&mut self.file, &self.header, &self.collections)?;
-
-        // Iterate until convergence (max 5 iterations)
-        for _ in 0..5 {
-            // Update all collection data_offset values
-            for meta in self.collections.values_mut() {
-                meta.data_offset = current_metadata_end;
-                meta.index_offset = current_metadata_end;
-            }
-
-            // Rewrite metadata with updated offsets
-            let new_metadata_end = Self::write_metadata(&mut self.file, &self.header, &self.collections)?;
-
-            // Check convergence
-            if new_metadata_end == current_metadata_end {
-                break;
-            }
-
-            current_metadata_end = new_metadata_end;
+        // Update all collection data_offset to the FIXED start position
+        for meta in self.collections.values_mut() {
+            meta.data_offset = data_offset;
+            meta.index_offset = data_offset;
         }
 
-        // Only truncate if there's no data yet (file size <= metadata end)
-        // This preserves existing documents while removing metadata remnants during initial setup
-        if original_file_size <= current_metadata_end {
-            self.file.set_len(current_metadata_end)?;
+        // Write metadata (will fit in reserved space or error if too large)
+        let metadata_end = Self::write_metadata(&mut self.file, &self.header, &self.collections)?;
+
+        // Verify metadata fits in reserved space
+        if metadata_end > data_offset {
+            return Err(MongoLiteError::Corruption(
+                format!("Metadata size {} exceeds reserved space {}", metadata_end, data_offset)
+            ));
+        }
+
+        // Ensure file is at least DATA_START_OFFSET long (fills reserved space with zeros if needed)
+        let current_size = self.file.metadata()?.len();
+        if current_size < data_offset {
+            self.file.set_len(data_offset)?;
         }
 
         self.file.sync_all()?;
