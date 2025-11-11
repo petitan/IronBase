@@ -43,16 +43,35 @@ impl CollectionCore {
             true  // unique
         )?;
 
-        // PERSISTENCE FIX: Rebuild indexes from persisted document catalog
+        // PERSISTENCE FIX: Load persisted indexes and rebuild from document catalog
         {
             let mut storage_guard = storage.write();
             let meta = storage_guard.get_collection_meta(&name)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
 
-            // Clone the catalog to avoid borrow issues
+            // Clone metadata to avoid borrow issues
             let catalog = meta.document_catalog.clone();
+            let persisted_indexes = meta.indexes.clone();
 
-            // Iterate over document catalog and rebuild indexes
+            drop(storage_guard); // Release write lock before rebuilding
+
+            // Load persisted custom indexes (if any)
+            for index_meta in &persisted_indexes {
+                // Skip _id index (already created)
+                if index_meta.name == id_index_name {
+                    continue;
+                }
+
+                // Create index
+                index_manager.create_btree_index(
+                    index_meta.name.clone(),
+                    index_meta.field.clone(),
+                    index_meta.unique
+                )?;
+            }
+
+            // Rebuild all indexes from document catalog
+            let mut storage_guard = storage.write();
             for (_id_key, offset) in catalog.iter() {
                 // Read document from disk (absolute offset)
                 match storage_guard.read_document_at(&name, *offset) {
@@ -64,30 +83,35 @@ impl CollectionCore {
                                     continue;
                                 }
 
-                                // Rebuild _id index
+                                // Rebuild ALL indexes
                                 if let Some(id_value) = doc.get("_id") {
-                                    // Deserialize DocumentId from JSON value
                                     if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_value.clone()) {
+                                        // Rebuild _id index
                                         let index_key = IndexKey::from(id_value);
-
                                         if let Some(id_index) = index_manager.get_btree_index_mut(&id_index_name) {
-                                            let _ = id_index.insert(index_key, doc_id);
+                                            let _ = id_index.insert(index_key, doc_id.clone());
+                                        }
+
+                                        // Rebuild custom indexes
+                                        for index_meta in &persisted_indexes {
+                                            if index_meta.name == id_index_name {
+                                                continue;
+                                            }
+
+                                            if let Some(field_value) = doc.get(&index_meta.field) {
+                                                let key = IndexKey::from(field_value);
+                                                if let Some(index) = index_manager.get_btree_index_mut(&index_meta.name) {
+                                                    let _ = index.insert(key, doc_id.clone());
+                                                }
+                                            }
                                         }
                                     }
                                 }
-
-                                // TODO: Rebuild other custom indexes if they exist
                             }
-                            Err(_) => {
-                                // Skip corrupted documents
-                                continue;
-                            }
+                            Err(_) => continue,
                         }
                     }
-                    Err(_) => {
-                        // Skip if we can't read the document
-                        continue;
-                    }
+                    Err(_) => continue,
                 }
             }
         }
@@ -174,8 +198,8 @@ impl CollectionCore {
         // Fall back to full collection scan
         drop(indexes); // Release read lock before write lock
 
-        // Scan all documents and filter by query (helper handles locks internally)
-        let docs_by_id = self.scan_documents()?;
+        // OPTIMIZATION: Use catalog iteration instead of full file scan
+        let docs_by_id = self.scan_documents_via_catalog()?;
         let matching_docs = self.filter_documents(docs_by_id, &parsed_query)?;
 
         Ok(matching_docs)
@@ -214,47 +238,33 @@ impl CollectionCore {
     pub fn find_one(&self, query_json: &Value) -> Result<Option<Value>> {
         let parsed_query = Query::from_json(query_json)?;
 
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
+        if let Some(query_obj) = query_json.as_object() {
+            if query_obj.len() == 1 && query_obj.contains_key("_id") {
+                if let Some(id_val) = query_obj.get("_id") {
+                    // Direct O(1) lookup using document_catalog
+                    let id_str = serde_json::to_string(id_val)
+                        .unwrap_or_else(|_| "unknown".to_string());
 
-        let file_len = storage.file_len()?;
+                    if let Some(doc) = self.read_document_by_id(&id_str)? {
+                        // Verify query still matches (for consistency)
+                        let doc_json_str = serde_json::to_string(&doc)?;
+                        let document = Document::from_json(&doc_json_str)?;
 
-        // Use HashMap to track latest version of each document by _id
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
+                        if parsed_query.matches(&document) {
+                            return Ok(Some(doc));
                         }
                     }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
+                    return Ok(None);
                 }
-                Err(_) => break,
             }
         }
 
+        // Fallback: Full scan using catalog iteration (still faster than file scan)
+        let docs_by_id = self.scan_documents_via_catalog()?;
+
         // Find first matching document (skip tombstones)
         for (_, doc) in docs_by_id {
-            // Skip tombstones (deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                continue;
-            }
-
             let doc_json_str = serde_json::to_string(&doc)?;
             let document = Document::from_json(&doc_json_str)?;
 
@@ -270,50 +280,12 @@ impl CollectionCore {
     pub fn count_documents(&self, query_json: &Value) -> Result<u64> {
         let parsed_query = Query::from_json(query_json)?;
 
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+        // OPTIMIZATION: Use catalog iteration instead of full file scan
+        let docs_by_id = self.scan_documents_via_catalog()?;
 
-        let file_len = storage.file_len()?;
-
-        // Use HashMap to track latest version of each document by _id
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
-                    }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
-                }
-                Err(_) => {
-                    break;
-                }
-            }
-        }
-
-        // Count matching documents (skip tombstones)
+        // Count matching documents (skip tombstones already filtered by catalog scan)
         let mut count = 0u64;
         for (_, doc) in docs_by_id {
-            // Skip tombstones (deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                continue;
-            }
-
             let doc_json_str = serde_json::to_string(&doc)?;
             let document = Document::from_json(&doc_json_str)?;
 
@@ -329,50 +301,38 @@ impl CollectionCore {
     pub fn update_one(&self, query_json: &Value, update_json: &Value) -> Result<(u64, u64)> {
         let parsed_query = Query::from_json(query_json)?;
 
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
+        let docs_by_id = if let Some(query_obj) = query_json.as_object() {
+            if query_obj.len() == 1 && query_obj.contains_key("_id") {
+                if let Some(id_val) = query_obj.get("_id") {
+                    // Direct O(1) lookup using document_catalog
+                    let id_str = serde_json::to_string(id_val)
+                        .unwrap_or_else(|_| "unknown".to_string());
 
-        let file_len = storage.file_len()?;
-
-        // First pass: collect all documents by _id (latest version only)
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        // Track latest version (include tombstones so they overwrite originals)
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
+                    if let Some(doc) = self.read_document_by_id(&id_str)? {
+                        let mut single_doc_map = HashMap::new();
+                        single_doc_map.insert(id_str, doc);
+                        single_doc_map
+                    } else {
+                        HashMap::new()
                     }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
+                } else {
+                    self.scan_documents_via_catalog()?
                 }
-                Err(_) => break,
+            } else {
+                // Fallback: Full scan using catalog iteration
+                self.scan_documents_via_catalog()?
             }
-        }
+        } else {
+            self.scan_documents_via_catalog()?
+        };
 
-        // Second pass: find first matching and update (skip tombstones)
+        // Find first matching and update (skip tombstones already filtered by catalog scan)
         let mut matched = 0u64;
         let mut modified = 0u64;
+        let mut storage = self.storage.write();
 
         for (_, doc) in docs_by_id {
-            // Skip tombstones (deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                continue;
-            }
             if matched > 0 {
                 break; // Only update first match
             }
@@ -504,49 +464,37 @@ impl CollectionCore {
     pub fn delete_one(&self, query_json: &Value) -> Result<u64> {
         let parsed_query = Query::from_json(query_json)?;
 
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
+        let docs_by_id = if let Some(query_obj) = query_json.as_object() {
+            if query_obj.len() == 1 && query_obj.contains_key("_id") {
+                if let Some(id_val) = query_obj.get("_id") {
+                    // Direct O(1) lookup using document_catalog
+                    let id_str = serde_json::to_string(id_val)
+                        .unwrap_or_else(|_| "unknown".to_string());
 
-        let file_len = storage.file_len()?;
-
-        // First pass: collect all documents by _id (latest version only)
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        // Track latest version (include tombstones so they overwrite originals)
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
+                    if let Some(doc) = self.read_document_by_id(&id_str)? {
+                        let mut single_doc_map = HashMap::new();
+                        single_doc_map.insert(id_str, doc);
+                        single_doc_map
+                    } else {
+                        HashMap::new()
                     }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
+                } else {
+                    self.scan_documents_via_catalog()?
                 }
-                Err(_) => break,
+            } else {
+                // Fallback: Full scan using catalog iteration
+                self.scan_documents_via_catalog()?
             }
-        }
+        } else {
+            self.scan_documents_via_catalog()?
+        };
 
-        // Second pass: find first matching and delete (skip tombstones)
+        // Find first matching and delete (skip tombstones already filtered by catalog scan)
         let mut deleted = 0u64;
+        let mut storage = self.storage.write();
 
         for (_, doc) in docs_by_id {
-            // Skip tombstones (already deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                continue;
-            }
             if deleted > 0 {
                 break; // Only delete first match
             }
@@ -827,59 +775,21 @@ impl CollectionCore {
             }
         }; // indexes read lock dropped here
 
-        let mut storage = self.storage.write();
-
-        // Now fetch documents by ID and apply full query filter
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
-
-        let file_len = storage.file_len()?;
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        // Build docs_by_id map (we still need to get latest version)
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // Filter by collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
-                    }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
-                }
-                Err(_) => break,
-            }
-        }
-
-        // Filter to only index-matched documents
+        // OPTIMIZATION: Use catalog-based lookup for index results instead of full file scan
         let mut matching_docs = Vec::new();
+
         for doc_id in doc_ids {
             let id_key = serde_json::to_string(&serde_json::json!(doc_id))
                 .unwrap_or_else(|_| "unknown".to_string());
 
-            if let Some(doc) = docs_by_id.get(&id_key) {
-                // Skip tombstones
-                if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    continue;
-                }
-
+            // O(1) lookup using document_catalog
+            if let Some(doc) = self.read_document_by_id(&id_key)? {
                 // Apply full query filter (in case index gave us false positives)
-                let doc_json_str = serde_json::to_string(doc)?;
+                let doc_json_str = serde_json::to_string(&doc)?;
                 let document = Document::from_json(&doc_json_str)?;
 
                 if parsed_query.matches(&document) {
-                    matching_docs.push(doc.clone());
+                    matching_docs.push(doc);
                 }
             }
         }
@@ -1015,8 +925,55 @@ impl CollectionCore {
         let mut indexes = self.indexes.write();
         indexes.create_btree_index(index_name.clone(), field.clone(), unique)?;
 
-        // TODO: Rebuild index from existing documents
-        // For now, the index will be populated as new documents are inserted
+        // Populate index with existing documents
+        let docs_by_id = {
+            drop(indexes); // Release write lock before acquiring storage lock
+            self.scan_documents_via_catalog()?
+        };
+
+        // Re-acquire write lock to populate index
+        let mut indexes = self.indexes.write();
+
+        for (id_str, doc) in &docs_by_id {
+            // Parse document ID
+            let doc_id: DocumentId = serde_json::from_str(id_str)
+                .unwrap_or_else(|_| DocumentId::Int(0));
+
+            // Extract field value and add to index
+            if let Some(field_value) = doc.get(&field) {
+                let key = IndexKey::from(field_value);
+
+                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                    let _ = index.insert(key, doc_id);
+                }
+            }
+        }
+
+        drop(indexes); // Release index lock
+
+        // PERSIST index metadata to collection metadata
+        {
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                // Create IndexMetadata
+                use crate::index::IndexMetadata;
+                let index_meta = IndexMetadata {
+                    name: index_name.clone(),
+                    field: field.clone(),
+                    unique,
+                    sparse: false,
+                    num_keys: 0,
+                    tree_height: 1,
+                    root_offset: 0,
+                };
+
+                // Add to persisted indexes list
+                meta.indexes.push(index_meta);
+
+                // Save metadata to disk
+                storage.flush()?;
+            }
+        }
 
         Ok(index_name)
     }
@@ -1024,7 +981,20 @@ impl CollectionCore {
     /// Drop an index
     pub fn drop_index(&self, index_name: &str) -> Result<()> {
         let mut indexes = self.indexes.write();
-        indexes.drop_index(index_name)
+        indexes.drop_index(index_name)?;
+
+        drop(indexes); // Release lock
+
+        // Remove from persisted metadata
+        {
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                meta.indexes.retain(|idx| idx.name != index_name);
+                storage.flush()?;
+            }
+        }
+
+        Ok(())
     }
 
     /// List all indexes
@@ -1155,8 +1125,64 @@ impl CollectionCore {
 
     // ========== PRIVATE HELPER METHODS ==========
 
+    /// Read a single document by _id using document_catalog (O(1) lookup)
+    /// Returns None if document not found or is tombstone
+    fn read_document_by_id(&self, id_str: &str) -> Result<Option<Value>> {
+        let mut storage = self.storage.write();
+        let meta = storage.get_collection_meta(&self.name)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+
+        // O(1) lookup in document_catalog
+        if let Some(&offset) = meta.document_catalog.get(id_str) {
+            let doc_bytes = storage.read_data(offset)?;
+            let doc: Value = serde_json::from_slice(&doc_bytes)?;
+
+            // Check if document is a tombstone (deleted)
+            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Ok(None);
+            }
+
+            Ok(Some(doc))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Scan documents via document_catalog instead of full file scan
+    /// Much faster than scan_documents() for large collections
+    fn scan_documents_via_catalog(&self) -> Result<HashMap<String, Value>> {
+        let mut storage = self.storage.write();
+
+        // Clone the catalog to avoid borrow checker issues
+        let catalog = {
+            let meta = storage.get_collection_meta(&self.name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            meta.document_catalog.clone()
+        };
+
+        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
+
+        // Iterate over catalog instead of sequential file scan
+        for (id_str, offset) in &catalog {
+            match storage.read_data(*offset) {
+                Ok(doc_bytes) => {
+                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
+
+                    // Skip tombstones (deleted documents)
+                    if !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        docs_by_id.insert(id_str.clone(), doc);
+                    }
+                }
+                Err(_) => continue, // Skip corrupted entries
+            }
+        }
+
+        Ok(docs_by_id)
+    }
+
     /// Scan all documents in this collection and return latest version by _id
     /// This helper reduces code duplication across find(), update(), delete(), etc.
+    /// DEPRECATED: Use scan_documents_via_catalog() for better performance
     fn scan_documents(&self) -> Result<HashMap<String, Value>> {
         let mut storage = self.storage.write();
         let meta = storage.get_collection_meta(&self.name)

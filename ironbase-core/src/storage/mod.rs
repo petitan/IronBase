@@ -62,6 +62,10 @@ pub struct CollectionMeta {
     /// This enables persistent document storage and fast retrieval
     #[serde(default)]
     pub document_catalog: HashMap<String, u64>,
+
+    /// Persisted index metadata for this collection
+    #[serde(default)]
+    pub indexes: Vec<crate::index::IndexMetadata>,
 }
 
 /// Index record for persistence
@@ -146,6 +150,7 @@ impl StorageEngine {
             index_offset: 0,
             last_id: 0,
             document_catalog: HashMap::new(),  // Initialize empty catalog
+            indexes: Vec::new(),  // Initialize empty index list
         };
 
         self.collections.insert(name.to_string(), meta);

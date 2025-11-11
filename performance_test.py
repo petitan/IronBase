@@ -62,6 +62,14 @@ def benchmark_insert(db_path, num_docs):
     print(f"  Throughput: {format_throughput(num_docs, duration)}")
     print(f"  Avg per insert: {format_time(duration / num_docs)}")
 
+    # Create indexes for benchmarked fields
+    print(f"\n  Creating indexes...")
+    start_index = time.perf_counter()
+    coll.create_index("age")
+    coll.create_index("name")
+    end_index = time.perf_counter()
+    print(f"  Index creation time: {format_time(end_index - start_index)}")
+
     db.close()
     return duration
 
