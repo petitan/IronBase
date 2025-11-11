@@ -1,0 +1,70 @@
+======================================================================
+MongoLite Performance Benchmark Suite
+======================================================================
+
+======================================================================
+INSERT Benchmark - 10,000 documents
+======================================================================
+  Total time: 363.39 ms
+  Throughput: 27,518 ops/sec
+  Avg per insert: 36.34 μs
+
+  Creating indexes...
+  Index creation time: 126.62 μs
+
+======================================================================
+FIND Benchmark - 1,000 queries
+======================================================================
+  find() all: 309.18 ms (10010 docs)
+  find() filtered (1000 queries): 304.01 s
+  Throughput: 3 ops/sec
+  Avg per query: 304.01 ms
+  find_one() avg: 175.60 ms
+  find_one() median: 174.92 ms
+
+======================================================================
+UPDATE Benchmark - 1,000 updates
+======================================================================
+  update_one() total: 171.33 s
+  Throughput: 6 ops/sec
+  Avg per update: 171.33 ms
+
+======================================================================
+DELETE Benchmark - 100 deletes
+======================================================================
+  delete_one() total: 17.90 s
+  Throughput: 6 ops/sec
+  Avg per delete: 179.00 ms
+
+======================================================================
+COUNT Benchmark - 1,000 queries
+======================================================================
+  count_documents() total: 229.53 s
+  Throughput: 4 ops/sec
+  Avg per count: 229.53 ms
+
+======================================================================
+COMPACTION Benchmark
+======================================================================
+  Compaction time: 223.25 ms
+  Size before: 1,505,971 bytes
+  Size after: 1,170,373 bytes
+  Space saved: 335,598 bytes (22.3%)
+  Documents kept: 9910
+  Tombstones removed: 100
+
+======================================================================
+SUMMARY
+======================================================================
+  INSERT: 10,000 docs in 363.39 ms = 27,518 ops/sec
+  FIND:   1,000 queries in 304.01 s = 3 ops/sec
+  UPDATE: 1,000 updates in 171.33 s = 6 ops/sec
+  DELETE: 100 deletes in 17.90 s = 6 ops/sec
+  COUNT:  1,000 counts in 229.53 s = 4 ops/sec
+  COMPACT: 223.25 ms
+
+  Final database size: 1,170,373 bytes (1.12 MB)
+
+======================================================================
+✅ Performance benchmark completed!
+======================================================================

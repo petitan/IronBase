@@ -1,0 +1,78 @@
+   Compiling libm v0.2.15
+   Compiling num-traits v0.2.19
+   Compiling rustix v1.1.2
+   Compiling getrandom v0.2.16
+   Compiling bitflags v2.10.0
+   Compiling linux-raw-sys v0.11.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling syn v2.0.110
+   Compiling fastrand v2.3.0
+   Compiling wait-timeout v0.2.1
+   Compiling bit-vec v0.6.3
+   Compiling fnv v1.0.7
+   Compiling quick-error v1.2.3
+   Compiling rand_core v0.6.4
+   Compiling bit-set v0.5.3
+   Compiling unarray v0.1.4
+   Compiling regex-syntax v0.8.8
+   Compiling lazy_static v1.5.0
+   Compiling rand_xorshift v0.3.0
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.5
+   Compiling tempfile v3.23.0
+   Compiling rusty-fork v0.3.1
+   Compiling proptest v1.4.0
+   Compiling serde_derive v1.0.228
+   Compiling thiserror-impl v1.0.69
+   Compiling thiserror v1.0.69
+   Compiling serde v1.0.228
+   Compiling uuid v1.18.1
+   Compiling chrono v0.4.42
+   Compiling bincode v1.3.3
+   Compiling ironbase-core v0.2.0 (/home/petitan/MongoLite/ironbase-core)
+warning: unused import: `MongoLiteError`
+ --> ironbase-core/src/storage/compaction.rs:8:28
+  |
+8 | use crate::error::{Result, MongoLiteError};
+  |                            ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` on by default
+
+warning: unused import: `Read`
+ --> ironbase-core/src/storage/compaction.rs:6:15
+  |
+6 | use std::io::{Read, Seek, SeekFrom, Write};
+  |               ^^^^
+
+warning: `ironbase-core` (lib) generated 2 warnings (run `cargo fix --lib -p ironbase-core` to apply 1 suggestion)
+error[E0432]: unresolved import `criterion`
+ --> ironbase-core/benches/benchmarks.rs:2:5
+  |
+2 | use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+  |     ^^^^^^^^^ use of undeclared crate or module `criterion`
+
+error: cannot determine resolution for the macro `criterion_group`
+   --> ironbase-core/benches/benchmarks.rs:260:1
+    |
+260 | criterion_group!(
+    | ^^^^^^^^^^^^^^^
+    |
+    = note: import resolution is stuck, try simplifying macro imports
+
+error: cannot determine resolution for the macro `criterion_main`
+   --> ironbase-core/benches/benchmarks.rs:276:1
+    |
+276 | criterion_main!(benches);
+    | ^^^^^^^^^^^^^^
+    |
+    = note: import resolution is stuck, try simplifying macro imports
+
+error[E0433]: failed to resolve: use of undeclared crate or module `criterion`
+   --> ironbase-core/benches/benchmarks.rs:218:13
+    |
+218 |             criterion::BatchSize::SmallInput,
+    |             ^^^^^^^^^ use of undeclared crate or module `criterion`
+
+Some errors have detailed explanations: E0432, E0433.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `ironbase-core` (bench "benchmarks") due to 4 previous errors

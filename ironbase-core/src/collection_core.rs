@@ -1106,7 +1106,27 @@ impl CollectionCore {
             doc: serde_json::json!(doc_with_id),
         })?;
 
-        // TODO: Track index changes (future: two-phase commit)
+        // Track index changes for two-phase commit
+        let indexes = self.indexes.read();
+        for index_name in indexes.list_indexes() {
+            // Get the index to extract field name
+            if let Some(btree_index) = indexes.get_btree_index(&index_name) {
+                let field_name = &btree_index.metadata.field;
+
+                // Get the field value from the document
+                if let Some(key_value) = doc_with_id.get(field_name) {
+                    let key = crate::transaction::IndexKey::from(key_value);
+                    tx.add_index_change(
+                        index_name.clone(),
+                        crate::transaction::IndexChange {
+                            operation: crate::transaction::IndexOperation::Insert,
+                            key,
+                            doc_id: doc_id.clone(),
+                        }
+                    )?;
+                }
+            }
+        }
 
         Ok(doc_id)
     }
@@ -1143,6 +1163,9 @@ impl CollectionCore {
                 return Err(MongoLiteError::Serialization("new_doc must be an object".to_string()));
             };
 
+            // Prepare new_doc for index tracking
+            let new_doc_for_tracking = new_doc_with_meta.clone();
+
             // Add operation to transaction
             tx.add_operation(Operation::Update {
                 collection: self.name.clone(),
@@ -1151,7 +1174,47 @@ impl CollectionCore {
                 new_doc: new_doc_with_meta,
             })?;
 
-            // TODO: Track index changes (future: two-phase commit)
+            // Track index changes for two-phase commit
+            let indexes = self.indexes.read();
+            for index_name in indexes.list_indexes() {
+                if let Some(btree_index) = indexes.get_btree_index(&index_name) {
+                    let field_name = &btree_index.metadata.field;
+
+                    // Get old and new values
+                    let old_value = old_doc.get(field_name);
+                    let new_value = if let Value::Object(ref map) = new_doc_for_tracking {
+                        map.get(field_name)
+                    } else {
+                        None
+                    };
+
+                    // Delete old key if exists
+                    if let Some(old_val) = old_value {
+                        let old_key = crate::transaction::IndexKey::from(old_val);
+                        tx.add_index_change(
+                            index_name.clone(),
+                            crate::transaction::IndexChange {
+                                operation: crate::transaction::IndexOperation::Delete,
+                                key: old_key,
+                                doc_id: doc_id.clone(),
+                            }
+                        )?;
+                    }
+
+                    // Insert new key if exists
+                    if let Some(new_val) = new_value {
+                        let new_key = crate::transaction::IndexKey::from(new_val);
+                        tx.add_index_change(
+                            index_name.clone(),
+                            crate::transaction::IndexChange {
+                                operation: crate::transaction::IndexOperation::Insert,
+                                key: new_key,
+                                doc_id: doc_id.clone(),
+                            }
+                        )?;
+                    }
+                }
+            }
 
             Ok((1, 1)) // matched_count, modified_count
         } else {
@@ -1188,7 +1251,26 @@ impl CollectionCore {
                 old_doc: old_doc.clone(),
             })?;
 
-            // TODO: Track index changes (future: two-phase commit)
+            // Track index changes for two-phase commit
+            let indexes = self.indexes.read();
+            for index_name in indexes.list_indexes() {
+                if let Some(btree_index) = indexes.get_btree_index(&index_name) {
+                    let field_name = &btree_index.metadata.field;
+
+                    // Delete key from index if exists
+                    if let Some(old_val) = old_doc.get(field_name) {
+                        let old_key = crate::transaction::IndexKey::from(old_val);
+                        tx.add_index_change(
+                            index_name.clone(),
+                            crate::transaction::IndexChange {
+                                operation: crate::transaction::IndexOperation::Delete,
+                                key: old_key,
+                                doc_id: doc_id.clone(),
+                            }
+                        )?;
+                    }
+                }
+            }
 
             Ok(1) // deleted_count
         } else {
