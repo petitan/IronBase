@@ -1,0 +1,71 @@
+============================================================
+IronBase Memory Usage Benchmark
+============================================================
+Python version: 3.12.3 (main, Aug 14 2025, 17:47:21) [GCC 13.3.0]
+IronBase version: unknown
+Initial memory: 14.50 MB
+CPU count: 12
+
+============================================================
+TEST 1: Database Creation
+============================================================
+Memory before: 14.62 MB
+Memory after:  14.75 MB
+Memory used:   0.12 MB
+
+============================================================
+TEST 2: Bulk Insert (10,000 documents)
+============================================================
+Memory before: 14.75 MB
+Memory after:  16.24 MB
+Memory used:   1.49 MB
+Per document:  0.15 KB
+
+============================================================
+TEST 3: Index Creation (1000 documents)
+============================================================
+Memory before: 15.05 MB
+Memory after:  16.17 MB
+Memory used:   1.12 MB
+Per index:     0.38 MB
+
+============================================================
+TEST 4: Query Operations (5000 documents)
+============================================================
+Memory before: 20.67 MB
+Memory after:  25.54 MB
+Memory used:   4.87 MB
+
+============================================================
+TEST 5: Multiple Collections (10 collections, 100 docs each)
+============================================================
+Memory before: 23.58 MB
+Memory after:  23.58 MB
+Memory used:   0.00 MB
+Per collection: 0.00 MB
+
+============================================================
+TEST 6: Large Documents (100 docs x 10KB each)
+============================================================
+Memory before: 23.58 MB
+Memory after:  23.58 MB
+Memory used:   0.00 MB
+Per document:  0.00 MB
+Total data size: 0.98 MB
+Overhead:      -100.0%
+
+============================================================
+SUMMARY
+============================================================
+Database Creation:         0.12 MB
+Bulk Insert (10K):         1.49 MB
+Index Creation (3):        1.12 MB
+Query Operations:          4.87 MB
+Multi Collections:         0.00 MB
+Large Documents:           0.00 MB
+                       ────────────
+Total Memory Impact:       7.61 MB
+
+============================================================
+✅ Memory benchmark completed successfully!
+============================================================
