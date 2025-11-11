@@ -80,6 +80,11 @@ impl CollectionCore {
             let catalog = meta.document_catalog.clone();
             let persisted_indexes = meta.indexes.clone();
 
+            eprintln!("🔍 DEBUG: Collection '{}' - catalog size: {}, persisted indexes: {}",
+                     name, catalog.len(), persisted_indexes.len());
+            use std::io::Write;
+            let _ = std::io::stderr().flush();
+
             drop(storage_guard); // Release write lock before rebuilding
 
             // Load persisted custom indexes (if any)
@@ -88,6 +93,9 @@ impl CollectionCore {
                 if index_meta.name == id_index_name {
                     continue;
                 }
+
+                eprintln!("🔍 DEBUG: Creating index '{}' on field '{}'",
+                         index_meta.name, index_meta.field);
 
                 // Create index
                 index_manager.create_btree_index(
@@ -98,7 +106,9 @@ impl CollectionCore {
             }
 
             // Rebuild all indexes from document catalog
+            eprintln!("🔍 DEBUG: Starting index rebuild from {} catalog entries", catalog.len());
             let mut storage_guard = storage.write();
+            let mut rebuilt_count = 0;
             for (_id_key, offset) in catalog.iter() {
                 // Read document from disk (absolute offset)
                 match storage_guard.read_document_at(&name, *offset) {
@@ -129,18 +139,26 @@ impl CollectionCore {
                                                 let key = IndexKey::from(field_value);
                                                 if let Some(index) = index_manager.get_btree_index_mut(&index_meta.name) {
                                                     let _ = index.insert(key, doc_id.clone());
+                                                    rebuilt_count += 1;
                                                 }
                                             }
                                         }
                                     }
                                 }
                             }
-                            Err(_) => continue,
+                            Err(e) => {
+                                eprintln!("🔍 DEBUG: Failed to parse document JSON: {:?}", e);
+                                continue;
+                            }
                         }
                     }
-                    Err(_) => continue,
+                    Err(e) => {
+                        eprintln!("🔍 DEBUG: Failed to read document at offset: {:?}", e);
+                        continue;
+                    }
                 }
             }
+            eprintln!("🔍 DEBUG: Index rebuild completed - {} index entries rebuilt", rebuilt_count);
         }
 
         Ok(CollectionCore {
@@ -219,9 +237,15 @@ impl CollectionCore {
 
     /// Find documents matching query
     pub fn find(&self, query_json: &Value) -> Result<Vec<Value>> {
+        eprintln!("🔍 DEBUG: find() called with query: {:?}", query_json);
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+
         // Check query cache first
         let query_hash = QueryHash::new(&self.name, query_json);
         if let Some(cached_doc_ids) = self.query_cache.get(&query_hash) {
+            eprintln!("🔍 DEBUG: Query cache HIT! {} cached doc IDs", cached_doc_ids.len());
+            let _ = std::io::stderr().flush();
             // Cache hit! Convert cached DocumentIds to full documents (direct lookup!)
             let mut results = Vec::with_capacity(cached_doc_ids.len());
             for doc_id in cached_doc_ids {
@@ -232,6 +256,9 @@ impl CollectionCore {
             return Ok(results);
         }
 
+        eprintln!("🔍 DEBUG: Query cache MISS - executing query");
+        let _ = std::io::stderr().flush();
+
         // Cache miss - execute query normally
         let parsed_query = Query::from_json(query_json)?;
 
@@ -239,12 +266,19 @@ impl CollectionCore {
         let indexes = self.indexes.read();
         let available_indexes = indexes.list_indexes();
 
-        let result_docs = if let Some((_field, plan)) = QueryPlanner::analyze_query(query_json, &available_indexes) {
+        eprintln!("🔍 DEBUG: Available indexes: {:?}", available_indexes);
+        let _ = std::io::stderr().flush();
+
+        let result_docs = if let Some((field, plan)) = QueryPlanner::analyze_query(query_json, &available_indexes) {
             // Use index-based execution
+            eprintln!("🔍 DEBUG: Using index for field '{}': {:?}", field, plan);
+            let _ = std::io::stderr().flush();
             drop(indexes);
             self.find_with_index(parsed_query, plan)?
         } else {
             // Fall back to full collection scan
+            eprintln!("🔍 DEBUG: No suitable index - using full scan");
+            let _ = std::io::stderr().flush();
             drop(indexes); // Release read lock before write lock
 
             // OPTIMIZATION: Use catalog iteration instead of full file scan
@@ -813,29 +847,43 @@ impl CollectionCore {
 
     /// Execute query using an index
     fn find_with_index(&self, parsed_query: Query, plan: QueryPlan) -> Result<Vec<Value>> {
+        eprintln!("🔍 DEBUG: find_with_index() called with plan: {:?}", plan);
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+
         // Get candidate document IDs from index
         let doc_ids: Vec<DocumentId> = {
             let indexes = self.indexes.read();
 
             match plan {
-                QueryPlan::IndexScan { index_name, key, .. } => {
-                    if let Some(index) = indexes.get_btree_index(&index_name) {
+                QueryPlan::IndexScan { ref index_name, ref key, .. } => {
+                    eprintln!("🔍 DEBUG: IndexScan - index: {}, key: {:?}", index_name, key);
+                    let _ = std::io::stderr().flush();
+                    if let Some(index) = indexes.get_btree_index(index_name) {
                         // Use range scan with same start and end to get ALL matching documents
                         // (B+ tree may have multiple documents with same key value)
-                        index.range_scan(&key, &key, true, true)
+                        let ids = index.range_scan(key, key, true, true);
+                        eprintln!("🔍 DEBUG: IndexScan returned {} doc IDs", ids.len());
+                        let _ = std::io::stderr().flush();
+                        ids
                     } else {
+                        eprintln!("🔍 DEBUG: Index '{}' NOT FOUND!", index_name);
+                        let _ = std::io::stderr().flush();
                         vec![]
                     }
                 }
                 QueryPlan::IndexRangeScan {
-                    index_name,
-                    start,
-                    end,
+                    ref index_name,
+                    ref start,
+                    ref end,
                     inclusive_start,
                     inclusive_end,
                     ..
                 } => {
-                    if let Some(index) = indexes.get_btree_index(&index_name) {
+                    eprintln!("🔍 DEBUG: IndexRangeScan - index: {}, start: {:?}, end: {:?}",
+                             index_name, start, end);
+                    let _ = std::io::stderr().flush();
+                    if let Some(index) = indexes.get_btree_index(index_name) {
                         // Range scan
                         let default_start = IndexKey::Null;
                         let default_end = IndexKey::String("\u{10ffff}".repeat(100));
@@ -843,33 +891,58 @@ impl CollectionCore {
                         let start_key = start.as_ref().unwrap_or(&default_start);
                         let end_key = end.as_ref().unwrap_or(&default_end);
 
-                        index.range_scan(start_key, end_key, inclusive_start, inclusive_end)
+                        let ids = index.range_scan(start_key, end_key, inclusive_start, inclusive_end);
+                        eprintln!("🔍 DEBUG: IndexRangeScan returned {} doc IDs", ids.len());
+                        let _ = std::io::stderr().flush();
+                        ids
                     } else {
+                        eprintln!("🔍 DEBUG: Index '{}' NOT FOUND!", index_name);
+                        let _ = std::io::stderr().flush();
                         vec![]
                     }
                 }
                 QueryPlan::CollectionScan => {
+                    eprintln!("🔍 DEBUG: CollectionScan (shouldn't happen in find_with_index!)");
+                    let _ = std::io::stderr().flush();
                     // This shouldn't happen, but fall back to empty
                     vec![]
                 }
             }
         }; // indexes read lock dropped here
 
+        eprintln!("🔍 DEBUG: Got {} candidate doc IDs from index", doc_ids.len());
+        let _ = std::io::stderr().flush();
+
         // OPTIMIZATION: Use catalog-based lookup for index results instead of full file scan
         let mut matching_docs = Vec::new();
 
-        for doc_id in doc_ids {
+        for doc_id in &doc_ids {
+            eprintln!("🔍 DEBUG: Looking up doc_id: {:?}", doc_id);
+            let _ = std::io::stderr().flush();
             // O(1) lookup using document_catalog (direct DocumentId lookup!)
-            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+            if let Some(doc) = self.read_document_by_id(doc_id)? {
+                eprintln!("🔍 DEBUG: Found document, applying query filter");
+                let _ = std::io::stderr().flush();
                 // Apply full query filter (in case index gave us false positives)
                 let doc_json_str = serde_json::to_string(&doc)?;
                 let document = Document::from_json(&doc_json_str)?;
 
                 if parsed_query.matches(&document) {
+                    eprintln!("🔍 DEBUG: Document MATCHES query!");
+                    let _ = std::io::stderr().flush();
                     matching_docs.push(doc);
+                } else {
+                    eprintln!("🔍 DEBUG: Document DOES NOT match query");
+                    let _ = std::io::stderr().flush();
                 }
+            } else {
+                eprintln!("🔍 DEBUG: Document NOT FOUND for doc_id: {:?}", doc_id);
+                let _ = std::io::stderr().flush();
             }
         }
+
+        eprintln!("🔍 DEBUG: find_with_index() returning {} documents", matching_docs.len());
+        let _ = std::io::stderr().flush();
 
         Ok(matching_docs)
     }
@@ -913,6 +986,176 @@ impl CollectionCore {
                             }
                         }
                     }
+                    "$push" => {
+                        if let Value::Object(ref field_values) = fields {
+                            for (field, value) in field_values {
+                                // Handle modifiers: $each, $position, $slice
+                                let (items, position, slice) = if let Value::Object(ref modifiers) = value {
+                                    let items = if let Some(each_val) = modifiers.get("$each") {
+                                        // $each: push multiple items
+                                        if let Value::Array(ref arr) = each_val {
+                                            arr.clone()
+                                        } else {
+                                            vec![each_val.clone()]
+                                        }
+                                    } else {
+                                        // No $each, treat entire value as single item
+                                        vec![value.clone()]
+                                    };
+
+                                    let position = modifiers.get("$position")
+                                        .and_then(|v| v.as_i64())
+                                        .map(|p| p as usize);
+
+                                    let slice = modifiers.get("$slice")
+                                        .and_then(|v| v.as_i64());
+
+                                    (items, position, slice)
+                                } else {
+                                    // Simple push: single value
+                                    (vec![value.clone()], None, None)
+                                };
+
+                                // Get or create array
+                                let mut array = match document.get(field) {
+                                    Some(Value::Array(arr)) => arr.clone(),
+                                    Some(_) => {
+                                        return Err(MongoLiteError::InvalidQuery(
+                                            format!("$push: field '{}' is not an array", field)
+                                        ));
+                                    }
+                                    None => vec![],
+                                };
+
+                                // Insert items at position or append
+                                if let Some(pos) = position {
+                                    let insert_pos = pos.min(array.len());
+                                    for (i, item) in items.into_iter().enumerate() {
+                                        array.insert(insert_pos + i, item);
+                                    }
+                                } else {
+                                    array.extend(items);
+                                }
+
+                                // Apply $slice if specified
+                                if let Some(slice_val) = slice {
+                                    if slice_val < 0 {
+                                        // Keep last N elements
+                                        let keep = (-slice_val) as usize;
+                                        let len = array.len();
+                                        if len > keep {
+                                            array = array.into_iter().skip(len - keep).collect();
+                                        }
+                                    } else {
+                                        // Keep first N elements
+                                        array.truncate(slice_val as usize);
+                                    }
+                                }
+
+                                document.set(field.clone(), Value::Array(array));
+                                was_modified = true;
+                            }
+                        }
+                    }
+                    "$pull" => {
+                        if let Value::Object(ref field_values) = fields {
+                            for (field, condition) in field_values {
+                                if let Some(Value::Array(ref arr)) = document.get(field) {
+                                    // Filter out matching elements
+                                    let filtered: Vec<Value> = arr.iter()
+                                        .filter(|item| !self.value_matches_condition(item, condition))
+                                        .cloned()
+                                        .collect();
+
+                                    if filtered.len() != arr.len() {
+                                        document.set(field.clone(), Value::Array(filtered));
+                                        was_modified = true;
+                                    }
+                                } else if document.get(field).is_some() {
+                                    return Err(MongoLiteError::InvalidQuery(
+                                        format!("$pull: field '{}' is not an array", field)
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    "$addToSet" => {
+                        if let Value::Object(ref field_values) = fields {
+                            for (field, value) in field_values {
+                                // Handle $each modifier
+                                let items = if let Value::Object(ref modifiers) = value {
+                                    if let Some(each_val) = modifiers.get("$each") {
+                                        if let Value::Array(ref arr) = each_val {
+                                            arr.clone()
+                                        } else {
+                                            vec![each_val.clone()]
+                                        }
+                                    } else {
+                                        vec![value.clone()]
+                                    }
+                                } else {
+                                    vec![value.clone()]
+                                };
+
+                                // Get or create array
+                                let mut array = match document.get(field) {
+                                    Some(Value::Array(arr)) => arr.clone(),
+                                    Some(_) => {
+                                        return Err(MongoLiteError::InvalidQuery(
+                                            format!("$addToSet: field '{}' is not an array", field)
+                                        ));
+                                    }
+                                    None => vec![],
+                                };
+
+                                // Add items if not already present
+                                for item in items {
+                                    if !array.contains(&item) {
+                                        array.push(item);
+                                        was_modified = true;
+                                    }
+                                }
+
+                                document.set(field.clone(), Value::Array(array));
+                            }
+                        }
+                    }
+                    "$pop" => {
+                        if let Value::Object(ref field_values) = fields {
+                            for (field, direction) in field_values {
+                                if let Some(Value::Array(ref arr)) = document.get(field) {
+                                    if arr.is_empty() {
+                                        continue; // No-op on empty array
+                                    }
+
+                                    let mut new_array = arr.clone();
+
+                                    // -1 = remove first, 1 = remove last
+                                    match direction.as_i64() {
+                                        Some(-1) => {
+                                            new_array.remove(0);
+                                            was_modified = true;
+                                        }
+                                        Some(1) => {
+                                            new_array.pop();
+                                            was_modified = true;
+                                        }
+                                        _ => {
+                                            return Err(MongoLiteError::InvalidQuery(
+                                                format!("$pop: value must be -1 or 1, got {:?}", direction)
+                                            ));
+                                        }
+                                    }
+
+                                    document.set(field.clone(), Value::Array(new_array));
+                                } else if document.get(field).is_some() {
+                                    return Err(MongoLiteError::InvalidQuery(
+                                        format!("$pop: field '{}' is not an array", field)
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     _ => {
                         return Err(MongoLiteError::InvalidQuery(format!("Unsupported update operator: {}", op)));
                     }
@@ -921,6 +1164,94 @@ impl CollectionCore {
         }
 
         Ok(was_modified)
+    }
+
+    /// Helper function for $pull: check if a value matches a condition
+    ///
+    /// Supports:
+    /// - Direct equality: `{"tags": "obsolete"}` removes "obsolete"
+    /// - Query operators: `{"score": {"$lt": 5}}` removes items < 5
+    fn value_matches_condition(&self, value: &Value, condition: &Value) -> bool {
+        // If condition is an object with operators, evaluate them
+        if let Value::Object(ref cond_obj) = condition {
+            // Check if it contains query operators
+            let has_operators = cond_obj.keys().any(|k| k.starts_with('$'));
+
+            if has_operators {
+                // Evaluate query operators
+                for (op, op_value) in cond_obj {
+                    match op.as_str() {
+                        "$eq" => {
+                            if value != op_value {
+                                return false;
+                            }
+                        }
+                        "$ne" => {
+                            if value == op_value {
+                                return false;
+                            }
+                        }
+                        "$gt" => {
+                            use std::cmp::Ordering;
+                            if !Self::compare_values(value, op_value).map(|cmp| cmp == Ordering::Greater).unwrap_or(false) {
+                                return false;
+                            }
+                        }
+                        "$gte" => {
+                            use std::cmp::Ordering;
+                            if !Self::compare_values(value, op_value).map(|cmp| matches!(cmp, Ordering::Greater | Ordering::Equal)).unwrap_or(false) {
+                                return false;
+                            }
+                        }
+                        "$lt" => {
+                            use std::cmp::Ordering;
+                            if !Self::compare_values(value, op_value).map(|cmp| cmp == Ordering::Less).unwrap_or(false) {
+                                return false;
+                            }
+                        }
+                        "$lte" => {
+                            use std::cmp::Ordering;
+                            if !Self::compare_values(value, op_value).map(|cmp| matches!(cmp, Ordering::Less | Ordering::Equal)).unwrap_or(false) {
+                                return false;
+                            }
+                        }
+                        "$in" => {
+                            if let Value::Array(ref arr) = op_value {
+                                if !arr.contains(value) {
+                                    return false;
+                                }
+                            }
+                        }
+                        "$nin" => {
+                            if let Value::Array(ref arr) = op_value {
+                                if arr.contains(value) {
+                                    return false;
+                                }
+                            }
+                        }
+                        _ => {} // Unknown operator, ignore
+                    }
+                }
+                return true; // All operators matched
+            }
+        }
+
+        // Direct equality comparison
+        value == condition
+    }
+
+    /// Helper to compare two JSON values for ordering
+    fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+        match (a, b) {
+            (Value::Number(n1), Value::Number(n2)) => {
+                let f1 = n1.as_f64()?;
+                let f2 = n2.as_f64()?;
+                f1.partial_cmp(&f2)
+            }
+            (Value::String(s1), Value::String(s2)) => Some(s1.cmp(s2)),
+            (Value::Bool(b1), Value::Bool(b2)) => Some(b1.cmp(b2)),
+            _ => None,
+        }
     }
 
     // ========== QUERY OPTIMIZATION OPERATIONS ==========
@@ -1288,18 +1619,30 @@ impl CollectionCore {
         let meta = storage.get_collection_meta(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
+        eprintln!("🔍 DEBUG: read_document_by_id({:?}) - catalog has {} entries",
+                 doc_id, meta.document_catalog.len());
+        use std::io::Write;
+        let _ = std::io::stderr().flush();
+
         // O(1) lookup in document_catalog (direct DocumentId lookup - no serialization!)
         if let Some(&offset) = meta.document_catalog.get(doc_id) {
+            eprintln!("🔍 DEBUG: Found doc_id {:?} at offset {}", doc_id, offset);
+            let _ = std::io::stderr().flush();
             let doc_bytes = storage.read_data(offset)?;
             let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
             // Check if document is a tombstone (deleted)
             if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                eprintln!("🔍 DEBUG: Document is tombstone");
+                let _ = std::io::stderr().flush();
                 return Ok(None);
             }
 
             Ok(Some(doc))
         } else {
+            eprintln!("🔍 DEBUG: doc_id {:?} NOT in catalog! Catalog keys: {:?}",
+                     doc_id, meta.document_catalog.keys().collect::<Vec<_>>());
+            let _ = std::io::stderr().flush();
             Ok(None)
         }
     }
