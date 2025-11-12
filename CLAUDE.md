@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**MongoLite** is a lightweight embedded NoSQL document database written in Rust with Python bindings via PyO3. It provides a MongoDB-like API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
+**IronBase** is a lightweight embedded NoSQL document database written in Rust with Python bindings via PyO3. It provides a MongoDB-like API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
 
 **Technology Stack:**
 - **Backend**: Rust (core library, storage engine, query processing)
@@ -27,7 +27,7 @@ maturin develop
 maturin build --release
 
 # Install from wheel
-pip install target/wheels/mongolite-*.whl
+pip install target/wheels/ironbase-*.whl
 ```
 
 ### Testing
@@ -76,7 +76,7 @@ Storage Engine (memory-mapped I/O, file management)
 
 ### Module Responsibilities
 
-**lib.rs** - Main entry point, PyO3 module definition, `MongoLite` database class exposed to Python
+**lib.rs** - Main entry point, PyO3 module definition, `IronBase` database class exposed to Python
 
 **storage.rs** - Core storage engine:
 - File format: Header (128 bytes) → Collection metadata → Document data → Indexes
@@ -105,7 +105,7 @@ Storage Engine (memory-mapped I/O, file management)
 - Future: automatic `_id` index, `create_index()`, unique indexes
 
 **error.rs** - Error types using `thiserror`:
-- `MongoLiteError` variants: IoError, Corruption, CollectionNotFound, CollectionExists, Serialization, etc.
+- `IronBaseError` variants: IoError, Corruption, CollectionNotFound, CollectionExists, Serialization, etc.
 
 ### Storage File Format (.mlite)
 
@@ -179,7 +179,7 @@ The codebase uses:
 ### Error Handling
 
 Always propagate errors properly:
-- Rust: Use `Result<T>` with `MongoLiteError`
+- Rust: Use `Result<T>` with `IronBaseError`
 - Python bindings: Map to appropriate `PyErr` types (`PyIOError`, `PyRuntimeError`, `PyValueError`)
 
 ### Memory-Mapped I/O

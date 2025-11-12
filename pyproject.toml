@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "ironbase"
 version = "0.2.0"
-description = "Lightweight embedded document database with MongoDB-compatible API - Rust-powered"
+description = "IronBase - Lightweight embedded document database with MongoDB-compatible API, powered by Rust"
 authors = [
     {name = "Your Name", email = "your.email@example.com"}
 ]
@@ -28,9 +28,9 @@ classifiers = [
 keywords = ["database", "embedded", "document", "mongodb", "nosql", "rust", "ironbase"]
 
 [project.urls]
-Homepage = "https://github.com/petitan/MongoLite"
-Repository = "https://github.com/petitan/MongoLite"
-Documentation = "https://github.com/petitan/MongoLite#readme"
+Homepage = "https://github.com/petitan/IronBase"
+Repository = "https://github.com/petitan/IronBase"
+Documentation = "https://github.com/petitan/IronBase#readme"
 
 [tool.maturin]
 features = ["pyo3/extension-module"]
