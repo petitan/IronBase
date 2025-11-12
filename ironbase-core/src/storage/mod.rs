@@ -2,6 +2,8 @@
 // Storage engine module
 
 pub mod traits;  // NEW: Storage trait definitions
+pub mod file_storage;  // NEW: FileStorage wrapper
+pub mod memory_storage;  // NEW: MemoryStorage for testing
 mod compaction;
 pub mod metadata;  // Make metadata public for CollectionMeta
 mod io;
@@ -20,6 +22,10 @@ pub use compaction::{CompactionStats, CompactionConfig};
 
 // Re-export traits module
 pub use traits::Storage;
+
+// Re-export storage implementations
+pub use file_storage::FileStorage;
+pub use memory_storage::MemoryStorage;
 
 /// Recovered index change from WAL (for higher-level replay)
 #[derive(Debug, Clone)]

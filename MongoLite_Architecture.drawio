@@ -1,0 +1,240 @@
+<mxfile host="app.diagrams.net" modified="2025-11-12T00:00:00.000Z" agent="Claude Code" version="24.0.0" etag="MongoLite-v2" type="device">
+  <diagram name="MongoLite Architecture" id="architecture">
+    <mxGraphModel dx="1422" dy="794" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="MongoLite Architecture (Version 2 - Dynamic Metadata)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=24;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="400" y="20" width="800" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- ========== LAYER 1: Python API (Blue) ========== -->
+        <mxCell id="python_layer" value="Python API Layer (PyO3 Bindings)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;fontSize=14;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="100" y="100" width="1400" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="python_ironbase" value="IronBase&#xa;&#xa;• __init__(path)&#xa;• collection(name)&#xa;• list_collections()&#xa;• drop_collection()&#xa;• close()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="140" y="140" width="200" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="python_collection" value="Collection&#xa;&#xa;• insert_one(doc)&#xa;• insert_many(docs)&#xa;• find(query)&#xa;• find_one(query)&#xa;• update_one/many()&#xa;• delete_one/many()&#xa;• count_documents()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="380" y="140" width="220" height="120" as="geometry" />
+        </mxCell>
+
+        <mxCell id="python_utils" value="Python Utils&#xa;&#xa;• python_to_json()&#xa;• json_to_python()&#xa;• Type conversions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b1ddf0;strokeColor=#10739e;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="640" y="140" width="180" height="120" as="geometry" />
+        </mxCell>
+
+        <!-- ========== LAYER 2: Rust Core (Green) ========== -->
+        <mxCell id="rust_layer" value="Rust Core Library" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontSize=14;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="100" y="320" width="1400" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rust_lib" value="lib.rs&#xa;&#xa;• MongoLite struct&#xa;• #[pyclass]&#xa;• PyO3 module def&#xa;• Collection wrapper" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b9e0a5;strokeColor=#5a8f3d;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="140" y="360" width="180" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rust_collection" value="collection.rs&#xa;&#xa;• insert_one()&#xa;• insert_many()&#xa;• find() / find_one()&#xa;• update_one/many()&#xa;• delete_one/many()&#xa;• count_documents()&#xa;• Arc&lt;RwLock&lt;Storage&gt;&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b9e0a5;strokeColor=#5a8f3d;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="360" y="360" width="200" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rust_document" value="document.rs&#xa;&#xa;• DocumentId enum&#xa;  - Int(i64)&#xa;  - String(String)&#xa;  - ObjectId(12 bytes)&#xa;• ID generation&#xa;• Serde traits" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b9e0a5;strokeColor=#5a8f3d;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="600" y="360" width="200" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rust_query" value="query.rs&#xa;&#xa;• Query operators&#xa;  - $eq, $ne, $gt, $lt&#xa;  - $in, $nin, $and, $or&#xa;  - $exists, $regex&#xa;• matches_filter()&#xa;• Query optimization" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b9e0a5;strokeColor=#5a8f3d;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="840" y="360" width="200" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="rust_error" value="error.rs&#xa;&#xa;• MongoLiteError&#xa;  - IoError&#xa;  - Corruption&#xa;  - NotFound&#xa;  - Serialization&#xa;• Result&lt;T&gt; aliases" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#b9e0a5;strokeColor=#5a8f3d;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1080" y="360" width="200" height="180" as="geometry" />
+        </mxCell>
+
+        <!-- ========== LAYER 3: Storage Engine (Yellow) ========== -->
+        <mxCell id="storage_layer" value="Storage Engine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontSize=14;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="100" y="600" width="1400" height="300" as="geometry" />
+        </mxCell>
+
+        <mxCell id="storage_mod" value="storage/mod.rs&#xa;&#xa;• StorageEngine struct&#xa;• Header (version 2)&#xa;  - metadata_offset&#xa;  - metadata_size&#xa;• CollectionMeta&#xa;  - document_catalog&#xa;  - document_count&#xa;• create_collection()&#xa;• open() / new()&#xa;• Memory-mapped I/O" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#b89400;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="140" y="640" width="240" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="storage_metadata" value="storage/metadata.rs&#xa;&#xa;• flush_metadata()&#xa;  - Lazy flush strategy&#xa;  - Catalog scan for offset&#xa;  - Write at file END&#xa;• load_metadata()&#xa;  - Dynamic (v2)&#xa;  - Legacy (v1)&#xa;• write_metadata_body()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#b89400;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="420" y="640" width="240" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="storage_io" value="storage/io.rs&#xa;&#xa;• write_document()&#xa;  - Append to file end&#xa;  - Update catalog&#xa;  - [len][JSON]&#xa;• read_data()&#xa;• read_document()&#xa;• mmap optimization" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#b89400;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="700" y="640" width="240" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="storage_compaction" value="storage/compaction.rs&#xa;&#xa;• compact()&#xa;  - Chunked processing&#xa;  - Remove tombstones&#xa;  - Version 2 output&#xa;• CompactionConfig&#xa;  - chunk_size (1000)&#xa;• CompactionStats&#xa;  - peak_memory_mb" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#b89400;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="980" y="640" width="240" height="240" as="geometry" />
+        </mxCell>
+
+        <mxCell id="storage_catalog" value="storage/catalog_serde.rs&#xa;&#xa;• Custom serialization&#xa;• DocumentId preserving&#xa;• [type_tag, value, offset]&#xa;• Index persistence fix" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#b89400;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="640" width="220" height="240" as="geometry" />
+        </mxCell>
+
+        <!-- ========== LAYER 4: File Format (Orange) ========== -->
+        <mxCell id="file_layer" value="File Format (.mlite)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;fontSize=14;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="100" y="940" width="700" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="file_v2" value="Version 2 (Dynamic Metadata)&#xa;&#xa;┌─────────────────────────┐&#xa;│ Header (256 bytes)      │ ← metadata_offset, metadata_size&#xa;├─────────────────────────┤&#xa;│ Documents               │ ← [len][JSON]...&#xa;│ [len][JSON]...          │&#xa;│ ...                     │&#xa;├─────────────────────────┤&#xa;│ Metadata (at END)       │ ← Dynamic position&#xa;│ [count][len][JSON]...   │&#xa;└─────────────────────────┘&#xa;&#xa;Benefits: No 10MB bloat, unlimited metadata" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd966;strokeColor=#cc6600;fontSize=10;align=left;spacingLeft=10;verticalAlign=top;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="440" y="980" width="340" height="160" as="geometry" />
+        </mxCell>
+
+        <mxCell id="file_v1" value="Version 1 (Legacy)&#xa;&#xa;┌─────────────────────────┐&#xa;│ Header (256 bytes)      │&#xa;├─────────────────────────┤&#xa;│ Metadata (10MB fixed)   │&#xa;├─────────────────────────┤&#xa;│ Documents               │&#xa;│ ...                     │&#xa;└─────────────────────────┘&#xa;&#xa;Problem: 10MB bloat" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffd966;strokeColor=#cc6600;fontSize=10;align=left;spacingLeft=10;verticalAlign=top;fontFamily=Courier New;" vertex="1" parent="1">
+          <mxGeometry x="140" y="980" width="260" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- ========== LAYER 5: WAL (Red) ========== -->
+        <mxCell id="wal_layer" value="Write-Ahead Log (WAL)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=14;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="840" y="940" width="660" height="220" as="geometry" />
+        </mxCell>
+
+        <mxCell id="wal_desc" value="WAL Mechanism&#xa;&#xa;• Append-only log (.wal file)&#xa;• Records all operations BEFORE applying&#xa;• Durability guarantee&#xa;• Crash recovery:&#xa;  1. Replay WAL entries&#xa;  2. Rebuild catalog from documents&#xa;  3. Flush metadata&#xa;&#xa;Transaction Safety:&#xa;• Lazy metadata flush is safe&#xa;• WAL ensures no data loss&#xa;• Recovery rebuilds in-memory state" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5a3a3;strokeColor=#a03030;fontSize=11;align=left;spacingLeft=10;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="880" y="980" width="600" height="160" as="geometry" />
+        </mxCell>
+
+        <!-- ========== Arrows (Data Flow) ========== -->
+
+        <!-- Python -> Rust -->
+        <mxCell id="arrow1" value="" style="endArrow=classic;html=1;strokeWidth=3;strokeColor=#666666;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="python_collection" target="rust_collection">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="490" y="280" as="sourcePoint" />
+            <mxPoint x="460" y="360" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow1_label" value="PyO3 Bridge" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="400" y="285" width="100" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Rust Collection -> Storage -->
+        <mxCell id="arrow2" value="" style="endArrow=classic;html=1;strokeWidth=3;strokeColor=#666666;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="rust_collection" target="storage_mod">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="460" y="560" as="sourcePoint" />
+            <mxPoint x="200" y="640" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow2_label" value="CRUD Operations" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="260" y="570" width="120" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Storage Metadata -> IO -->
+        <mxCell id="arrow3" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#999999;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="storage_metadata" target="storage_io">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="660" y="760" as="sourcePoint" />
+            <mxPoint x="700" y="760" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Storage IO -> File -->
+        <mxCell id="arrow4" value="" style="endArrow=classic;html=1;strokeWidth=3;strokeColor=#666666;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="storage_io" target="file_v2">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="820" y="900" as="sourcePoint" />
+            <mxPoint x="610" y="980" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow4_label" value="File I/O&#xa;(mmap &lt;1GB)" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=12;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="740" y="910" width="100" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Compaction -> Metadata -->
+        <mxCell id="arrow5" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#999999;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="storage_compaction" target="storage_metadata">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="980" y="760" as="sourcePoint" />
+            <mxPoint x="660" y="760" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow5_label" value="flush before compact" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="710" y="735" width="120" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- WAL -> Storage -->
+        <mxCell id="arrow6" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#cc0000;exitX=0;exitY=0.25;exitDx=0;exitDy=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="wal_desc" target="storage_io">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="880" y="1020" as="sourcePoint" />
+            <mxPoint x="940" y="820" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow6_label" value="Recovery" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=11;fontStyle=2;fontColor=#cc0000;" vertex="1" parent="1">
+          <mxGeometry x="780" y="880" width="80" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- Document -> Collection -->
+        <mxCell id="arrow7" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#999999;exitX=0;exitY=0.25;exitDx=0;exitDy=0;entryX=1;entryY=0.25;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="rust_document" target="rust_collection">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="600" y="405" as="sourcePoint" />
+            <mxPoint x="560" y="405" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Query -> Collection -->
+        <mxCell id="arrow8" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#999999;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="rust_query" target="rust_collection">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="840" y="450" as="sourcePoint" />
+            <mxPoint x="560" y="450" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Catalog -> Metadata -->
+        <mxCell id="arrow9" value="" style="endArrow=classic;html=1;strokeWidth=2;strokeColor=#999999;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;dashed=1;" edge="1" parent="1" source="storage_catalog" target="storage_metadata">
+          <mxGeometry width="50" height="50" relative="1" as="geometry">
+            <mxPoint x="1260" y="760" as="sourcePoint" />
+            <mxPoint x="660" y="820" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="arrow9_label" value="catalog serialization" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="890" y="795" width="120" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ========== Legend ========== -->
+        <mxCell id="legend" value="Legend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;fontSize=12;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1550" y="100" width="200" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend_python" value="Python Layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="135" width="160" height="25" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend_rust" value="Rust Core" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="165" width="160" height="25" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend_storage" value="Storage Engine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="195" width="160" height="25" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend_file" value="File Format" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="225" width="160" height="25" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend_wal" value="WAL (Durability)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1570" y="255" width="160" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- ========== Performance Stats ========== -->
+        <mxCell id="stats" value="Performance Stats (650K docs)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;verticalAlign=top;fontSize=12;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1550" y="320" width="200" height="180" as="geometry" />
+        </mxCell>
+
+        <mxCell id="stats_content" value="✅ Insert: 11,505 docs/sec&#xa;✅ Count: 22.6s&#xa;✅ File: 564 MB&#xa;✅ Metadata: ~15 MB&#xa;&#xa;File Size Reduction:&#xa;• 100 docs: 99.91% smaller&#xa;  (10MB → 8.82KB)&#xa;&#xa;O(1) Insert Performance&#xa;(lazy metadata flush)" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="355" width="180" height="135" as="geometry" />
+        </mxCell>
+
+        <!-- ========== Key Features ========== -->
+        <mxCell id="features" value="Key Features" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d0cee2;strokeColor=#56517e;verticalAlign=top;fontSize=12;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1550" y="520" width="200" height="200" as="geometry" />
+        </mxCell>
+
+        <mxCell id="features_content" value="✓ Dynamic Metadata (v2)&#xa;  - No 10MB bloat&#xa;  - Unlimited metadata&#xa;&#xa;✓ Lazy Metadata Flush&#xa;  - O(1) inserts&#xa;  - Flush on: close, compact&#xa;&#xa;✓ Chunked Compaction&#xa;  - 1000 docs/chunk&#xa;  - Constant memory&#xa;&#xa;✓ WAL Durability&#xa;  - No data loss&#xa;  - Crash recovery&#xa;&#xa;✓ Backward Compatible&#xa;  - Supports v1 &amp; v2" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=10;spacingLeft=10;" vertex="1" parent="1">
+          <mxGeometry x="1560" y="555" width="180" height="155" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

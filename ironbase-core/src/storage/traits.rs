@@ -77,9 +77,13 @@ pub trait Storage: Send + Sync {
     ///
     /// # Performance
     ///
-    /// - FileStorage: Memory-mapped sequential scan
+    /// - FileStorage: Memory-mapped sequential scan (requires mut for file I/O)
     /// - MemoryStorage: Iterator over Vec
-    fn scan_documents<'a>(&'a self, collection: &str) -> Result<Vec<Document>>;
+    ///
+    /// # Note
+    ///
+    /// Takes `&mut self` because file-based storage requires mutable access for I/O operations
+    fn scan_documents(&mut self, collection: &str) -> Result<Vec<Document>>;
 
     // ========================================================================
     // COLLECTION MANAGEMENT
