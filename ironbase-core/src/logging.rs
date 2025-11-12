@@ -83,7 +83,8 @@ pub fn should_log(level: LogLevel) -> bool {
 }
 
 /// Maximum length for log messages (will be truncated with "...")
-const MAX_LOG_LENGTH: usize = 120;
+/// 1 KB limit to prevent massive log spam
+const MAX_LOG_LENGTH: usize = 1024;
 
 /// Internal logging function
 #[doc(hidden)]
