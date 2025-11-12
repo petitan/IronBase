@@ -1,8 +1,9 @@
 // storage/mod.rs
 // Storage engine module
 
+pub mod traits;  // NEW: Storage trait definitions
 mod compaction;
-mod metadata;
+pub mod metadata;  // Make metadata public for CollectionMeta
 mod io;
 
 use std::fs::{File, OpenOptions};
@@ -14,8 +15,11 @@ use crate::error::{Result, MongoLiteError};
 use crate::wal::WriteAheadLog;
 use crate::transaction::Transaction;
 
-// Re-export compaction types
+// Re-export public types
 pub use compaction::{CompactionStats, CompactionConfig};
+
+// Re-export traits module
+pub use traits::Storage;
 
 /// Recovered index change from WAL (for higher-level replay)
 #[derive(Debug, Clone)]
