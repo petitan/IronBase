@@ -7,12 +7,12 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use ironbase_core::{DatabaseCore, CollectionCore, DocumentId, InsertManyResult};
+use ironbase_core::{DatabaseCore, CollectionCore, DocumentId, StorageEngine};
 
 /// IronBase Database - Python wrapper
 #[pyclass]
 pub struct IronBase {
-    db: DatabaseCore,
+    db: DatabaseCore<StorageEngine>,
 }
 
 #[pymethods]
@@ -244,7 +244,7 @@ impl IronBase {
 /// Collection - Python wrapper for CollectionCore
 #[pyclass]
 pub struct Collection {
-    core: CollectionCore,
+    core: CollectionCore<StorageEngine>,
 }
 
 #[pymethods]

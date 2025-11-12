@@ -22,7 +22,7 @@ use crate::document::{Document, DocumentId};
 pub use compaction::{CompactionStats, CompactionConfig};
 
 // Re-export traits module
-pub use traits::Storage;
+pub use traits::{Storage, RawStorage, CompactableStorage, IndexableStorage};
 
 // Re-export storage implementations
 pub use file_storage::FileStorage;
@@ -617,6 +617,32 @@ impl Storage for StorageEngine {
     }
 }
 
+// ============================================================================
+// RAWSTORAGE IMPLEMENTATION FOR STORAGEENGINE
+// ============================================================================
+
+impl RawStorage for StorageEngine {
+    fn write_document_raw(&mut self, collection: &str, doc_id: &DocumentId, data: &[u8]) -> Result<u64> {
+        self.write_document(collection, doc_id, data)
+    }
+
+    fn read_document_at(&mut self, collection: &str, offset: u64) -> Result<Vec<u8>> {
+        self.read_document_at(collection, offset)
+    }
+
+    fn write_data(&mut self, data: &[u8]) -> Result<u64> {
+        self.write_data(data)
+    }
+
+    fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
+        self.read_data(offset)
+    }
+
+    fn file_len(&self) -> Result<u64> {
+        self.file_len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,7 +661,7 @@ mod tests {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 1);
+        assert_eq!(storage.header.version, 2);  // Version 2: dynamic metadata
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -953,7 +979,7 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 1);
+        assert_eq!(header.version, 2);  // Version 2: dynamic metadata
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);

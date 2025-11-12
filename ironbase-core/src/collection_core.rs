@@ -28,7 +28,7 @@ use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::storage::StorageEngine;
+use crate::storage::{Storage, RawStorage};
 use crate::document::{Document, DocumentId};
 use crate::error::{Result, MongoLiteError};
 use crate::query::Query;
@@ -45,20 +45,26 @@ pub struct InsertManyResult {
 }
 
 /// Pure Rust Collection - language-independent core logic
-pub struct CollectionCore {
+///
+/// Generic over Storage backend:
+/// - `CollectionCore<StorageEngine>` - Production file-based storage
+/// - `CollectionCore<MemoryStorage>` - Fast in-memory storage for testing
+///
+/// Requires `RawStorage` for low-level document operations (write_document_raw, read_document_at)
+pub struct CollectionCore<S: Storage + RawStorage> {
     pub name: String,
-    pub storage: Arc<RwLock<StorageEngine>>,
+    pub storage: Arc<RwLock<S>>,
     /// Index manager for B+ tree indexes
     pub indexes: Arc<RwLock<IndexManager>>,
     /// Query result cache with LRU eviction (capacity: 1000 queries)
     pub query_cache: Arc<QueryCache>,
 }
 
-impl CollectionCore {
+impl<S: Storage + RawStorage> CollectionCore<S> {
     // ========== CONSTRUCTOR ==========
 
     /// Create new collection (or get existing)
-    pub fn new(name: String, storage: Arc<RwLock<StorageEngine>>) -> Result<Self> {
+    pub fn new(name: String, storage: Arc<RwLock<S>>) -> Result<Self> {
         // Collection létrehozása, ha nem létezik
         {
             let mut storage_guard = storage.write();
@@ -231,7 +237,7 @@ impl CollectionCore {
 
         // Szerializálás és írás - USE NEW write_document with catalog tracking
         let doc_json = doc.to_json()?;
-        storage.write_document(&self.name, &doc_id, doc_json.as_bytes())?;
+        storage.write_document_raw(&self.name, &doc_id, doc_json.as_bytes())?;
 
         // NOTE: We don't flush metadata here for performance!
         // Catalog changes are kept in memory and flushed on:
@@ -321,7 +327,7 @@ impl CollectionCore {
         // Write all documents to storage
         for (doc_id, doc) in prepared_docs {
             let doc_json = doc.to_json()?;
-            storage.write_document(&self.name, &doc_id, doc_json.as_bytes())?;
+            storage.write_document_raw(&self.name, &doc_id, doc_json.as_bytes())?;
         }
 
         // NOTE: We don't flush metadata here for performance!
@@ -553,7 +559,7 @@ impl CollectionCore {
 
                     // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
-                    storage.write_document(&self.name, &document.id, updated_json.as_bytes())?;
+                    storage.write_document_raw(&self.name, &document.id, updated_json.as_bytes())?;
 
                     modified = 1;
                 }
@@ -644,7 +650,7 @@ impl CollectionCore {
 
                     // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
-                    storage.write_document(&self.name, &document.id, updated_json.as_bytes())?;
+                    storage.write_document_raw(&self.name, &document.id, updated_json.as_bytes())?;
 
                     modified += 1;
                 }
@@ -713,7 +719,7 @@ impl CollectionCore {
                 let tombstone_json = serde_json::to_string(&tombstone)?;
 
                 // Write tombstone WITH catalog tracking (updates catalog entry)
-                storage.write_document(&self.name, &document.id, tombstone_json.as_bytes())?;
+                storage.write_document_raw(&self.name, &document.id, tombstone_json.as_bytes())?;
 
                 deleted = 1;
             }
@@ -789,7 +795,7 @@ impl CollectionCore {
                 let tombstone_json = serde_json::to_string(&tombstone)?;
 
                 // Write tombstone WITH catalog tracking (updates catalog entry)
-                storage.write_document(&self.name, &document.id, tombstone_json.as_bytes())?;
+                storage.write_document_raw(&self.name, &document.id, tombstone_json.as_bytes())?;
 
                 deleted += 1;
             }

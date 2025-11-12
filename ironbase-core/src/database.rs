@@ -7,13 +7,13 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 
-use crate::storage::StorageEngine;
+use crate::storage::{StorageEngine, Storage, RawStorage};
 use crate::collection_core::CollectionCore;
 use crate::error::Result;
 use crate::transaction::{Transaction, TransactionId};
 use crate::document::DocumentId;
 use serde_json::Value;
-use crate::log_warn;
+
 
 /// Convert transaction::IndexKey to index::IndexKey
 fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
@@ -26,16 +26,30 @@ fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::Ind
     }
 }
 
-/// Pure Rust MongoLite Database - language-independent
-pub struct DatabaseCore {
-    storage: Arc<RwLock<StorageEngine>>,
+/// Pure Rust IronBase Database - language-independent
+///
+/// Generic over Storage backend:
+/// - `DatabaseCore<StorageEngine>` - Production file-based storage (default)
+/// - `DatabaseCore<MemoryStorage>` - Fast in-memory storage for testing
+///
+/// # Future TODO
+/// - FileStorage needs full refactor for better trait compliance
+/// - WAL recovery currently StorageEngine-specific
+pub struct DatabaseCore<S: Storage + RawStorage> {
+    storage: Arc<RwLock<S>>,
     db_path: String,
     next_tx_id: AtomicU64,
     active_transactions: Arc<RwLock<std::collections::HashMap<TransactionId, Transaction>>>,
 }
 
-impl DatabaseCore {
-    /// Open or create database
+// ============================================================================
+// STORAGEENGINE-SPECIFIC IMPLEMENTATION (WAL recovery)
+// ============================================================================
+
+impl DatabaseCore<StorageEngine> {
+    /// Open or create database with StorageEngine (production)
+    ///
+    /// This method is StorageEngine-specific because it handles WAL recovery.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let mut storage = StorageEngine::open(&path_str)?;
@@ -53,7 +67,6 @@ impl DatabaseCore {
 
         // Apply recovered index changes to collections
         // Group index changes by collection name
-        use std::collections::HashMap;
         let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> = HashMap::new();
 
         for change in recovered_index_changes {
@@ -91,8 +104,114 @@ impl DatabaseCore {
         Ok(db)
     }
 
+    /// Get database statistics as JSON (StorageEngine-specific)
+    pub fn stats(&self) -> serde_json::Value {
+        let storage = self.storage.read();
+        storage.stats()
+    }
+
+    /// Storage compaction - removes tombstones and old document versions (StorageEngine-specific)
+    pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
+        let mut storage = self.storage.write();
+        storage.compact()
+    }
+
+    /// Commit a transaction (applies all buffered operations atomically) - StorageEngine-specific
+    pub fn commit_transaction(&self, tx_id: TransactionId) -> Result<()> {
+        // Remove transaction from active list
+        let mut transaction = {
+            let mut active = self.active_transactions.write();
+            active.remove(&tx_id)
+                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
+                    format!("Transaction {} not found", tx_id)
+                ))?
+        };
+
+        // Commit through storage engine
+        let mut storage = self.storage.write();
+        storage.commit_transaction(&mut transaction)?;
+
+        Ok(())
+    }
+
+    /// Rollback a transaction (discard all buffered operations) - StorageEngine-specific
+    pub fn rollback_transaction(&self, tx_id: TransactionId) -> Result<()> {
+        // Remove transaction from active list
+        let mut transaction = {
+            let mut active = self.active_transactions.write();
+            active.remove(&tx_id)
+                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
+                    format!("Transaction {} not found", tx_id)
+                ))?
+        };
+
+        // Rollback through storage engine
+        let mut storage = self.storage.write();
+        storage.rollback_transaction(&mut transaction)?;
+
+        Ok(())
+    }
+
+    /// Commit transaction with index operations - StorageEngine-specific
+    pub fn commit_transaction_with_indexes(&self, tx_id: TransactionId) -> Result<()> {
+        // Remove transaction from active list
+        let mut transaction = {
+            let mut active = self.active_transactions.write();
+            active.remove(&tx_id)
+                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
+                    format!("Transaction {} not found", tx_id)
+                ))?
+        };
+
+        // Commit through storage engine with index operations
+        let mut storage = self.storage.write();
+        storage.commit_transaction(&mut transaction)?;
+
+        Ok(())
+    }
+
+    // ========== Two-Phase Commit Helper Methods (StorageEngine-specific) ==========
+
+    /// Construct index file path for a collection's index
+    /// Format: {db_path_without_ext}.{index_name}.idx
+    ///
+    /// Example: "/data/myapp.mlite" + "users_age" → "/data/myapp.users_age.idx"
+    #[cfg(test)]
+    fn get_index_file_path(&self, _collection_name: &str, index_name: &str) -> std::path::PathBuf {
+        use std::path::PathBuf;
+
+        let mut path = PathBuf::from(&self.db_path);
+
+        // Remove .mlite extension if present
+        if path.extension().map(|e| e == "mlite").unwrap_or(false) {
+            path.set_extension("");
+        }
+
+        // Append index name and .idx extension
+        let index_file = format!("{}.{}.idx", path.display(), index_name);
+        PathBuf::from(index_file)
+    }
+
+    /// Extract collection name from transaction's first operation
+    #[cfg(test)]
+    fn get_collection_from_transaction(transaction: &Transaction) -> Option<String> {
+        transaction.operations()
+            .first()
+            .map(|op| match op {
+                crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
+                crate::transaction::Operation::Update { collection, .. } => collection.clone(),
+                crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
+            })
+    }
+}
+
+// ============================================================================
+// GENERIC IMPLEMENTATION (all storage backends)
+// ============================================================================
+
+impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Get collection (creates if doesn't exist)
-    pub fn collection(&self, name: &str) -> Result<CollectionCore> {
+    pub fn collection(&self, name: &str) -> Result<CollectionCore<S>> {
         CollectionCore::new(name.to_string(), Arc::clone(&self.storage))
     }
 
@@ -114,18 +233,6 @@ impl DatabaseCore {
         storage.flush()
     }
 
-    /// Get database statistics as JSON
-    pub fn stats(&self) -> serde_json::Value {
-        let storage = self.storage.read();
-        storage.stats()
-    }
-
-    /// Storage compaction - removes tombstones and old document versions
-    pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
-        let mut storage = self.storage.write();
-        storage.compact()
-    }
-
     /// Get database path
     pub fn path(&self) -> &str {
         &self.db_path
@@ -143,198 +250,6 @@ impl DatabaseCore {
         active.insert(tx_id, transaction);
 
         tx_id
-    }
-
-    /// Commit a transaction (applies all buffered operations atomically)
-    pub fn commit_transaction(&self, tx_id: TransactionId) -> Result<()> {
-        // Remove transaction from active list
-        let mut transaction = {
-            let mut active = self.active_transactions.write();
-            active.remove(&tx_id)
-                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                    format!("Transaction {} not found", tx_id)
-                ))?
-        };
-
-        // Commit through storage engine
-        let mut storage = self.storage.write();
-        storage.commit_transaction(&mut transaction)?;
-
-        Ok(())
-    }
-
-    /// Rollback a transaction (discard all buffered operations)
-    pub fn rollback_transaction(&self, tx_id: TransactionId) -> Result<()> {
-        // Remove transaction from active list
-        let mut transaction = {
-            let mut active = self.active_transactions.write();
-            active.remove(&tx_id)
-                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                    format!("Transaction {} not found", tx_id)
-                ))?
-        };
-
-        // Rollback through storage engine
-        let mut storage = self.storage.write();
-        storage.rollback_transaction(&mut transaction)?;
-
-        Ok(())
-    }
-
-    /// Commit transaction with atomic index updates (two-phase commit)
-    ///
-    /// # Two-Phase Commit Protocol
-    /// 1. PREPARE: Apply index changes to in-memory IndexManager
-    /// 2. PREPARE: Create temp index files (.idx.tmp) via prepare_changes()
-    /// 3. COMMIT: Delegate to StorageEngine::commit_transaction() (WAL + data)
-    /// 4. FINALIZE: Atomic rename .idx.tmp → .idx via commit_prepared_changes()
-    ///
-    /// # Crash Recovery
-    /// - If crash before COMMIT: WAL rollback cleans up temp files
-    /// - If crash after COMMIT: WAL recovery replays index changes from WAL
-    ///
-    /// # Arguments
-    /// * `tx_id` - Transaction ID to commit
-    ///
-    /// # Returns
-    /// * `Ok(())` on successful commit
-    /// * `Err(MongoLiteError)` if commit fails (transaction rolled back)
-    pub fn commit_transaction_with_indexes(&self, tx_id: TransactionId) -> Result<()> {
-        use std::collections::HashMap;
-        use std::path::PathBuf;
-
-        // ========== PHASE 0: EXTRACT TRANSACTION ==========
-
-        // 1. Extract transaction from active list
-        let mut transaction = {
-            let mut active = self.active_transactions.write();
-            active.remove(&tx_id)
-                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                    format!("Transaction {} not found", tx_id)
-                ))?
-        };
-
-        // 2. If transaction has no index changes, delegate to simple commit
-        if transaction.index_changes().is_empty() {
-            let mut storage = self.storage.write();
-            return storage.commit_transaction(&mut transaction);
-        }
-
-        // 3. Extract collection name from first operation
-        let collection_name = Self::get_collection_from_transaction(&transaction)
-            .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                format!("Transaction {} has no operations", tx_id)
-            ))?;
-
-        // ========== PHASE 1: PREPARE INDEXES ==========
-
-        // Track all temp files for atomic rename
-        let mut prepared_indexes: Vec<(PathBuf, PathBuf)> = Vec::new();
-
-        // Get collection (creates if doesn't exist)
-        let collection = self.collection(&collection_name)?;
-
-        // Group index changes by index name
-        let mut changes_by_index: HashMap<String, Vec<crate::transaction::IndexChange>> = HashMap::new();
-        for (index_name, changes) in transaction.index_changes() {
-            changes_by_index.insert(index_name.clone(), changes.clone());
-        }
-
-        // Apply changes to in-memory indexes and prepare temp files
-        for (index_name, changes) in changes_by_index {
-            let mut indexes = collection.indexes.write();
-
-            if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                // Apply all changes to in-memory index
-                for change in &changes {
-                    let result = match change.operation {
-                        crate::transaction::IndexOperation::Insert => {
-                            let key = convert_index_key(&change.key);
-                            index.insert(key, change.doc_id.clone())
-                        }
-                        crate::transaction::IndexOperation::Delete => {
-                            let key = convert_index_key(&change.key);
-                            index.delete(&key, &change.doc_id)
-                        }
-                    };
-
-                    // If index modification fails, cleanup temp files and restore transaction
-                    if let Err(e) = result {
-                        // Cleanup all prepared temp files
-                        for (temp_path, _) in &prepared_indexes {
-                            let _ = crate::index::BPlusTree::rollback_prepared_changes(temp_path);
-                        }
-
-                        // Re-insert transaction into active list for potential rollback
-                        let mut active = self.active_transactions.write();
-                        active.insert(tx_id, transaction);
-
-                        return Err(e);
-                    }
-                }
-
-                // Prepare temp file with updated index
-                let base_path = self.get_index_file_path(&collection_name, &index_name);
-                match index.prepare_changes(&base_path) {
-                    Ok(temp_path) => {
-                        prepared_indexes.push((temp_path, base_path));
-                    }
-                    Err(e) => {
-                        // Cleanup all prepared temp files
-                        for (temp_path, _) in &prepared_indexes {
-                            let _ = crate::index::BPlusTree::rollback_prepared_changes(temp_path);
-                        }
-
-                        // Re-insert transaction into active list for potential rollback
-                        let mut active = self.active_transactions.write();
-                        active.insert(tx_id, transaction);
-
-                        return Err(e);
-                    }
-                }
-            }
-
-            // Release indexes write lock before next iteration
-            drop(indexes);
-        }
-
-        // ========== PHASE 2: COMMIT DATA + WAL ==========
-
-        // Delegate to existing StorageEngine commit
-        // This handles:
-        // - Writing WAL entries (Operations + IndexChanges)
-        // - Fsync WAL
-        // - Applying operations to data
-        // - Fsync data
-        // - Marking transaction committed
-        let commit_result = {
-            let mut storage = self.storage.write();
-            storage.commit_transaction(&mut transaction)
-        };
-
-        // If commit fails, cleanup temp files (transaction not committed)
-        if let Err(e) = commit_result {
-            for (temp_path, _) in &prepared_indexes {
-                let _ = crate::index::BPlusTree::rollback_prepared_changes(temp_path);
-            }
-            return Err(e);
-        }
-
-        // ========== PHASE 3: FINALIZE INDEXES ==========
-
-        // Atomic rename all temp files to final paths
-        // NOTE: If finalize fails, transaction is already committed (durable in WAL)
-        // Temp files will be cleaned up on next startup, indexes rebuilt from WAL
-        for (temp_path, final_path) in prepared_indexes {
-            if let Err(e) = crate::index::BPlusTree::commit_prepared_changes(&temp_path, &final_path) {
-                // Log error but DON'T fail transaction (already committed)
-                log_warn!("Index finalize failed for {:?}: {:?}", final_path, e);
-                log_warn!("Index will be rebuilt from WAL on next open()");
-                // Continue with next index
-            }
-        }
-
-        Ok(())
     }
 
     /// Get a reference to an active transaction (for adding operations)
@@ -415,38 +330,6 @@ impl DatabaseCore {
         self.with_transaction(tx_id, |transaction| {
             collection.delete_one_tx(query, transaction)
         })
-    }
-
-    // ========== Two-Phase Commit Helper Methods ==========
-
-    /// Construct index file path for a collection's index
-    /// Format: {db_path_without_ext}.{index_name}.idx
-    ///
-    /// Example: "/data/myapp.mlite" + "users_age" → "/data/myapp.users_age.idx"
-    fn get_index_file_path(&self, _collection_name: &str, index_name: &str) -> std::path::PathBuf {
-        use std::path::PathBuf;
-
-        let mut path = PathBuf::from(&self.db_path);
-
-        // Remove .mlite extension if present
-        if path.extension().map(|e| e == "mlite").unwrap_or(false) {
-            path.set_extension("");
-        }
-
-        // Append index name and .idx extension
-        let index_file = format!("{}.{}.idx", path.display(), index_name);
-        PathBuf::from(index_file)
-    }
-
-    /// Extract collection name from transaction's first operation
-    fn get_collection_from_transaction(transaction: &Transaction) -> Option<String> {
-        transaction.operations()
-            .first()
-            .map(|op| match op {
-                crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
-                crate::transaction::Operation::Update { collection, .. } => collection.clone(),
-                crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
-            })
     }
 }
 

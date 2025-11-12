@@ -141,6 +141,66 @@ pub trait IndexableStorage: Storage {
     fn list_indexes(&self, collection: &str) -> Vec<String>;
 }
 
+/// Low-level storage operations (used by CollectionCore)
+///
+/// This trait provides raw byte-level document operations that give
+/// more control over serialization and catalog management.
+pub trait RawStorage: Storage {
+    /// Write raw document bytes with explicit ID (tracked in catalog)
+    ///
+    /// # Arguments
+    ///
+    /// * `collection` - Collection name
+    /// * `doc_id` - Document ID (for catalog tracking)
+    /// * `data` - Raw document bytes (JSON)
+    ///
+    /// # Returns
+    ///
+    /// File offset where document was written
+    fn write_document_raw(&mut self, collection: &str, doc_id: &DocumentId, data: &[u8]) -> Result<u64>;
+
+    /// Read document at specific offset
+    ///
+    /// # Arguments
+    ///
+    /// * `collection` - Collection name
+    /// * `offset` - File offset
+    ///
+    /// # Returns
+    ///
+    /// Raw document bytes
+    fn read_document_at(&mut self, collection: &str, offset: u64) -> Result<Vec<u8>>;
+
+    /// Write raw data without catalog tracking (for tombstones)
+    ///
+    /// # Arguments
+    ///
+    /// * `data` - Raw bytes to write
+    ///
+    /// # Returns
+    ///
+    /// File offset where data was written
+    fn write_data(&mut self, data: &[u8]) -> Result<u64>;
+
+    /// Read raw data at offset
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - File offset
+    ///
+    /// # Returns
+    ///
+    /// Raw bytes
+    fn read_data(&mut self, offset: u64) -> Result<Vec<u8>>;
+
+    /// Get current file length
+    ///
+    /// # Returns
+    ///
+    /// Total file size in bytes
+    fn file_len(&self) -> Result<u64>;
+}
+
 // ============================================================================
 // HELPER TYPES
 // ============================================================================
