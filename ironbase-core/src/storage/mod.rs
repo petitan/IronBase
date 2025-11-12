@@ -16,6 +16,7 @@ use serde::{Serialize, Deserialize};
 use crate::error::{Result, MongoLiteError};
 use crate::wal::WriteAheadLog;
 use crate::transaction::Transaction;
+use crate::document::{Document, DocumentId};
 
 // Re-export public types
 pub use compaction::{CompactionStats, CompactionConfig};
@@ -517,6 +518,102 @@ impl StorageEngine {
 impl Drop for StorageEngine {
     fn drop(&mut self) {
         let _ = self.flush();
+    }
+}
+
+// ============================================================================
+// STORAGE TRAIT IMPLEMENTATION FOR StorageEngine
+// ============================================================================
+
+impl Storage for StorageEngine {
+    fn write_document(&mut self, collection: &str, doc: &serde_json::Value) -> Result<u64> {
+        // Parse document to extract ID
+        let doc_id: DocumentId = if let Some(id_val) = doc.get("_id") {
+            serde_json::from_value(id_val.clone())?
+        } else {
+            // Generate auto-increment ID
+            let meta = self.get_collection_meta_mut(collection)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+            meta.last_id += 1;
+            DocumentId::Int(meta.last_id as i64)
+        };
+
+        // Serialize document
+        let doc_json = serde_json::to_string(doc)?;
+
+        // Write using existing method
+        self.write_document(collection, &doc_id, doc_json.as_bytes())
+    }
+
+    fn read_document(&self, collection: &str, id: &DocumentId) -> Result<Option<serde_json::Value>> {
+        let meta = match self.get_collection_meta(collection) {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        let offset = match meta.document_catalog.get(id) {
+            Some(&off) => off,
+            None => return Ok(None),
+        };
+
+        // SAFETY: Need mutable access for I/O
+        let storage_mut = unsafe {
+            let const_ptr = self as *const StorageEngine;
+            let mut_ptr = const_ptr as *mut StorageEngine;
+            &mut *mut_ptr
+        };
+
+        let data = storage_mut.read_document_at(collection, offset)?;
+        let value: serde_json::Value = serde_json::from_slice(&data)?;
+        Ok(Some(value))
+    }
+
+    fn scan_documents(&mut self, collection: &str) -> Result<Vec<Document>> {
+        let catalog = match self.get_collection_meta(collection) {
+            Some(m) => m.document_catalog.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        let mut documents = Vec::new();
+
+        for (_doc_id, &offset) in &catalog {
+            let data = self.read_document_at(collection, offset)?;
+            let doc_value: serde_json::Value = serde_json::from_slice(&data)?;
+
+            // Skip tombstones
+            if doc_value.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                continue;
+            }
+
+            let document = Document::from_json(&serde_json::to_string(&doc_value)?)?;
+            documents.push(document);
+        }
+
+        Ok(documents)
+    }
+
+    fn create_collection(&mut self, name: &str) -> Result<()> {
+        self.create_collection(name)
+    }
+
+    fn drop_collection(&mut self, name: &str) -> Result<()> {
+        self.drop_collection(name)
+    }
+
+    fn list_collections(&self) -> Vec<String> {
+        self.list_collections()
+    }
+
+    fn get_collection_meta(&self, name: &str) -> Option<&CollectionMeta> {
+        self.get_collection_meta(name)
+    }
+
+    fn get_collection_meta_mut(&mut self, name: &str) -> Option<&mut CollectionMeta> {
+        self.get_collection_meta_mut(name)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        self.flush()
     }
 }
 
