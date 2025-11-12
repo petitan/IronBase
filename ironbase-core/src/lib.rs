@@ -31,7 +31,7 @@ pub use storage::{StorageEngine, CompactionStats};
 pub use query::Query;
 pub use query_cache::{QueryCache, QueryHash, CacheStats};
 pub use find_options::FindOptions;
-pub use collection_core::CollectionCore;
+pub use collection_core::{CollectionCore, InsertManyResult};
 pub use database::DatabaseCore;
 pub use transaction::{Transaction, TransactionId, TransactionState, Operation};
 pub use wal::{WriteAheadLog, WALEntry, WALEntryType};

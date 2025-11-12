@@ -7,7 +7,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use serde_json::Value;
 use std::collections::HashMap;
 
-use ironbase_core::{DatabaseCore, CollectionCore, DocumentId};
+use ironbase_core::{DatabaseCore, CollectionCore, DocumentId, InsertManyResult};
 
 /// IronBase Database - Python wrapper
 #[pyclass]
@@ -268,28 +268,45 @@ impl Collection {
         })
     }
 
-    /// Insert many documents
+    /// Insert many documents - optimized batch insert
     fn insert_many(&self, documents: &PyList) -> PyResult<PyObject> {
-        let mut inserted_ids = Vec::new();
-
+        // Convert Python list to Vec<HashMap>
+        let mut docs = Vec::with_capacity(documents.len());
         for doc in documents.iter() {
             let doc_dict: &PyDict = doc.downcast()?;
-            let result = self.insert_one(doc_dict)?;
+            let mut fields = HashMap::new();
 
-            Python::with_gil(|py| {
-                let result_dict: &PyDict = result.extract(py)?;
-                let id = result_dict.get_item("inserted_id")?
-                    .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("No inserted_id"))?;
-                inserted_ids.push(id.to_object(py));
-                Ok::<(), PyErr>(())
-            })?;
+            for (key, value) in doc_dict.iter() {
+                let key_str: String = key.extract()?;
+                let value_json = python_to_json(value)?;
+                fields.insert(key_str, value_json);
+            }
+
+            docs.push(fields);
         }
 
+        // Call Rust core insert_many (ALL logic in core)
+        let result = self.core.insert_many(docs)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        // Convert result back to Python
         Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-            result.set_item("inserted_ids", PyList::new(py, &inserted_ids))?;
-            Ok(result.into())
+            let result_dict = PyDict::new(py);
+            result_dict.set_item("acknowledged", true)?;
+            result_dict.set_item("inserted_count", result.inserted_count)?;
+
+            // Convert inserted_ids to Python list
+            let ids_list = PyList::empty(py);
+            for doc_id in result.inserted_ids {
+                match doc_id {
+                    DocumentId::Int(i) => ids_list.append(i)?,
+                    DocumentId::String(s) => ids_list.append(s)?,
+                    DocumentId::ObjectId(oid) => ids_list.append(oid)?,
+                }
+            }
+            result_dict.set_item("inserted_ids", ids_list)?;
+
+            Ok(result_dict.into())
         })
     }
 

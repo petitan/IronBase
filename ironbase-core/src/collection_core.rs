@@ -36,6 +36,13 @@ use crate::index::{IndexManager, IndexKey};
 use crate::query_planner::{QueryPlanner, QueryPlan};
 use crate::query_cache::{QueryCache, QueryHash};
 
+/// Result of insert_many operation
+#[derive(Debug, Clone)]
+pub struct InsertManyResult {
+    pub inserted_ids: Vec<DocumentId>,
+    pub inserted_count: usize,
+}
+
 /// Pure Rust Collection - language-independent core logic
 pub struct CollectionCore {
     pub name: String,
@@ -231,6 +238,93 @@ impl CollectionCore {
         self.query_cache.invalidate_collection(&self.name);
 
         Ok(doc_id)
+    }
+
+    /// Insert many documents - optimized batch insert
+    /// Returns InsertManyResult with all inserted document IDs
+    pub fn insert_many(&self, documents: Vec<HashMap<String, Value>>) -> Result<InsertManyResult> {
+        if documents.is_empty() {
+            return Ok(InsertManyResult {
+                inserted_ids: Vec::new(),
+                inserted_count: 0,
+            });
+        }
+
+        let mut storage = self.storage.write();
+        let mut inserted_ids = Vec::with_capacity(documents.len());
+
+        // Get mutable reference to collection metadata ONCE
+        let meta = storage.get_collection_meta_mut(&self.name)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+
+        // Generate all IDs upfront
+        let start_id = meta.last_id;
+        meta.last_id += documents.len() as u64;
+
+        // Prepare all documents with IDs
+        let mut prepared_docs = Vec::with_capacity(documents.len());
+        for (idx, mut fields) in documents.into_iter().enumerate() {
+            // new_auto adds 1, so subtract 1 from the sequence
+            let doc_id = DocumentId::new_auto(start_id - 1 + idx as u64);
+
+            // Add _id to fields
+            fields.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+
+            // Add _collection field
+            fields.insert("_collection".to_string(), Value::String(self.name.clone()));
+
+            // Create document
+            let doc = Document::new(doc_id.clone(), fields);
+            prepared_docs.push((doc_id.clone(), doc));
+            inserted_ids.push(doc_id);
+        }
+
+        // Update indexes in batch BEFORE writing to storage
+        {
+            let mut indexes = self.indexes.write();
+            let id_index_name = format!("{}_id", self.name);
+
+            for (doc_id, doc) in &prepared_docs {
+                // Update _id index
+                if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+                    let id_key = match &doc_id {
+                        DocumentId::Int(i) => IndexKey::Int(*i),
+                        DocumentId::String(s) => IndexKey::String(s.clone()),
+                        DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+                    };
+                    id_index.insert(id_key, doc_id.clone())?;
+                }
+
+                // Update all other indexes
+                for index_name in indexes.list_indexes() {
+                    if index_name == id_index_name {
+                        continue;
+                    }
+
+                    if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                        let field = &index.metadata.field;
+                        if let Some(field_value) = doc.get(field) {
+                            let index_key = IndexKey::from(field_value);
+                            index.insert(index_key, doc_id.clone())?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Write all documents to storage
+        for (doc_id, doc) in prepared_docs {
+            let doc_json = doc.to_json()?;
+            storage.write_document(&self.name, &doc_id, doc_json.as_bytes())?;
+        }
+
+        // Invalidate query cache (collection has changed)
+        self.query_cache.invalidate_collection(&self.name);
+
+        Ok(InsertManyResult {
+            inserted_count: inserted_ids.len(),
+            inserted_ids,
+        })
     }
 
     // ========== QUERY OPERATIONS ==========
