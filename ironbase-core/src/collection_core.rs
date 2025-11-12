@@ -263,8 +263,8 @@ impl CollectionCore {
         // Prepare all documents with IDs
         let mut prepared_docs = Vec::with_capacity(documents.len());
         for (idx, mut fields) in documents.into_iter().enumerate() {
-            // new_auto adds 1, so subtract 1 from the sequence
-            let doc_id = DocumentId::new_auto(start_id - 1 + idx as u64);
+            // new_auto adds 1 internally, so we pass start_id + idx
+            let doc_id = DocumentId::new_auto(start_id + idx as u64);
 
             // Add _id to fields
             fields.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
