@@ -24,6 +24,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 crossbeam = { workspace = true }
 bincode = { workspace = true }
+lazy_static = { workspace = true }
 crc32fast = "1.4"  # For WAL checksums
 lru = "0.12"       # For query result caching
 
