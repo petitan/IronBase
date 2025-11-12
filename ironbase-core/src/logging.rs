@@ -82,11 +82,21 @@ pub fn should_log(level: LogLevel) -> bool {
     level <= get_log_level()
 }
 
+/// Maximum length for log messages (will be truncated with "...")
+const MAX_LOG_LENGTH: usize = 120;
+
 /// Internal logging function
 #[doc(hidden)]
 pub fn log_message(level: LogLevel, module: &str, message: &str) {
     if should_log(level) {
-        eprintln!("{} [{}] {}: {}", level.icon(), level.as_str(), module, message);
+        // Truncate long messages
+        let truncated = if message.len() > MAX_LOG_LENGTH {
+            format!("{}...", &message[..MAX_LOG_LENGTH])
+        } else {
+            message.to_string()
+        };
+
+        eprintln!("{} [{}] {}: {}", level.icon(), level.as_str(), module, truncated);
     }
 }
 
