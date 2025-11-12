@@ -56,6 +56,36 @@ impl IronBase {
         Ok(serde_json::to_string_pretty(&self.db.stats()).unwrap())
     }
 
+    /// Set the global log level
+    ///
+    /// Args:
+    ///     level (str): One of "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
+    ///
+    /// Example:
+    ///     db.set_log_level("DEBUG")  # Show debug messages
+    ///     db.set_log_level("WARN")   # Only warnings and errors (default)
+    ///     db.set_log_level("TRACE")  # Show everything (very verbose)
+    #[staticmethod]
+    fn set_log_level(level: String) -> PyResult<()> {
+        let log_level = ironbase_core::LogLevel::from_str(&level)
+            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                format!("Invalid log level '{}'. Must be one of: ERROR, WARN, INFO, DEBUG, TRACE", level)
+            ))?;
+
+        ironbase_core::set_log_level(log_level);
+        Ok(())
+    }
+
+    /// Get the current global log level
+    ///
+    /// Returns:
+    ///     str: Current log level ("ERROR", "WARN", "INFO", "DEBUG", or "TRACE")
+    #[staticmethod]
+    fn get_log_level() -> PyResult<String> {
+        let level = ironbase_core::get_log_level();
+        Ok(level.as_str().to_string())
+    }
+
     /// Storage compaction - removes tombstones and old document versions
     /// Returns compaction statistics as a dict
     fn compact(&self) -> PyResult<PyObject> {

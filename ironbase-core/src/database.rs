@@ -13,6 +13,7 @@ use crate::error::Result;
 use crate::transaction::{Transaction, TransactionId};
 use crate::document::DocumentId;
 use serde_json::Value;
+use crate::log_warn;
 
 /// Convert transaction::IndexKey to index::IndexKey
 fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
@@ -327,8 +328,8 @@ impl DatabaseCore {
         for (temp_path, final_path) in prepared_indexes {
             if let Err(e) = crate::index::BPlusTree::commit_prepared_changes(&temp_path, &final_path) {
                 // Log error but DON'T fail transaction (already committed)
-                eprintln!("WARN: Index finalize failed for {:?}: {:?}", final_path, e);
-                eprintln!("WARN: Index will be rebuilt from WAL on next open()");
+                log_warn!("Index finalize failed for {:?}: {:?}", final_path, e);
+                log_warn!("Index will be rebuilt from WAL on next open()");
                 // Continue with next index
             }
         }

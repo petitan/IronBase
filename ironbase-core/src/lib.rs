@@ -16,6 +16,7 @@ pub mod database;
 pub mod transaction;
 pub mod wal;
 pub mod catalog_serde;
+pub mod logging;
 
 #[cfg(test)]
 mod transaction_property_tests;
@@ -35,3 +36,4 @@ pub use collection_core::{CollectionCore, InsertManyResult};
 pub use database::DatabaseCore;
 pub use transaction::{Transaction, TransactionId, TransactionState, Operation};
 pub use wal::{WriteAheadLog, WALEntry, WALEntryType};
+pub use logging::{LogLevel, set_log_level, get_log_level};

@@ -35,6 +35,7 @@ use crate::query::Query;
 use crate::index::{IndexManager, IndexKey};
 use crate::query_planner::{QueryPlanner, QueryPlan};
 use crate::query_cache::{QueryCache, QueryHash};
+use crate::{log_debug, log_trace, log_warn};
 
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
@@ -87,10 +88,8 @@ impl CollectionCore {
             let catalog = meta.document_catalog.clone();
             let persisted_indexes = meta.indexes.clone();
 
-            eprintln!("🔍 DEBUG: Collection '{}' - catalog size: {}, persisted indexes: {}",
-                     name, catalog.len(), persisted_indexes.len());
-            use std::io::Write;
-            let _ = std::io::stderr().flush();
+            log_debug!("Collection '{}' - catalog size: {}, persisted indexes: {}",
+                      name, catalog.len(), persisted_indexes.len());
 
             drop(storage_guard); // Release write lock before rebuilding
 
@@ -101,8 +100,8 @@ impl CollectionCore {
                     continue;
                 }
 
-                eprintln!("🔍 DEBUG: Creating index '{}' on field '{}'",
-                         index_meta.name, index_meta.field);
+                log_debug!("Creating index '{}' on field '{}'",
+                          index_meta.name, index_meta.field);
 
                 // Create index
                 index_manager.create_btree_index(
@@ -113,7 +112,7 @@ impl CollectionCore {
             }
 
             // Rebuild all indexes from document catalog
-            eprintln!("🔍 DEBUG: Starting index rebuild from {} catalog entries", catalog.len());
+            log_debug!("Starting index rebuild from {} catalog entries", catalog.len());
             let mut storage_guard = storage.write();
             let mut rebuilt_count = 0;
             for (_id_key, offset) in catalog.iter() {
@@ -154,18 +153,18 @@ impl CollectionCore {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("🔍 DEBUG: Failed to parse document JSON: {:?}", e);
+                                log_warn!("Failed to parse document JSON during index rebuild: {:?}", e);
                                 continue;
                             }
                         }
                     }
                     Err(e) => {
-                        eprintln!("🔍 DEBUG: Failed to read document at offset: {:?}", e);
+                        log_warn!("Failed to read document at offset during index rebuild: {:?}", e);
                         continue;
                     }
                 }
             }
-            eprintln!("🔍 DEBUG: Index rebuild completed - {} index entries rebuilt", rebuilt_count);
+            log_debug!("Index rebuild completed - {} index entries rebuilt", rebuilt_count);
         }
 
         Ok(CollectionCore {
@@ -331,15 +330,12 @@ impl CollectionCore {
 
     /// Find documents matching query
     pub fn find(&self, query_json: &Value) -> Result<Vec<Value>> {
-        eprintln!("🔍 DEBUG: find() called with query: {:?}", query_json);
-        use std::io::Write;
-        let _ = std::io::stderr().flush();
+        log_debug!("find() called with query: {:?}", query_json);
 
         // Check query cache first
         let query_hash = QueryHash::new(&self.name, query_json);
         if let Some(cached_doc_ids) = self.query_cache.get(&query_hash) {
-            eprintln!("🔍 DEBUG: Query cache HIT! {} cached doc IDs", cached_doc_ids.len());
-            let _ = std::io::stderr().flush();
+            log_trace!("Query cache HIT! {} cached doc IDs", cached_doc_ids.len());
             // Cache hit! Convert cached DocumentIds to full documents (direct lookup!)
             let mut results = Vec::with_capacity(cached_doc_ids.len());
             for doc_id in cached_doc_ids {
@@ -350,8 +346,7 @@ impl CollectionCore {
             return Ok(results);
         }
 
-        eprintln!("🔍 DEBUG: Query cache MISS - executing query");
-        let _ = std::io::stderr().flush();
+        log_trace!("Query cache MISS - executing query");
 
         // Cache miss - execute query normally
         let parsed_query = Query::from_json(query_json)?;
@@ -360,19 +355,16 @@ impl CollectionCore {
         let indexes = self.indexes.read();
         let available_indexes = indexes.list_indexes();
 
-        eprintln!("🔍 DEBUG: Available indexes: {:?}", available_indexes);
-        let _ = std::io::stderr().flush();
+        log_trace!("Available indexes: {:?}", available_indexes);
 
         let result_docs = if let Some((field, plan)) = QueryPlanner::analyze_query(query_json, &available_indexes) {
             // Use index-based execution
-            eprintln!("🔍 DEBUG: Using index for field '{}': {:?}", field, plan);
-            let _ = std::io::stderr().flush();
+            log_debug!("Using index for field '{}': {:?}", field, plan);
             drop(indexes);
             self.find_with_index(parsed_query, plan)?
         } else {
             // Fall back to full collection scan
-            eprintln!("🔍 DEBUG: No suitable index - using full scan");
-            let _ = std::io::stderr().flush();
+            log_debug!("No suitable index - using full scan");
             drop(indexes); // Release read lock before write lock
 
             // OPTIMIZATION: Use catalog iteration instead of full file scan
@@ -941,9 +933,7 @@ impl CollectionCore {
 
     /// Execute query using an index
     fn find_with_index(&self, parsed_query: Query, plan: QueryPlan) -> Result<Vec<Value>> {
-        eprintln!("🔍 DEBUG: find_with_index() called with plan: {:?}", plan);
-        use std::io::Write;
-        let _ = std::io::stderr().flush();
+        log_trace!("find_with_index() called with plan: {:?}", plan);
 
         // Get candidate document IDs from index
         let doc_ids: Vec<DocumentId> = {
@@ -951,18 +941,15 @@ impl CollectionCore {
 
             match plan {
                 QueryPlan::IndexScan { ref index_name, ref key, .. } => {
-                    eprintln!("🔍 DEBUG: IndexScan - index: {}, key: {:?}", index_name, key);
-                    let _ = std::io::stderr().flush();
+                    log_trace!("IndexScan - index: {}, key: {:?}", index_name, key);
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         // Use range scan with same start and end to get ALL matching documents
                         // (B+ tree may have multiple documents with same key value)
                         let ids = index.range_scan(key, key, true, true);
-                        eprintln!("🔍 DEBUG: IndexScan returned {} doc IDs", ids.len());
-                        let _ = std::io::stderr().flush();
+                        log_trace!("IndexScan returned {} doc IDs", ids.len());
                         ids
                     } else {
-                        eprintln!("🔍 DEBUG: Index '{}' NOT FOUND!", index_name);
-                        let _ = std::io::stderr().flush();
+                        log_warn!("Index '{}' NOT FOUND!", index_name);
                         vec![]
                     }
                 }
@@ -974,9 +961,8 @@ impl CollectionCore {
                     inclusive_end,
                     ..
                 } => {
-                    eprintln!("🔍 DEBUG: IndexRangeScan - index: {}, start: {:?}, end: {:?}",
-                             index_name, start, end);
-                    let _ = std::io::stderr().flush();
+                    log_trace!("IndexRangeScan - index: {}, start: {:?}, end: {:?}",
+                              index_name, start, end);
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         // Range scan
                         let default_start = IndexKey::Null;
@@ -986,57 +972,47 @@ impl CollectionCore {
                         let end_key = end.as_ref().unwrap_or(&default_end);
 
                         let ids = index.range_scan(start_key, end_key, inclusive_start, inclusive_end);
-                        eprintln!("🔍 DEBUG: IndexRangeScan returned {} doc IDs", ids.len());
-                        let _ = std::io::stderr().flush();
+                        log_trace!("IndexRangeScan returned {} doc IDs", ids.len());
                         ids
                     } else {
-                        eprintln!("🔍 DEBUG: Index '{}' NOT FOUND!", index_name);
-                        let _ = std::io::stderr().flush();
+                        log_warn!("Index '{}' NOT FOUND!", index_name);
                         vec![]
                     }
                 }
                 QueryPlan::CollectionScan => {
-                    eprintln!("🔍 DEBUG: CollectionScan (shouldn't happen in find_with_index!)");
-                    let _ = std::io::stderr().flush();
+                    log_warn!("CollectionScan (shouldn't happen in find_with_index!)");
                     // This shouldn't happen, but fall back to empty
                     vec![]
                 }
             }
         }; // indexes read lock dropped here
 
-        eprintln!("🔍 DEBUG: Got {} candidate doc IDs from index", doc_ids.len());
-        let _ = std::io::stderr().flush();
+        log_trace!("Got {} candidate doc IDs from index", doc_ids.len());
 
         // OPTIMIZATION: Use catalog-based lookup for index results instead of full file scan
         let mut matching_docs = Vec::new();
 
         for doc_id in &doc_ids {
-            eprintln!("🔍 DEBUG: Looking up doc_id: {:?}", doc_id);
-            let _ = std::io::stderr().flush();
+            log_trace!("Looking up doc_id: {:?}", doc_id);
             // O(1) lookup using document_catalog (direct DocumentId lookup!)
             if let Some(doc) = self.read_document_by_id(doc_id)? {
-                eprintln!("🔍 DEBUG: Found document, applying query filter");
-                let _ = std::io::stderr().flush();
+                log_trace!("Found document, applying query filter");
                 // Apply full query filter (in case index gave us false positives)
                 let doc_json_str = serde_json::to_string(&doc)?;
                 let document = Document::from_json(&doc_json_str)?;
 
                 if parsed_query.matches(&document) {
-                    eprintln!("🔍 DEBUG: Document MATCHES query!");
-                    let _ = std::io::stderr().flush();
+                    log_trace!("Document MATCHES query!");
                     matching_docs.push(doc);
                 } else {
-                    eprintln!("🔍 DEBUG: Document DOES NOT match query");
-                    let _ = std::io::stderr().flush();
+                    log_trace!("Document DOES NOT match query");
                 }
             } else {
-                eprintln!("🔍 DEBUG: Document NOT FOUND for doc_id: {:?}", doc_id);
-                let _ = std::io::stderr().flush();
+                log_trace!("Document NOT FOUND for doc_id: {:?}", doc_id);
             }
         }
 
-        eprintln!("🔍 DEBUG: find_with_index() returning {} documents", matching_docs.len());
-        let _ = std::io::stderr().flush();
+        log_trace!("find_with_index() returning {} documents", matching_docs.len());
 
         Ok(matching_docs)
     }
@@ -1713,30 +1689,25 @@ impl CollectionCore {
         let meta = storage.get_collection_meta(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        eprintln!("🔍 DEBUG: read_document_by_id({:?}) - catalog has {} entries",
-                 doc_id, meta.document_catalog.len());
-        use std::io::Write;
-        let _ = std::io::stderr().flush();
+        log_trace!("read_document_by_id({:?}) - catalog has {} entries",
+                  doc_id, meta.document_catalog.len());
 
         // O(1) lookup in document_catalog (direct DocumentId lookup - no serialization!)
         if let Some(&offset) = meta.document_catalog.get(doc_id) {
-            eprintln!("🔍 DEBUG: Found doc_id {:?} at offset {}", doc_id, offset);
-            let _ = std::io::stderr().flush();
+            log_trace!("Found doc_id {:?} at offset {}", doc_id, offset);
             let doc_bytes = storage.read_data(offset)?;
             let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
             // Check if document is a tombstone (deleted)
             if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                eprintln!("🔍 DEBUG: Document is tombstone");
-                let _ = std::io::stderr().flush();
+                log_trace!("Document is tombstone");
                 return Ok(None);
             }
 
             Ok(Some(doc))
         } else {
-            eprintln!("🔍 DEBUG: doc_id {:?} NOT in catalog! Catalog keys: {:?}",
-                     doc_id, meta.document_catalog.keys().collect::<Vec<_>>());
-            let _ = std::io::stderr().flush();
+            log_trace!("doc_id {:?} NOT in catalog! Catalog keys: {:?}",
+                      doc_id, meta.document_catalog.keys().collect::<Vec<_>>());
             Ok(None)
         }
     }
