@@ -30,7 +30,7 @@ pub struct RecoveredIndexChange {
 /// RESERVED SPACE for metadata at the beginning of file (after header)
 /// This ensures documents ALWAYS start at a fixed offset (HEADER_SIZE + RESERVED_METADATA_SIZE)
 /// preventing corruption during metadata growth when document_catalog grows
-pub const RESERVED_METADATA_SIZE: u64 = 256 * 1024; // 256KB reserved for metadata (supports 10K+ docs)
+pub const RESERVED_METADATA_SIZE: u64 = 10 * 1024 * 1024; // 10MB reserved for metadata (supports 400K+ docs)
 pub const HEADER_SIZE: u64 = 256; // Fixed header size
 pub const DATA_START_OFFSET: u64 = HEADER_SIZE + RESERVED_METADATA_SIZE; // Documents start here
 
