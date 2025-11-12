@@ -51,9 +51,10 @@ impl StorageEngine {
     ) -> Result<u64> {
         use crate::error::MongoLiteError;
 
-        // Ensure we write AFTER the reserved metadata space
+        // Ensure we write AFTER the header (version 2: no reserved space!)
+        // But BEFORE any existing metadata (so seek to end of document data)
         let file_end = self.file.seek(SeekFrom::End(0))?;
-        let write_pos = std::cmp::max(file_end, super::DATA_START_OFFSET);
+        let write_pos = std::cmp::max(file_end, super::HEADER_SIZE);
         let absolute_offset = self.file.seek(SeekFrom::Start(write_pos))?;
 
         // Write length + data (same format as write_data)
@@ -67,6 +68,7 @@ impl StorageEngine {
             .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
 
         meta.document_catalog.insert(doc_id.clone(), absolute_offset);
+        meta.document_count += 1;  // CRITICAL: increment document count!
 
         Ok(absolute_offset)
     }

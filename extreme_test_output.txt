@@ -1,0 +1,58 @@
+Traceback (most recent call last):
+  File "/home/petitan/MongoLite/test_e2e_extreme_650k.py", line 253, in run_extreme_tests
+    test_extreme_compaction(db, db_path)
+  File "/home/petitan/MongoLite/test_e2e_extreme_650k.py", line 196, in test_extreme_compaction
+    stats = db.compact()
+            ^^^^^^^^^^^^
+RuntimeError: IO error: failed to fill whole buffer
+
+🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+EXTREME LARGE-SCALE TEST: 650K Documents (~15MB Metadata)
+Testing IronBase dynamic metadata storage limits
+🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+
+================================================================================
+EXTREME TEST 1: Insert 650K Documents
+================================================================================
+Target: 650,000 documents
+Expected data size: ~634 MB
+Expected metadata size: ~14 MB
+
+Inserting data...
+  Progress: 115,000/650,000 docs (17.7%) | DB size: 99.63 MB | Speed: 11285 docs/sec | Batch: 157.0ms
+  Progress: 230,000/650,000 docs (35.4%) | DB size: 199.48 MB | Speed: 11314 docs/sec | Batch: 160.2ms
+  Progress: 345,000/650,000 docs (53.1%) | DB size: 299.33 MB | Speed: 11308 docs/sec | Batch: 124.0ms
+  Progress: 460,000/650,000 docs (70.8%) | DB size: 399.18 MB | Speed: 11300 docs/sec | Batch: 190.2ms
+  Progress: 575,000/650,000 docs (88.5%) | DB size: 499.02 MB | Speed: 11255 docs/sec | Batch: 126.1ms
+
+✓ Insert completed!
+  Total documents: 650,000
+  Database size: 564.14 MB
+  Total time: 57.63s (1.0 minutes)
+  Average speed: 11279 docs/sec
+  Average throughput: 9.79 MB/sec
+
+================================================================================
+EXTREME TEST 2: Query Performance
+================================================================================
+
+Test 2.1: Count all documents
+✓ Count: 650,000 documents in 23059.48ms
+
+Test 2.2: Find by category (equality)
+✓ Found 93,039 electronics in 22.71s
+
+Test 2.3: Find first 1000 documents
+✓ Retrieved 1000 documents in 12378.61ms
+
+Test 2.4: Distinct categories
+✓ Found 7 unique categories in 19.99s: ['Books', 'Clothing', 'Electronics', 'Food', 'Home & Garden', 'Sports', 'Toys']
+
+================================================================================
+EXTREME TEST 4: Database Compaction
+================================================================================
+
+Database size before compaction: 564.14 MB
+Running compaction (may take several minutes)...
+
+❌ TEST FAILED: IO error: failed to fill whole buffer

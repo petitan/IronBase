@@ -233,6 +233,13 @@ impl CollectionCore {
         let doc_json = doc.to_json()?;
         storage.write_document(&self.name, &doc_id, doc_json.as_bytes())?;
 
+        // NOTE: We don't flush metadata here for performance!
+        // Catalog changes are kept in memory and flushed on:
+        // - Database close
+        // - Explicit flush
+        // - Before compaction
+        // This prevents O(n) metadata rewrites on every insert
+
         // Invalidate query cache (collection has changed)
         self.query_cache.invalidate_collection(&self.name);
 
@@ -316,6 +323,9 @@ impl CollectionCore {
             let doc_json = doc.to_json()?;
             storage.write_document(&self.name, &doc_id, doc_json.as_bytes())?;
         }
+
+        // NOTE: We don't flush metadata here for performance!
+        // Catalog changes are kept in memory and flushed on database close
 
         // Invalidate query cache (collection has changed)
         self.query_cache.invalidate_collection(&self.name);

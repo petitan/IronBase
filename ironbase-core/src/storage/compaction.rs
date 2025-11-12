@@ -57,6 +57,10 @@ impl StorageEngine {
 
     /// Storage compaction with custom configuration
     pub fn compact_with_config(&mut self, config: &CompactionConfig) -> Result<CompactionStats> {
+        // CRITICAL: Flush metadata first to ensure header.metadata_offset is up-to-date!
+        // This ensures we know where document data ends and metadata begins
+        self.flush_metadata()?;
+
         let temp_path = format!("{}.compact", self.file_path);
         let mut stats = CompactionStats::default();
 
@@ -65,7 +69,15 @@ impl StorageEngine {
 
         // Clone collections to avoid borrow conflicts
         let collections_snapshot = self.collections.clone();
-        let file_len = self.file_len()?;
+
+        // For version 2+: only scan up to metadata_offset (don't read metadata as documents!)
+        // After flush_metadata(), metadata_offset is guaranteed to be > 0 for version 2
+        let file_len = if self.header.version >= 2 && self.header.metadata_offset > 0 {
+            self.header.metadata_offset
+        } else {
+            // Version 1: metadata is at fixed location, scan entire data region
+            self.file_len()?
+        };
 
         // Create temporary new file
         let mut new_file = OpenOptions::new()
@@ -78,83 +90,93 @@ impl StorageEngine {
         // Prepare new collections metadata
         let mut new_collections = self.collections.clone();
         for coll_meta in new_collections.values_mut() {
-            coll_meta.data_offset = super::DATA_START_OFFSET;
+            coll_meta.data_offset = super::HEADER_SIZE;  // Version 2: no reserved space
             coll_meta.document_catalog.clear();
             coll_meta.document_count = 0;
         }
 
-        // Write placeholder metadata
+        // Write header only (no metadata yet - documents start at HEADER_SIZE)
         new_file.seek(SeekFrom::Start(0))?;
-        Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
+        let header_bytes = bincode::serialize(&self.header)
+            .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+        new_file.write_all(&header_bytes)?;
 
-        // Write documents starting at DATA_START_OFFSET
-        new_file.seek(SeekFrom::Start(super::DATA_START_OFFSET))?;
-        let mut write_offset = super::DATA_START_OFFSET;
+        // Write documents starting right after header (version 2)
+        new_file.seek(SeekFrom::Start(super::HEADER_SIZE))?;
+        let mut write_offset = super::HEADER_SIZE;
 
-        // Process each collection separately (collection-by-collection)
-        for (coll_name, coll_meta) in &collections_snapshot {
-            // Track latest version of each document in this collection using chunked processing
-            let mut docs_by_id: HashMap<crate::document::DocumentId, Value> = HashMap::new();
-            let mut current_offset = coll_meta.data_offset;
-            let mut chunk_count = 0;
-            // Scan all documents in this collection with chunked processing
-            while current_offset < file_len {
-                match self.read_data(current_offset) {
-                    Ok(doc_bytes) => {
-                        stats.documents_scanned += 1;
+        // Track documents per collection (all collections processed in single pass)
+        let mut collection_docs: HashMap<String, HashMap<crate::document::DocumentId, Value>> = HashMap::new();
+        for coll_name in collections_snapshot.keys() {
+            collection_docs.insert(coll_name.clone(), HashMap::new());
+        }
 
-                        if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
-                            // Check if this document belongs to this collection
-                            let doc_collection = doc.get("_collection")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+        // Single pass through entire file to collect latest version of each document
+        let mut current_offset = super::HEADER_SIZE;
+        let mut chunk_count = 0;
 
-                            if doc_collection == coll_name {
-                                if let Some(id_value) = doc.get("_id") {
-                                    // Deserialize directly to DocumentId
-                                    if let Ok(doc_id) = serde_json::from_value::<crate::document::DocumentId>(id_value.clone()) {
-                                        // Track memory usage (estimate: document size + HashMap overhead)
-                                        let doc_size_bytes = doc_bytes.len() as u64;
-                                        let current_memory_bytes = docs_by_id.len() as u64 * doc_size_bytes;
-                                        let current_memory_mb = current_memory_bytes / (1024 * 1024);
-                                        if current_memory_mb > stats.peak_memory_mb {
-                                            stats.peak_memory_mb = current_memory_mb;
+        while current_offset < file_len {
+            match self.read_data(current_offset) {
+                Ok(doc_bytes) => {
+                    stats.documents_scanned += 1;
+
+                    if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
+                        // Find which collection this document belongs to
+                        let doc_collection = doc.get("_collection")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        if let Some(docs_by_id) = collection_docs.get_mut(doc_collection) {
+                            if let Some(id_value) = doc.get("_id") {
+                                // Deserialize directly to DocumentId
+                                if let Ok(doc_id) = serde_json::from_value::<crate::document::DocumentId>(id_value.clone()) {
+                                    // Track memory usage
+                                    let doc_size_bytes = doc_bytes.len() as u64;
+                                    let current_memory_bytes = docs_by_id.len() as u64 * doc_size_bytes;
+                                    let current_memory_mb = current_memory_bytes / (1024 * 1024);
+                                    if current_memory_mb > stats.peak_memory_mb {
+                                        stats.peak_memory_mb = current_memory_mb;
+                                    }
+
+                                    docs_by_id.insert(doc_id, doc);
+                                    chunk_count += 1;
+
+                                    // If chunk is full, flush all collections
+                                    if chunk_count >= config.chunk_size {
+                                        for (coll_name, docs) in collection_docs.iter_mut() {
+                                            if !docs.is_empty() {
+                                                write_offset = self.flush_compaction_chunk(
+                                                    &mut new_file,
+                                                    &mut new_collections,
+                                                    coll_name,
+                                                    docs,
+                                                    write_offset,
+                                                    &mut stats,
+                                                )?;
+                                                docs.clear();
+                                            }
                                         }
-
-                                        docs_by_id.insert(doc_id, doc);
-                                        chunk_count += 1;
-
-                                        // If chunk is full, flush non-tombstones to new file
-                                        if chunk_count >= config.chunk_size {
-                                            write_offset = self.flush_compaction_chunk(
-                                                &mut new_file,
-                                                &mut new_collections,
-                                                coll_name,
-                                                &mut docs_by_id,
-                                                write_offset,
-                                                &mut stats,
-                                            )?;
-                                            chunk_count = 0;
-                                            docs_by_id.clear();
-                                        }
+                                        chunk_count = 0;
                                     }
                                 }
                             }
                         }
-
-                        current_offset += 4 + doc_bytes.len() as u64;
                     }
-                    Err(_) => break,
-                }
-            }
 
-            // Flush remaining documents in the final chunk
-            if !docs_by_id.is_empty() {
+                    current_offset += 4 + doc_bytes.len() as u64;
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Flush remaining documents for all collections
+        for (coll_name, docs) in collection_docs.iter_mut() {
+            if !docs.is_empty() {
                 write_offset = self.flush_compaction_chunk(
                     &mut new_file,
                     &mut new_collections,
                     coll_name,
-                    &mut docs_by_id,
+                    docs,
                     write_offset,
                     &mut stats,
                 )?;
@@ -163,9 +185,39 @@ impl StorageEngine {
 
         new_file.sync_all()?;
 
-        // Now rewrite metadata with the populated document_catalog
+        // Now write metadata at END of file (version 2 dynamic metadata)
+        // Find end of document data
+        let metadata_offset = write_offset;  // After last document
+
+        // Serialize metadata body
+        let mut metadata_buffer = std::io::Cursor::new(Vec::new());
+        // Write collection count
+        let count = (new_collections.len() as u32).to_le_bytes();
+        metadata_buffer.write_all(&count)?;
+        // Write each collection metadata
+        for meta in new_collections.values() {
+            let meta_bytes = serde_json::to_vec(meta)?;
+            let len = (meta_bytes.len() as u32).to_le_bytes();
+            metadata_buffer.write_all(&len)?;
+            metadata_buffer.write_all(&meta_bytes)?;
+        }
+        let metadata_bytes = metadata_buffer.into_inner();
+        let metadata_size = metadata_bytes.len() as u64;
+
+        // Write metadata at end
+        new_file.seek(SeekFrom::Start(metadata_offset))?;
+        new_file.write_all(&metadata_bytes)?;
+
+        // Update header with metadata location
+        let mut updated_header = self.header.clone();
+        updated_header.metadata_offset = metadata_offset;
+        updated_header.metadata_size = metadata_size;
+
+        // Rewrite header
         new_file.seek(SeekFrom::Start(0))?;
-        Self::write_metadata(&mut new_file, &self.header, &new_collections)?;
+        let header_bytes = bincode::serialize(&updated_header)
+            .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+        new_file.write_all(&header_bytes)?;
         new_file.sync_all()?;
 
         // Get new file size

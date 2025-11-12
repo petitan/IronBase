@@ -38,23 +38,31 @@ pub const DATA_START_OFFSET: u64 = HEADER_SIZE + RESERVED_METADATA_SIZE; // Docu
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Header {
     pub magic: [u8; 8],           // "MONGOLTE"
-    pub version: u32,              // Verzió szám
+    pub version: u32,              // Verzió szám (2 = dynamic metadata)
     pub page_size: u32,            // Oldal méret (default: 4KB)
     pub collection_count: u32,     // Collection-ök száma
     pub free_list_head: u64,       // Szabad blokkok lista kezdete
     #[serde(default)]
     pub index_section_offset: u64, // Index metadata section offset (0 = none)
+
+    // NEW: Dynamic metadata support (version 2+)
+    #[serde(default)]
+    pub metadata_offset: u64,      // Offset where metadata starts (0 = use legacy fixed location)
+    #[serde(default)]
+    pub metadata_size: u64,        // Size of metadata section in bytes
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 1,
+            version: 2,  // Version 2: dynamic metadata
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
             index_section_offset: 0,
+            metadata_offset: 0,  // Will be set on first write
+            metadata_size: 0,
         }
     }
 }
@@ -168,8 +176,12 @@ impl StorageEngine {
         self.collections.insert(name.to_string(), meta);
         self.header.collection_count += 1;
 
-        // Flush metadata with proper convergence
-        self.flush_metadata()?;
+        // NOTE: We don't flush metadata here for performance!
+        // Metadata will be flushed on:
+        // - Database close
+        // - Explicit flush()
+        // - Before compaction
+        // This prevents unnecessary I/O and allows documents to be written from HEADER_SIZE
 
         Ok(())
     }
