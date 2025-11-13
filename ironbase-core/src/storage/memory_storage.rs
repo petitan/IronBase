@@ -232,6 +232,11 @@ impl Storage for MemoryStorage {
         // No-op for memory storage (nothing to flush)
         Ok(())
     }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        // No-op for memory storage (no WAL)
+        Ok(())
+    }
 }
 
 // ============================================================================

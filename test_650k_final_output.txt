@@ -1,0 +1,85 @@
+
+🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+EXTREME LARGE-SCALE TEST: 650K Documents (~15MB Metadata)
+Testing IronBase dynamic metadata storage limits
+🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥
+
+================================================================================
+EXTREME TEST 1: Insert 650K Documents
+================================================================================
+Target: 650,000 documents
+Expected data size: ~634 MB
+Expected metadata size: ~14 MB
+
+Inserting data...
+  Progress: 115,000/650,000 docs (17.7%) | DB size: 99.65 MB | Speed: 11249 docs/sec | Batch: 135.4ms
+  Progress: 225,000/650,000 docs (34.6%) | DB size: 195.16 MB | Speed: 11110 docs/sec | Batch: 117.3ms
+  Progress: 345,000/650,000 docs (53.1%) | DB size: 299.36 MB | Speed: 11266 docs/sec | Batch: 119.0ms
+  Progress: 465,000/650,000 docs (71.5%) | DB size: 403.55 MB | Speed: 11340 docs/sec | Batch: 119.8ms
+  Progress: 570,000/650,000 docs (87.7%) | DB size: 494.73 MB | Speed: 11169 docs/sec | Batch: 125.5ms
+
+✓ Insert completed!
+  Total documents: 650,000
+  Database size: 564.20 MB
+  Total time: 58.10s (1.0 minutes)
+  Average speed: 11188 docs/sec
+  Average throughput: 9.71 MB/sec
+
+================================================================================
+EXTREME TEST 2: Query Performance
+================================================================================
+
+Test 2.1: Count all documents
+✓ Count: 650,000 documents in 23400.61ms
+
+Test 2.2: Find by category (equality)
+✓ Found 92,566 electronics in 20.78s
+
+Test 2.3: Find first 1000 documents
+✓ Retrieved 1000 documents in 12795.33ms
+
+Test 2.4: Distinct categories
+✓ Found 0 unique categories in 1.38s: []
+
+================================================================================
+EXTREME TEST 4: Database Compaction
+================================================================================
+
+Database size before compaction: 564.20 MB
+Running compaction (may take several minutes)...
+
+✓ Compaction completed in 9.82s (0.2 minutes)
+  Documents scanned: 650,000
+  Documents kept: 650,000
+  Tombstones removed: 0
+  Space saved: 7.95 MB
+  Size before: 564.20 MB
+  Size after: 571.52 MB
+  Compression ratio: 98.63%
+  Peak memory: 0.00 MB
+
+================================================================================
+Closing database...
+
+================================================================================
+EXTREME TEST 5: Reopen Database (Load 15MB Metadata)
+================================================================================
+
+Closing database...
+Reopening database (loading 15MB metadata from disk)...
+✓ Database reopened in 0.14s
+✓ Verified document count: 650,000
+
+================================================================================
+✅ ALL EXTREME TESTS PASSED!
+================================================================================
+
+📊 Final Statistics:
+   Total test time: 553.14s (9.2 minutes)
+   Final database size: 571.52 MB
+   Documents inserted: 650,000
+
+🎉 IronBase successfully handled 650K documents with 15MB metadata!
+
+Cleaning up test files...
+✓ Cleanup complete

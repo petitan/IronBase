@@ -117,6 +117,12 @@ pub trait Storage: Send + Sync {
     /// For FileStorage, this writes metadata to disk.
     /// For MemoryStorage, this is a no-op.
     fn flush(&mut self) -> Result<()>;
+
+    /// Checkpoint - Clear WAL without flushing metadata
+    ///
+    /// Use this in long-running processes to prevent WAL file growth.
+    /// For MemoryStorage, this is a no-op.
+    fn checkpoint(&mut self) -> Result<()>;
 }
 
 // ============================================================================

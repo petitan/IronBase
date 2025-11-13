@@ -233,6 +233,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         storage.flush()
     }
 
+    /// Checkpoint - Clear WAL without flushing metadata
+    /// Use this in long-running processes to prevent WAL file growth
+    pub fn checkpoint(&self) -> Result<()> {
+        let mut storage = self.storage.write();
+        storage.checkpoint()
+    }
+
     /// Get database path
     pub fn path(&self) -> &str {
         &self.db_path

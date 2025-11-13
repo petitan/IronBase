@@ -233,12 +233,25 @@ impl StorageEngine {
         // Flush metadata to disk with proper convergence
         self.flush_metadata()?;
         self.file.sync_all()?;
+
+        // CRITICAL: Clear WAL AFTER metadata is safely on disk
+        // This prevents WAL from growing indefinitely in long-running processes
+        self.wal.clear()?;
+
         Ok(())
     }
 
     /// Get mutable reference to the database file (for index persistence)
     pub fn get_file_mut(&mut self) -> &mut File {
         &mut self.file
+    }
+
+    /// Checkpoint - explicit WAL cleanup without metadata flush
+    /// Use this in long-running processes to prevent WAL growth
+    pub fn checkpoint(&mut self) -> Result<()> {
+        // Simply clear the WAL (all operations already in main file)
+        self.wal.clear()?;
+        Ok(())
     }
 
     /// Statisztikák
@@ -614,6 +627,10 @@ impl Storage for StorageEngine {
 
     fn flush(&mut self) -> Result<()> {
         self.flush()
+    }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        self.checkpoint()
     }
 }
 

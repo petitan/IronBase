@@ -51,6 +51,20 @@ impl IronBase {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 
+    /// Checkpoint - Clear WAL without flushing metadata
+    /// Use this in long-running processes to prevent WAL file growth
+    ///
+    /// Example:
+    ///     db = IronBase("server.mlite")
+    ///     for i in range(100000):
+    ///         db["logs"].insert_one({"log": f"Entry {i}"})
+    ///         if i % 1000 == 0:
+    ///             db.checkpoint()  # Prevent WAL from growing indefinitely
+    fn checkpoint(&self) -> PyResult<()> {
+        self.db.checkpoint()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+    }
+
     /// Adatbázis statisztikák
     fn stats(&self) -> PyResult<String> {
         Ok(serde_json::to_string_pretty(&self.db.stats()).unwrap())

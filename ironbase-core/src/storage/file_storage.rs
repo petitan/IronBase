@@ -216,6 +216,10 @@ impl Storage for FileStorage {
     fn flush(&mut self) -> Result<()> {
         self.inner.flush()
     }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        self.inner.checkpoint()
+    }
 }
 
 // ============================================================================
