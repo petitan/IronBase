@@ -10,8 +10,9 @@ use std::collections::HashMap;
 use crate::storage::{StorageEngine, Storage, RawStorage};
 use crate::collection_core::CollectionCore;
 use crate::error::Result;
-use crate::transaction::{Transaction, TransactionId};
+use crate::transaction::{Transaction, TransactionId, Operation};
 use crate::document::DocumentId;
+use crate::durability::DurabilityMode;
 use serde_json::Value;
 
 
@@ -40,6 +41,12 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     db_path: String,
     next_tx_id: AtomicU64,
     active_transactions: Arc<RwLock<std::collections::HashMap<TransactionId, Transaction>>>,
+
+    // NEW: Durability mode (safe by default like SQL databases)
+    durability_mode: DurabilityMode,
+
+    // NEW: Batch buffer for Batch mode
+    batch_buffer: Arc<RwLock<Vec<Operation>>>,
 }
 
 // ============================================================================
@@ -57,12 +64,100 @@ impl DatabaseCore<StorageEngine> {
         // Recover from WAL (includes both data and index changes)
         let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
 
-        // Create DatabaseCore instance
+        // Create DatabaseCore instance with default Safe mode
         let db = DatabaseCore {
             storage: Arc::new(RwLock::new(storage)),
             db_path: path_str,
             next_tx_id: AtomicU64::new(1),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            durability_mode: DurabilityMode::default(), // Safe mode by default
+            batch_buffer: Arc::new(RwLock::new(Vec::new())),
+        };
+
+        // Apply recovered index changes to collections
+        // Group index changes by collection name
+        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> = HashMap::new();
+
+        for change in recovered_index_changes {
+            // Group by collection name (now properly included in RecoveredIndexChange)
+            changes_by_collection
+                .entry(change.collection.clone())
+                .or_insert_with(Vec::new)
+                .push(change);
+        }
+
+        // Apply changes to each collection's indexes
+        for (collection_name, changes) in changes_by_collection {
+            // Get collection (creates if doesn't exist)
+            if let Ok(collection) = db.collection(&collection_name) {
+                for change in changes {
+                    // Apply the index change to the collection's indexes
+                    let mut indexes = collection.indexes.write();
+                    if let Some(btree_index) = indexes.get_btree_index_mut(&change.index_name) {
+                        // Convert transaction::IndexKey to index::IndexKey
+                        let index_key = convert_index_key(&change.key);
+
+                        match change.operation {
+                            crate::transaction::IndexOperation::Insert => {
+                                btree_index.insert(index_key, change.doc_id)?;
+                            }
+                            crate::transaction::IndexOperation::Delete => {
+                                btree_index.delete(&index_key, &change.doc_id)?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(db)
+    }
+
+    /// Open or create database with explicit durability mode
+    ///
+    /// # Arguments
+    /// * `path` - Database file path
+    /// * `mode` - Durability mode (Safe, Batch, or Unsafe)
+    ///
+    /// # Examples
+    /// ```rust
+    /// use ironbase_core::{DatabaseCore, DurabilityMode};
+    /// use ironbase_core::storage::StorageEngine;
+    ///
+    /// // Safe mode (default, like SQL databases)
+    /// let db = DatabaseCore::<StorageEngine>::open_with_durability(
+    ///     "app.mlite",
+    ///     DurabilityMode::Safe
+    /// )?;
+    ///
+    /// // Batch mode (good balance)
+    /// let db = DatabaseCore::<StorageEngine>::open_with_durability(
+    ///     "app.mlite",
+    ///     DurabilityMode::Batch { batch_size: 100 }
+    /// )?;
+    ///
+    /// // Unsafe mode (fast, opt-in for performance)
+    /// let db = DatabaseCore::<StorageEngine>::open_with_durability(
+    ///     "app.mlite",
+    ///     DurabilityMode::Unsafe
+    /// )?;
+    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// ```
+    pub fn open_with_durability<P: AsRef<Path>>(path: P, mode: DurabilityMode) -> Result<Self> {
+        let path_str = path.as_ref().to_string_lossy().to_string();
+        let mut storage = StorageEngine::open(&path_str)?;
+
+        // Recover from WAL (includes both data and index changes)
+        let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
+
+        // Create DatabaseCore instance with specified mode
+        let db = DatabaseCore {
+            storage: Arc::new(RwLock::new(storage)),
+            db_path: path_str,
+            next_tx_id: AtomicU64::new(1),
+            active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            durability_mode: mode,
+            batch_buffer: Arc::new(RwLock::new(Vec::new())),
         };
 
         // Apply recovered index changes to collections
@@ -168,6 +263,163 @@ impl DatabaseCore<StorageEngine> {
         storage.commit_transaction(&mut transaction)?;
 
         Ok(())
+    }
+
+    // ========== Auto-Commit Transaction Helpers (StorageEngine-specific, INTERNAL) ==========
+
+    /// Begin an auto-transaction (internal use only for auto-commit mode)
+    ///
+    /// This is used internally by insert_one/update_one/delete_one when
+    /// durability_mode is Safe or Batch. Not exposed to external users.
+    pub(crate) fn begin_auto_transaction(&self) -> Transaction {
+        let tx_id = self.next_tx_id.fetch_add(1, Ordering::SeqCst);
+        Transaction::new(tx_id)
+    }
+
+    /// Commit auto-transaction with WAL and fsync
+    ///
+    /// This is the critical path for Safe mode:
+    /// 1. Write to WAL (BEGIN + OPERATIONS + COMMIT)
+    /// 2. WAL fsync
+    /// 3. Metadata flush
+    /// 4. WAL clear
+    pub(crate) fn commit_auto_transaction(&self, mut transaction: Transaction) -> Result<()> {
+        let mut storage = self.storage.write();
+
+        // Write to WAL and commit
+        storage.commit_transaction(&mut transaction)?;
+
+        // WAL is automatically flushed in commit_transaction()
+        // This ensures durability even on power failure
+
+        Ok(())
+    }
+
+    /// Flush batch operations to WAL
+    ///
+    /// Used by Batch mode when batch_buffer reaches batch_size.
+    /// Creates a single transaction with all buffered operations.
+    pub(crate) fn flush_batch(&self) -> Result<()> {
+        let mut batch = self.batch_buffer.write();
+
+        if batch.is_empty() {
+            return Ok(());
+        }
+
+        // Create auto-transaction with all operations
+        let mut auto_tx = self.begin_auto_transaction();
+
+        for op in batch.iter() {
+            auto_tx.add_operation(op.clone())?;
+        }
+
+        // Commit (WAL + fsync)
+        self.commit_auto_transaction(auto_tx)?;
+
+        // Clear batch
+        batch.clear();
+
+        Ok(())
+    }
+
+    /// Add operation to batch buffer (for Batch mode)
+    ///
+    /// Returns true if batch is full and needs flushing
+    pub(crate) fn add_to_batch(&self, operation: Operation) -> Result<bool> {
+        let mut batch = self.batch_buffer.write();
+        batch.push(operation);
+
+        if let Some(batch_size) = self.durability_mode.batch_size() {
+            Ok(batch.len() >= batch_size)
+        } else {
+            Ok(false)
+        }
+    }
+
+    // ========== Auto-Commit CRUD Operations (StorageEngine-specific, PUBLIC API) ==========
+
+    /// Insert one document with auto-commit (respects durability mode)
+    ///
+    /// This is the SAFE insert_one that respects the database's durability mode:
+    /// - **Safe mode**: Auto-commits immediately (like SQL)
+    /// - **Batch mode**: Batches and commits periodically
+    /// - **Unsafe mode**: No auto-commit (fast path)
+    ///
+    /// # Example
+    /// ```rust
+    /// use ironbase_core::{DatabaseCore, DurabilityMode};
+    /// use ironbase_core::storage::StorageEngine;
+    /// use std::collections::HashMap;
+    /// use serde_json::json;
+    ///
+    /// let db = DatabaseCore::<StorageEngine>::open("app.mlite")?; // Safe by default
+    /// let doc_id = db.insert_one_safe("users", HashMap::from([
+    ///     ("name".to_string(), json!("Alice")),
+    ///     ("age".to_string(), json!(30)),
+    /// ]))?;
+    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// ```
+    pub fn insert_one_safe(
+        &self,
+        collection_name: &str,
+        document: HashMap<String, Value>
+    ) -> Result<DocumentId> {
+        match self.durability_mode {
+            DurabilityMode::Safe => {
+                // Safe mode: Auto-commit every operation
+                let collection = self.collection(collection_name)?;
+
+                // 1. Begin auto-transaction
+                let mut auto_tx = self.begin_auto_transaction();
+
+                // 2. Execute insert
+                let doc_id = collection.insert_one(document.clone())?;
+
+                // 3. Add operation to transaction
+                let doc_value = serde_json::to_value(&document)
+                    .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+                auto_tx.add_operation(Operation::Insert {
+                    collection: collection_name.to_string(),
+                    doc_id: doc_id.clone(),
+                    doc: doc_value,
+                })?;
+
+                // 4. Auto-commit (WAL write + fsync)
+                self.commit_auto_transaction(auto_tx)?;
+
+                Ok(doc_id)
+            }
+
+            DurabilityMode::Batch { .. } => {
+                // Batch mode: Add to batch, flush when full
+                let collection = self.collection(collection_name)?;
+
+                // 1. Execute insert
+                let doc_id = collection.insert_one(document.clone())?;
+
+                // 2. Add to batch buffer
+                let doc_value = serde_json::to_value(&document)
+                    .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+                let should_flush = self.add_to_batch(Operation::Insert {
+                    collection: collection_name.to_string(),
+                    doc_id: doc_id.clone(),
+                    doc: doc_value,
+                })?;
+
+                // 3. Flush if batch is full
+                if should_flush {
+                    self.flush_batch()?;
+                }
+
+                Ok(doc_id)
+            }
+
+            DurabilityMode::Unsafe => {
+                // Unsafe mode: Fast path, no auto-commit
+                let collection = self.collection(collection_name)?;
+                collection.insert_one(document)
+            }
+        }
     }
 
     // ========== Two-Phase Commit Helper Methods (StorageEngine-specific) ==========
@@ -337,6 +589,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         self.with_transaction(tx_id, |transaction| {
             collection.delete_one_tx(query, transaction)
         })
+    }
+
+    /// Get current durability mode
+    pub fn durability_mode(&self) -> DurabilityMode {
+        self.durability_mode
     }
 }
 

@@ -17,6 +17,7 @@ pub mod transaction;
 pub mod wal;
 pub mod catalog_serde;
 pub mod logging;
+pub mod durability;
 
 #[cfg(test)]
 mod transaction_property_tests;
@@ -24,6 +25,8 @@ mod transaction_property_tests;
 mod transaction_integration_tests;
 #[cfg(test)]
 mod transaction_benchmarks;
+#[cfg(test)]
+mod test_auto_commit;
 
 // Public exports
 pub use error::{MongoLiteError, Result};
@@ -37,3 +40,4 @@ pub use database::DatabaseCore;
 pub use transaction::{Transaction, TransactionId, TransactionState, Operation};
 pub use wal::{WriteAheadLog, WALEntry, WALEntryType};
 pub use logging::{LogLevel, set_log_level, get_log_level};
+pub use durability::DurabilityMode;
