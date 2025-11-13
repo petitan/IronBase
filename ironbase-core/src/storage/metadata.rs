@@ -148,21 +148,29 @@ impl StorageEngine {
             }
         }
 
-        // If we found any documents, read the last one to find its size
-        let metadata_offset = if max_doc_offset > super::HEADER_SIZE {
-            // Seek to the last document to read its size
-            self.file.seek(SeekFrom::Start(max_doc_offset))?;
-
-            // Read document length (4 bytes)
-            let mut len_bytes = [0u8; 4];
-            if self.file.read_exact(&mut len_bytes).is_ok() {
-                let doc_len = u32::from_le_bytes(len_bytes) as u64;
-                // Metadata starts after: offset + 4 (length) + doc_len
-                max_doc_offset + 4 + doc_len
+        // IDEMPOTENT FIX: Check if metadata already exists and is valid
+        let file_len = self.file.metadata()?.len();
+        let metadata_offset = if self.header.metadata_offset > 0
+            && self.header.metadata_offset >= super::HEADER_SIZE
+            && self.header.metadata_offset <= file_len
+        {
+            // Metadata already written - reuse existing location if documents haven't changed
+            // Check if max_doc_offset is before existing metadata (no new documents past metadata)
+            if max_doc_offset < self.header.metadata_offset {
+                // Safe to reuse existing metadata location
+                self.header.metadata_offset
             } else {
-                // Failed to read - use current file end
-                self.file.metadata()?.len()
+                // Documents were added after metadata - recalculate
+                // This shouldn't happen in normal operation but handle it anyway
+                crate::log_warn!(
+                    "Documents found after metadata (max_doc: {}, metadata: {}), recalculating",
+                    max_doc_offset, self.header.metadata_offset
+                );
+                Self::calculate_metadata_offset(&mut self.file, max_doc_offset, file_len)?
             }
+        } else if max_doc_offset > super::HEADER_SIZE {
+            // No existing metadata or invalid - calculate from last document
+            Self::calculate_metadata_offset(&mut self.file, max_doc_offset, file_len)?
         } else {
             // No documents yet - metadata right after header
             super::HEADER_SIZE
@@ -190,6 +198,47 @@ impl StorageEngine {
         self.file.sync_all()?;
 
         Ok(())
+    }
+
+    /// Calculate metadata offset by reading the last document's size
+    /// Returns the offset where metadata should start
+    fn calculate_metadata_offset(file: &mut File, max_doc_offset: u64, file_len: u64) -> Result<u64> {
+        // Seek to the last document to read its size
+        file.seek(SeekFrom::Start(max_doc_offset))?;
+
+        // Read document length (4 bytes)
+        let mut len_bytes = [0u8; 4];
+        match file.read_exact(&mut len_bytes) {
+            Ok(_) => {
+                let doc_len = u32::from_le_bytes(len_bytes) as u64;
+                let calculated_offset = max_doc_offset + 4 + doc_len;
+
+                // VALIDATION: Ensure calculated offset is sane
+                if calculated_offset > file_len {
+                    return Err(MongoLiteError::Corruption(format!(
+                        "Invalid metadata offset calculation: {} > file_len {}",
+                        calculated_offset, file_len
+                    )));
+                }
+
+                // Additional sanity check: doc_len should be reasonable (< 16MB)
+                if doc_len > 16 * 1024 * 1024 {
+                    return Err(MongoLiteError::Corruption(format!(
+                        "Suspiciously large document size: {} bytes at offset {}",
+                        doc_len, max_doc_offset
+                    )));
+                }
+
+                Ok(calculated_offset)
+            }
+            Err(e) => {
+                // Failed to read document - file might be corrupt
+                Err(MongoLiteError::Corruption(format!(
+                    "Failed to read document at offset {}: {}",
+                    max_doc_offset, e
+                )))
+            }
+        }
     }
 
     /// Write only the metadata body (collections), not header

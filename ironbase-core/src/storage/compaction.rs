@@ -111,61 +111,71 @@ impl StorageEngine {
             collection_docs.insert(coll_name.clone(), HashMap::new());
         }
 
-        // Single pass through entire file to collect latest version of each document
-        let mut current_offset = super::HEADER_SIZE;
+        // CATALOG-BASED ITERATION (instead of sequential file scan)
+        // The catalog is the source of truth for document locations
+        // This avoids sequential scan assumptions and handles gaps correctly
         let mut chunk_count = 0;
 
-        while current_offset < file_len {
-            match self.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    stats.documents_scanned += 1;
+        for (coll_name, coll_meta) in collections_snapshot.iter() {
+            // Iterate catalog instead of scanning file sequentially
+            for (doc_id, &offset) in &coll_meta.document_catalog {
+                // Validate offset is before metadata (sanity check)
+                if offset >= file_len {
+                    crate::log_warn!(
+                        "Skipping document {:?} at invalid offset {} (file_len: {})",
+                        doc_id, offset, file_len
+                    );
+                    stats.tombstones_removed += 1;
+                    continue;
+                }
 
-                    if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
-                        // Find which collection this document belongs to
-                        let doc_collection = doc.get("_collection")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                // Read document at catalog-specified offset
+                match self.read_data(offset) {
+                    Ok(doc_bytes) => {
+                        stats.documents_scanned += 1;
 
-                        if let Some(docs_by_id) = collection_docs.get_mut(doc_collection) {
-                            if let Some(id_value) = doc.get("_id") {
-                                // Deserialize directly to DocumentId
-                                if let Ok(doc_id) = serde_json::from_value::<crate::document::DocumentId>(id_value.clone()) {
-                                    // Track memory usage
-                                    let doc_size_bytes = doc_bytes.len() as u64;
-                                    let current_memory_bytes = docs_by_id.len() as u64 * doc_size_bytes;
-                                    let current_memory_mb = current_memory_bytes / (1024 * 1024);
-                                    if current_memory_mb > stats.peak_memory_mb {
-                                        stats.peak_memory_mb = current_memory_mb;
-                                    }
+                        if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
+                            if let Some(docs_by_id) = collection_docs.get_mut(coll_name.as_str()) {
+                                // Track memory usage
+                                let doc_size_bytes = doc_bytes.len() as u64;
+                                let current_memory_bytes = docs_by_id.len() as u64 * doc_size_bytes;
+                                let current_memory_mb = current_memory_bytes / (1024 * 1024);
+                                if current_memory_mb > stats.peak_memory_mb {
+                                    stats.peak_memory_mb = current_memory_mb;
+                                }
 
-                                    docs_by_id.insert(doc_id, doc);
-                                    chunk_count += 1;
+                                docs_by_id.insert(doc_id.clone(), doc);
+                                chunk_count += 1;
 
-                                    // If chunk is full, flush all collections
-                                    if chunk_count >= config.chunk_size {
-                                        for (coll_name, docs) in collection_docs.iter_mut() {
-                                            if !docs.is_empty() {
-                                                write_offset = self.flush_compaction_chunk(
-                                                    &mut new_file,
-                                                    &mut new_collections,
-                                                    coll_name,
-                                                    docs,
-                                                    write_offset,
-                                                    &mut stats,
-                                                )?;
-                                                docs.clear();
-                                            }
+                                // If chunk is full, flush all collections
+                                if chunk_count >= config.chunk_size {
+                                    for (flush_coll_name, docs) in collection_docs.iter_mut() {
+                                        if !docs.is_empty() {
+                                            write_offset = self.flush_compaction_chunk(
+                                                &mut new_file,
+                                                &mut new_collections,
+                                                flush_coll_name,
+                                                docs,
+                                                write_offset,
+                                                &mut stats,
+                                            )?;
+                                            docs.clear();
                                         }
-                                        chunk_count = 0;
                                     }
+                                    chunk_count = 0;
                                 }
                             }
                         }
                     }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
+                    Err(e) => {
+                        // Log corrupt document but continue
+                        crate::log_warn!(
+                            "Skipping corrupt document {:?} at offset {}: {}",
+                            doc_id, offset, e
+                        );
+                        stats.tombstones_removed += 1;
+                    }
                 }
-                Err(_) => break,
             }
         }
 
