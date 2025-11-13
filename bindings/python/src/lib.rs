@@ -6,24 +6,62 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 // Arc and RwLock are used internally by DatabaseCore/CollectionCore
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
-use ironbase_core::{DatabaseCore, CollectionCore, DocumentId, StorageEngine};
+use ironbase_core::{DatabaseCore, CollectionCore, DocumentId, StorageEngine, DurabilityMode};
 
 /// IronBase Database - Python wrapper
 #[pyclass]
 pub struct IronBase {
-    db: DatabaseCore<StorageEngine>,
+    db: Arc<DatabaseCore<StorageEngine>>,
 }
 
 #[pymethods]
 impl IronBase {
     /// Új adatbázis megnyitása vagy létrehozása
+    ///
+    /// Args:
+    ///     path (str): Database file path (.mlite)
+    ///     durability (str, optional): Durability mode - "safe" (default), "batch", or "unsafe"
+    ///     batch_size (int, optional): Batch size for "batch" mode (default: 100)
+    ///
+    /// Durability modes:
+    ///     - "safe": Every operation auto-committed (like SQL) - ZERO data loss, ~1-5K inserts/sec
+    ///     - "batch": Operations batched, periodic commit - Bounded loss (max batch_size ops), ~20-50K inserts/sec
+    ///     - "unsafe": No auto-commit, manual checkpoint required - High data loss risk, ~50-100K inserts/sec
+    ///
+    /// Examples:
+    ///     # Safe mode (default)
+    ///     db = IronBase("app.mlite")
+    ///     db = IronBase("app.mlite", durability="safe")
+    ///
+    ///     # Batch mode (good balance)
+    ///     db = IronBase("app.mlite", durability="batch", batch_size=100)
+    ///
+    ///     # Unsafe mode (opt-in for performance)
+    ///     db = IronBase("app.mlite", durability="unsafe")
     #[new]
-    fn new(path: String) -> PyResult<Self> {
-        let db = DatabaseCore::open(&path)
+    #[pyo3(signature = (path, durability="safe", batch_size=100))]
+    fn new(path: String, durability: &str, batch_size: usize) -> PyResult<Self> {
+        // Parse durability mode
+        let mode = match durability {
+            "safe" => DurabilityMode::Safe,
+            "batch" => DurabilityMode::Batch { batch_size },
+            "unsafe" => DurabilityMode::Unsafe,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!(
+                        "Invalid durability mode '{}'. Must be 'safe', 'batch', or 'unsafe'",
+                        durability
+                    )
+                ));
+            }
+        };
+
+        let db = DatabaseCore::open_with_durability(&path, mode)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
-        Ok(IronBase { db })
+        Ok(IronBase { db: Arc::new(db) })
     }
 
     /// Collection lekérése (ha nem létezik, létrehozza)
@@ -31,7 +69,11 @@ impl IronBase {
         let coll_core = self.db.collection(&name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        Ok(Collection { core: coll_core })
+        Ok(Collection {
+            core: coll_core,
+            db: Arc::clone(&self.db),
+            name: name.clone(),
+        })
     }
 
     /// Collection-ök listája
@@ -259,11 +301,18 @@ impl IronBase {
 #[pyclass]
 pub struct Collection {
     core: CollectionCore<StorageEngine>,
+    db: Arc<DatabaseCore<StorageEngine>>,
+    name: String,
 }
 
 #[pymethods]
 impl Collection {
-    /// Insert one document
+    /// Insert one document (respects database durability mode)
+    ///
+    /// This method automatically uses the database's durability mode:
+    /// - Safe mode: Auto-commits immediately (WAL + fsync)
+    /// - Batch mode: Batches and commits periodically
+    /// - Unsafe mode: No auto-commit (fast path)
     fn insert_one(&self, document: &PyDict) -> PyResult<PyObject> {
         let mut doc_map: HashMap<String, Value> = HashMap::new();
 
@@ -274,8 +323,8 @@ impl Collection {
             doc_map.insert(key_str, json_value);
         }
 
-        // Call core method
-        let inserted_id = self.core.insert_one(doc_map)
+        // Call database-level insert_one_safe (respects durability mode)
+        let inserted_id = self.db.insert_one_safe(&self.name, doc_map)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Eredmény visszaadása
