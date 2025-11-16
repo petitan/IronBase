@@ -18,6 +18,7 @@
 - ✅ **136 tests passing** - Comprehensive test coverage including ACD transactions (storage, query, document, aggregation, find, transactions, WAL, crash recovery, property-based, integration, benchmarks)
 - 🌐 **Multi-language support** - Rust core with language-specific bindings (Python, C# planned)
 - 🔒 **ACD Transactions** - Atomicity, Consistency, Durability with Write-Ahead Log and crash recovery (Python API ✅)
+- 🛡️ **Auto-commit Durability Modes** - Safe (ZERO data loss), Batch (bounded loss), Unsafe (manual checkpoint) - configurable per database
 
 ## 🎯 Célközönség
 
@@ -81,7 +82,14 @@ maturin build --release
 from ironbase import ironbase
 
 # Adatbázis megnyitása (létrehozza, ha nem létezik)
+# Default: Safe mode (ZERO data loss, auto-commit every operation)
 db = ironbase("myapp.mlite")
+
+# Vagy: Batch mode (high throughput, bounded data loss risk)
+# db = ironbase("myapp.mlite", durability="batch", batch_size=100)
+
+# Vagy: Unsafe mode (maximum performance, manual checkpoint required)
+# db = ironbase("myapp.mlite", durability="unsafe")
 
 # Collection lekérése
 users = db.collection("users")
@@ -127,6 +135,11 @@ db.close()
 # Adatbázis megnyitása
 db = ironbase("path/to/database.mlite")
 
+# Adatbázis megnyitása durability móddal
+db = ironbase("path/to/database.mlite", durability="safe")  # default
+db = ironbase("path/to/database.mlite", durability="batch", batch_size=100)
+db = ironbase("path/to/database.mlite", durability="unsafe")
+
 # Collection lekérése (létrehozza, ha nincs)
 collection = db.collection("collection_name")
 
@@ -139,9 +152,136 @@ db.drop_collection("collection_name")
 # Statisztikák
 stats = db.stats()
 
+# Manual checkpoint (csak Unsafe módban szükséges)
+db.checkpoint()
+
 # Bezárás
 db.close()
 ```
+
+### Durability Modes (Auto-Commit)
+
+ironbase három durability módot kínál, amelyek különböző kompromisszumokat kínálnak a teljesítmény és adatbiztonság között:
+
+#### 🛡️ Safe Mode (Default)
+
+**ZERO data loss guarantee** - Minden művelet azonnal commit-olva van WAL-lal + fsync.
+
+```python
+db = ironbase("myapp.mlite")  # Safe mode alapértelmezett
+# VAGY explicit:
+db = ironbase("myapp.mlite", durability="safe")
+
+users = db.collection("users")
+users.insert_one({"name": "Alice"})  # Azonnal perzisztálva
+# ⚡ Power failure → 0 adat veszteség
+```
+
+**Jellemzők:**
+- ✅ **ZERO data loss**: Minden művelet garantáltan megőrzött
+- ✅ **Auto-commit**: Minden insert/update/delete azonnal WAL-ba írva
+- ✅ **Crash recovery**: WAL replay automatikusan visszaállít minden műveletet
+- ⚠️ **Teljesítmény**: ~190 ops/sec (40% of unsafe, de BIZTONSÁGOS)
+
+**Használati esetek:**
+- 💰 Pénzügyi tranzakciók
+- 👤 Felhasználói fiókok/profilok
+- 🛒 E-commerce rendelések
+- 📝 Kritikus üzleti adatok
+
+#### ⚡ Batch Mode
+
+**Bounded data loss** - Műveletek kötegekben commit-olva, maximum `batch_size` művelet veszhet el.
+
+```python
+db = ironbase("myapp.mlite", durability="batch", batch_size=100)
+
+logs = db.collection("logs")
+for i in range(1000):
+    logs.insert_one({"event": f"Event {i}"})
+    # Minden 100. műveletnél automatikus flush
+
+# Manual flush (optional):
+db.checkpoint()  # Azonnal commit-ol minden függőben levő műveletet
+```
+
+**Jellemzők:**
+- ✅ **Bounded loss**: Maximum `batch_size` művelet veszhet el power failure esetén
+- ✅ **High throughput**: ~490 ops/sec (104% of unsafe! Batch gyorsabb!)
+- ✅ **Auto-flush**: Automatikus commit minden N. műveletnél
+- ⚠️ **Data loss risk**: Max `batch_size` műveletnél (pl. max 100 ops)
+
+**Használati esetek:**
+- 📊 Alkalmazás logok (batch_size=100-1000)
+- 📈 Analytics események (batch_size=1000-5000)
+- 🔍 Session tracking (batch_size=100-500)
+- 📡 Telemetria adatok
+
+#### 🚀 Unsafe Mode
+
+**Manual checkpoint required** - Nincs auto-commit, maximális teljesítmény, nagy adatvesztési kockázat.
+
+```python
+db = ironbase("myapp.mlite", durability="unsafe")
+
+temp = db.collection("staging")
+for i in range(10000):
+    temp.insert_one({"data": i})  # Gyors, de nem perzisztálva
+
+# KÖTELEZŐ: Manual checkpoint
+db.checkpoint()  # Most történik a WAL write + fsync
+
+# ⚡ Power failure checkpoint() előtt → MINDEN adat elveszhet
+```
+
+**Jellemzők:**
+- ❌ **HIGH data loss risk**: Minden adat elveszhet checkpoint() nélkül
+- ✅ **Maximum speed**: ~472 ops/sec baseline (de batch modes gyorsabbak!)
+- ⚠️ **Manual control**: Fejlesztő felelőssége a checkpoint() hívás
+- ✅ **Use case**: Temporary/staging data, ahol újrafuttatható az import
+
+**Használati esetek:**
+- 🔄 Temporary staging data (újrafuttatható import)
+- 🧪 Teszt/fejlesztési környezet
+- 📦 Bulk import (retry safe, újra lehet futtatni hiba esetén)
+- 🎯 Performance benchmarks
+
+#### 📊 Performance Comparison
+
+Benchmark eredmények (1000 dokumentum insert):
+
+| Mode        | Throughput (ops/sec) | Relative | Safety                   | Use Case                |
+|-------------|----------------------|----------|--------------------------|-------------------------|
+| **Safe**    | 190                  | 40%      | ✅ ZERO loss             | Production (critical)   |
+| **Batch-10**| 402                  | 85%      | ⚠️ Max 10 ops            | High-frequency logs     |
+| **Batch-100**| 489                 | 104%     | ⚠️ Max 100 ops           | **RECOMMENDED** (balance)|
+| **Batch-500**| 498                 | 105%     | ⚠️ Max 500 ops           | Analytics events        |
+| **Unsafe**  | 472                  | 100%     | ❌ HIGH risk             | Temp/staging only       |
+
+**Meglepő eredmény:** Batch modes (100, 500) GYORSABBAK mint az Unsafe mode! Ez a batch flushing optimalizációjának köszönhető.
+
+#### 🎯 Recommendations
+
+**Financial/Critical Data:**
+```python
+db = ironbase("production.mlite", durability="safe")  # ZERO data loss
+```
+
+**High-Throughput Logs:**
+```python
+db = ironbase("logs.mlite", durability="batch", batch_size=100)  # Best balance
+```
+
+**Temporary Staging:**
+```python
+db = ironbase("staging.mlite", durability="unsafe")
+# ... bulk operations ...
+db.checkpoint()  # Manual commit at the end
+```
+
+**Default Recommendation:** Use **Safe mode** for production data (like SQL databases). Only use Batch/Unsafe if you understand the trade-offs.
+
+**Részletes dokumentáció:** Lásd [DESIGN_AUTO_COMMIT.md](DESIGN_AUTO_COMMIT.md) a teljes tervezési döntésekért, algoritmusokért és benchmark eredményekért.
 
 ### Transactions (ACD)
 
