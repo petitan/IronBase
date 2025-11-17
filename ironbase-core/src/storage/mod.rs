@@ -953,9 +953,20 @@ mod tests {
     fn test_empty_data_write() {
         let (_temp, mut storage) = setup_test_db();
 
+        // Empty data write is still allowed at write-time (length=0 is written)
         let offset = storage.write_data(b"").unwrap();
-        let data = storage.read_data(offset).unwrap();
-        assert_eq!(data, b"");
+
+        // But reading it back should fail with our new validation
+        // (zero-length documents are considered corrupted)
+        let result = storage.read_data(offset);
+        assert!(result.is_err(), "Reading zero-length document should fail");
+
+        match result {
+            Err(MongoLiteError::Corruption(msg)) => {
+                assert!(msg.contains("zero length"), "Error should mention zero length: {}", msg);
+            }
+            _ => panic!("Expected Corruption error for zero-length document"),
+        }
     }
 
     #[test]

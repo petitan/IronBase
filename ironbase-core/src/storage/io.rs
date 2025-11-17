@@ -21,12 +21,49 @@ impl StorageEngine {
 
     /// Read data from specified offset
     pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
+        use crate::error::MongoLiteError;
+
+        // CRITICAL FIX: Validate offset is within file bounds BEFORE reading
+        // Prevents race condition where flush_metadata() truncates file while reading
+        let file_len = self.file.metadata()?.len();
+
+        if offset >= file_len {
+            return Err(MongoLiteError::Corruption(format!(
+                "Attempted to read at offset {} but file is only {} bytes (likely metadata truncation race)",
+                offset, file_len
+            )));
+        }
+
+        // Additional validation: Ensure we can read at least the length header (4 bytes)
+        if offset + 4 > file_len {
+            return Err(MongoLiteError::Corruption(format!(
+                "Insufficient space to read length header at offset {} (file: {} bytes)",
+                offset, file_len
+            )));
+        }
+
         self.file.seek(SeekFrom::Start(offset))?;
 
         // Méret olvasása
         let mut len_bytes = [0u8; 4];
         self.file.read_exact(&mut len_bytes)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
+
+        // Validate document length is sane
+        if len == 0 {
+            return Err(MongoLiteError::Corruption(format!(
+                "Document at offset {} has zero length (corrupted or truncated)",
+                offset
+            )));
+        }
+
+        // Validate we can read the full document
+        if offset + 4 + (len as u64) > file_len {
+            return Err(MongoLiteError::Corruption(format!(
+                "Document at offset {} claims length {} but would exceed file boundary (file: {} bytes)",
+                offset, len, file_len
+            )));
+        }
 
         // Adat olvasása
         let mut data = vec![0u8; len];

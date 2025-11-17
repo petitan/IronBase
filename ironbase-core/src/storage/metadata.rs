@@ -176,8 +176,18 @@ impl StorageEngine {
             super::HEADER_SIZE
         };
 
-        // Truncate file at metadata position to remove any old metadata
-        self.file.set_len(metadata_offset)?;
+        // CRITICAL FIX: DO NOT truncate file during metadata flush!
+        // Truncation causes race condition with concurrent reads:
+        // - If find() is reading documents while flush_metadata() truncates,
+        // - the read will fail with "Deserialization error" when trying to read
+        // - from offsets that are now beyond the truncated file length.
+        //
+        // SOLUTION: Write metadata at end of file WITHOUT truncating.
+        // Old metadata becomes garbage and will be cleaned up during compaction.
+        // This is safe because header.metadata_offset always points to the latest.
+        //
+        // OLD CODE (REMOVED - CAUSES RACE CONDITION):
+        // self.file.set_len(metadata_offset)?;
 
         // Seek to metadata write position
         self.file.seek(SeekFrom::Start(metadata_offset))?;
