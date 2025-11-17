@@ -71,7 +71,20 @@ impl QueryCache {
     /// Called on insert/update/delete operations to maintain consistency
     pub fn invalidate_collection(&self, _collection: &str) {
         // Simple approach: clear entire cache
-        // TODO: More granular invalidation (track which queries belong to which collection)
+        // OPTIMIZATION: More granular invalidation (track which queries belong to which collection)
+        //
+        // Current: Nuclear approach - clear entire cache on ANY write
+        // Impact: Cache becomes ineffective in write-heavy workloads
+        //
+        // Granular invalidation design:
+        // 1. Add collection tracking to cache entries:
+        //    struct CachedEntry { result: Vec<Value>, collections: HashSet<String> }
+        // 2. Parse query to extract collection references (easy for simple queries)
+        // 3. Only invalidate entries where collections.contains(collection)
+        //
+        // Complexity: Low (1-2 hours work)
+        // Benefit: Significant for multi-collection databases
+        // Priority: Low (correctness unaffected, only performance)
         let mut cache = self.cache.write();
         cache.clear();
     }

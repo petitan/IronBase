@@ -58,7 +58,26 @@ fn test_insert_with_index_maintenance() {
     collection.insert_one(fields1).unwrap();
     collection.insert_one(fields2).unwrap();
 
-    // TODO: Add index-based query test when query optimizer is implemented
+    // TEST ADDITION: Index-based query test (requires query optimizer)
+    //
+    // Current: Index is populated but never used by find()
+    // Missing: Query optimizer that routes queries to index.search()
+    //
+    // Test to add when optimizer is implemented:
+    //
+    // let results = collection.find(&json!({"age": {"$eq": 30}})).unwrap();
+    // assert_eq!(results.len(), 1);
+    // assert_eq!(results[0].get("name").unwrap().as_str().unwrap(), "Alice");
+    //
+    // Verify index was used (not full scan):
+    // let stats = collection.get_query_stats().unwrap();
+    // assert!(stats.index_used);
+    // assert_eq!(stats.documents_scanned, 1); // Not 2!
+    //
+    // Prerequisites:
+    // - Query optimizer implementation (IMPLEMENTATION_QUERY_OPTIMIZER.md)
+    // - Index child loading (index.rs:195 - commit 90045d8)
+    // - Query statistics tracking
 }
 
 #[test]

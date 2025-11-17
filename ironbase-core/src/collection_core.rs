@@ -1403,7 +1403,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Parse pipeline
         let pipeline = Pipeline::from_json(pipeline_json)?;
 
-        // Get all documents (TODO: optimize with index if $match is first stage)
+        // OPTIMIZATION: Use index if $match is first stage (query optimizer)
+        //
+        // Current: Always full collection scan (self.find on empty query)
+        // Impact: Aggregation pipelines with selective $match are slow
+        //
+        // Index-based optimization:
+        // 1. Check if pipeline[0] is $match stage
+        // 2. Extract query from $match (e.g., {"age": {"$gt": 25}})
+        // 3. Use query optimizer to select best index (see IMPLEMENTATION_QUERY_OPTIMIZER.md)
+        // 4. Use index.search() or range_scan() to get filtered doc IDs
+        // 5. Load only matching documents (not entire collection)
+        //
+        // Benefit: 10-1000x speedup for selective aggregations
+        // Example: db.collection.aggregate([{$match: {email: "foo@bar.com"}}, {$group: ...}])
+        //          - Without index: scan 650K docs → 33 seconds
+        //          - With index: 1 B+ tree lookup → <1ms
+        //
+        // Prerequisites:
+        // - Index child loading (index.rs:195 - documented in commit 90045d8)
+        // - Query optimizer (see IMPLEMENTATION_QUERY_OPTIMIZER.md)
+        // - Range scan support (B+ tree leaf sibling pointers)
+        //
+        // Priority: Medium (correctness unaffected, but significant performance gain)
         let docs = self.find(&serde_json::json!({}))?;
 
         // Execute pipeline

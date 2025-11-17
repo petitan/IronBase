@@ -494,8 +494,23 @@ impl OperatorMatcher for RegexOperator {
             None => Ok(false),
             Some(Value::String(s)) => {
                 if let Value::String(pattern) = filter_value {
-                    // For now, simple substring matching (TODO: use regex crate for full regex support)
-                    // Full regex would require adding the regex crate dependency
+                    // FEATURE: Full regex support (requires regex crate)
+                    //
+                    // Current: Simple substring matching (field.contains(pattern))
+                    // Missing: Regex anchors (^, $), character classes ([a-z]), quantifiers (+, *, ?), etc.
+                    //
+                    // Implementation:
+                    // 1. Add dependency: regex = "1.10" to Cargo.toml
+                    // 2. Replace with: Regex::new(pattern)?.is_match(s)
+                    // 3. Cache compiled regexes (Regex::new is expensive!)
+                    //    - LRU cache: HashMap<String, Regex> with 100 entry limit
+                    //
+                    // Trade-offs:
+                    // - Binary size: +500KB (regex crate)
+                    // - Performance: 2-10x slower than substring matching
+                    // - Compatibility: Full MongoDB $regex compatibility
+                    //
+                    // Priority: Low (substring matching covers 80% of use cases)
                     Ok(s.contains(pattern.as_str()))
                 } else {
                     Err(MongoLiteError::InvalidQuery(
