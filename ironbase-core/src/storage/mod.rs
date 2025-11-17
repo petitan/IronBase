@@ -348,7 +348,7 @@ impl StorageEngine {
         // - StorageEngine (this layer): Writes index changes to WAL
         // - CollectionCore/Database layer: Executes two-phase commit
         //
-        // TWO-PHASE COMMIT PROTOCOL (implemented in Steps 4-6):
+        // TWO-PHASE COMMIT PROTOCOL (API exists, but NOT CALLED):
         // Phase 1 (PREPARE): Create temp index files (.idx.tmp)
         //   - For each index: index.prepare_changes(base_path) → temp_path
         //   - WAL write (Step 2.5) makes changes durable
@@ -357,11 +357,35 @@ impl StorageEngine {
         //   - For each temp: BPlusTree::commit_prepared_changes(temp_path, final_path)
         //   - POSIX rename() guarantees atomicity
         //
-        // CRASH RECOVERY (implemented in Step 4):
+        // CRASH RECOVERY (would be implemented in Step 4):
         // - WAL recovery replays IndexChange entries
         // - Detects uncommitted temp files and cleans up
         //
         // TODO (Steps 4-6): Implement full two-phase commit at Database/CollectionCore level
+        //
+        // IMPLEMENTATION PLAN:
+        // 1. Add index_file_paths tracking to Transaction struct
+        // 2. In commit_transaction(), after Step 3 (WAL commit):
+        //    a) For each affected index: call prepare_changes() → collect temp_paths
+        //    b) Fsync all temp files
+        //    c) Atomically rename all temp → final (commit_prepared_changes())
+        //    d) On error: rollback_prepared_changes() for all temp files
+        // 3. Add crash recovery: scan for .idx.tmp files on database open
+        //    - If tx_id in WAL has COMMIT → complete the rename
+        //    - If tx_id has ROLLBACK or missing → delete temp files
+        //
+        // CURRENT STATE:
+        // - BPlusTree API fully implemented (see index.rs:419-476)
+        // - Index changes are durable via WAL (crash recoverable)
+        // - BUT: Index files NOT atomically committed (weak atomicity)
+        //
+        // IMPACT:
+        // - Transactions are ACD compliant (WAL ensures durability)
+        // - Index files may be slightly out-of-sync after crash (WAL replay fixes)
+        // - No correctness bugs (WAL is source of truth)
+        // - Minor: index reads after crash before WAL replay may be stale
+        //
+        // PRIORITY: Medium (nice-to-have, not critical for correctness)
 
         // Step 7: Apply metadata changes
         for metadata_change in transaction.metadata_changes() {
