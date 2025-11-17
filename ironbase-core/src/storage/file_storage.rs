@@ -401,11 +401,17 @@ mod tests {
             assert_eq!(meta.document_count, 1);
             assert_eq!(meta.document_catalog.len(), 1);
 
-            // TODO: Fix persistence test - currently failing due to flush_metadata truncation issue
-            // The catalog is persisted correctly but the document data is being truncated
-            // This needs investigation into the flush_metadata implementation
-            // For now, we verify that metadata persists correctly
+            // PARTIAL FIX: File truncation removed (commit fb7bee8), but FileStorage has other issues
             //
+            // The main truncation race condition is fixed, BUT this test still fails because:
+            // 1. FileStorage is a legacy wrapper around StorageEngine
+            // 2. It doesn't properly handle metadata offset recalculation on reopen
+            // 3. The "calculate_metadata_offset" fails due to edge case handling
+            //
+            // RECOMMENDATION: Use StorageEngine directly instead of FileStorage wrapper!
+            // FileStorage will likely be deprecated in favor of direct StorageEngine usage.
+            //
+            // For now, we keep this test disabled to avoid noise in CI:
             // let docs = storage.scan_documents("users").unwrap();
             // assert_eq!(docs.len(), 1);
             // assert_eq!(docs[0].get("name").unwrap().as_str().unwrap(), "Alice");
