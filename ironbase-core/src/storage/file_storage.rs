@@ -394,7 +394,7 @@ mod tests {
 
         // Reopen and verify
         {
-            let mut storage = FileStorage::open(&db_path).unwrap();
+            let storage = FileStorage::open(&db_path).unwrap();
             assert_eq!(storage.list_collections(), vec!["users"]);
 
             let meta = storage.get_collection_meta("users").unwrap();
