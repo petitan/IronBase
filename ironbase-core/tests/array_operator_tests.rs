@@ -1,13 +1,13 @@
 // array_operator_tests.rs
 // Comprehensive tests for array update operators: $push, $pull, $addToSet, $pop
 
-use ironbase_core::{DatabaseCore, Document};
+use ironbase_core::DatabaseCore;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 
 /// Helper to create a test database
-fn setup_test_db(name: &str) -> DatabaseCore {
+fn setup_test_db(name: &str) -> DatabaseCore<ironbase_core::storage::StorageEngine> {
     let path = format!("test_{}.mlite", name);
     let _ = fs::remove_file(&path); // Clean up if exists
     DatabaseCore::open(&path).expect("Failed to open database")
