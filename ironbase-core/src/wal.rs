@@ -222,7 +222,14 @@ impl WriteAheadLog {
     fn read_next_entry(&mut self) -> Result<WALEntry> {
         // Read header: 8 (tx_id) + 1 (type) + 4 (len) = 13 bytes
         let mut header = [0u8; 13];
-        self.file.read_exact(&mut header)?;
+        match self.file.read_exact(&mut header) {
+            Ok(_) => {},
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                // Empty file or end of entries - return EOF error
+                return Err(MongoLiteError::Io(e));
+            }
+            Err(e) => return Err(MongoLiteError::Io(e)),
+        }
 
         let tx_id = u64::from_le_bytes(header[0..8].try_into().unwrap());
         let entry_type = WALEntryType::from_u8(header[8])?;
