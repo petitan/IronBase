@@ -1768,11 +1768,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         for (doc_id, offset) in &catalog {
             match storage.read_data(*offset) {
                 Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // Skip tombstones (deleted documents)
-                    if !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
-                        docs_by_id.insert(doc_id.clone(), doc);
+                    // Try to deserialize JSON - skip if corrupt
+                    match serde_json::from_slice::<Value>(&doc_bytes) {
+                        Ok(doc) => {
+                            // Skip tombstones (deleted documents)
+                            if !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                docs_by_id.insert(doc_id.clone(), doc);
+                            }
+                        }
+                        Err(_) => continue, // Skip corrupted JSON
                     }
                 }
                 Err(_) => continue, // Skip corrupted entries

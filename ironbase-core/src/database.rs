@@ -15,6 +15,20 @@ use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use serde_json::Value;
 
+/// Internal trait to flush any pending batch buffers before metadata sync
+pub trait BatchFlush {
+    fn flush_pending_batch(&self) -> Result<()>;
+}
+
+impl BatchFlush for DatabaseCore<StorageEngine> {
+    fn flush_pending_batch(&self) -> Result<()> {
+        if matches!(self.durability_mode, DurabilityMode::Batch { .. }) {
+            self.flush_batch()?;
+        }
+        Ok(())
+    }
+}
+
 
 /// Convert transaction::IndexKey to index::IndexKey
 fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
@@ -312,6 +326,8 @@ impl DatabaseCore<StorageEngine> {
         for op in batch.iter() {
             auto_tx.add_operation(op.clone())?;
         }
+        // Operations in batch were already applied when enqueued
+        auto_tx.mark_operations_applied();
 
         // Commit (WAL + fsync)
         self.commit_auto_transaction(auto_tx)?;
@@ -383,6 +399,8 @@ impl DatabaseCore<StorageEngine> {
                     doc_id: doc_id.clone(),
                     doc: doc_value,
                 })?;
+                // The insert has already been applied; mark to avoid double-apply
+                auto_tx.mark_operations_applied();
 
                 // 4. Auto-commit (WAL write + fsync)
                 self.commit_auto_transaction(auto_tx)?;
@@ -480,7 +498,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     }
 
     /// Flush all changes to disk
-    pub fn flush(&self) -> Result<()> {
+    pub fn flush(&self) -> Result<()>
+    where
+        DatabaseCore<S>: BatchFlush,
+    {
+        // Ensure any pending batch operations are flushed before metadata sync
+        self.flush_pending_batch()?;
+
         let mut storage = self.storage.write();
         storage.flush()
     }

@@ -150,6 +150,9 @@ pub struct Transaction {
 
     /// Current state
     state: TransactionState,
+
+    /// Flag indicating operations were already applied (e.g., auto-commit fast path)
+    operations_applied: bool,
 }
 
 impl Transaction {
@@ -161,6 +164,7 @@ impl Transaction {
             index_changes: HashMap::new(),
             metadata_changes: Vec::new(),
             state: TransactionState::Active,
+            operations_applied: false,
         }
     }
 
@@ -202,6 +206,16 @@ impl Transaction {
         }
         self.metadata_changes.push(change);
         Ok(())
+    }
+
+    /// Mark that operations have already been applied to storage/indexes
+    pub fn mark_operations_applied(&mut self) {
+        self.operations_applied = true;
+    }
+
+    /// Check whether operations were applied outside the WAL commit
+    pub fn operations_applied(&self) -> bool {
+        self.operations_applied
     }
 
     /// Get all operations (for WAL writing)

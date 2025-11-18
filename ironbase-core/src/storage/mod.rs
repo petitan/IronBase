@@ -280,6 +280,8 @@ impl StorageEngine {
             return Err(MongoLiteError::TransactionCommitted);
         }
 
+        let already_applied = transaction.operations_applied();
+
         // Step 1: Write BEGIN marker to WAL
         let begin_entry = WALEntry::new(transaction.id, WALEntryType::Begin, vec![]);
         self.wal.append(&begin_entry)?;
@@ -338,7 +340,9 @@ impl StorageEngine {
         self.wal.flush()?;
 
         // Step 5: Apply operations to storage
-        self.apply_operations(transaction)?;
+        if !already_applied {
+            self.apply_operations(transaction)?;
+        }
 
         // Step 6: Two-Phase Commit for Index Changes
         // NOTE: Index changes are written to WAL in Step 2.5 above.
@@ -387,10 +391,12 @@ impl StorageEngine {
         //
         // PRIORITY: Medium (nice-to-have, not critical for correctness)
 
-        // Step 7: Apply metadata changes
-        for metadata_change in transaction.metadata_changes() {
-            if let Some(meta) = self.collections.get_mut(&metadata_change.collection) {
-                meta.last_id = metadata_change.last_id as u64;
+        // Step 7: Apply metadata changes (skip if already applied)
+        if !already_applied {
+            for metadata_change in transaction.metadata_changes() {
+                if let Some(meta) = self.collections.get_mut(&metadata_change.collection) {
+                    meta.last_id = metadata_change.last_id as u64;
+                }
             }
         }
 
@@ -579,7 +585,7 @@ impl Storage for StorageEngine {
         let doc_json = serde_json::to_string(doc)?;
 
         // Write using existing method
-        self.write_document(collection, &doc_id, doc_json.as_bytes())
+        StorageEngine::write_document(self, collection, &doc_id, doc_json.as_bytes())
     }
 
     fn read_document(&self, collection: &str, id: &DocumentId) -> Result<Option<serde_json::Value>> {
@@ -600,7 +606,7 @@ impl Storage for StorageEngine {
             &mut *mut_ptr
         };
 
-        let data = storage_mut.read_document_at(collection, offset)?;
+        let data = StorageEngine::read_document_at(storage_mut, collection, offset)?;
         let value: serde_json::Value = serde_json::from_slice(&data)?;
         Ok(Some(value))
     }
@@ -614,7 +620,7 @@ impl Storage for StorageEngine {
         let mut documents = Vec::new();
 
         for (_doc_id, &offset) in &catalog {
-            let data = self.read_document_at(collection, offset)?;
+            let data = StorageEngine::read_document_at(self, collection, offset)?;
             let doc_value: serde_json::Value = serde_json::from_slice(&data)?;
 
             // Skip tombstones
@@ -664,23 +670,23 @@ impl Storage for StorageEngine {
 
 impl RawStorage for StorageEngine {
     fn write_document_raw(&mut self, collection: &str, doc_id: &DocumentId, data: &[u8]) -> Result<u64> {
-        self.write_document(collection, doc_id, data)
+        StorageEngine::write_document(self, collection, doc_id, data)
     }
 
     fn read_document_at(&mut self, collection: &str, offset: u64) -> Result<Vec<u8>> {
-        self.read_document_at(collection, offset)
+        StorageEngine::read_document_at(self, collection, offset)
     }
 
     fn write_data(&mut self, data: &[u8]) -> Result<u64> {
-        self.write_data(data)
+        StorageEngine::write_data(self, data)
     }
 
     fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
-        self.read_data(offset)
+        StorageEngine::read_data(self, offset)
     }
 
     fn file_len(&self) -> Result<u64> {
-        self.file_len()
+        StorageEngine::file_len(self)
     }
 }
 
