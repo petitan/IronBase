@@ -26,12 +26,20 @@ from typing import Dict, Any
 
 # Configuration
 MCP_SERVER_URL = "http://localhost:8080/mcp"
-DEBUG = False  # Set to True for debugging
+DEBUG = True  # Set to True for debugging
 
 def log_debug(message: str):
     """Log debug message to stderr (won't interfere with stdout)"""
     if DEBUG:
         print(f"[MCP Bridge] {message}", file=sys.stderr, flush=True)
+        # Also log to file for debugging on Windows
+        try:
+            with open("C:\\Users\\Kalman\\Desktop\\mcp_bridge_debug.log", "a", encoding="utf-8") as f:
+                from datetime import datetime
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"[{timestamp}] {message}\n")
+        except:
+            pass  # Ignore file logging errors
 
 def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -272,7 +280,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
             log_debug(f"HTTP error: {response.status_code}")
             return {
                 "jsonrpc": "2.0",
-                "id": request.get("id"),
+                "id": request.get("id") if request.get("id") is not None else -1,
                 "error": {
                     "code": -32603,
                     "message": f"HTTP error {response.status_code}: {response.text}"
