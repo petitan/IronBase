@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "docjl-editor": {
+      "command": "/home/petitan/MongoLite/mcp-server/target/release/mcp-docjl-server",
+      "args": [],
+      "env": {
+        "DOCJL_CONFIG": "/home/petitan/MongoLite/mcp-server/config.toml",
+        "RUST_LOG": "info"
+      }
+    }
+  }
+}

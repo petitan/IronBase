@@ -5,7 +5,11 @@ pub mod domain;
 pub mod host;
 
 // Re-export main types for convenience
+#[cfg(not(feature = "real-ironbase"))]
 pub use adapters::IronBaseAdapter;
+
+#[cfg(feature = "real-ironbase")]
+pub use adapters::RealIronBaseAdapter as IronBaseAdapter;
 
 pub use domain::{
     Block, BlockType, Document, DocumentOperations, DomainError, DomainResult,

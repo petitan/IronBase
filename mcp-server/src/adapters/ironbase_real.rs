@@ -69,16 +69,25 @@ impl RealIronBaseAdapter {
         let mut cross_ref = self.cross_ref.write();
 
         // Process each document
-        for doc_json in docs_json {
+        for mut doc_json in docs_json {
+            // Convert integer _id to string if needed (IronBase uses integer IDs)
+            if let Some(id) = doc_json.get("_id") {
+                if let Some(id_num) = id.as_i64() {
+                    doc_json["_id"] = serde_json::json!(id_num.to_string());
+                }
+            }
+
             // Parse as DOCJL Document
             let doc: Document = serde_json::from_value(doc_json)
                 .map_err(|e| DomainError::StorageError {
                     message: format!("Failed to parse document: {}", e),
                 })?;
 
-            // Extract labels
+            // Extract labels (skip duplicates across documents)
             for label in doc.collect_labels() {
-                label_gen.register(&label)?;
+                if !label_gen.exists(&label) {
+                    label_gen.register(&label)?;
+                }
             }
 
             // Extract cross-references
@@ -116,7 +125,12 @@ impl RealIronBaseAdapter {
                 message: format!("Failed to get collection: {}", e),
             })?;
 
-        let query = serde_json::json!({"_id": document_id});
+        // Try to parse document_id as integer for IronBase query
+        let id_value = document_id.parse::<i64>()
+            .map(|n| serde_json::json!(n))
+            .unwrap_or_else(|_| serde_json::json!(document_id));
+
+        let query = serde_json::json!({"_id": id_value});
         let docs = collection.find(&query)
             .map_err(|e| DomainError::StorageError {
                 message: format!("Failed to find document: {}", e),
@@ -128,7 +142,16 @@ impl RealIronBaseAdapter {
             });
         }
 
-        let doc: Document = serde_json::from_value(docs[0].clone())
+        let mut doc_json = docs[0].clone();
+
+        // Convert integer _id to string if needed (IronBase uses integer IDs)
+        if let Some(id) = doc_json.get("_id") {
+            if let Some(id_num) = id.as_i64() {
+                doc_json["_id"] = serde_json::json!(id_num.to_string());
+            }
+        }
+
+        let doc: Document = serde_json::from_value(doc_json)
             .map_err(|e| DomainError::StorageError {
                 message: format!("Failed to parse document: {}", e),
             })?;
@@ -175,7 +198,14 @@ impl RealIronBaseAdapter {
             })?;
 
         let mut documents = Vec::new();
-        for doc_json in docs_json {
+        for mut doc_json in docs_json {
+            // Convert integer _id to string if needed (IronBase uses integer IDs)
+            if let Some(id) = doc_json.get("_id") {
+                if let Some(id_num) = id.as_i64() {
+                    doc_json["_id"] = serde_json::json!(id_num.to_string());
+                }
+            }
+
             let doc: Document = serde_json::from_value(doc_json)
                 .map_err(|e| DomainError::StorageError {
                     message: format!("Failed to parse document: {}", e),

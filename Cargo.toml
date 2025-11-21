@@ -4,6 +4,9 @@ members = [
     "ironbase-core",
     "bindings/python",
 ]
+exclude = [
+    "mcp-server",
+]
 
 [workspace.package]
 version = "0.2.0"

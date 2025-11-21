@@ -1,0 +1,123 @@
+=== Crash/WAL Stress Test ===
+Database path : stress_crash.mlite
+Commit ops    : 500
+Crash ops     : 150
+Iterations    : 50
+
+Iteration 01 - mode: COMMIT
+  Documents in DB: 500, expected: 500
+  ✓ State consistent
+Iteration 02 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 500, expected: 500
+  ✓ State consistent
+Iteration 03 - mode: COMMIT
+  Documents in DB: 1000, expected: 1000
+  ✓ State consistent
+Iteration 04 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 1000, expected: 1000
+  ✓ State consistent
+Iteration 05 - mode: COMMIT
+  Documents in DB: 1500, expected: 1500
+  ✓ State consistent
+Iteration 06 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 1500, expected: 1500
+  ✓ State consistent
+Iteration 07 - mode: COMMIT
+  Documents in DB: 2000, expected: 2000
+  ✓ State consistent
+Iteration 08 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 2000, expected: 2000
+  ✓ State consistent
+Iteration 09 - mode: COMMIT
+  Documents in DB: 2500, expected: 2500
+  ✓ State consistent
+Iteration 10 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 2500, expected: 2500
+  ✓ State consistent
+Iteration 11 - mode: COMMIT
+  Documents in DB: 3000, expected: 3000
+  ✓ State consistent
+Iteration 12 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 3000, expected: 3000
+  ✓ State consistent
+Iteration 13 - mode: COMMIT
+  Documents in DB: 3500, expected: 3500
+  ✓ State consistent
+Iteration 14 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 3500, expected: 3500
+  ✓ State consistent
+Iteration 15 - mode: COMMIT
+  Documents in DB: 4000, expected: 4000
+  ✓ State consistent
+Iteration 16 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 4000, expected: 4000
+  ✓ State consistent
+Iteration 17 - mode: COMMIT
+  Documents in DB: 4500, expected: 4500
+  ✓ State consistent
+Iteration 18 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 4500, expected: 4500
+  ✓ State consistent
+Iteration 19 - mode: COMMIT
+  Documents in DB: 5000, expected: 5000
+  ✓ State consistent
+Iteration 20 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 5000, expected: 5000
+  ✓ State consistent
+Iteration 21 - mode: COMMIT
+  Documents in DB: 5500, expected: 5500
+  ✓ State consistent
+Iteration 22 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 5500, expected: 5500
+  ✓ State consistent
+Iteration 23 - mode: COMMIT
+  Documents in DB: 6000, expected: 6000
+  ✓ State consistent
+Iteration 24 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 6000, expected: 6000
+  ✓ State consistent
+Iteration 25 - mode: COMMIT
+  Documents in DB: 6500, expected: 6500
+  ✓ State consistent
+Iteration 26 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 6500, expected: 6500
+  ✓ State consistent
+Iteration 27 - mode: COMMIT
+  Documents in DB: 7000, expected: 7000
+  ✓ State consistent
+Iteration 28 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 7000, expected: 7000
+  ✓ State consistent
+Iteration 29 - mode: COMMIT
+  Documents in DB: 7500, expected: 7500
+  ✓ State consistent
+Iteration 30 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 7500, expected: 7500
+  ✓ State consistent
+Iteration 31 - mode: COMMIT
+  Documents in DB: 8000, expected: 8000
+  ✓ State consistent
+Iteration 32 - mode: CRASH
+  ⚡ Worker killed to simulate crash
+  Documents in DB: 8000, expected: 8000
+  ✓ State consistent
+Iteration 33 - mode: COMMIT
+  Documents in DB: 2400, expected: 8500
+  ✗ MISMATCH – possible WAL/catalog bug!
+
+Cleaning up...
