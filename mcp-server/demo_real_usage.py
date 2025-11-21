@@ -44,19 +44,25 @@ class DOCJLClient:
 
     def get_outline(self, doc_id: str) -> List[Dict[str, Any]]:
         """Get document outline"""
-        return self._call("mcp_docjl_list_headings", {"document_id": doc_id})
+        result = self._call("mcp_docjl_list_headings", {"document_id": doc_id})
+        return result.get("outline", [])
 
     def insert_block(self, doc_id: str, block_type: str, content: Any,
                      position: str = "end", label: str = None) -> Dict[str, Any]:
         """Insert new block"""
-        params = {
-            "document_id": doc_id,
-            "block_type": block_type,
-            "content": content,
-            "position": position
+        # Build the block object
+        block = {
+            "type": block_type,
+            "content": content
         }
         if label:
-            params["label"] = label
+            block["label"] = label
+
+        params = {
+            "document_id": doc_id,
+            "block": block,
+            "position": position
+        }
         return self._call("mcp_docjl_insert_block", params)
 
     def search_blocks(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -98,7 +104,8 @@ class DOCJLClient:
 
     def get_audit_log(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Get audit log"""
-        return self._call("mcp_docjl_get_audit_log", {"limit": limit})
+        result = self._call("mcp_docjl_get_audit_log", {"limit": limit})
+        return result.get("entries", [])
 
 
 def print_section(title: str):
@@ -163,47 +170,63 @@ def demo_scenario_2_editing(client: DOCJLClient, doc_id: str):
     )
     print(f"✅ Inserted block: {result.get('affected_labels', [])}")
 
-    # Insert requirement
-    print("\n2. Insert new requirement block...")
+    # Insert heading
+    print("\n2. Insert new heading...")
+    # Build complete heading block with level
+    heading_block = {
+        "type": "heading",
+        "level": 2,
+        "content": [{"type": "text", "content": "Performance Requirements"}],
+        "label": "sec:3"
+    }
+    result = client._call("mcp_docjl_insert_block", {
+        "document_id": doc_id,
+        "block": heading_block,
+        "position": "end"
+    })
+    heading_label = result.get('affected_labels', [{}])[0].get('new_label', 'sec:3')
+    print(f"✅ Inserted heading: {heading_label}")
+
+    # Insert paragraph under heading
+    print("\n3. Insert requirement paragraph...")
     result = client.insert_block(
         doc_id=doc_id,
-        block_type="requirement",
-        content={
-            "id": "REQ-001",
-            "text": "The system shall respond within 200ms",
-            "priority": "HIGH"
-        },
+        block_type="paragraph",
+        content=[
+            {"type": "text", "content": "REQ-001: The system shall respond within "},
+            {"type": "bold", "content": "200ms"},
+            {"type": "text", "content": " (Priority: HIGH)"}
+        ],
         position="end"
     )
-    req_label = result.get('affected_labels', [{}])[0].get('new_label', 'unknown')
-    print(f"✅ Inserted requirement: {req_label}")
+    para_label = result.get('affected_labels', [{}])[0].get('new_label', 'unknown')
+    print(f"✅ Inserted requirement: {para_label}")
 
-    # Update the requirement
-    print("\n3. Update requirement label...")
-    result = client.update_block(
-        doc_id=doc_id,
-        block_label=req_label,
-        updates={"label": "req:performance-001"}
-    )
-    print(f"✅ Updated label: {result.get('affected_labels', [])}")
-
-    return req_label
+    return para_label
 
 
-def demo_scenario_3_search(client: DOCJLClient):
+def demo_scenario_3_search(client: DOCJLClient, doc_id: str):
     """Scenario 3: Content Search & Discovery"""
     print_section("SCENARIO 3: Content Search & Discovery")
 
     # Search by type
-    print("\n1. Search for all paragraphs...")
-    results = client.search_blocks({"block_type": "paragraph"})
-    print(f"Found {len(results)} paragraphs across all documents")
+    print(f"\n1. Search for all paragraphs in document {doc_id}...")
+    results = client._call("mcp_docjl_search_blocks", {
+        "document_id": doc_id,
+        "query": {"type": "paragraph"}
+    })
+    blocks = results.get("results", [])
+    print(f"Found {len(blocks)} paragraphs")
 
     # Search by content (if implemented)
-    print("\n2. Search for blocks mentioning 'requirement'...")
+    print(f"\n2. Search for blocks mentioning 'requirement' in document {doc_id}...")
     try:
-        results = client.search_blocks({"content_contains": "requirement"})
-        print(f"Found {len(results)} blocks mentioning 'requirement'")
+        results = client._call("mcp_docjl_search_blocks", {
+            "document_id": doc_id,
+            "query": {"content_contains": "requirement"}
+        })
+        blocks = results.get("results", [])
+        print(f"Found {len(blocks)} blocks mentioning 'requirement'")
     except Exception as e:
         print(f"⚠️  Content search not fully implemented: {e}")
 
@@ -269,7 +292,7 @@ def main():
             return
 
         req_label = demo_scenario_2_editing(client, doc_id)
-        demo_scenario_3_search(client)
+        demo_scenario_3_search(client, doc_id)
         demo_scenario_4_validation(client, doc_id)
         demo_scenario_5_cleanup(client, doc_id, req_label)
 
