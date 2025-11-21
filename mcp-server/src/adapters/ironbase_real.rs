@@ -167,13 +167,22 @@ impl RealIronBaseAdapter {
                 message: format!("Failed to get collection: {}", e),
             })?;
 
-        let doc_value = serde_json::to_value(document)
+        // Serialize document to JSON
+        let mut doc_value = serde_json::to_value(document)
             .map_err(|e| DomainError::StorageError {
                 message: format!("Failed to serialize document: {}", e),
             })?;
 
-        // Upsert document
-        let query = serde_json::json!({"_id": document.id});
+        // Convert string _id to integer for IronBase
+        let id_int = document.id.parse::<i64>()
+            .map_err(|_| DomainError::StorageError {
+                message: format!("Invalid document ID format: {}", document.id),
+            })?;
+
+        doc_value["_id"] = serde_json::json!(id_int);
+
+        // Use IronBase update_one with $set operator to replace document
+        let query = serde_json::json!({"_id": id_int});
         let update = serde_json::json!({"$set": doc_value});
 
         collection.update_one(&query, &update)

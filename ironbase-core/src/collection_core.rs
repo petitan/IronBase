@@ -381,12 +381,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let meta = storage.get_collection_meta_mut(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        // ID generálás
-        let doc_id = DocumentId::new_auto(meta.last_id);
-        meta.last_id += 1;
+        // Check if _id already exists in fields
+        let doc_id = if let Some(existing_id) = fields.get("_id") {
+            // Use existing _id from fields
+            serde_json::from_value(existing_id.clone())
+                .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?
+        } else {
+            // Auto-generate new _id
+            let new_id = DocumentId::new_auto(meta.last_id);
+            meta.last_id += 1;
 
-        // Add _id to fields for query matching (From<Document> will not duplicate it)
-        fields.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+            // Add _id to fields for query matching
+            fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
+            new_id
+        };
 
         // Add _collection field for multi-collection isolation
         fields.insert("_collection".to_string(), Value::String(self.name.clone()));
