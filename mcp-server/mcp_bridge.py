@@ -26,7 +26,7 @@ from typing import Dict, Any
 
 # Configuration
 MCP_SERVER_URL = "http://localhost:8080/mcp"
-DEBUG = True  # Set to True for debugging
+DEBUG = False  # Set to True for debugging
 
 def log_debug(message: str):
     """Log debug message to stderr (won't interfere with stdout)"""
