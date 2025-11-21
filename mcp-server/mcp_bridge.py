@@ -194,9 +194,23 @@ def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
                             ]
                         }
                     }
+                elif "error" in backend_result:
+                    # Backend returned error - ensure proper format
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": backend_result["error"]
+                    }
                 else:
-                    # Backend returned error
-                    return backend_result
+                    # Unknown backend response
+                    return {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {
+                            "code": -32603,
+                            "message": f"Unexpected backend response: {json.dumps(backend_result)}"
+                        }
+                    }
             else:
                 return {
                     "jsonrpc": "2.0",
@@ -269,7 +283,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug(f"JSON decode error: {e}")
         return {
             "jsonrpc": "2.0",
-            "id": None,
+            "id": -1,  # Use -1 instead of None for parse errors (no valid request ID available)
             "error": {
                 "code": -32700,
                 "message": f"Parse error: {str(e)}"
@@ -279,7 +293,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug("Connection error - is WSL server running?")
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id") if 'request' in locals() else None,
+            "id": request.get("id") if 'request' in locals() else -1,
             "error": {
                 "code": -32603,
                 "message": "Cannot connect to WSL server at http://localhost:8080. Is the server running?"
@@ -289,7 +303,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug("Request timeout")
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id") if 'request' in locals() else None,
+            "id": request.get("id") if 'request' in locals() else -1,
             "error": {
                 "code": -32603,
                 "message": "Request timeout (30s)"
@@ -299,7 +313,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug(f"Unexpected error: {e}")
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id") if 'request' in locals() else None,
+            "id": request.get("id") if 'request' in locals() else -1,
             "error": {
                 "code": -32603,
                 "message": f"Internal error: {str(e)}"
