@@ -1,0 +1,61 @@
+[package]
+name = "mcp-docjl-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["PeTitan Kft."]
+description = "MCP server for AI-assisted DOCJL document editing"
+license = "MIT"
+
+[dependencies]
+# Core dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.35", features = ["full"] }
+parking_lot = "0.12"
+
+# HTTP and JSON-RPC (using older compatible versions)
+axum = "0.6"
+tower = "0.4"
+tower-http = { version = "0.4", features = ["trace", "cors"] }
+hyper = { version = "0.14", features = ["full"] }
+
+# Date/time and UUIDs
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# Configuration
+toml = "0.7"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Random (for audit IDs and security)
+rand = "0.8"
+
+# IronBase integration
+ironbase-core = { path = "../ironbase-core" }
+
+# Schema validation (optional - for JSON schema support)
+jsonschema = { version = "0.17", optional = true }
+
+[dev-dependencies]
+tempfile = "3.8"
+mockito = "1.2"
+
+[features]
+default = []
+real-ironbase = []
+json-schema = ["jsonschema"]
+
+[[bin]]
+name = "mcp-docjl-server"
+path = "src/main.rs"
+
+[lib]
+name = "mcp_docjl"
+path = "src/lib.rs"
