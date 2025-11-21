@@ -122,13 +122,22 @@ def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
                     },
                     {
                         "name": "mcp_docjl_insert_block",
-                        "description": "Insert new content block into document",
+                        "description": "Insert new content block into document. Label format: 'type:number' (e.g. para:1, sec:2). Use next available number for the type.",
                         "inputSchema": {
                             "type": "object",
                             "properties": {
-                                "document_id": {"type": "string"},
-                                "block": {"type": "object"},
-                                "position": {"type": "string"}
+                                "document_id": {"type": "string", "description": "Document ID (as string)"},
+                                "block": {
+                                    "type": "object",
+                                    "description": "Block to insert with type, label (format: 'type:number' like 'para:1'), and content array",
+                                    "properties": {
+                                        "type": {"type": "string", "enum": ["paragraph", "heading"], "description": "Block type"},
+                                        "label": {"type": "string", "pattern": "^(para|sec|fig|tbl|eq|lst|def|thm|lem|proof|ex|note|warn|info|tip):([0-9]+)$", "description": "Label in format 'type:number' (e.g. para:1, sec:2)"},
+                                        "content": {"type": "array", "description": "Content array with {type, content} objects"}
+                                    },
+                                    "required": ["type", "label", "content"]
+                                },
+                                "position": {"type": "string", "description": "Insert position: 'start', 'end', or 'before:label' / 'after:label'"}
                             },
                             "required": ["document_id", "block"]
                         }
