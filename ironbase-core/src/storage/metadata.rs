@@ -94,8 +94,11 @@ impl StorageEngine {
         writer.seek(SeekFrom::Start(0))?;
 
         // Header kiírása
-        let header_bytes = bincode::serialize(header)
+        let mut header_bytes = bincode::serialize(header)
             .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+        if header_bytes.len() < super::HEADER_SIZE as usize {
+            header_bytes.resize(super::HEADER_SIZE as usize, 0);
+        }
         writer.write_all(&header_bytes)?;
 
         // Collection metaadatok kiírása
@@ -138,10 +141,12 @@ impl StorageEngine {
         // Documents are written starting at HEADER_SIZE, we need to find where they end
 
         // Find the highest offset in all document catalogs
-        let mut max_doc_offset: u64 = super::HEADER_SIZE;
+        let mut max_doc_offset: u64 = 0;
+        let mut has_documents = false;
 
         for coll_meta in self.collections.values() {
-            for &doc_offset in coll_meta.document_catalog.values() {
+            for (_, &doc_offset) in &coll_meta.document_catalog {
+                has_documents = true;
                 if doc_offset > max_doc_offset {
                     max_doc_offset = doc_offset;
                 }
@@ -154,26 +159,21 @@ impl StorageEngine {
             && self.header.metadata_offset >= super::HEADER_SIZE
             && self.header.metadata_offset <= file_len
         {
-            // Metadata already written - reuse existing location if documents haven't changed
-            // Check if max_doc_offset is before existing metadata (no new documents past metadata)
-            if max_doc_offset < self.header.metadata_offset {
-                // Safe to reuse existing metadata location
-                self.header.metadata_offset
+            if self.metadata_dirty {
+                if has_documents {
+                    Self::calculate_metadata_offset(&mut self.file, max_doc_offset, file_len)?
+                } else {
+                    file_len.max(super::HEADER_SIZE)
+                }
             } else {
-                // Documents were added after metadata - recalculate
-                // This shouldn't happen in normal operation but handle it anyway
-                crate::log_warn!(
-                    "Documents found after metadata (max_doc: {}, metadata: {}), recalculating",
-                    max_doc_offset, self.header.metadata_offset
-                );
-                Self::calculate_metadata_offset(&mut self.file, max_doc_offset, file_len)?
+                self.header.metadata_offset
             }
-        } else if max_doc_offset > super::HEADER_SIZE {
+        } else if has_documents {
             // No existing metadata or invalid - calculate from last document
             Self::calculate_metadata_offset(&mut self.file, max_doc_offset, file_len)?
         } else {
-            // No documents yet - metadata right after header
-            super::HEADER_SIZE
+            // No documents yet - append metadata after current data (at least HEADER_SIZE)
+            file_len.max(super::HEADER_SIZE)
         };
 
         // CRITICAL FIX: DO NOT truncate file during metadata flush!
@@ -206,6 +206,7 @@ impl StorageEngine {
         self.file.write_all(&header_bytes)?;
 
         self.file.sync_all()?;
+        self.metadata_dirty = false;
 
         Ok(())
     }

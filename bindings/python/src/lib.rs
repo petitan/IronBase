@@ -81,6 +81,22 @@ impl IronBase {
         Ok(self.db.list_collections())
     }
 
+    /// Set or clear JSON schema for a collection (optional)
+    ///
+    /// Args:
+    ///     name (str): Collection name
+    ///     schema (dict or None): JSON schema definition
+    fn set_collection_schema(&self, name: String, schema: Option<&PyDict>) -> PyResult<()> {
+        let schema_json = match schema {
+            Some(dict) => Some(python_dict_to_json_value(dict)?),
+            None => None,
+        };
+
+        self.db
+            .set_collection_schema(&name, schema_json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
     /// Collection törlése
     fn drop_collection(&self, name: String) -> PyResult<()> {
         self.db.drop_collection(&name)
@@ -307,6 +323,18 @@ pub struct Collection {
 
 #[pymethods]
 impl Collection {
+    /// Set or clear JSON schema for this collection
+    fn set_schema(&self, schema: Option<&PyDict>) -> PyResult<()> {
+        let schema_json = match schema {
+            Some(dict) => Some(python_dict_to_json_value(dict)?),
+            None => None,
+        };
+
+        self.core
+            .set_schema(schema_json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
     /// Insert one document (respects database durability mode)
     ///
     /// This method automatically uses the database's durability mode:

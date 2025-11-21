@@ -117,7 +117,7 @@ impl Storage for FileStorage {
         Ok(offset)
     }
 
-    fn read_document(&self, collection: &str, id: &DocumentId) -> Result<Option<Value>> {
+    fn read_document(&mut self, collection: &str, id: &DocumentId) -> Result<Option<Value>> {
         // Get collection metadata to access catalog
         let meta = match self.inner.get_collection_meta(collection) {
             Some(m) => m,
@@ -130,16 +130,8 @@ impl Storage for FileStorage {
             None => return Ok(None), // Document not found
         };
 
-        // Read document data from file
-        // SAFETY: We need mutable access to StorageEngine for I/O, but we're not mutating state
-        // This is safe because read_data only seeks/reads the file
-        let storage_mut = unsafe {
-            let const_ptr = &self.inner as *const StorageEngine;
-            let mut_ptr = const_ptr as *mut StorageEngine;
-            &mut *mut_ptr
-        };
-
-        let data = storage_mut.read_document_at(collection, offset)?;
+        // Read document data from file (now we can use &mut self directly!)
+        let data = self.inner.read_document_at(collection, offset)?;
 
         // Deserialize JSON
         let doc_value: Value = serde_json::from_slice(&data)
@@ -219,6 +211,14 @@ impl Storage for FileStorage {
 
     fn checkpoint(&mut self) -> Result<()> {
         self.inner.checkpoint()
+    }
+
+    fn adjust_live_count(&mut self, collection: &str, delta: i64) {
+        self.inner.adjust_live_count(collection, delta);
+    }
+
+    fn get_live_count(&self, collection: &str) -> Option<u64> {
+        self.inner.get_live_count(collection)
     }
 }
 
@@ -452,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_read_from_nonexistent_collection() {
-        let (_temp, storage) = setup_test_storage();
+        let (_temp, mut storage) = setup_test_storage();
 
         let doc = storage.read_document("nonexistent", &DocumentId::Int(1)).unwrap();
         assert!(doc.is_none());

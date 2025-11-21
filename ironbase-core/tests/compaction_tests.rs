@@ -1,5 +1,6 @@
 // Storage compaction tests
 use ironbase_core::{StorageEngine, Document, DocumentId};
+use ironbase_core::storage::RawStorage;
 use serde_json::json;
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -18,7 +19,7 @@ fn test_compaction_removes_tombstones() {
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         let doc = Document::new(DocumentId::Int(i as i64), fields);
         let doc_json = doc.to_json().unwrap();
-        storage.write_data(doc_json.as_bytes()).unwrap();
+        storage.write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes()).unwrap();
     }
 
     // Mark half as tombstones (simulate deletes)
@@ -29,7 +30,7 @@ fn test_compaction_removes_tombstones() {
         fields.insert("_collection".to_string(), json!("users"));
         let doc = Document::new(DocumentId::Int(i as i64), fields);
         let doc_json = doc.to_json().unwrap();
-        storage.write_data(doc_json.as_bytes()).unwrap();
+        storage.write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes()).unwrap();
     }
 
     storage.flush().unwrap();
@@ -63,7 +64,7 @@ fn test_compaction_preserves_live_documents() {
         fields.insert("_collection".to_string(), json!("items"));
         let doc = Document::new(DocumentId::Int(i as i64), fields);
         let doc_json = doc.to_json().unwrap();
-        storage.write_data(doc_json.as_bytes()).unwrap();
+        storage.write_document_raw("items", &DocumentId::Int(i as i64), doc_json.as_bytes()).unwrap();
         expected_ids.push(i);
     }
 
@@ -117,14 +118,16 @@ fn test_compaction_multi_collection() {
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("_collection".to_string(), json!("users"));
         let doc = Document::new(DocumentId::Int(i as i64), fields);
-        storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+        let doc_json = doc.to_json().unwrap();
+        storage.write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes()).unwrap();
 
         // Posts
         let mut fields = HashMap::new();
         fields.insert("title".to_string(), json!(format!("Post{}", i)));
         fields.insert("_collection".to_string(), json!("posts"));
         let doc = Document::new(DocumentId::Int(i as i64), fields);
-        storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+        let doc_json = doc.to_json().unwrap();
+        storage.write_document_raw("posts", &DocumentId::Int(i as i64), doc_json.as_bytes()).unwrap();
     }
 
     // Delete some from users (tombstones)
@@ -133,7 +136,8 @@ fn test_compaction_multi_collection() {
         fields.insert("_tombstone".to_string(), json!(true));
         fields.insert("_collection".to_string(), json!("users"));
         let doc = Document::new(DocumentId::Int(i as i64), fields);
-        storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+        let doc_json = doc.to_json().unwrap();
+        storage.write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes()).unwrap();
     }
 
     storage.flush().unwrap();
@@ -156,10 +160,11 @@ fn test_compaction_handles_updates() {
 
     // Insert document
     let mut fields = HashMap::new();
-    fields.insert("value".to_string(), json!(100));
-    fields.insert("_collection".to_string(), json!("data"));
-    let doc = Document::new(DocumentId::Int(1), fields);
-    storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+        fields.insert("value".to_string(), json!(100));
+        fields.insert("_collection".to_string(), json!("data"));
+        let doc = Document::new(DocumentId::Int(1), fields);
+        let doc_json = doc.to_json().unwrap();
+        storage.write_document_raw("data", &DocumentId::Int(1), doc_json.as_bytes()).unwrap();
 
     // Update it 5 times (creates old versions)
     for i in 2..=6 {
@@ -167,7 +172,8 @@ fn test_compaction_handles_updates() {
         fields.insert("value".to_string(), json!(i * 100));
         fields.insert("_collection".to_string(), json!("data"));
         let doc = Document::new(DocumentId::Int(1), fields);
-        storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+        let doc_json = doc.to_json().unwrap();
+        storage.write_document_raw("data", &DocumentId::Int(1), doc_json.as_bytes()).unwrap();
     }
 
     storage.flush().unwrap();
@@ -201,7 +207,8 @@ fn test_compaction_stats() {
         fields.insert("data".to_string(), json!(vec![0u8; 100])); // 100 bytes each
         fields.insert("_collection".to_string(), json!("test"));
         let doc = Document::new(DocumentId::Int(i), fields);
-        storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+        let doc_json = doc.to_json().unwrap();
+        storage.write_document_raw("test", &DocumentId::Int(i), doc_json.as_bytes()).unwrap();
     }
 
     // Mark 50 as tombstones
@@ -210,7 +217,8 @@ fn test_compaction_stats() {
         fields.insert("_tombstone".to_string(), json!(true));
         fields.insert("_collection".to_string(), json!("test"));
         let doc = Document::new(DocumentId::Int(i), fields);
-        storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+        let doc_json = doc.to_json().unwrap();
+        storage.write_document_raw("test", &DocumentId::Int(i), doc_json.as_bytes()).unwrap();
     }
 
     storage.flush().unwrap();
@@ -244,7 +252,8 @@ fn test_compaction_persistence() {
             fields.insert("id".to_string(), json!(i));
             fields.insert("_collection".to_string(), json!("items"));
             let doc = Document::new(DocumentId::Int(i), fields);
-            storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+            let doc_json = doc.to_json().unwrap();
+            storage.write_document_raw("items", &DocumentId::Int(i), doc_json.as_bytes()).unwrap();
         }
 
         // Mark half as deleted
@@ -253,7 +262,8 @@ fn test_compaction_persistence() {
             fields.insert("_tombstone".to_string(), json!(true));
             fields.insert("_collection".to_string(), json!("items"));
             let doc = Document::new(DocumentId::Int(i), fields);
-            storage.write_data(doc.to_json().unwrap().as_bytes()).unwrap();
+            let doc_json = doc.to_json().unwrap();
+            storage.write_document_raw("items", &DocumentId::Int(i), doc_json.as_bytes()).unwrap();
         }
 
         storage.compact().unwrap();

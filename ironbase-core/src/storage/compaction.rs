@@ -93,6 +93,7 @@ impl StorageEngine {
             coll_meta.data_offset = super::HEADER_SIZE;  // Version 2: no reserved space
             coll_meta.document_catalog.clear();
             coll_meta.document_count = 0;
+            coll_meta.live_document_count = 0;
         }
 
         // Write header only (no metadata yet - documents start at HEADER_SIZE)
@@ -292,6 +293,7 @@ impl StorageEngine {
             if let Some(coll_meta) = new_collections.get_mut(coll_name) {
                 coll_meta.document_catalog.insert(doc_id.clone(), doc_offset);
                 coll_meta.document_count += 1;
+                coll_meta.live_document_count = coll_meta.live_document_count.saturating_add(1);
             }
         }
 

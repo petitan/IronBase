@@ -33,6 +33,9 @@ pub enum MongoLiteError {
     #[error("Aggregation error: {0}")]
     AggregationError(String),
 
+    #[error("Schema validation error: {0}")]
+    SchemaError(String),
+
     #[error("Transaction already committed or aborted")]
     TransactionCommitted,
 

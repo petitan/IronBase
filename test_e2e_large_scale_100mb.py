@@ -126,12 +126,22 @@ def test_large_scale_insert():
     print(f"  Total documents: {total_inserted:,}")
     print(f"  Database size: {format_size(final_size)}")
     print(f"  Total time: {total_elapsed:.2f}s")
+
+    print("\nCreating baseline indexes (category, price, stock)...")
+    idx_category = products.create_index("category", unique=False)
+    idx_price = products.create_index("price", unique=False)
+    idx_stock = products.create_index("stock", unique=False)
+    print(f"  ✓ Indexes ready: {idx_category}, {idx_price}, {idx_stock}")
     print(f"  Average speed: {total_inserted/total_elapsed:.0f} docs/sec")
     print(f"  Average throughput: {final_size/(1024*1024)/total_elapsed:.2f} MB/sec")
 
-    return db, products, total_inserted
+    return db, products, total_inserted, {
+        "category": idx_category,
+        "price": idx_price,
+        "stock": idx_stock,
+    }
 
-def test_large_scale_queries(db, products, total_docs):
+def test_large_scale_queries(db, products, total_docs, indexes):
     """Test 2: Query performance on large dataset"""
     print()
     print("=" * 80)
@@ -149,14 +159,14 @@ def test_large_scale_queries(db, products, total_docs):
     # Test 2: Simple equality query
     print("\nTest 2.2: Find by category (equality)")
     start = time.time()
-    electronics = products.find({"category": "Electronics"})
+    electronics = products.find_with_hint({"category": "Electronics"}, indexes["category"])
     elapsed = time.time() - start
     print(f"✓ Found {len(electronics):,} electronics in {elapsed*1000:.2f}ms")
 
     # Test 3: Range query
     print("\nTest 2.3: Find by price range")
     start = time.time()
-    mid_price = products.find({"price": {"$gte": 100, "$lte": 500}})
+    mid_price = products.find({"price": {"$gte": 100.0, "$lte": 500.0}})
     elapsed = time.time() - start
     print(f"✓ Found {len(mid_price):,} products in $100-500 range in {elapsed*1000:.2f}ms")
 
@@ -255,7 +265,7 @@ def test_large_scale_deletes(db, products, total_docs):
 
     return new_count
 
-def test_large_scale_indexing(db, products):
+def test_large_scale_indexing(db, products, indexes):
     """Test 5: Indexing on large dataset"""
     print()
     print("=" * 80)
@@ -263,11 +273,19 @@ def test_large_scale_indexing(db, products):
     print("=" * 80)
 
     # Test 1: Create index
+    if "category" in indexes:
+        try:
+            products.drop_index(indexes["category"])
+            print("  (Existing category index dropped for benchmark)")
+        except Exception:
+            pass
+
     print("\nTest 5.1: Create index on 'category' field")
     start = time.time()
     idx_name = products.create_index("category", unique=False)
     elapsed = time.time() - start
     print(f"✓ Index created: {idx_name} in {elapsed:.2f}s")
+    indexes["category"] = idx_name
 
     # Test 2: Query with index hint
     print("\nTest 5.2: Query with index hint")
@@ -323,10 +341,10 @@ def run_large_scale_tests():
 
     try:
         # Phase 1: Insert 100MB data
-        db, products, total_docs = test_large_scale_insert()
+        db, products, total_docs, indexes = test_large_scale_insert()
 
         # Phase 2: Query performance
-        test_large_scale_queries(db, products, total_docs)
+        test_large_scale_queries(db, products, total_docs, indexes)
 
         # Phase 3: Update operations
         test_large_scale_updates(db, products, total_docs)
@@ -335,7 +353,7 @@ def run_large_scale_tests():
         remaining_docs = test_large_scale_deletes(db, products, total_docs)
 
         # Phase 5: Indexing
-        test_large_scale_indexing(db, products)
+        test_large_scale_indexing(db, products, indexes)
 
         # Phase 6: Compaction
         test_large_scale_compaction(db, db_path, remaining_docs)

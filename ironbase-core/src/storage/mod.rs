@@ -83,6 +83,8 @@ impl Default for Header {
 pub struct CollectionMeta {
     pub name: String,
     pub document_count: u64,
+    #[serde(default)]
+    pub live_document_count: u64,
     pub data_offset: u64,          // Adatok kezdő pozíciója
     pub index_offset: u64,         // Indexek kezdő pozíciója
     pub last_id: u64,              // Utolsó _id
@@ -97,6 +99,10 @@ pub struct CollectionMeta {
     /// Persisted index metadata for this collection
     #[serde(default)]
     pub indexes: Vec<crate::index::IndexMetadata>,
+
+    /// Optional JSON schema for validation
+    #[serde(default)]
+    pub schema: Option<serde_json::Value>,
 }
 
 /// Index record for persistence
@@ -114,6 +120,7 @@ pub struct StorageEngine {
     collections: HashMap<String, CollectionMeta>,
     file_path: String,
     wal: WriteAheadLog,
+    metadata_dirty: bool,
 }
 
 impl StorageEngine {
@@ -158,6 +165,7 @@ impl StorageEngine {
             collections,
             file_path: path_str,
             wal,
+            metadata_dirty: false,
         };
 
         // NOTE: WAL recovery is now handled by DatabaseCore::open() for index atomicity
@@ -177,11 +185,13 @@ impl StorageEngine {
         let meta = CollectionMeta {
             name: name.to_string(),
             document_count: 0,
+            live_document_count: 0,
             data_offset: 0,  // Will be set correctly by flush_metadata
             index_offset: 0,
             last_id: 0,
             document_catalog: HashMap::new(),  // Initialize empty catalog
             indexes: Vec::new(),  // Initialize empty index list
+            schema: None,
         };
 
         self.collections.insert(name.to_string(), meta);
@@ -434,11 +444,12 @@ impl StorageEngine {
 
         for operation in transaction.operations() {
             match operation {
-                Operation::Insert { collection: _, doc_id: _, doc } => {
+                Operation::Insert { collection, doc_id: _, doc } => {
                     // Serialize and write document to storage
                     let doc_json = serde_json::to_string(doc)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                     self.write_data(doc_json.as_bytes())?;
+                    self.adjust_live_count(collection, 1);
                 }
                 Operation::Update { collection: _, doc_id: _, old_doc: _, new_doc } => {
                     // Write new version of document (append-only)
@@ -456,6 +467,7 @@ impl StorageEngine {
                     let tombstone_json = serde_json::to_string(&tombstone)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                     self.write_data(tombstone_json.as_bytes())?;
+                    self.adjust_live_count(collection, -1);
                 }
             }
         }
@@ -588,7 +600,7 @@ impl Storage for StorageEngine {
         StorageEngine::write_document(self, collection, &doc_id, doc_json.as_bytes())
     }
 
-    fn read_document(&self, collection: &str, id: &DocumentId) -> Result<Option<serde_json::Value>> {
+    fn read_document(&mut self, collection: &str, id: &DocumentId) -> Result<Option<serde_json::Value>> {
         let meta = match self.get_collection_meta(collection) {
             Some(m) => m,
             None => return Ok(None),
@@ -599,14 +611,8 @@ impl Storage for StorageEngine {
             None => return Ok(None),
         };
 
-        // SAFETY: Need mutable access for I/O
-        let storage_mut = unsafe {
-            let const_ptr = self as *const StorageEngine;
-            let mut_ptr = const_ptr as *mut StorageEngine;
-            &mut *mut_ptr
-        };
-
-        let data = StorageEngine::read_document_at(storage_mut, collection, offset)?;
+        // Now we can use &mut self directly (no unsafe cast needed!)
+        let data = StorageEngine::read_document_at(self, collection, offset)?;
         let value: serde_json::Value = serde_json::from_slice(&data)?;
         Ok(Some(value))
     }
@@ -661,6 +667,22 @@ impl Storage for StorageEngine {
 
     fn checkpoint(&mut self) -> Result<()> {
         self.checkpoint()
+    }
+
+    fn adjust_live_count(&mut self, collection: &str, delta: i64) {
+        if let Some(meta) = self.collections.get_mut(collection) {
+            if delta >= 0 {
+                meta.live_document_count = meta.live_document_count.saturating_add(delta as u64);
+            } else {
+                let dec = (-delta) as u64;
+                meta.live_document_count = meta.live_document_count.saturating_sub(dec);
+            }
+            self.metadata_dirty = true;
+        }
+    }
+
+    fn get_live_count(&self, collection: &str) -> Option<u64> {
+        self.collections.get(collection).map(|m| m.live_document_count)
     }
 }
 

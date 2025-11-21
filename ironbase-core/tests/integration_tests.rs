@@ -1,7 +1,7 @@
 // Integration tests for MongoLite Core
-use ironbase_core::{StorageEngine, Document, DocumentId};
-use std::collections::HashMap;
-use serde_json::json;
+use ironbase_core::{StorageEngine, Document, DocumentId, DatabaseCore};
+use std::collections::{HashMap, HashSet};
+use serde_json::{json, Value};
 use tempfile::TempDir;
 
 // Helper to create test storage
@@ -183,6 +183,31 @@ fn test_document_with_collection_field() {
 }
 
 #[test]
+fn test_collection_distinct_values() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("distinct.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let coll = db.collection("products").unwrap();
+
+    // Insert documents through CollectionCore to ensure catalog is populated
+    coll.insert_one(HashMap::from([
+        ("name".to_string(), json!("Laptop")),
+        ("category".to_string(), json!("electronics")),
+    ])).unwrap();
+
+    coll.insert_one(HashMap::from([
+        ("name".to_string(), json!("Desk")),
+        ("category".to_string(), json!("furniture")),
+    ])).unwrap();
+
+    let distinct = coll.distinct("category", &Value::Object(Default::default())).unwrap();
+    assert_eq!(distinct.len(), 2);
+    let categories: HashSet<_> = distinct.into_iter().collect();
+    assert!(categories.contains(&json!("electronics")));
+    assert!(categories.contains(&json!("furniture")));
+}
+
+#[test]
 fn test_tombstone_pattern() {
     let (_temp, mut storage) = create_test_storage();
     storage.create_collection("users").unwrap();
@@ -279,4 +304,86 @@ fn test_stats_with_collections() {
 
     assert!(names.contains(&"users".to_string()));
     assert!(names.contains(&"posts".to_string()));
+}
+
+#[test]
+fn test_schema_validation_blocks_invalid_insert() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("schema_insert.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    collection.set_schema(Some(json!({
+        "type": "object",
+        "required": ["name", "age"],
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "number"}
+        }
+    }))).unwrap();
+
+    let mut invalid = HashMap::new();
+    invalid.insert("name".to_string(), json!("Alice"));
+    assert!(collection.insert_one(invalid).is_err());
+
+    let mut valid = HashMap::new();
+    valid.insert("name".to_string(), json!("Bob"));
+    valid.insert("age".to_string(), json!(30));
+    collection.insert_one(valid).unwrap();
+}
+
+#[test]
+fn test_schema_validation_blocks_invalid_update() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("schema_update.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    collection.set_schema(Some(json!({
+        "type": "object",
+        "required": ["name", "age"],
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "number"}
+        }
+    }))).unwrap();
+
+    let mut doc = HashMap::new();
+    doc.insert("name".to_string(), json!("Carol"));
+    doc.insert("age".to_string(), json!(28));
+    collection.insert_one(doc).unwrap();
+
+    let result = collection.update_one(
+        &json!({"name": "Carol"}),
+        &json!({"$unset": {"age": true}})
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_nested_field_queries_via_collection_core() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("nested_query.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let coll = db.collection("customers").unwrap();
+
+    coll.insert_one(HashMap::from([
+        ("name".to_string(), json!("Anna")),
+        ("address".to_string(), json!({"city": "Budapest", "zip": 1111})),
+        ("stats".to_string(), json!({"login_count": 42}))
+    ])).unwrap();
+
+    coll.insert_one(HashMap::from([
+        ("name".to_string(), json!("Bence")),
+        ("address".to_string(), json!({"city": "Debrecen", "zip": 4025})),
+        ("stats".to_string(), json!({"login_count": 5}))
+    ])).unwrap();
+
+    let found = coll.find_one(&json!({"address.city": "Budapest"})).unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().get("name").and_then(|v| v.as_str()), Some("Anna"));
+
+    let matched = coll.find(&json!({"stats.login_count": {"$gte": 40}})).unwrap();
+    assert_eq!(matched.len(), 1);
+    assert_eq!(matched[0].get("name").and_then(|v| v.as_str()), Some("Anna"));
 }

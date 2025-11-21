@@ -485,6 +485,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         CollectionCore::new(name.to_string(), Arc::clone(&self.storage))
     }
 
+    /// Set or clear JSON schema for a collection
+    pub fn set_collection_schema(&self, name: &str, schema: Option<Value>) -> Result<()> {
+        let collection = self.collection(name)?;
+        collection.set_schema(schema)
+    }
+
     /// List all collection names
     pub fn list_collections(&self) -> Vec<String> {
         let storage = self.storage.read();

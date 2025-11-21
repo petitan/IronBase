@@ -6,6 +6,7 @@ use crate::error::Result;
 use super::StorageEngine;
 
 impl StorageEngine {
+
     /// Write data to end of file
     /// Returns the offset where data was written
     pub fn write_data(&mut self, data: &[u8]) -> Result<u64> {
@@ -16,6 +17,7 @@ impl StorageEngine {
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
 
+        self.metadata_dirty = true;
         Ok(offset)
     }
 
@@ -88,17 +90,15 @@ impl StorageEngine {
     ) -> Result<u64> {
         use crate::error::MongoLiteError;
 
-        // Ensure we write AFTER the header (version 2: no reserved space!)
-        // But BEFORE any existing metadata (so seek to end of document data)
-        let file_end = self.file.seek(SeekFrom::End(0))?;
-        let write_pos = std::cmp::max(file_end, super::HEADER_SIZE);
-        let absolute_offset = self.file.seek(SeekFrom::Start(write_pos))?;
+        // Append document after existing data
+        let absolute_offset = self.file.seek(SeekFrom::End(0))?;
 
         // Write length + data (same format as write_data)
         let len = (data.len() as u32).to_le_bytes();
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
 
+        self.metadata_dirty = true;
         // Update catalog in metadata with ABSOLUTE offset
         // Direct insert using DocumentId (no serialization overhead!)
         let meta = self.get_collection_meta_mut(collection)
@@ -106,6 +106,10 @@ impl StorageEngine {
 
         meta.document_catalog.insert(doc_id.clone(), absolute_offset);
         meta.document_count += 1;  // CRITICAL: increment document count!
+
+        if self.header.metadata_offset > super::HEADER_SIZE {
+            self.metadata_dirty = true;
+        }
 
         Ok(absolute_offset)
     }

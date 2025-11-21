@@ -129,7 +129,7 @@ impl Storage for MemoryStorage {
         Ok(offset)
     }
 
-    fn read_document(&self, collection: &str, id: &DocumentId) -> Result<Option<Value>> {
+    fn read_document(&mut self, collection: &str, id: &DocumentId) -> Result<Option<Value>> {
         // Get documents for collection
         let docs = match self.collections.get(collection) {
             Some(d) => d,
@@ -185,11 +185,13 @@ impl Storage for MemoryStorage {
         let meta = CollectionMeta {
             name: name.to_string(),
             document_count: 0,
+            live_document_count: 0,
             data_offset: 256, // Synthetic
             index_offset: 256, // Synthetic
             last_id: 0,
             document_catalog: HashMap::new(),
             indexes: Vec::new(),
+            schema: None,
         };
 
         self.metadata.insert(name.to_string(), meta);
@@ -236,6 +238,21 @@ impl Storage for MemoryStorage {
     fn checkpoint(&mut self) -> Result<()> {
         // No-op for memory storage (no WAL)
         Ok(())
+    }
+
+    fn adjust_live_count(&mut self, collection: &str, delta: i64) {
+        if let Some(meta) = self.metadata.get_mut(collection) {
+            if delta >= 0 {
+                meta.live_document_count = meta.live_document_count.saturating_add(delta as u64);
+            } else {
+                let dec = (-delta) as u64;
+                meta.live_document_count = meta.live_document_count.saturating_sub(dec);
+            }
+        }
+    }
+
+    fn get_live_count(&self, collection: &str) -> Option<u64> {
+        self.metadata.get(collection).map(|m| m.live_document_count)
     }
 }
 
@@ -421,7 +438,7 @@ mod tests {
 
     #[test]
     fn test_read_from_nonexistent_collection() {
-        let storage = MemoryStorage::new();
+        let mut storage = MemoryStorage::new();
 
         let doc = storage.read_document("nonexistent", &DocumentId::Int(1)).unwrap();
         assert!(doc.is_none());

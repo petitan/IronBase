@@ -69,7 +69,12 @@ pub trait Storage: Send + Sync {
     /// # Returns
     ///
     /// The document as JSON, or None if not found
-    fn read_document(&self, collection: &str, id: &DocumentId) -> Result<Option<Value>>;
+    ///
+    /// # Note
+    ///
+    /// Requires &mut self due to file I/O operations (seek/read)
+    /// Future: could use interior mutability (RefCell/Mutex) for &self
+    fn read_document(&mut self, collection: &str, id: &DocumentId) -> Result<Option<Value>>;
 
     /// Scan all documents in a collection
     ///
@@ -123,6 +128,12 @@ pub trait Storage: Send + Sync {
     /// Use this in long-running processes to prevent WAL file growth.
     /// For MemoryStorage, this is a no-op.
     fn checkpoint(&mut self) -> Result<()>;
+
+    /// Adjust the live document count for a collection
+    fn adjust_live_count(&mut self, collection: &str, delta: i64);
+
+    /// Get the current live document count for a collection
+    fn get_live_count(&self, collection: &str) -> Option<u64>;
 }
 
 // ============================================================================

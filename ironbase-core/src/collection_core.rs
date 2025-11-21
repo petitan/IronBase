@@ -26,7 +26,7 @@
 use std::sync::Arc;
 use parking_lot::RwLock;
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::storage::{Storage, RawStorage};
 use crate::document::{Document, DocumentId};
@@ -58,6 +58,143 @@ pub struct CollectionCore<S: Storage + RawStorage> {
     pub indexes: Arc<RwLock<IndexManager>>,
     /// Query result cache with LRU eviction (capacity: 1000 queries)
     pub query_cache: Arc<QueryCache>,
+    schema: Arc<RwLock<Option<CompiledSchema>>>,
+}
+
+#[derive(Clone)]
+struct CompiledSchema {
+    required: Vec<String>,
+    properties: HashMap<String, SchemaType>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SchemaType {
+    String,
+    Number,
+    Boolean,
+    Object,
+    Array,
+}
+
+impl CompiledSchema {
+    fn from_value(schema: &Value) -> Result<Self> {
+        let obj = schema
+            .as_object()
+            .ok_or_else(|| MongoLiteError::SchemaError("Schema must be a JSON object".to_string()))?;
+
+        if let Some(schema_type) = obj.get("type") {
+            let type_str = schema_type
+                .as_str()
+                .ok_or_else(|| MongoLiteError::SchemaError("Schema type must be a string".to_string()))?;
+            if type_str != "object" {
+                return Err(MongoLiteError::SchemaError(
+                    "Only object schemas are supported".to_string(),
+                ));
+            }
+        }
+
+        let mut required = Vec::new();
+        if let Some(required_value) = obj.get("required") {
+            let arr = required_value.as_array().ok_or_else(|| {
+                MongoLiteError::SchemaError("required must be an array of field names".to_string())
+            })?;
+            for entry in arr {
+                let field = entry.as_str().ok_or_else(|| {
+                    MongoLiteError::SchemaError("required entries must be strings".to_string())
+                })?;
+                required.push(field.to_string());
+            }
+        }
+
+        let mut properties = HashMap::new();
+        if let Some(props) = obj.get("properties") {
+            let props_obj = props.as_object().ok_or_else(|| {
+                MongoLiteError::SchemaError("properties must be an object".to_string())
+            })?;
+            for (field, spec) in props_obj {
+                if let Some(type_value) = spec.get("type") {
+                    let type_str = type_value.as_str().ok_or_else(|| {
+                        MongoLiteError::SchemaError(format!(
+                            "Property '{}' type must be a string",
+                            field
+                        ))
+                    })?;
+                    let parsed_type = SchemaType::from_str(type_str).ok_or_else(|| {
+                        MongoLiteError::SchemaError(format!(
+                            "Unsupported type '{}' for field '{}'",
+                            type_str, field
+                        ))
+                    })?;
+                    properties.insert(field.clone(), parsed_type);
+                }
+            }
+        }
+
+        Ok(Self { required, properties })
+    }
+
+    fn validate(&self, value: &Value) -> Result<()> {
+        let obj = value.as_object().ok_or_else(|| {
+            MongoLiteError::SchemaError("Document must be a JSON object".to_string())
+        })?;
+
+        for field in &self.required {
+            if !obj.contains_key(field) {
+                return Err(MongoLiteError::SchemaError(format!(
+                    "Missing required field '{}'",
+                    field
+                )));
+            }
+        }
+
+        for (field, schema_type) in &self.properties {
+            if let Some(field_value) = obj.get(field) {
+                if !schema_type.matches(field_value) {
+                    return Err(MongoLiteError::SchemaError(format!(
+                        "Field '{}' expected type {}",
+                        field,
+                        schema_type.as_str()
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl SchemaType {
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "string" => Some(SchemaType::String),
+            "number" => Some(SchemaType::Number),
+            "integer" => Some(SchemaType::Number),
+            "boolean" => Some(SchemaType::Boolean),
+            "object" => Some(SchemaType::Object),
+            "array" => Some(SchemaType::Array),
+            _ => None,
+        }
+    }
+
+    fn matches(self, value: &Value) -> bool {
+        match self {
+            SchemaType::String => value.is_string(),
+            SchemaType::Number => value.is_number(),
+            SchemaType::Boolean => value.is_boolean(),
+            SchemaType::Object => value.is_object(),
+            SchemaType::Array => value.is_array(),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            SchemaType::String => "string",
+            SchemaType::Number => "number",
+            SchemaType::Boolean => "boolean",
+            SchemaType::Object => "object",
+            SchemaType::Array => "array",
+        }
+    }
 }
 
 impl<S: Storage + RawStorage> CollectionCore<S> {
@@ -85,6 +222,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         )?;
 
         // PERSISTENCE FIX: Load persisted indexes and rebuild from document catalog
+        let schema_definition = {
+            let storage_guard = storage.write();
+            let meta = storage_guard.get_collection_meta(&name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
+            meta.schema.clone()
+        };
+
         {
             let storage_guard = storage.write();
             let meta = storage_guard.get_collection_meta(&name)
@@ -173,12 +317,58 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             log_debug!("Index rebuild completed - {} index entries rebuilt", rebuilt_count);
         }
 
+        let compiled_schema = if let Some(raw_schema) = schema_definition {
+            Some(Self::compile_schema(&raw_schema)?)
+        } else {
+            None
+        };
+
         Ok(CollectionCore {
             name,
             storage,
             indexes: Arc::new(RwLock::new(index_manager)),
             query_cache: Arc::new(QueryCache::new(1000)),  // LRU cache with 1000 query capacity
+            schema: Arc::new(RwLock::new(compiled_schema)),
         })
+    }
+
+    fn compile_schema(schema: &Value) -> Result<CompiledSchema> {
+        CompiledSchema::from_value(schema)
+    }
+
+    fn validate_value_against_schema(&self, value: &Value) -> Result<()> {
+        let guard = self.schema.read();
+        if let Some(schema) = guard.as_ref() {
+            schema.validate(value)?;
+        }
+        Ok(())
+    }
+
+    fn validate_document(&self, document: &Document) -> Result<()> {
+        let value = serde_json::to_value(document)
+            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+        self.validate_value_against_schema(&value)
+    }
+
+    /// Set or clear the JSON schema for this collection.
+    pub fn set_schema(&self, schema: Option<Value>) -> Result<()> {
+        let compiled = if let Some(ref raw) = schema {
+            Some(Self::compile_schema(raw)?)
+        } else {
+            None
+        };
+
+        {
+            let mut storage = self.storage.write();
+            let meta = storage.get_collection_meta_mut(&self.name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            meta.schema = schema;
+            storage.flush()?;
+        }
+
+        let mut guard = self.schema.write();
+        *guard = compiled;
+        Ok(())
     }
 
     // ========== CRUD OPERATIONS ==========
@@ -203,6 +393,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Dokumentum létrehozása
         let doc = Document::new(doc_id.clone(), fields);
+        self.validate_document(&doc)?;
 
         // Update indexes BEFORE writing to storage
         {
@@ -238,6 +429,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Szerializálás és írás - USE NEW write_document with catalog tracking
         let doc_json = doc.to_json()?;
         storage.write_document_raw(&self.name, &doc_id, doc_json.as_bytes())?;
+        storage.adjust_live_count(&self.name, 1);
 
         // NOTE: We don't flush metadata here for performance!
         // Catalog changes are kept in memory and flushed on:
@@ -264,6 +456,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut storage = self.storage.write();
         let mut inserted_ids = Vec::with_capacity(documents.len());
+        let mut live_delta = 0i64;
 
         // Get mutable reference to collection metadata ONCE
         let meta = storage.get_collection_meta_mut(&self.name)
@@ -287,6 +480,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Create document
             let doc = Document::new(doc_id.clone(), fields);
+            self.validate_document(&doc)?;
             prepared_docs.push((doc_id.clone(), doc));
             inserted_ids.push(doc_id);
         }
@@ -328,6 +522,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         for (doc_id, doc) in prepared_docs {
             let doc_json = doc.to_json()?;
             storage.write_document_raw(&self.name, &doc_id, doc_json.as_bytes())?;
+            live_delta += 1;
         }
 
         // NOTE: We don't flush metadata here for performance!
@@ -335,6 +530,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Invalidate query cache (collection has changed)
         self.query_cache.invalidate_collection(&self.name);
+        if live_delta != 0 {
+            storage.adjust_live_count(&self.name, live_delta);
+        }
 
         Ok(InsertManyResult {
             inserted_count: inserted_ids.len(),
@@ -348,56 +546,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     pub fn find(&self, query_json: &Value) -> Result<Vec<Value>> {
         log_debug!("find() called with query: {:?}", query_json);
 
-        // Check query cache first
-        let query_hash = QueryHash::new(&self.name, query_json);
-        if let Some(cached_doc_ids) = self.query_cache.get(&query_hash) {
-            log_trace!("Query cache HIT! {} cached doc IDs", cached_doc_ids.len());
-            // Cache hit! Convert cached DocumentIds to full documents (direct lookup!)
-            let mut results = Vec::with_capacity(cached_doc_ids.len());
-            for doc_id in cached_doc_ids {
-                if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                    results.push(doc);
-                }
+        let doc_ids = self.collect_doc_ids(query_json)?;
+        let mut results = Vec::with_capacity(doc_ids.len());
+        for doc_id in doc_ids {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                results.push(doc);
             }
-            return Ok(results);
         }
-
-        log_trace!("Query cache MISS - executing query");
-
-        // Cache miss - execute query normally
-        let parsed_query = Query::from_json(query_json)?;
-
-        // Try to use an index
-        let indexes = self.indexes.read();
-        let available_indexes = indexes.list_indexes();
-
-        log_trace!("Available indexes: {:?}", available_indexes);
-
-        let result_docs = if let Some((field, plan)) = QueryPlanner::analyze_query(query_json, &available_indexes) {
-            // Use index-based execution
-            log_debug!("Using index for field '{}': {:?}", field, plan);
-            drop(indexes);
-            self.find_with_index(parsed_query, plan)?
-        } else {
-            // Fall back to full collection scan
-            log_debug!("No suitable index - using full scan");
-            drop(indexes); // Release read lock before write lock
-
-            // OPTIMIZATION: Use catalog iteration instead of full file scan
-            let docs_by_id = self.scan_documents_via_catalog()?;
-            self.filter_documents(docs_by_id, &parsed_query)?
-        };
-
-        // Extract DocumentIds from results and cache them
-        let doc_ids: Vec<DocumentId> = result_docs
-            .iter()
-            .filter_map(|doc| doc.get("_id"))
-            .filter_map(|id_value| serde_json::from_value::<DocumentId>(id_value.clone()).ok())
-            .collect();
-
-        self.query_cache.insert(query_hash, doc_ids);
-
-        Ok(result_docs)
+        Ok(results)
     }
 
     /// Find documents with options (projection, sort, limit, skip)
@@ -406,20 +562,45 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         options: crate::find_options::FindOptions
     ) -> Result<Vec<Value>> {
-        use crate::find_options::{apply_projection, apply_sort, apply_limit_skip};
+        use crate::find_options::{apply_projection, apply_sort};
 
-        // 1. Get matching documents (use existing find() logic)
-        let mut docs = self.find(query_json)?;
+        let skip = options.skip.unwrap_or(0);
+        let limit = options.limit;
+
+        let mut sort_field_ref: Option<&str> = None;
+        let mut sort_desc = false;
+        if let Some(ref sort_spec) = options.sort {
+            if sort_spec.len() == 1 {
+                sort_field_ref = Some(sort_spec[0].0.as_str());
+                sort_desc = sort_spec[0].1 < 0;
+            }
+        }
+
+        let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
+            query_json,
+            None,
+            sort_field_ref,
+            sort_desc,
+            skip,
+            limit,
+            sort_field_ref.is_none(),
+        )?;
+
+        let mut docs = Vec::with_capacity(doc_ids.len());
+        for doc_id in doc_ids {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                docs.push(doc);
+            }
+        }
 
         // 2. Apply sort
         if let Some(ref sort) = options.sort {
-            apply_sort(&mut docs, sort);
+            if !(index_sorted && sort.len() == 1) {
+                apply_sort(&mut docs, sort);
+            }
         }
 
-        // 3. Apply skip and limit
-        docs = apply_limit_skip(docs, options.limit, options.skip);
-
-        // 4. Apply projection
+        // 3. Apply projection
         if let Some(ref projection) = options.projection {
             docs = docs.into_iter()
                 .map(|doc| apply_projection(&doc, projection))
@@ -427,6 +608,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         Ok(docs)
+    }
+
+    /// Streaming cursor for large result sets
+    pub fn find_streaming(&self, query_json: &Value) -> Result<FindCursor<'_, S>> {
+        let (doc_ids, _) = self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        Ok(FindCursor {
+            collection: self,
+            doc_ids,
+            position: 0,
+        })
     }
 
     /// Find one document matching query
@@ -459,8 +650,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Find first matching document (skip tombstones)
         for (_, doc) in docs_by_id {
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
+            let doc_json_str = match serde_json::to_string(&doc) {
+                Ok(json) => json,
+                Err(_) => continue,
+            };
+            let document = match Document::from_json(&doc_json_str) {
+                Ok(doc) => doc,
+                Err(_) => continue,
+            };
 
             if parsed_query.matches(&document) {
                 return Ok(Some(doc));
@@ -472,6 +669,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Count documents matching query
     pub fn count_documents(&self, query_json: &Value) -> Result<u64> {
+        if Self::query_matches_all(query_json) {
+            let storage = self.storage.read();
+            return Ok(storage.get_live_count(&self.name).unwrap_or(0));
+        }
+
+        if let Some(doc_id) = Self::extract_id_query(query_json) {
+            return Ok(if self.read_document_by_id(&doc_id)?.is_some() { 1 } else { 0 });
+        }
+
         let parsed_query = Query::from_json(query_json)?;
 
         // OPTIMIZATION: Use catalog iteration instead of full file scan
@@ -556,10 +762,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     // ✅ Ensure updated document has _collection
                     document.set("_collection".to_string(), Value::String(self.name.clone()));
+                    self.validate_document(&document)?;
 
                     // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
                     storage.write_document_raw(&self.name, &document.id, updated_json.as_bytes())?;
+                    storage.adjust_live_count(&self.name, -1);
+                    storage.adjust_live_count(&self.name, 1);
 
                     modified = 1;
                 }
@@ -578,44 +787,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     pub fn update_many(&self, query_json: &Value, update_json: &Value) -> Result<(u64, u64)> {
         let parsed_query = Query::from_json(query_json)?;
 
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
-
-        let file_len = storage.file_len()?;
-
-        // First pass: collect all documents by _id (latest version only)
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        // Track latest version (include tombstones so they overwrite originals)
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
-                    }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
-                }
-                Err(_) => break,
-            }
-        }
+        // Catalog-based scan to get latest version per _id
+        let docs_by_id = self.scan_documents_via_catalog()?;
 
         // Second pass: find all matching and update (skip tombstones)
         let mut matched = 0u64;
         let mut modified = 0u64;
+
+        let mut storage = self.storage.write();
 
         for (_, doc) in docs_by_id {
             // Skip tombstones (deleted documents)
@@ -623,8 +802,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 continue;
             }
 
+            // Deserialize with proper _id handling
             let doc_json_str = serde_json::to_string(&doc)?;
             let mut document = Document::from_json(&doc_json_str)?;
+            let doc_id = document.id.clone();
 
             // Check if matches query
             if parsed_query.matches(&document) {
@@ -647,10 +828,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     // ✅ Ensure updated document has _collection
                     document.set("_collection".to_string(), Value::String(self.name.clone()));
+                    self.validate_document(&document)?;
 
                     // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
-                    storage.write_document_raw(&self.name, &document.id, updated_json.as_bytes())?;
+                    storage.write_document_raw(&self.name, &doc_id, updated_json.as_bytes())?;
+                    storage.adjust_live_count(&self.name, -1);
+                    storage.adjust_live_count(&self.name, 1);
 
                     modified += 1;
                 }
@@ -720,6 +904,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                 // Write tombstone WITH catalog tracking (updates catalog entry)
                 storage.write_document_raw(&self.name, &document.id, tombstone_json.as_bytes())?;
+                storage.adjust_live_count(&self.name, -1);
 
                 deleted = 1;
             }
@@ -736,43 +921,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Delete many documents - returns deleted_count
     pub fn delete_many(&self, query_json: &Value) -> Result<u64> {
         let parsed_query = Query::from_json(query_json)?;
-
+        let docs_by_id = self.scan_documents_via_catalog()?;
         let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        let file_len = storage.file_len()?;
-
-        // First pass: collect all documents by _id (latest version only)
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        // Track latest version (include tombstones so they overwrite originals)
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
-                    }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
-                }
-                Err(_) => break,
-            }
-        }
-
-        // Second pass: find all matching and delete (skip tombstones)
         let mut deleted = 0u64;
 
         for (_, doc) in docs_by_id {
@@ -794,7 +945,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
                 let tombstone_json = serde_json::to_string(&tombstone)?;
 
-                // Write tombstone WITH catalog tracking (updates catalog entry)
                 storage.write_document_raw(&self.name, &document.id, tombstone_json.as_bytes())?;
 
                 deleted += 1;
@@ -804,6 +954,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Invalidate query cache if any document was deleted
         if deleted > 0 {
             self.query_cache.invalidate_collection(&self.name);
+            storage.adjust_live_count(&self.name, -(deleted as i64));
         }
 
         Ok(deleted)
@@ -811,44 +962,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Distinct values for a field
     pub fn distinct(&self, field: &str, query_json: &Value) -> Result<Vec<Value>> {
-        let parsed_query = Query::from_json(query_json)?;
-
-        let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
-
-        let file_len = storage.file_len()?;
-
-        // Use HashMap to track latest version of each document by _id
-        let mut docs_by_id: HashMap<String, Value> = HashMap::new();
-        let mut current_offset = meta.data_offset;
-
-        while current_offset < file_len {
-            match storage.read_data(current_offset) {
-                Ok(doc_bytes) => {
-                    let doc: Value = serde_json::from_slice(&doc_bytes)?;
-
-                    // ✅ FILTER: Only include documents from THIS collection
-                    let doc_collection = doc.get("_collection")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    if doc_collection == self.name {
-                        if let Some(id_value) = doc.get("_id") {
-                            let id_key = serde_json::to_string(id_value)
-                                .unwrap_or_else(|_| "unknown".to_string());
-                            docs_by_id.insert(id_key, doc);
-                        }
-                    }
-
-                    current_offset += 4 + doc_bytes.len() as u64;
+        if let Some(doc_id) = Self::extract_id_query(query_json) {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                if let Some(value) = doc.get(field) {
+                    return Ok(vec![value.clone()]);
                 }
-                Err(_) => break,
             }
+            return Ok(Vec::new());
         }
 
+        let match_all = Self::query_matches_all(query_json);
+        let parsed_query = if match_all {
+            None
+        } else {
+            Some(Query::from_json(query_json)?)
+        };
+
+        let docs_by_id = self.scan_documents_via_catalog()?;
+
         // Collect distinct values from matching documents (skip tombstones)
-        let mut seen_values: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_values: HashSet<String> = HashSet::new();
         let mut distinct_values = Vec::new();
 
         for (_, doc) in docs_by_id {
@@ -857,18 +990,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 continue;
             }
 
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
+            let matches = if let Some(query) = &parsed_query {
+                    let doc_json_str = serde_json::to_string(&doc)?;
+                    let document = Document::from_json(&doc_json_str)?;
+                    query.matches(&document)
+                } else {
+                    true
+                };
 
-            // Check if matches query
-            if parsed_query.matches(&document) {
-                // Extract field value
+            if matches {
                 if let Some(field_value) = doc.get(field) {
-                    // Use JSON string representation for uniqueness check
                     let value_key = serde_json::to_string(field_value)
                         .unwrap_or_else(|_| "null".to_string());
 
-                    // Only add if not seen before
                     if seen_values.insert(value_key) {
                         distinct_values.push(field_value.clone());
                     }
@@ -949,88 +1083,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Execute query using an index
     fn find_with_index(&self, parsed_query: Query, plan: QueryPlan) -> Result<Vec<Value>> {
-        log_trace!("find_with_index() called with plan: {:?}", plan);
-
-        // Get candidate document IDs from index
-        let doc_ids: Vec<DocumentId> = {
-            let indexes = self.indexes.read();
-
-            match plan {
-                QueryPlan::IndexScan { ref index_name, ref key, .. } => {
-                    log_trace!("IndexScan - index: {}, key: {:?}", index_name, key);
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        // Use range scan with same start and end to get ALL matching documents
-                        // (B+ tree may have multiple documents with same key value)
-                        let ids = index.range_scan(key, key, true, true);
-                        log_trace!("IndexScan returned {} doc IDs", ids.len());
-                        ids
-                    } else {
-                        log_warn!("Index '{}' NOT FOUND!", index_name);
-                        vec![]
-                    }
-                }
-                QueryPlan::IndexRangeScan {
-                    ref index_name,
-                    ref start,
-                    ref end,
-                    inclusive_start,
-                    inclusive_end,
-                    ..
-                } => {
-                    log_trace!("IndexRangeScan - index: {}, start: {:?}, end: {:?}",
-                              index_name, start, end);
-                    if let Some(index) = indexes.get_btree_index(index_name) {
-                        // Range scan
-                        let default_start = IndexKey::Null;
-                        let default_end = IndexKey::String("\u{10ffff}".repeat(100));
-
-                        let start_key = start.as_ref().unwrap_or(&default_start);
-                        let end_key = end.as_ref().unwrap_or(&default_end);
-
-                        let ids = index.range_scan(start_key, end_key, inclusive_start, inclusive_end);
-                        log_trace!("IndexRangeScan returned {} doc IDs", ids.len());
-                        ids
-                    } else {
-                        log_warn!("Index '{}' NOT FOUND!", index_name);
-                        vec![]
-                    }
-                }
-                QueryPlan::CollectionScan => {
-                    log_warn!("CollectionScan (shouldn't happen in find_with_index!)");
-                    // This shouldn't happen, but fall back to empty
-                    vec![]
-                }
-            }
-        }; // indexes read lock dropped here
-
-        log_trace!("Got {} candidate doc IDs from index", doc_ids.len());
-
-        // OPTIMIZATION: Use catalog-based lookup for index results instead of full file scan
-        let mut matching_docs = Vec::new();
-
-        for doc_id in &doc_ids {
-            log_trace!("Looking up doc_id: {:?}", doc_id);
-            // O(1) lookup using document_catalog (direct DocumentId lookup!)
-            if let Some(doc) = self.read_document_by_id(doc_id)? {
-                log_trace!("Found document, applying query filter");
-                // Apply full query filter (in case index gave us false positives)
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
-
-                if parsed_query.matches(&document) {
-                    log_trace!("Document MATCHES query!");
-                    matching_docs.push(doc);
-                } else {
-                    log_trace!("Document DOES NOT match query");
-                }
-            } else {
-                log_trace!("Document NOT FOUND for doc_id: {:?}", doc_id);
+        let (doc_ids, _) = self.collect_doc_ids_from_plan(&parsed_query, plan, None, false, 0, None)?;
+        let mut results = Vec::with_capacity(doc_ids.len());
+        for doc_id in doc_ids {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                results.push(doc);
             }
         }
-
-        log_trace!("find_with_index() returning {} documents", matching_docs.len());
-
-        Ok(matching_docs)
+        Ok(results)
     }
 
     /// Apply update operators to document - returns whether document was modified
@@ -1538,6 +1598,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         doc_with_id.insert("_id".to_string(), serde_json::json!(doc_id.clone()));
         doc_with_id.insert("_collection".to_string(), Value::String(self.name.clone()));
 
+        let doc_for_validation = Document::new(doc_id.clone(), doc_with_id.clone());
+        self.validate_document(&doc_for_validation)?;
+
         // Add operation to transaction
         tx.add_operation(Operation::Insert {
             collection: self.name.clone(),
@@ -1604,6 +1667,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Prepare new_doc for index tracking
             let new_doc_for_tracking = new_doc_with_meta.clone();
+            self.validate_value_against_schema(&new_doc_for_tracking)?;
 
             // Add operation to transaction
             tx.add_operation(Operation::Update {
@@ -1786,6 +1850,187 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(docs_by_id)
     }
 
+    fn collect_doc_ids(&self, query_json: &Value) -> Result<Vec<DocumentId>> {
+        let (ids, _) = self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        Ok(ids)
+    }
+
+    fn collect_doc_ids_with_options(
+        &self,
+        query_json: &Value,
+        hint: Option<&str>,
+        sort_field: Option<&str>,
+        sort_desc: bool,
+        skip: usize,
+        limit: Option<usize>,
+        use_cache: bool,
+    ) -> Result<(Vec<DocumentId>, bool)> {
+        let cache_hash = if use_cache && hint.is_none() && sort_field.is_none() && skip == 0 && limit.is_none() {
+            Some(QueryHash::new(&self.name, query_json))
+        } else {
+            None
+        };
+
+        if let Some(hash) = cache_hash {
+            if let Some(cached) = self.query_cache.get(&hash) {
+                return Ok((cached, false));
+            }
+        }
+
+        let parsed_query = Query::from_json(query_json)?;
+
+        let plan = if let Some(hint_name) = hint {
+            let field = self.extract_field_from_index_name(hint_name);
+            Some(self.create_plan_for_hint(query_json, hint_name, &field)?)
+        } else {
+            let indexes = self.indexes.read();
+            let available_indexes = indexes.list_indexes();
+            drop(indexes);
+            QueryPlanner::analyze_query(query_json, &available_indexes).map(|(_, plan)| plan)
+        };
+
+        let (doc_ids_vec, used_sort) = if let Some(plan) = plan {
+            self.collect_doc_ids_from_plan(
+                &parsed_query,
+                plan,
+                sort_field,
+                sort_desc,
+                skip,
+                limit,
+            )?
+        } else {
+            // Fallback to full scan using catalog
+            let docs_by_id = self.scan_documents_via_catalog()?;
+            let mut doc_ids = Vec::new();
+            let mut skipped = 0usize;
+
+            for (doc_id, doc) in docs_by_id {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
+
+                if parsed_query.matches(&document) {
+                    if skipped < skip {
+                        skipped += 1;
+                        continue;
+                    }
+                    doc_ids.push(doc_id.clone());
+                    if let Some(limit_count) = limit {
+                        if doc_ids.len() >= limit_count {
+                            break;
+                        }
+                    }
+                }
+            }
+
+            (doc_ids, false)
+        };
+
+        if let Some(hash) = cache_hash {
+            self.query_cache.insert(hash, doc_ids_vec.clone());
+        }
+
+        Ok((doc_ids_vec, used_sort))
+    }
+
+    fn collect_doc_ids_from_plan(
+        &self,
+        parsed_query: &Query,
+        plan: QueryPlan,
+        sort_field: Option<&str>,
+        sort_desc: bool,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Result<(Vec<DocumentId>, bool)> {
+        let mut doc_ids = {
+            let indexes = self.indexes.read();
+            match plan {
+                QueryPlan::IndexScan { ref index_name, ref key, .. } => {
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        index.range_scan(key, key, true, true)
+                    } else {
+                        vec![]
+                    }
+                }
+                QueryPlan::IndexRangeScan {
+                    ref index_name,
+                    ref start,
+                    ref end,
+                    inclusive_start,
+                    inclusive_end,
+                    ..
+                } => {
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let default_start = IndexKey::Null;
+                        let default_end = IndexKey::String("\u{10ffff}".repeat(100));
+
+                        let start_key = start.as_ref().unwrap_or(&default_start);
+                        let end_key = end.as_ref().unwrap_or(&default_end);
+                        index.range_scan(start_key, end_key, inclusive_start, inclusive_end)
+                    } else {
+                        vec![]
+                    }
+                }
+                QueryPlan::CollectionScan => vec![],
+            }
+        };
+
+        let uses_index_sort = match (&plan, sort_field) {
+            (QueryPlan::IndexScan { ref field, .. }, Some(sf)) if field == sf => true,
+            (QueryPlan::IndexRangeScan { ref field, .. }, Some(sf)) if field == sf => true,
+            _ => false,
+        };
+
+        if uses_index_sort && sort_desc {
+            doc_ids.reverse();
+        }
+
+        // Apply skip/limit while verifying query
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+
+        for doc_id in doc_ids {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
+
+                if parsed_query.matches(&document) {
+                    if skipped < skip {
+                        skipped += 1;
+                        continue;
+                    }
+
+                    results.push(doc_id.clone());
+                    if let Some(limit_count) = limit {
+                        if results.len() >= limit_count {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((results, uses_index_sort))
+    }
+
+    fn query_matches_all(query_json: &Value) -> bool {
+        match query_json {
+            Value::Null => true,
+            Value::Object(map) => map.is_empty(),
+            _ => false,
+        }
+    }
+
+    fn extract_id_query(query_json: &Value) -> Option<DocumentId> {
+        if let Value::Object(map) = query_json {
+            if map.len() == 1 {
+                if let Some(id_value) = map.get("_id") {
+                    return serde_json::from_value(id_value.clone()).ok();
+                }
+            }
+        }
+        None
+    }
+
     /// Scan all documents in this collection and return latest version by _id
     /// This helper reduces code duplication across find(), update(), delete(), etc.
     /// DEPRECATED: Use scan_documents_via_catalog() for better performance
@@ -1813,5 +2058,40 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         Ok(results)
+    }
+}
+
+/// Streaming cursor over query results
+pub struct FindCursor<'a, S: Storage + RawStorage> {
+    collection: &'a CollectionCore<S>,
+    doc_ids: Vec<DocumentId>,
+    position: usize,
+}
+
+impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
+    /// Fetch the next chunk of documents (up to `chunk_size`)
+    pub fn next_chunk(&mut self, chunk_size: usize) -> Result<Vec<Value>> {
+        if self.position >= self.doc_ids.len() {
+            return Ok(Vec::new());
+        }
+
+        let end = (self.position + chunk_size).min(self.doc_ids.len());
+        let mut results = Vec::with_capacity(end - self.position);
+        for doc_id in &self.doc_ids[self.position..end] {
+            if let Some(doc) = self.collection.read_document_by_id(doc_id)? {
+                results.push(doc);
+            }
+        }
+        self.position = end;
+        Ok(results)
+    }
+
+    /// Remaining documents in the cursor
+    pub fn remaining(&self) -> usize {
+        self.doc_ids.len().saturating_sub(self.position)
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.position >= self.doc_ids.len()
     }
 }

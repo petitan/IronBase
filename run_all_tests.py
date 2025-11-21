@@ -10,26 +10,27 @@ from pathlib import Path
 
 # Define test suites in execution order
 TEST_SUITES = [
-    # Core CRUD operations
-    ("test_mongolite.py", "Find operations"),
-    ("test_update.py", "Update operations"),
-    ("test_delete.py", "Delete operations"),
-    ("test_count.py", "Count operations"),
+    # WAL and durability
+    ("test_wal_behavior.py", "WAL behavior"),
+    ("test_power_failure.py", "Power failure recovery"),
+    ("test_crash_recovery_checkpoint.py", "Crash recovery + checkpoints"),
+    ("test_checkpoint.py", "Checkpoint durability"),
+    ("test_transaction_wal.py", "Transaction WAL consistency"),
+    ("test_auto_commit_power_failure.py", "Auto-commit durability modes"),
+    ("test_python_auto_commit.py", "Python API auto-commit"),
 
-    # Advanced features
-    ("test_complex_queries.py", "Complex queries"),
-    ("test_transactions.py", "Transactions"),
-    ("test_indexes.py", "Indexes"),
-    ("test_distinct.py", "Distinct operation"),
-    ("test_find_options.py", "Find options (limit, skip, sort)"),
+    # Logging and catalog
+    ("test_logging_system.py", "Logging system"),
+    ("test_catalog_debug.py", "Catalog debugging"),
+    ("test_nested_fields.py", "Nested field handling"),
 
-    # Compaction and persistence
-    ("test_compaction_simple.py", "Compaction (simple)"),
-    ("test_compaction.py", "Compaction (comprehensive)"),
-    ("test_reopen_fixed.py", "Database reopen/persistence"),
-
-    # Index persistence
-    ("test_index_persistence_poc.py", "B+ tree persistence (Rust unit tests)"),
+    # End-to-end and perf (longer)
+    ("test_e2e_comprehensive.py", "E2E comprehensive"),
+    ("test_e2e_extreme_650k.py", "E2E extreme 650k"),
+    ("test_e2e_large_scale_100mb.py", "E2E large scale 100MB"),
+    ("test_refactored_api.py", "Refactored API compatibility"),
+    ("test_insert_many_performance.py", "Insert-many performance"),
+    ("test_find_50k.py", "Find 50k performance"),
 ]
 
 def run_test(test_file, description):
@@ -41,7 +42,7 @@ def run_test(test_file, description):
 
     try:
         result = subprocess.run(
-            ["python", test_file],
+            [sys.executable, test_file],
             capture_output=True,
             text=True,
             timeout=60

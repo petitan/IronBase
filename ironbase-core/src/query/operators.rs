@@ -41,8 +41,11 @@ use lazy_static::lazy_static;
 ///
 /// ```rust
 /// use serde_json::json;
+/// use ironbase_core::query::operators::EqOperator;
+/// use ironbase_core::query::operators::OperatorMatcher;
+///
 /// let eq_op = EqOperator;
-/// let matches = eq_op.matches(Some(&json!("Alice")), &json!("Alice"), None)?;
+/// let matches = eq_op.matches(Some(&json!("Alice")), &json!("Alice"), None).unwrap();
 /// assert!(matches);
 /// ```
 pub trait OperatorMatcher: Send + Sync {
@@ -1040,6 +1043,16 @@ mod tests {
     fn test_matches_filter_logical_and() {
         let doc = create_test_document(1, vec![("age", json!(25)), ("city", json!("NYC"))]);
         let filter = json!({"$and": [{"age": {"$gte": 18}}, {"city": "NYC"}]});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_matches_filter_nested_dot_notation() {
+        let doc = create_test_document(1, vec![
+            ("address", json!({"city": "Budapest", "zip": 1111})),
+            ("stats", json!({"login_count": 42}))
+        ]);
+        let filter = json!({"address.city": "Budapest", "stats.login_count": {"$gte": 40}});
         assert!(matches_filter(&doc, &filter).unwrap());
     }
 

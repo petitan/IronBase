@@ -133,6 +133,35 @@ This is useful when:
 - Testing different index strategies
 - Debugging query performance issues
 
+### Nested Fields and Dot Notation
+
+MongoLite nem tiltja a beágyazott JSON struktúrákat – bátran tárolhatsz dokumentumokat, ahol egy mező újabb objektumot tartalmaz. A lekérdező és az indexelő réteg egyszerű *dot-notációs* stringként kezeli ezeket a mezőket, így ugyanazzal a szintaxissal tudsz rájuk szűrni, mint MongoDB-ben:
+
+```python
+users.insert_one({
+    "name": "Bori",
+    "address": {"city": "Budapest", "zip": 1111}
+})
+
+# Dot-notációs szűrés teljes dokumentum bejárással
+users.find({"address.city": "Budapest"})
+```
+
+Fontos azonban, hogy jelenleg nincs külön gyorsítás a dot-notációra. A motor végigjárja a teljes dokumentum objektumfáját, ezért index nélkül ez teljes táblaszkennel jár. Indexet is létrehozhatsz nested mezőre, de a névben szereplő path literal marad:
+
+```python
+# Index a nested mezőre – a planner ugyanúgy kezeli, mint bármely más field-et
+users.create_index("address.city")
+
+# Range feltétel és kézi hint ugyanazon a néven működik
+users.find_with_hint(
+    {"address.zip": {"$gte": 1000, "$lte": 1999}},
+    "users_address.zip"
+)
+```
+
+A range lekérdezések és a hint API működnek ilyen mezőkkel is, feltéve hogy az index path-ja megegyezik a query kulccsal. Nincs viszont speciális dot-notációs lookup vagy path-aware statisztika, így a finomhangoláshoz a fenti minta szerint explicit indexeket kell definiálni.
+
 ### Unique Constraints
 
 Unique indexes prevent duplicate values:

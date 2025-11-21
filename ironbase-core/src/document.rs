@@ -64,7 +64,30 @@ impl Document {
     /// WORKAROUND: Since _id is in doc.id field after deserialization,
     /// we can't return a reference to it. The query engine must special-case _id matching.
     pub fn get(&self, field: &str) -> Option<&Value> {
-        self.fields.get(field)
+        if field.is_empty() {
+            return None;
+        }
+        if field.contains('.') {
+            let mut value = self.fields.get(field.split('.').next().unwrap())?;
+            for part in field.split('.').skip(1) {
+                match value {
+                    Value::Object(map) => {
+                        value = map.get(part)?;
+                    }
+                    Value::Array(arr) => {
+                        if let Ok(index) = part.parse::<usize>() {
+                            value = arr.get(index)?;
+                        } else {
+                            return None;
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            Some(value)
+        } else {
+            self.fields.get(field)
+        }
     }
 
     /// Get the _id value as a JSON Value (for query matching)
@@ -395,5 +418,17 @@ mod tests {
         let profile = &user_data["profile"];
         assert_eq!(profile["name"], "Helen");
         assert_eq!(profile["contacts"]["email"], "helen@example.com");
+    }
+
+    #[test]
+    fn test_document_get_nested_dot_path() {
+        let json_str = r#"{
+            "_id": 1,
+            "address": {"city": "Budapest", "zip": 1111},
+            "stats": {"login_count": 42}
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+        assert_eq!(doc.get("address.city").unwrap(), &json!("Budapest"));
+        assert_eq!(doc.get("stats.login_count").unwrap(), &json!(42));
     }
 }
