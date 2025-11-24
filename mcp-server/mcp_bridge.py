@@ -220,7 +220,7 @@ def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": json.dumps(backend_result["result"], indent=2)
+                                    "text": json.dumps(backend_result["result"], indent=2, ensure_ascii=False)
                                 }
                             ]
                         }
@@ -385,7 +385,7 @@ def main():
         response = process_request(line)
 
         # Write response to stdout
-        response_json = json.dumps(response)
+        response_json = json.dumps(response, ensure_ascii=False)
         print(response_json, flush=True)
         log_debug(f"Sent response ({len(response_json)} bytes)")
 
