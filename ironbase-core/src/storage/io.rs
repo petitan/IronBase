@@ -1,12 +1,11 @@
 // storage/io.rs
 // Low-level I/O operations for storage engine
 
-use std::io::{Read, Write, Seek, SeekFrom};
-use crate::error::Result;
 use super::StorageEngine;
+use crate::error::Result;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 impl StorageEngine {
-
     /// Write data to end of file
     /// Returns the offset where data was written
     pub fn write_data(&mut self, data: &[u8]) -> Result<u64> {
@@ -86,7 +85,7 @@ impl StorageEngine {
         &mut self,
         collection: &str,
         doc_id: &crate::document::DocumentId,
-        data: &[u8]
+        data: &[u8],
     ) -> Result<u64> {
         use crate::error::MongoLiteError;
 
@@ -101,11 +100,13 @@ impl StorageEngine {
         self.metadata_dirty = true;
         // Update catalog in metadata with ABSOLUTE offset
         // Direct insert using DocumentId (no serialization overhead!)
-        let meta = self.get_collection_meta_mut(collection)
+        let meta = self
+            .get_collection_meta_mut(collection)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
 
-        meta.document_catalog.insert(doc_id.clone(), absolute_offset);
-        meta.document_count += 1;  // CRITICAL: increment document count!
+        meta.document_catalog
+            .insert(doc_id.clone(), absolute_offset);
+        meta.document_count += 1; // CRITICAL: increment document count!
 
         if self.header.metadata_offset > super::HEADER_SIZE {
             self.metadata_dirty = true;

@@ -1,13 +1,13 @@
 // ironbase-core/src/query_cache.rs
 // Query result caching with LRU eviction policy
 
+use crate::document::DocumentId;
 use lru::LruCache;
 use parking_lot::RwLock;
+use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
-use serde_json::Value;
-use crate::document::DocumentId;
 
 /// Hash of a query (collection + query JSON)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -43,7 +43,8 @@ impl QueryCache {
     /// # Arguments
     /// * `capacity` - Maximum number of cached queries (recommended: 1000)
     pub fn new(capacity: usize) -> Self {
-        let non_zero_capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1000).unwrap());
+        let non_zero_capacity =
+            NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1000).unwrap());
         QueryCache {
             cache: RwLock::new(LruCache::new(non_zero_capacity)),
             capacity,
@@ -132,7 +133,10 @@ mod tests {
         let hash1 = QueryHash::new("users", &query);
         let hash2 = QueryHash::new("posts", &query);
 
-        assert_ne!(hash1, hash2, "Different collections should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different collections should produce different hashes"
+        );
     }
 
     #[test]
@@ -142,7 +146,10 @@ mod tests {
         let hash1 = QueryHash::new("users", &query1);
         let hash2 = QueryHash::new("users", &query2);
 
-        assert_ne!(hash1, hash2, "Different queries should produce different hashes");
+        assert_ne!(
+            hash1, hash2,
+            "Different queries should produce different hashes"
+        );
     }
 
     #[test]
@@ -189,7 +196,10 @@ mod tests {
         assert!(cache.get(&hash).is_some());
 
         cache.invalidate_collection("users");
-        assert!(cache.get(&hash).is_none(), "Cache should be cleared after invalidation");
+        assert!(
+            cache.get(&hash).is_none(),
+            "Cache should be cleared after invalidation"
+        );
     }
 
     #[test]

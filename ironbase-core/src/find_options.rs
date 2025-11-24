@@ -1,8 +1,8 @@
 // ironbase-core/src/find_options.rs
 // Find query options: projection, sort, limit, skip
 
-use std::collections::HashMap;
 use serde_json::Value;
+use std::collections::HashMap;
 
 /// Options for find queries
 #[derive(Debug, Clone, Default)]
@@ -55,7 +55,8 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value
 
     // Detect mode
     let has_inclusions = projection.values().any(|&v| v == 1);
-    let has_non_id_exclusions = projection.iter()
+    let has_non_id_exclusions = projection
+        .iter()
         .any(|(field, &action)| action == 0 && field != "_id");
 
     let include_mode = has_inclusions && !has_non_id_exclusions;
@@ -121,7 +122,7 @@ fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
 
     match (a, b) {
         (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less,    // null < any value
+        (None, Some(_)) => Ordering::Less, // null < any value
         (Some(_), None) => Ordering::Greater,
 
         (Some(Value::Number(n1)), Some(Value::Number(n2))) => {
@@ -135,9 +136,7 @@ fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
         (Some(Value::Bool(b1)), Some(Value::Bool(b2))) => b1.cmp(b2),
 
         // Type priority: null < number < string < bool < object < array
-        (Some(a_val), Some(b_val)) => {
-            type_priority(a_val).cmp(&type_priority(b_val))
-        }
+        (Some(a_val), Some(b_val)) => type_priority(a_val).cmp(&type_priority(b_val)),
     }
 }
 
@@ -179,15 +178,12 @@ mod tests {
     #[test]
     fn test_projection_include_mode() {
         let doc = json!({"name": "Alice", "age": 30, "city": "NYC", "_id": 1});
-        let projection = HashMap::from([
-            ("name".to_string(), 1),
-            ("age".to_string(), 1),
-        ]);
+        let projection = HashMap::from([("name".to_string(), 1), ("age".to_string(), 1)]);
 
         let result = apply_projection(&doc, &projection);
         assert!(result.get("name").is_some());
         assert!(result.get("age").is_some());
-        assert!(result.get("_id").is_some());  // Included by default
+        assert!(result.get("_id").is_some()); // Included by default
         assert!(result.get("city").is_none());
     }
 
@@ -196,37 +192,31 @@ mod tests {
         let doc = json!({"name": "Alice", "age": 30, "_id": 1});
         let projection = HashMap::from([
             ("name".to_string(), 1),
-            ("_id".to_string(), 0),  // Explicit exclude
+            ("_id".to_string(), 0), // Explicit exclude
         ]);
 
         let result = apply_projection(&doc, &projection);
         assert!(result.get("name").is_some());
-        assert!(result.get("_id").is_none());  // Excluded
+        assert!(result.get("_id").is_none()); // Excluded
     }
 
     #[test]
     fn test_projection_exclude_mode() {
         let doc = json!({"name": "Alice", "age": 30, "city": "NYC", "_id": 1});
-        let projection = HashMap::from([
-            ("city".to_string(), 0),
-        ]);
+        let projection = HashMap::from([("city".to_string(), 0)]);
 
         let result = apply_projection(&doc, &projection);
         assert!(result.get("name").is_some());
         assert!(result.get("age").is_some());
         assert!(result.get("_id").is_some());
-        assert!(result.get("city").is_none());  // Excluded
+        assert!(result.get("city").is_none()); // Excluded
     }
 
     #[test]
     fn test_sort_single_field() {
-        let mut docs = vec![
-            json!({"age": 30}),
-            json!({"age": 25}),
-            json!({"age": 35}),
-        ];
+        let mut docs = vec![json!({"age": 30}), json!({"age": 25}), json!({"age": 35})];
 
-        let sort = vec![("age".to_string(), 1)];  // Ascending
+        let sort = vec![("age".to_string(), 1)]; // Ascending
 
         apply_sort(&mut docs, &sort);
 
@@ -237,13 +227,9 @@ mod tests {
 
     #[test]
     fn test_sort_descending() {
-        let mut docs = vec![
-            json!({"age": 30}),
-            json!({"age": 25}),
-            json!({"age": 35}),
-        ];
+        let mut docs = vec![json!({"age": 30}), json!({"age": 25}), json!({"age": 35})];
 
-        let sort = vec![("age".to_string(), -1)];  // Descending
+        let sort = vec![("age".to_string(), -1)]; // Descending
 
         apply_sort(&mut docs, &sort);
 
@@ -267,9 +253,9 @@ mod tests {
 
         apply_sort(&mut docs, &sort);
 
-        assert_eq!(docs[0].get("name").unwrap(), "Alice");  // age=25
-        assert_eq!(docs[1].get("name").unwrap(), "Carol");  // age=30, name=C
-        assert_eq!(docs[2].get("name").unwrap(), "Bob");    // age=30, name=B
+        assert_eq!(docs[0].get("name").unwrap(), "Alice"); // age=25
+        assert_eq!(docs[1].get("name").unwrap(), "Carol"); // age=30, name=C
+        assert_eq!(docs[2].get("name").unwrap(), "Bob"); // age=30, name=B
     }
 
     #[test]
@@ -344,10 +330,7 @@ mod tests {
 
     #[test]
     fn test_skip_beyond_length() {
-        let docs = vec![
-            json!({"n": 1}),
-            json!({"n": 2}),
-        ];
+        let docs = vec![json!({"n": 1}), json!({"n": 2})];
 
         let result = apply_limit_skip(docs, None, Some(10));
 

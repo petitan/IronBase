@@ -1,8 +1,8 @@
 // Index performance and integration tests
 use ironbase_core::DatabaseCore;
 use serde_json::json;
-use tempfile::TempDir;
 use std::time::Instant;
+use tempfile::TempDir;
 
 #[test]
 fn test_index_equality_query() {
@@ -50,12 +50,14 @@ fn test_index_range_query() {
     }
 
     // Range query: price >= 200 AND price < 500 (should use IndexRangeScan)
-    let results = collection.find(&json!({
-        "price": {
-            "$gte": 200,
-            "$lt": 500
-        }
-    })).unwrap();
+    let results = collection
+        .find(&json!({
+            "price": {
+                "$gte": 200,
+                "$lt": 500
+            }
+        }))
+        .unwrap();
 
     assert_eq!(results.len(), 30); // 20-49 (prices 200-490)
 
@@ -101,7 +103,9 @@ fn test_index_with_multiple_queries() {
     let collection = db.collection("employees").unwrap();
 
     // Create index on salary
-    collection.create_index("salary".to_string(), false).unwrap();
+    collection
+        .create_index("salary".to_string(), false)
+        .unwrap();
 
     // Insert employees
     let salaries = vec![30000, 45000, 60000, 75000, 90000, 105000, 120000];
@@ -122,16 +126,20 @@ fn test_index_with_multiple_queries() {
     assert_eq!(results.len(), 3); // 90k, 105k, 120k
 
     // Test 3: Less than or equal
-    let results = collection.find(&json!({"salary": {"$lte": 45000}})).unwrap();
+    let results = collection
+        .find(&json!({"salary": {"$lte": 45000}}))
+        .unwrap();
     assert_eq!(results.len(), 2); // 30k, 45k
 
     // Test 4: Range
-    let results = collection.find(&json!({
-        "salary": {
-            "$gte": 50000,
-            "$lt": 100000
-        }
-    })).unwrap();
+    let results = collection
+        .find(&json!({
+            "salary": {
+                "$gte": 50000,
+                "$lt": 100000
+            }
+        }))
+        .unwrap();
     assert_eq!(results.len(), 3); // 60k, 75k, 90k
 }
 
@@ -145,7 +153,9 @@ fn test_index_performance_comparison() {
 
     // Collection WITH index
     let indexed_collection = db.collection("indexed_users").unwrap();
-    indexed_collection.create_index("age".to_string(), false).unwrap();
+    indexed_collection
+        .create_index("age".to_string(), false)
+        .unwrap();
 
     // Collection WITHOUT index
     let unindexed_collection = db.collection("unindexed_users").unwrap();
@@ -177,9 +187,20 @@ fn test_index_performance_comparison() {
     let results_unindexed = unindexed_collection.find(&json!({"age": 50})).unwrap();
     let unindexed_time = start.elapsed();
 
-    println!("Indexed:   {:?} ({} results)", indexed_time, results_indexed.len());
-    println!("Unindexed: {:?} ({} results)", unindexed_time, results_unindexed.len());
-    println!("Speedup:   {:.2}x", unindexed_time.as_nanos() as f64 / indexed_time.as_nanos() as f64);
+    println!(
+        "Indexed:   {:?} ({} results)",
+        indexed_time,
+        results_indexed.len()
+    );
+    println!(
+        "Unindexed: {:?} ({} results)",
+        unindexed_time,
+        results_unindexed.len()
+    );
+    println!(
+        "Speedup:   {:.2}x",
+        unindexed_time.as_nanos() as f64 / indexed_time.as_nanos() as f64
+    );
 
     assert_eq!(results_indexed.len(), results_unindexed.len());
 
@@ -187,20 +208,35 @@ fn test_index_performance_comparison() {
     println!("\n=== Range Query: 30 <= age < 70 ===");
 
     let start = Instant::now();
-    let results_indexed = indexed_collection.find(&json!({
-        "age": {"$gte": 30, "$lt": 70}
-    })).unwrap();
+    let results_indexed = indexed_collection
+        .find(&json!({
+            "age": {"$gte": 30, "$lt": 70}
+        }))
+        .unwrap();
     let indexed_time = start.elapsed();
 
     let start = Instant::now();
-    let results_unindexed = unindexed_collection.find(&json!({
-        "age": {"$gte": 30, "$lt": 70}
-    })).unwrap();
+    let results_unindexed = unindexed_collection
+        .find(&json!({
+            "age": {"$gte": 30, "$lt": 70}
+        }))
+        .unwrap();
     let unindexed_time = start.elapsed();
 
-    println!("Indexed:   {:?} ({} results)", indexed_time, results_indexed.len());
-    println!("Unindexed: {:?} ({} results)", unindexed_time, results_unindexed.len());
-    println!("Speedup:   {:.2}x", unindexed_time.as_nanos() as f64 / indexed_time.as_nanos() as f64);
+    println!(
+        "Indexed:   {:?} ({} results)",
+        indexed_time,
+        results_indexed.len()
+    );
+    println!(
+        "Unindexed: {:?} ({} results)",
+        unindexed_time,
+        results_unindexed.len()
+    );
+    println!(
+        "Speedup:   {:.2}x",
+        unindexed_time.as_nanos() as f64 / indexed_time.as_nanos() as f64
+    );
 
     // The indexed version may return fewer results due to optimization
     // but should at least find the same unique ages

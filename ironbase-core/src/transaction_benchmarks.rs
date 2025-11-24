@@ -4,11 +4,11 @@
 #[cfg(test)]
 mod benchmarks {
     use crate::database::DatabaseCore;
-    use crate::transaction::Operation;
     use crate::document::DocumentId;
+    use crate::transaction::Operation;
     use serde_json::json;
-    use tempfile::TempDir;
     use std::time::Instant;
+    use tempfile::TempDir;
 
     /// Helper to format duration nicely
     fn format_duration(nanos: u128) -> String {
@@ -43,7 +43,10 @@ mod benchmarks {
         println!("\n📊 Empty Transaction Overhead:");
         println!("   Total: {} iterations in {:?}", iterations, elapsed);
         println!("   Average: {} per transaction", format_duration(avg_nanos));
-        println!("   Throughput: {:.0} tx/sec", iterations as f64 / elapsed.as_secs_f64());
+        println!(
+            "   Throughput: {:.0} tx/sec",
+            iterations as f64 / elapsed.as_secs_f64()
+        );
     }
 
     #[test]
@@ -65,7 +68,8 @@ mod benchmarks {
                 collection: "bench".to_string(),
                 doc_id: DocumentId::Int(i as i64),
                 doc: json!({"id": i, "data": "test"}),
-            }).unwrap();
+            })
+            .unwrap();
 
             db.update_transaction(tx_id, tx).unwrap();
             db.commit_transaction(tx_id).unwrap();
@@ -77,7 +81,10 @@ mod benchmarks {
         println!("\n📊 Single Operation Transaction:");
         println!("   Total: {} iterations in {:?}", iterations, elapsed);
         println!("   Average: {} per transaction", format_duration(avg_nanos));
-        println!("   Throughput: {:.0} tx/sec", iterations as f64 / elapsed.as_secs_f64());
+        println!(
+            "   Throughput: {:.0} tx/sec",
+            iterations as f64 / elapsed.as_secs_f64()
+        );
     }
 
     #[test]
@@ -102,7 +109,8 @@ mod benchmarks {
                     collection: "bench".to_string(),
                     doc_id: DocumentId::Int(doc_id as i64),
                     doc: json!({"id": doc_id, "data": format!("item_{}", doc_id)}),
-                }).unwrap();
+                })
+                .unwrap();
             }
 
             db.update_transaction(tx_id, tx).unwrap();
@@ -115,8 +123,14 @@ mod benchmarks {
         println!("\n📊 10-Operation Transaction:");
         println!("   Total: {} transactions in {:?}", iterations, elapsed);
         println!("   Average: {} per transaction", format_duration(avg_nanos));
-        println!("   Throughput: {:.0} tx/sec", iterations as f64 / elapsed.as_secs_f64());
-        println!("   Per operation: {}", format_duration(avg_nanos / ops_per_tx));
+        println!(
+            "   Throughput: {:.0} tx/sec",
+            iterations as f64 / elapsed.as_secs_f64()
+        );
+        println!(
+            "   Per operation: {}",
+            format_duration(avg_nanos / ops_per_tx)
+        );
     }
 
     #[test]
@@ -141,7 +155,8 @@ mod benchmarks {
                     collection: "bench".to_string(),
                     doc_id: DocumentId::Int(doc_id as i64),
                     doc: json!({"id": doc_id, "value": doc_id * 2}),
-                }).unwrap();
+                })
+                .unwrap();
             }
 
             db.update_transaction(tx_id, tx).unwrap();
@@ -154,8 +169,14 @@ mod benchmarks {
         println!("\n📊 100-Operation Transaction:");
         println!("   Total: {} transactions in {:?}", iterations, elapsed);
         println!("   Average: {} per transaction", format_duration(avg_nanos));
-        println!("   Throughput: {:.0} tx/sec", iterations as f64 / elapsed.as_secs_f64());
-        println!("   Per operation: {}", format_duration(avg_nanos / ops_per_tx));
+        println!(
+            "   Throughput: {:.0} tx/sec",
+            iterations as f64 / elapsed.as_secs_f64()
+        );
+        println!(
+            "   Per operation: {}",
+            format_duration(avg_nanos / ops_per_tx)
+        );
     }
 
     #[test]
@@ -179,7 +200,8 @@ mod benchmarks {
                     collection: "bench".to_string(),
                     doc_id: DocumentId::Int((i * 5 + j) as i64),
                     doc: json!({"data": "test"}),
-                }).unwrap();
+                })
+                .unwrap();
             }
 
             db.update_transaction(tx_id, tx).unwrap();
@@ -194,7 +216,10 @@ mod benchmarks {
         println!("\n📊 Rollback Overhead (5 ops each):");
         println!("   Total: {} iterations in {:?}", iterations, elapsed);
         println!("   Average: {} per rollback", format_duration(avg_nanos));
-        println!("   Throughput: {:.0} rollbacks/sec", iterations as f64 / elapsed.as_secs_f64());
+        println!(
+            "   Throughput: {:.0} rollbacks/sec",
+            iterations as f64 / elapsed.as_secs_f64()
+        );
     }
 
     #[test]
@@ -216,7 +241,10 @@ mod benchmarks {
         println!("\n📊 Begin Transaction Only:");
         println!("   Total: {} iterations in {:?}", iterations, elapsed);
         println!("   Average: {} per begin", format_duration(avg_nanos));
-        println!("   Throughput: {:.0} begins/sec", iterations as f64 / elapsed.as_secs_f64());
+        println!(
+            "   Throughput: {:.0} begins/sec",
+            iterations as f64 / elapsed.as_secs_f64()
+        );
     }
 
     #[test]
@@ -239,7 +267,8 @@ mod benchmarks {
                 collection: "wal_bench".to_string(),
                 doc_id: DocumentId::Int(i as i64),
                 doc: json!({"data": "wal_test", "iteration": i}),
-            }).unwrap();
+            })
+            .unwrap();
 
             db.update_transaction(tx_id, tx).unwrap();
 
@@ -253,7 +282,10 @@ mod benchmarks {
         println!("\n📊 WAL Write Performance (with fsync):");
         println!("   Total: {} commits in {:?}", iterations, elapsed);
         println!("   Average: {} per WAL write", format_duration(avg_nanos));
-        println!("   Throughput: {:.0} writes/sec", iterations as f64 / elapsed.as_secs_f64());
+        println!(
+            "   Throughput: {:.0} writes/sec",
+            iterations as f64 / elapsed.as_secs_f64()
+        );
     }
 
     #[test]
@@ -274,7 +306,8 @@ mod benchmarks {
                     collection: "recovery_bench".to_string(),
                     doc_id: DocumentId::Int(i),
                     doc: json!({"id": i}),
-                }).unwrap();
+                })
+                .unwrap();
 
                 db.update_transaction(tx_id, tx).unwrap();
                 db.commit_transaction(tx_id).unwrap();
@@ -293,6 +326,9 @@ mod benchmarks {
 
         println!("\n📊 Crash Recovery Time (100 committed transactions):");
         println!("   Recovery time: {:?}", elapsed);
-        println!("   Per transaction: {}", format_duration(elapsed.as_nanos() / 100));
+        println!(
+            "   Per transaction: {}",
+            format_duration(elapsed.as_nanos() / 100)
+        );
     }
 }

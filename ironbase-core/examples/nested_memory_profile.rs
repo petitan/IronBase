@@ -15,10 +15,7 @@ fn main() -> anyhow::Result<()> {
         .get(1)
         .cloned()
         .unwrap_or_else(|| "nested_memory_profile.mlite".to_string());
-    let target_docs: usize = args
-        .get(2)
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(25_000);
+    let target_docs: usize = args.get(2).and_then(|v| v.parse().ok()).unwrap_or(25_000);
     let batch_size = 1_000_usize;
 
     println!("==============================================");
@@ -191,7 +188,9 @@ fn current_rss_kb() -> io::Result<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             let value = rest.trim().split_whitespace().next().unwrap_or("0");
-            return value.parse::<u64>().map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+            return value
+                .parse::<u64>()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
         }
     }
     Err(io::Error::new(

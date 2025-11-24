@@ -4,10 +4,10 @@
 #[cfg(test)]
 mod property_tests {
     use crate::database::DatabaseCore;
-    use crate::transaction::{Operation};
     use crate::document::DocumentId;
-    use serde_json::json;
+    use crate::transaction::Operation;
     use proptest::prelude::*;
+    use serde_json::json;
     use tempfile::TempDir;
 
     // Strategy for generating random operations

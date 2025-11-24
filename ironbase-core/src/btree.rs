@@ -1,21 +1,21 @@
 // src/btree.rs
 // Full B+ Tree Implementation with proper split support
 
-use crate::index::{IndexKey, IndexMetadata};
 use crate::document::DocumentId;
-use crate::error::{Result, MongoLiteError};
-use serde::{Serialize, Deserialize};
+use crate::error::{MongoLiteError, Result};
+use crate::index::{IndexKey, IndexMetadata};
+use serde::{Deserialize, Serialize};
 
 // B+ Tree Configuration
 const BTREE_ORDER: usize = 32;
-const MAX_KEYS: usize = BTREE_ORDER - 1;  // 31
+const MAX_KEYS: usize = BTREE_ORDER - 1; // 31
 
 /// B+ Tree Node (in-memory, simplified)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Node {
     Internal {
         keys: Vec<IndexKey>,
-        children: Vec<Box<Node>>,  // In-memory children
+        children: Vec<Box<Node>>, // In-memory children
     },
     Leaf {
         keys: Vec<IndexKey>,
@@ -26,8 +26,8 @@ pub enum Node {
 /// Split result when node overflows
 #[derive(Debug)]
 struct SplitResult {
-    key: IndexKey,        // Key to push up
-    right: Box<Node>,     // New right node
+    key: IndexKey,    // Key to push up
+    right: Box<Node>, // New right node
 }
 
 /// Full B+ Tree with complete split support
@@ -71,8 +71,8 @@ impl BPlusTreeFull {
                 // child[i] has keys < keys[i]
                 // child[i+1] has keys >= keys[i]
                 let idx = match keys.binary_search(key) {
-                    Ok(pos) => pos + 1,  // Found exact match in separator -> go right
-                    Err(pos) => pos,     // Not found -> pos is correct child
+                    Ok(pos) => pos + 1, // Found exact match in separator -> go right
+                    Err(pos) => pos,    // Not found -> pos is correct child
                 };
                 Self::search_in_node(&children[idx], key)
             }
@@ -86,15 +86,19 @@ impl BPlusTreeFull {
     pub fn insert(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
         // Unique constraint check
         if self.metadata.unique && self.search(&key).is_some() {
-            return Err(MongoLiteError::IndexError(
-                format!("Duplicate key: {:?}", key)
-            ));
+            return Err(MongoLiteError::IndexError(format!(
+                "Duplicate key: {:?}",
+                key
+            )));
         }
 
         // Take root ownership for mutation
         let old_root = std::mem::replace(
             &mut self.root,
-            Box::new(Node::Leaf { keys: Vec::new(), values: Vec::new() })
+            Box::new(Node::Leaf {
+                keys: Vec::new(),
+                values: Vec::new(),
+            }),
         );
 
         // Insert and handle potential split
@@ -124,7 +128,10 @@ impl BPlusTreeFull {
         value: DocumentId,
     ) -> Result<(Box<Node>, Option<SplitResult>)> {
         match *node {
-            Node::Leaf { ref mut keys, ref mut values } => {
+            Node::Leaf {
+                ref mut keys,
+                ref mut values,
+            } => {
                 // Find insert position
                 let pos = keys.binary_search(&key).unwrap_or_else(|p| p);
 
@@ -149,16 +156,22 @@ impl BPlusTreeFull {
                     values: right_values,
                 });
 
-                Ok((node, Some(SplitResult {
-                    key: split_key,
-                    right: right_node,
-                })))
+                Ok((
+                    node,
+                    Some(SplitResult {
+                        key: split_key,
+                        right: right_node,
+                    }),
+                ))
             }
-            Node::Internal { ref mut keys, ref mut children } => {
+            Node::Internal {
+                ref mut keys,
+                ref mut children,
+            } => {
                 // Find child to insert into (same logic as search)
                 let idx = match keys.binary_search(&key) {
-                    Ok(pos) => pos + 1,  // Exact match -> go right
-                    Err(pos) => pos,     // Not found -> pos is correct child
+                    Ok(pos) => pos + 1, // Exact match -> go right
+                    Err(pos) => pos,    // Not found -> pos is correct child
                 };
 
                 // Remove child, insert into it
@@ -196,10 +209,13 @@ impl BPlusTreeFull {
                         children: right_children,
                     });
 
-                    return Ok((node, Some(SplitResult {
-                        key: mid_key,
-                        right: right_node,
-                    })));
+                    return Ok((
+                        node,
+                        Some(SplitResult {
+                            key: mid_key,
+                            right: right_node,
+                        }),
+                    ));
                 }
 
                 Ok((node, None))
@@ -216,7 +232,14 @@ impl BPlusTreeFull {
         inclusive_end: bool,
     ) -> Vec<DocumentId> {
         let mut results = Vec::new();
-        Self::range_scan_node(&self.root, start, end, inclusive_start, inclusive_end, &mut results);
+        Self::range_scan_node(
+            &self.root,
+            start,
+            end,
+            inclusive_start,
+            inclusive_end,
+            &mut results,
+        );
         results
     }
 
@@ -232,8 +255,8 @@ impl BPlusTreeFull {
             Node::Internal { keys, children } => {
                 // Find starting child (same separator logic as search)
                 let start_idx = match keys.binary_search(start) {
-                    Ok(pos) => pos + 1,  // Start key equals separator -> start from right child
-                    Err(pos) => pos,     // Start key between separators
+                    Ok(pos) => pos + 1, // Start key equals separator -> start from right child
+                    Err(pos) => pos,    // Start key between separators
                 };
 
                 // Scan all potentially relevant children
@@ -243,7 +266,14 @@ impl BPlusTreeFull {
                     if i > 0 && keys.get(i - 1).map(|k| k > end).unwrap_or(false) {
                         break;
                     }
-                    Self::range_scan_node(&children[i], start, end, inclusive_start, inclusive_end, results);
+                    Self::range_scan_node(
+                        &children[i],
+                        start,
+                        end,
+                        inclusive_start,
+                        inclusive_end,
+                        results,
+                    );
                 }
             }
             Node::Leaf { keys, values } => {
@@ -306,8 +336,10 @@ mod tests {
     fn test_btree_basic_insert_search() {
         let mut tree = BPlusTreeFull::new("test".to_string(), "age".to_string(), false);
 
-        tree.insert(IndexKey::Int(10), DocumentId::Int(100)).unwrap();
-        tree.insert(IndexKey::Int(20), DocumentId::Int(200)).unwrap();
+        tree.insert(IndexKey::Int(10), DocumentId::Int(100))
+            .unwrap();
+        tree.insert(IndexKey::Int(20), DocumentId::Int(200))
+            .unwrap();
         tree.insert(IndexKey::Int(5), DocumentId::Int(50)).unwrap();
 
         assert_eq!(tree.search(&IndexKey::Int(10)), Some(DocumentId::Int(100)));
@@ -327,22 +359,36 @@ mod tests {
 
         // All keys should still be searchable
         for i in 0..100 {
-            assert_eq!(tree.search(&IndexKey::Int(i)), Some(DocumentId::Int(i)),
-                "Failed to find key {}", i);
+            assert_eq!(
+                tree.search(&IndexKey::Int(i)),
+                Some(DocumentId::Int(i)),
+                "Failed to find key {}",
+                i
+            );
         }
 
         assert_eq!(tree.size(), 100);
         // Tree height should increase with splits
-        assert!(tree.height() > 1, "Tree should have split and increased height");
+        assert!(
+            tree.height() > 1,
+            "Tree should have split and increased height"
+        );
     }
 
     #[test]
     fn test_btree_unique_constraint() {
         let mut tree = BPlusTreeFull::new("test".to_string(), "email".to_string(), true);
 
-        tree.insert(IndexKey::String("test@example.com".to_string()), DocumentId::Int(1)).unwrap();
+        tree.insert(
+            IndexKey::String("test@example.com".to_string()),
+            DocumentId::Int(1),
+        )
+        .unwrap();
 
-        let result = tree.insert(IndexKey::String("test@example.com".to_string()), DocumentId::Int(2));
+        let result = tree.insert(
+            IndexKey::String("test@example.com".to_string()),
+            DocumentId::Int(2),
+        );
         assert!(result.is_err());
     }
 
@@ -354,12 +400,7 @@ mod tests {
             tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
         }
 
-        let results = tree.range_scan(
-            &IndexKey::Int(10),
-            &IndexKey::Int(20),
-            true,
-            false,
-        );
+        let results = tree.range_scan(&IndexKey::Int(10), &IndexKey::Int(20), true, false);
 
         assert_eq!(results.len(), 10);
         assert_eq!(results[0], DocumentId::Int(10));
@@ -370,9 +411,12 @@ mod tests {
     fn test_btree_delete() {
         let mut tree = BPlusTreeFull::new("test".to_string(), "age".to_string(), false);
 
-        tree.insert(IndexKey::Int(10), DocumentId::Int(100)).unwrap();
-        tree.insert(IndexKey::Int(20), DocumentId::Int(200)).unwrap();
-        tree.insert(IndexKey::Int(30), DocumentId::Int(300)).unwrap();
+        tree.insert(IndexKey::Int(10), DocumentId::Int(100))
+            .unwrap();
+        tree.insert(IndexKey::Int(20), DocumentId::Int(200))
+            .unwrap();
+        tree.insert(IndexKey::Int(30), DocumentId::Int(300))
+            .unwrap();
 
         assert_eq!(tree.size(), 3);
 
@@ -408,17 +452,21 @@ mod tests {
         // Insert in non-sequential order
         let keys = vec![50, 25, 75, 10, 30, 60, 90, 5, 15, 20];
         for &k in &keys {
-            tree.insert(IndexKey::Int(k), DocumentId::Int(k as i64)).unwrap();
+            tree.insert(IndexKey::Int(k), DocumentId::Int(k as i64))
+                .unwrap();
         }
 
         // All should be searchable
         for &k in &keys {
-            assert_eq!(tree.search(&IndexKey::Int(k)), Some(DocumentId::Int(k as i64)));
+            assert_eq!(
+                tree.search(&IndexKey::Int(k)),
+                Some(DocumentId::Int(k as i64))
+            );
         }
     }
 
     #[test]
-    #[ignore]  // Slow test - run with: cargo test -- --ignored
+    #[ignore] // Slow test - run with: cargo test -- --ignored
     fn test_btree_performance_1m_keys() {
         use std::time::Instant;
 
@@ -431,7 +479,8 @@ mod tests {
         }
         let insert_duration = start.elapsed();
 
-        println!("1M inserts took: {:?} ({:.2} ops/sec)",
+        println!(
+            "1M inserts took: {:?} ({:.2} ops/sec)",
             insert_duration,
             1_000_000.0 / insert_duration.as_secs_f64()
         );
@@ -445,7 +494,8 @@ mod tests {
         }
         let search_duration = start.elapsed();
 
-        println!("1000 searches took: {:?} ({:.2} µs/search)",
+        println!(
+            "1000 searches took: {:?} ({:.2} µs/search)",
             search_duration,
             search_duration.as_micros() as f64 / 1000.0
         );

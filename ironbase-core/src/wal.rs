@@ -5,7 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use crate::error::{Result, MongoLiteError};
+use crate::error::{MongoLiteError, Result};
 use crate::transaction::TransactionId;
 
 /// Entry type in the WAL
@@ -188,7 +188,7 @@ impl WriteAheadLog {
             match self.read_next_entry() {
                 Ok(entry) => entries.push(entry),
                 Err(MongoLiteError::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                    break;  // End of file
+                    break; // End of file
                 }
                 Err(e) => return Err(e),
             }
@@ -223,7 +223,7 @@ impl WriteAheadLog {
         // Read header: 8 (tx_id) + 1 (type) + 4 (len) = 13 bytes
         let mut header = [0u8; 13];
         match self.file.read_exact(&mut header) {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                 // Empty file or end of entries - return EOF error
                 return Err(MongoLiteError::Io(e));
@@ -263,7 +263,7 @@ impl WriteAheadLog {
     pub fn clear(&mut self) -> Result<()> {
         self.file.set_len(0)?;
         self.file.seek(SeekFrom::Start(0))?;
-        self.file.sync_all()?;  // Ensure truncation is persisted to disk
+        self.file.sync_all()?; // Ensure truncation is persisted to disk
         Ok(())
     }
 
@@ -324,7 +324,10 @@ mod tests {
     #[test]
     fn test_wal_entry_type_conversion() {
         assert_eq!(WALEntryType::from_u8(0x01).unwrap(), WALEntryType::Begin);
-        assert_eq!(WALEntryType::from_u8(0x02).unwrap(), WALEntryType::Operation);
+        assert_eq!(
+            WALEntryType::from_u8(0x02).unwrap(),
+            WALEntryType::Operation
+        );
         assert_eq!(WALEntryType::from_u8(0x03).unwrap(), WALEntryType::Commit);
         assert_eq!(WALEntryType::from_u8(0x04).unwrap(), WALEntryType::Abort);
         assert!(WALEntryType::from_u8(0xFF).is_err());
@@ -385,8 +388,8 @@ mod tests {
             let mut wal = WriteAheadLog::open(&wal_path).unwrap();
             let recovered = wal.recover().unwrap();
 
-            assert_eq!(recovered.len(), 1);  // One committed transaction
-            assert_eq!(recovered[0].len(), 3);  // Begin + Operation + Commit
+            assert_eq!(recovered.len(), 1); // One committed transaction
+            assert_eq!(recovered[0].len(), 3); // Begin + Operation + Commit
         }
     }
 
@@ -399,13 +402,18 @@ mod tests {
             let mut wal = WriteAheadLog::open(&wal_path).unwrap();
 
             // Committed transaction
-            wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![])).unwrap();
-            wal.append(&WALEntry::new(1, WALEntryType::Operation, b"op1".to_vec())).unwrap();
-            wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![])).unwrap();
+            wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+                .unwrap();
+            wal.append(&WALEntry::new(1, WALEntryType::Operation, b"op1".to_vec()))
+                .unwrap();
+            wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
+                .unwrap();
 
             // Uncommitted transaction
-            wal.append(&WALEntry::new(2, WALEntryType::Begin, vec![])).unwrap();
-            wal.append(&WALEntry::new(2, WALEntryType::Operation, b"op2".to_vec())).unwrap();
+            wal.append(&WALEntry::new(2, WALEntryType::Begin, vec![]))
+                .unwrap();
+            wal.append(&WALEntry::new(2, WALEntryType::Operation, b"op2".to_vec()))
+                .unwrap();
             // No commit
 
             wal.flush().unwrap();
@@ -416,7 +424,7 @@ mod tests {
             let mut wal = WriteAheadLog::open(&wal_path).unwrap();
             let recovered = wal.recover().unwrap();
 
-            assert_eq!(recovered.len(), 1);  // Only committed transaction
+            assert_eq!(recovered.len(), 1); // Only committed transaction
             assert_eq!(recovered[0][0].transaction_id, 1);
         }
     }
@@ -428,7 +436,8 @@ mod tests {
 
         {
             let mut wal = WriteAheadLog::open(&wal_path).unwrap();
-            wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![])).unwrap();
+            wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+                .unwrap();
             wal.flush().unwrap();
 
             wal.clear().unwrap();

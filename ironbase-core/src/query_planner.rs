@@ -1,8 +1,8 @@
 // src/query_planner.rs
 // Query planner and optimizer - index selection
 
-use serde_json::Value;
 use crate::index::IndexKey;
+use serde_json::Value;
 
 /// Query plan - describes how to execute a query
 #[derive(Debug, Clone)]
@@ -34,7 +34,10 @@ pub struct QueryPlanner;
 impl QueryPlanner {
     /// Analyze a query and determine if an index can be used
     /// Returns (field_name, QueryPlan) if an index opportunity is found
-    pub fn analyze_query(query_json: &Value, available_indexes: &[String]) -> Option<(String, QueryPlan)> {
+    pub fn analyze_query(
+        query_json: &Value,
+        available_indexes: &[String],
+    ) -> Option<(String, QueryPlan)> {
         // Check for simple equality query: { "field": value }
         if let Value::Object(ref map) = query_json {
             // First try range query analysis (handles { "field": { "$gte": ... } })
@@ -67,7 +70,7 @@ impl QueryPlanner {
                         index_name,
                         field: field.clone(),
                         key,
-                    }
+                    },
                 ));
             }
         }
@@ -76,7 +79,10 @@ impl QueryPlanner {
     }
 
     /// Analyze query for range operators ($gt, $gte, $lt, $lte)
-    fn analyze_range_query(query_json: &Value, available_indexes: &[String]) -> Option<(String, QueryPlan)> {
+    fn analyze_range_query(
+        query_json: &Value,
+        available_indexes: &[String],
+    ) -> Option<(String, QueryPlan)> {
         if let Value::Object(ref map) = query_json {
             for (field, conditions) in map {
                 if field.starts_with('$') {
@@ -122,7 +128,7 @@ impl QueryPlanner {
                                 end,
                                 inclusive_start,
                                 inclusive_end,
-                            }
+                            },
                         ));
                     }
                 }
@@ -135,7 +141,8 @@ impl QueryPlanner {
     /// Find an index for a given field
     fn find_index_for_field(field: &str, available_indexes: &[String]) -> Option<String> {
         // Look for index ending with _{field}
-        available_indexes.iter()
+        available_indexes
+            .iter()
             .find(|idx| idx.ends_with(&format!("_{}", field)))
             .cloned()
     }
@@ -147,7 +154,11 @@ impl QueryPlanner {
         if let Some((field, plan)) = Self::analyze_query(query_json, available_indexes) {
             // Index-based plan
             match plan {
-                QueryPlan::IndexScan { ref index_name, ref key, .. } => {
+                QueryPlan::IndexScan {
+                    ref index_name,
+                    ref key,
+                    ..
+                } => {
                     json!({
                         "queryPlan": "IndexScan",
                         "indexUsed": index_name,
@@ -158,7 +169,14 @@ impl QueryPlanner {
                         "estimatedCost": "O(log n)",
                     })
                 }
-                QueryPlan::IndexRangeScan { ref index_name, ref start, ref end, inclusive_start, inclusive_end, .. } => {
+                QueryPlan::IndexRangeScan {
+                    ref index_name,
+                    ref start,
+                    ref end,
+                    inclusive_start,
+                    inclusive_end,
+                    ..
+                } => {
                     json!({
                         "queryPlan": "IndexRangeScan",
                         "indexUsed": index_name,
@@ -215,7 +233,11 @@ mod tests {
         assert_eq!(field, "age");
 
         match plan {
-            QueryPlan::IndexScan { index_name, field, key } => {
+            QueryPlan::IndexScan {
+                index_name,
+                field,
+                key,
+            } => {
                 assert_eq!(index_name, "users_age");
                 assert_eq!(field, "age");
                 assert_eq!(key, IndexKey::Int(25));
@@ -236,7 +258,14 @@ mod tests {
         assert_eq!(field, "age");
 
         match plan {
-            QueryPlan::IndexRangeScan { index_name, start, end, inclusive_start, inclusive_end, .. } => {
+            QueryPlan::IndexRangeScan {
+                index_name,
+                start,
+                end,
+                inclusive_start,
+                inclusive_end,
+                ..
+            } => {
                 assert_eq!(index_name, "users_age");
                 assert_eq!(start, Some(IndexKey::Int(18)));
                 assert_eq!(end, Some(IndexKey::Int(65)));

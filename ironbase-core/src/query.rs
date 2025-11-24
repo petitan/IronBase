@@ -36,9 +36,9 @@
 
 pub mod operators;
 
-use serde_json::Value;
 use crate::document::Document;
 use crate::error::Result;
+use serde_json::Value;
 
 // Re-export the new operator-based matching function (primary API)
 pub use operators::matches_filter;
@@ -107,9 +107,7 @@ impl Query {
     pub fn from_json(json: &Value) -> Result<Self> {
         // Just store the JSON - no complex parsing needed!
         // The new operator registry will handle everything in matches()
-        Ok(Query {
-            json: json.clone(),
-        })
+        Ok(Query { json: json.clone() })
     }
 
     /// Check if a document matches this query
@@ -139,7 +137,7 @@ impl Query {
         // This is MUCH simpler than the old 200+ line implementation!
         match operators::matches_filter(document, &self.json) {
             Ok(result) => result,
-            Err(_) => false,  // Invalid queries don't match
+            Err(_) => false, // Invalid queries don't match
         }
     }
 
@@ -219,7 +217,7 @@ mod tests {
         let doc2 = create_test_document(2, vec![("age", json!(15))]);
         let doc3 = create_test_document(3, vec![("age", json!(35))]);
 
-        assert!(query.matches(&doc1));  // 25 is >= 18 and < 30
+        assert!(query.matches(&doc1)); // 25 is >= 18 and < 30
         assert!(!query.matches(&doc2)); // 15 is < 18
         assert!(!query.matches(&doc3)); // 35 is >= 30
     }
@@ -231,7 +229,8 @@ mod tests {
                 {"age": {"$gte": 18}},
                 {"city": "NYC"}
             ]
-        })).unwrap();
+        }))
+        .unwrap();
 
         let doc1 = create_test_document(1, vec![("age", json!(25)), ("city", json!("NYC"))]);
         let doc2 = create_test_document(2, vec![("age", json!(15)), ("city", json!("NYC"))]);
@@ -249,7 +248,8 @@ mod tests {
                 {"age": {"$lt": 18}},
                 {"age": {"$gt": 65}}
             ]
-        })).unwrap();
+        }))
+        .unwrap();
 
         let doc1 = create_test_document(1, vec![("age", json!(15))]);
         let doc2 = create_test_document(2, vec![("age", json!(70))]);
@@ -298,25 +298,35 @@ mod tests {
                 {"age": {"$gte": 25}},
                 {"active": true}
             ]
-        })).unwrap();
+        }))
+        .unwrap();
 
-        let doc1 = create_test_document(1, vec![
-            ("city", json!("NYC")),
-            ("age", json!(30)),
-            ("active", json!(true))
-        ]);
+        let doc1 = create_test_document(
+            1,
+            vec![
+                ("city", json!("NYC")),
+                ("age", json!(30)),
+                ("active", json!(true)),
+            ],
+        );
 
-        let doc2 = create_test_document(2, vec![
-            ("city", json!("LA")),
-            ("age", json!(20)),
-            ("active", json!(true))
-        ]);
+        let doc2 = create_test_document(
+            2,
+            vec![
+                ("city", json!("LA")),
+                ("age", json!(20)),
+                ("active", json!(true)),
+            ],
+        );
 
-        let doc3 = create_test_document(3, vec![
-            ("city", json!("Chicago")),
-            ("age", json!(30)),
-            ("active", json!(true))
-        ]);
+        let doc3 = create_test_document(
+            3,
+            vec![
+                ("city", json!("Chicago")),
+                ("age", json!(30)),
+                ("active", json!(true)),
+            ],
+        );
 
         assert!(query.matches(&doc1));
         assert!(!query.matches(&doc2)); // age < 25

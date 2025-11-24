@@ -1,12 +1,12 @@
 // storage/compaction.rs
 // Storage compaction functionality
 
+use super::StorageEngine;
+use crate::error::Result;
+use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
-use serde_json::Value;
-use crate::error::{Result};
-use super::StorageEngine;
 
 /// Compaction configuration
 #[derive(Debug, Clone)]
@@ -17,9 +17,7 @@ pub struct CompactionConfig {
 
 impl Default for CompactionConfig {
     fn default() -> Self {
-        CompactionConfig {
-            chunk_size: 1000,
-        }
+        CompactionConfig { chunk_size: 1000 }
     }
 }
 
@@ -31,7 +29,7 @@ pub struct CompactionStats {
     pub documents_scanned: u64,
     pub documents_kept: u64,
     pub tombstones_removed: u64,
-    pub peak_memory_mb: u64,  // Peak memory usage during compaction
+    pub peak_memory_mb: u64, // Peak memory usage during compaction
 }
 
 impl CompactionStats {
@@ -90,7 +88,7 @@ impl StorageEngine {
         // Prepare new collections metadata
         let mut new_collections = self.collections.clone();
         for coll_meta in new_collections.values_mut() {
-            coll_meta.data_offset = super::HEADER_SIZE;  // Version 2: no reserved space
+            coll_meta.data_offset = super::HEADER_SIZE; // Version 2: no reserved space
             coll_meta.document_catalog.clear();
             coll_meta.document_count = 0;
             coll_meta.live_document_count = 0;
@@ -107,7 +105,8 @@ impl StorageEngine {
         let mut write_offset = super::HEADER_SIZE;
 
         // Track documents per collection (all collections processed in single pass)
-        let mut collection_docs: HashMap<String, HashMap<crate::document::DocumentId, Value>> = HashMap::new();
+        let mut collection_docs: HashMap<String, HashMap<crate::document::DocumentId, Value>> =
+            HashMap::new();
         for coll_name in collections_snapshot.keys() {
             collection_docs.insert(coll_name.clone(), HashMap::new());
         }
@@ -124,7 +123,9 @@ impl StorageEngine {
                 if offset >= file_len {
                     crate::log_warn!(
                         "Skipping document {:?} at invalid offset {} (file_len: {})",
-                        doc_id, offset, file_len
+                        doc_id,
+                        offset,
+                        file_len
                     );
                     stats.tombstones_removed += 1;
                     continue;
@@ -172,7 +173,9 @@ impl StorageEngine {
                         // Log corrupt document but continue
                         crate::log_warn!(
                             "Skipping corrupt document {:?} at offset {}: {}",
-                            doc_id, offset, e
+                            doc_id,
+                            offset,
+                            e
                         );
                         stats.tombstones_removed += 1;
                     }
@@ -198,7 +201,7 @@ impl StorageEngine {
 
         // Now write metadata at END of file (version 2 dynamic metadata)
         // Find end of document data
-        let metadata_offset = write_offset;  // After last document
+        let metadata_offset = write_offset; // After last document
 
         // Serialize metadata body
         let mut metadata_buffer = std::io::Cursor::new(Vec::new());
@@ -273,7 +276,11 @@ impl StorageEngine {
     ) -> Result<u64> {
         for (doc_id, doc) in docs_by_id.iter() {
             // Skip tombstones (deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 stats.tombstones_removed += 1;
                 continue;
             }
@@ -291,7 +298,9 @@ impl StorageEngine {
 
             // Update document_catalog and document_count
             if let Some(coll_meta) = new_collections.get_mut(coll_name) {
-                coll_meta.document_catalog.insert(doc_id.clone(), doc_offset);
+                coll_meta
+                    .document_catalog
+                    .insert(doc_id.clone(), doc_offset);
                 coll_meta.document_count += 1;
                 coll_meta.live_document_count = coll_meta.live_document_count.saturating_add(1);
             }

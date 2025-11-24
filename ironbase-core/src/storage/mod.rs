@@ -1,28 +1,28 @@
 // storage/mod.rs
 // Storage engine module
 
-pub mod traits;  // NEW: Storage trait definitions
-pub mod file_storage;  // NEW: FileStorage wrapper
-pub mod memory_storage;  // NEW: MemoryStorage for testing
 mod compaction;
-pub mod metadata;  // Make metadata public for CollectionMeta
+pub mod file_storage; // NEW: FileStorage wrapper
 mod io;
+pub mod memory_storage; // NEW: MemoryStorage for testing
+pub mod metadata; // Make metadata public for CollectionMeta
+pub mod traits; // NEW: Storage trait definitions
 
+use crate::document::{Document, DocumentId};
+use crate::error::{MongoLiteError, Result};
+use crate::transaction::Transaction;
+use crate::wal::WriteAheadLog;
+use memmap2::{MmapMut, MmapOptions};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::collections::HashMap;
-use memmap2::{MmapMut, MmapOptions};
-use serde::{Serialize, Deserialize};
-use crate::error::{Result, MongoLiteError};
-use crate::wal::WriteAheadLog;
-use crate::transaction::Transaction;
-use crate::document::{Document, DocumentId};
 
 // Re-export public types
-pub use compaction::{CompactionStats, CompactionConfig};
+pub use compaction::{CompactionConfig, CompactionStats};
 
 // Re-export traits module
-pub use traits::{Storage, RawStorage, CompactableStorage, IndexableStorage};
+pub use traits::{CompactableStorage, IndexableStorage, RawStorage, Storage};
 
 // Re-export storage implementations
 pub use file_storage::FileStorage;
@@ -48,31 +48,31 @@ pub const DATA_START_OFFSET: u64 = HEADER_SIZE + RESERVED_METADATA_SIZE; // Docu
 /// Adatbázis fájl fejléc
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Header {
-    pub magic: [u8; 8],           // "MONGOLTE"
-    pub version: u32,              // Verzió szám (2 = dynamic metadata)
-    pub page_size: u32,            // Oldal méret (default: 4KB)
-    pub collection_count: u32,     // Collection-ök száma
-    pub free_list_head: u64,       // Szabad blokkok lista kezdete
+    pub magic: [u8; 8],        // "MONGOLTE"
+    pub version: u32,          // Verzió szám (2 = dynamic metadata)
+    pub page_size: u32,        // Oldal méret (default: 4KB)
+    pub collection_count: u32, // Collection-ök száma
+    pub free_list_head: u64,   // Szabad blokkok lista kezdete
     #[serde(default)]
     pub index_section_offset: u64, // Index metadata section offset (0 = none)
 
     // NEW: Dynamic metadata support (version 2+)
     #[serde(default)]
-    pub metadata_offset: u64,      // Offset where metadata starts (0 = use legacy fixed location)
+    pub metadata_offset: u64, // Offset where metadata starts (0 = use legacy fixed location)
     #[serde(default)]
-    pub metadata_size: u64,        // Size of metadata section in bytes
+    pub metadata_size: u64, // Size of metadata section in bytes
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 2,  // Version 2: dynamic metadata
+            version: 2, // Version 2: dynamic metadata
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
             index_section_offset: 0,
-            metadata_offset: 0,  // Will be set on first write
+            metadata_offset: 0, // Will be set on first write
             metadata_size: 0,
         }
     }
@@ -85,9 +85,9 @@ pub struct CollectionMeta {
     pub document_count: u64,
     #[serde(default)]
     pub live_document_count: u64,
-    pub data_offset: u64,          // Adatok kezdő pozíciója
-    pub index_offset: u64,         // Indexek kezdő pozíciója
-    pub last_id: u64,              // Utolsó _id
+    pub data_offset: u64,  // Adatok kezdő pozíciója
+    pub index_offset: u64, // Indexek kezdő pozíciója
+    pub last_id: u64,      // Utolsó _id
 
     /// Document catalog: DocumentId -> file offset mapping
     /// This enables persistent document storage and fast retrieval
@@ -128,13 +128,13 @@ impl StorageEngine {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let exists = path.as_ref().exists();
-        
+
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(&path)?;
-        
+
         let (header, collections) = if exists && file.metadata()?.len() > 0 {
             // Meglévő adatbázis betöltése
             Self::load_metadata(&mut file)?
@@ -145,9 +145,10 @@ impl StorageEngine {
             let _ = Self::write_metadata(&mut file, &header, &collections)?;
             (header, collections)
         };
-        
+
         // Memory-mapped fájl (ha elég kicsi a fájl)
-        let mmap = if file.metadata()?.len() < 1_000_000_000 {  // 1GB alatt használjuk az mmap-et
+        let mmap = if file.metadata()?.len() < 1_000_000_000 {
+            // 1GB alatt használjuk az mmap-et
             let mmap = unsafe { MmapOptions::new().map_mut(&file).ok() };
             mmap
         } else {
@@ -173,8 +174,7 @@ impl StorageEngine {
 
         Ok(storage)
     }
-    
-    
+
     /// Collection létrehozása
     pub fn create_collection(&mut self, name: &str) -> Result<()> {
         if self.collections.contains_key(name) {
@@ -186,11 +186,11 @@ impl StorageEngine {
             name: name.to_string(),
             document_count: 0,
             live_document_count: 0,
-            data_offset: 0,  // Will be set correctly by flush_metadata
+            data_offset: 0, // Will be set correctly by flush_metadata
             index_offset: 0,
             last_id: 0,
-            document_catalog: HashMap::new(),  // Initialize empty catalog
-            indexes: Vec::new(),  // Initialize empty index list
+            document_catalog: HashMap::new(), // Initialize empty catalog
+            indexes: Vec::new(),              // Initialize empty index list
             schema: None,
         };
 
@@ -206,7 +206,7 @@ impl StorageEngine {
 
         Ok(())
     }
-    
+
     /// Collection törlése
     pub fn drop_collection(&mut self, name: &str) -> Result<()> {
         if !self.collections.contains_key(name) {
@@ -221,12 +221,12 @@ impl StorageEngine {
 
         Ok(())
     }
-    
+
     /// Collection-ök listája
     pub fn list_collections(&self) -> Vec<String> {
         self.collections.keys().cloned().collect()
     }
-    
+
     /// Collection metaadatok lekérése (immutable)
     pub fn get_collection_meta(&self, name: &str) -> Option<&CollectionMeta> {
         self.collections.get(name)
@@ -300,7 +300,11 @@ impl StorageEngine {
         for operation in transaction.operations() {
             let op_json = serde_json::to_string(operation)
                 .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-            let op_entry = WALEntry::new(transaction.id, WALEntryType::Operation, op_json.as_bytes().to_vec());
+            let op_entry = WALEntry::new(
+                transaction.id,
+                WALEntryType::Operation,
+                op_json.as_bytes().to_vec(),
+            );
             self.wal.append(&op_entry)?;
         }
 
@@ -308,13 +312,11 @@ impl StorageEngine {
         // Each index change is written as an IndexChange entry
         // Format: {collection: string, index_name: string, operation: Insert|Delete, key: IndexKey, doc_id: DocumentId}
         // Extract collection name from first operation (all operations in a transaction are for the same collection)
-        let collection_name = transaction.operations()
-            .first()
-            .map(|op| match op {
-                crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
-                crate::transaction::Operation::Update { collection, .. } => collection.clone(),
-                crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
-            });
+        let collection_name = transaction.operations().first().map(|op| match op {
+            crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
+            crate::transaction::Operation::Update { collection, .. } => collection.clone(),
+            crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
+        });
 
         for (index_name, changes) in transaction.index_changes() {
             for change in changes {
@@ -336,7 +338,7 @@ impl StorageEngine {
                 let index_entry = WALEntry::new(
                     transaction.id,
                     WALEntryType::IndexChange,
-                    change_json.as_bytes().to_vec()
+                    change_json.as_bytes().to_vec(),
                 );
                 self.wal.append(&index_entry)?;
             }
@@ -444,20 +446,33 @@ impl StorageEngine {
 
         for operation in transaction.operations() {
             match operation {
-                Operation::Insert { collection, doc_id: _, doc } => {
+                Operation::Insert {
+                    collection,
+                    doc_id: _,
+                    doc,
+                } => {
                     // Serialize and write document to storage
                     let doc_json = serde_json::to_string(doc)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                     self.write_data(doc_json.as_bytes())?;
                     self.adjust_live_count(collection, 1);
                 }
-                Operation::Update { collection: _, doc_id: _, old_doc: _, new_doc } => {
+                Operation::Update {
+                    collection: _,
+                    doc_id: _,
+                    old_doc: _,
+                    new_doc,
+                } => {
                     // Write new version of document (append-only)
                     let doc_json = serde_json::to_string(new_doc)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                     self.write_data(doc_json.as_bytes())?;
                 }
-                Operation::Delete { collection, doc_id, old_doc: _ } => {
+                Operation::Delete {
+                    collection,
+                    doc_id,
+                    old_doc: _,
+                } => {
                     // Write tombstone marker with collection info
                     let tombstone = serde_json::json!({
                         "_id": doc_id,
@@ -478,7 +493,9 @@ impl StorageEngine {
     /// Recover from WAL after crash
     ///
     /// Returns (committed_transactions, index_changes) for higher-level recovery
-    pub fn recover_from_wal(&mut self) -> Result<(Vec<Vec<crate::wal::WALEntry>>, Vec<RecoveredIndexChange>)> {
+    pub fn recover_from_wal(
+        &mut self,
+    ) -> Result<(Vec<Vec<crate::wal::WALEntry>>, Vec<RecoveredIndexChange>)> {
         let recovered = self.wal.recover()?;
 
         if recovered.is_empty() {
@@ -493,23 +510,38 @@ impl StorageEngine {
             for entry in tx_entries {
                 match entry.entry_type {
                     crate::wal::WALEntryType::Operation => {
-                        let op_str = std::str::from_utf8(&entry.data)
-                            .map_err(|e| MongoLiteError::Serialization(format!("UTF-8 error: {}", e)))?;
-                        let operation: crate::transaction::Operation = serde_json::from_str(op_str)?;
+                        let op_str = std::str::from_utf8(&entry.data).map_err(|e| {
+                            MongoLiteError::Serialization(format!("UTF-8 error: {}", e))
+                        })?;
+                        let operation: crate::transaction::Operation =
+                            serde_json::from_str(op_str)?;
 
                         // Apply operation to storage
                         match operation {
-                            crate::transaction::Operation::Insert { collection: _, doc_id: _, doc } => {
+                            crate::transaction::Operation::Insert {
+                                collection: _,
+                                doc_id: _,
+                                doc,
+                            } => {
                                 let doc_json = serde_json::to_string(&doc)
                                     .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                                 self.write_data(doc_json.as_bytes())?;
                             }
-                            crate::transaction::Operation::Update { collection: _, doc_id: _, old_doc: _, new_doc } => {
+                            crate::transaction::Operation::Update {
+                                collection: _,
+                                doc_id: _,
+                                old_doc: _,
+                                new_doc,
+                            } => {
                                 let doc_json = serde_json::to_string(&new_doc)
                                     .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                                 self.write_data(doc_json.as_bytes())?;
                             }
-                            crate::transaction::Operation::Delete { collection, doc_id, old_doc: _ } => {
+                            crate::transaction::Operation::Delete {
+                                collection,
+                                doc_id,
+                                old_doc: _,
+                            } => {
                                 let tombstone = serde_json::json!({
                                     "_id": doc_id,
                                     "_collection": collection,
@@ -523,29 +555,40 @@ impl StorageEngine {
                     }
                     crate::wal::WALEntryType::IndexChange => {
                         // Parse index change from JSON
-                        let change_str = std::str::from_utf8(&entry.data)
-                            .map_err(|e| MongoLiteError::Serialization(format!("UTF-8 error: {}", e)))?;
+                        let change_str = std::str::from_utf8(&entry.data).map_err(|e| {
+                            MongoLiteError::Serialization(format!("UTF-8 error: {}", e))
+                        })?;
                         let change_json: serde_json::Value = serde_json::from_str(change_str)?;
 
                         // Extract fields (including collection name added in Step 6)
                         let collection = change_json["collection"]
                             .as_str()
-                            .ok_or_else(|| MongoLiteError::Serialization("Missing collection".to_string()))?
+                            .ok_or_else(|| {
+                                MongoLiteError::Serialization("Missing collection".to_string())
+                            })?
                             .to_string();
 
                         let index_name = change_json["index_name"]
                             .as_str()
-                            .ok_or_else(|| MongoLiteError::Serialization("Missing index_name".to_string()))?
+                            .ok_or_else(|| {
+                                MongoLiteError::Serialization("Missing index_name".to_string())
+                            })?
                             .to_string();
 
                         let operation = match change_json["operation"].as_str() {
                             Some("Insert") => crate::transaction::IndexOperation::Insert,
                             Some("Delete") => crate::transaction::IndexOperation::Delete,
-                            _ => return Err(MongoLiteError::Serialization("Invalid operation".to_string())),
+                            _ => {
+                                return Err(MongoLiteError::Serialization(
+                                    "Invalid operation".to_string(),
+                                ))
+                            }
                         };
 
-                        let key: crate::transaction::IndexKey = serde_json::from_value(change_json["key"].clone())?;
-                        let doc_id: crate::document::DocumentId = serde_json::from_value(change_json["doc_id"].clone())?;
+                        let key: crate::transaction::IndexKey =
+                            serde_json::from_value(change_json["key"].clone())?;
+                        let doc_id: crate::document::DocumentId =
+                            serde_json::from_value(change_json["doc_id"].clone())?;
 
                         all_index_changes.push(RecoveredIndexChange {
                             collection,
@@ -555,7 +598,7 @@ impl StorageEngine {
                             doc_id,
                         });
                     }
-                    _ => {}  // Skip Begin, Commit, Abort markers
+                    _ => {} // Skip Begin, Commit, Abort markers
                 }
             }
         }
@@ -565,9 +608,7 @@ impl StorageEngine {
 
         Ok((recovered, all_index_changes))
     }
-
 }
-
 
 // Automatikus bezárás
 impl Drop for StorageEngine {
@@ -587,7 +628,8 @@ impl Storage for StorageEngine {
             serde_json::from_value(id_val.clone())?
         } else {
             // Generate auto-increment ID
-            let meta = self.get_collection_meta_mut(collection)
+            let meta = self
+                .get_collection_meta_mut(collection)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
             meta.last_id += 1;
             DocumentId::Int(meta.last_id as i64)
@@ -600,7 +642,11 @@ impl Storage for StorageEngine {
         StorageEngine::write_document(self, collection, &doc_id, doc_json.as_bytes())
     }
 
-    fn read_document(&mut self, collection: &str, id: &DocumentId) -> Result<Option<serde_json::Value>> {
+    fn read_document(
+        &mut self,
+        collection: &str,
+        id: &DocumentId,
+    ) -> Result<Option<serde_json::Value>> {
         let meta = match self.get_collection_meta(collection) {
             Some(m) => m,
             None => return Ok(None),
@@ -630,7 +676,11 @@ impl Storage for StorageEngine {
             let doc_value: serde_json::Value = serde_json::from_slice(&data)?;
 
             // Skip tombstones
-            if doc_value.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc_value
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -682,7 +732,13 @@ impl Storage for StorageEngine {
     }
 
     fn get_live_count(&self, collection: &str) -> Option<u64> {
-        self.collections.get(collection).map(|m| m.live_document_count)
+        self.collections
+            .get(collection)
+            .map(|m| m.live_document_count)
+    }
+
+    fn get_file_path(&self) -> &str {
+        &self.file_path
     }
 }
 
@@ -691,7 +747,12 @@ impl Storage for StorageEngine {
 // ============================================================================
 
 impl RawStorage for StorageEngine {
-    fn write_document_raw(&mut self, collection: &str, doc_id: &DocumentId, data: &[u8]) -> Result<u64> {
+    fn write_document_raw(
+        &mut self,
+        collection: &str,
+        doc_id: &DocumentId,
+        data: &[u8],
+    ) -> Result<u64> {
         StorageEngine::write_document(self, collection, doc_id, data)
     }
 
@@ -730,7 +791,7 @@ mod tests {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 2);  // Version 2: dynamic metadata
+        assert_eq!(storage.header.version, 2); // Version 2: dynamic metadata
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -907,15 +968,26 @@ mod tests {
 
         // Create multiple collections
         for i in 0..5 {
-            storage.create_collection(&format!("collection_{}", i)).unwrap();
+            storage
+                .create_collection(&format!("collection_{}", i))
+                .unwrap();
         }
 
         // All collections should have correct data_offset
-        let first_offset = storage.get_collection_meta("collection_0").unwrap().data_offset;
+        let first_offset = storage
+            .get_collection_meta("collection_0")
+            .unwrap()
+            .data_offset;
 
         for i in 1..5 {
-            let offset = storage.get_collection_meta(&format!("collection_{}", i)).unwrap().data_offset;
-            assert_eq!(offset, first_offset, "All collections should have same data_offset after convergence");
+            let offset = storage
+                .get_collection_meta(&format!("collection_{}", i))
+                .unwrap()
+                .data_offset;
+            assert_eq!(
+                offset, first_offset,
+                "All collections should have same data_offset after convergence"
+            );
         }
     }
 
@@ -1015,7 +1087,11 @@ mod tests {
 
         match result {
             Err(MongoLiteError::Corruption(msg)) => {
-                assert!(msg.contains("zero length"), "Error should mention zero length: {}", msg);
+                assert!(
+                    msg.contains("zero length"),
+                    "Error should mention zero length: {}",
+                    msg
+                );
             }
             _ => panic!("Expected Corruption error for zero-length document"),
         }
@@ -1059,7 +1135,7 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 2);  // Version 2: dynamic metadata
+        assert_eq!(header.version, 2); // Version 2: dynamic metadata
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);
@@ -1082,7 +1158,8 @@ mod tests {
                 collection: "users".to_string(),
                 doc_id: crate::document::DocumentId::Int(1),
                 doc: serde_json::json!({"name": "Alice", "age": 30}),
-            }).unwrap();
+            })
+            .unwrap();
 
             storage.commit_transaction(&mut tx).unwrap();
         }
@@ -1109,7 +1186,8 @@ mod tests {
             collection: "users".to_string(),
             doc_id: crate::document::DocumentId::Int(1),
             doc: serde_json::json!({"name": "Bob"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         storage.rollback_transaction(&mut tx).unwrap();
 
@@ -1119,7 +1197,7 @@ mod tests {
 
     #[test]
     fn test_wal_recovery_after_crash() {
-        use crate::wal::{WriteAheadLog, WALEntry, WALEntryType};
+        use crate::wal::{WALEntry, WALEntryType, WriteAheadLog};
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.mlite");
@@ -1131,7 +1209,8 @@ mod tests {
 
             // Write a committed transaction to WAL
             let tx_id = 1;
-            wal.append(&WALEntry::new(tx_id, WALEntryType::Begin, vec![])).unwrap();
+            wal.append(&WALEntry::new(tx_id, WALEntryType::Begin, vec![]))
+                .unwrap();
 
             let operation = crate::transaction::Operation::Insert {
                 collection: "users".to_string(),
@@ -1139,9 +1218,15 @@ mod tests {
                 doc: serde_json::json!({"name": "Recovered Alice", "age": 25}),
             };
             let op_json = serde_json::to_string(&operation).unwrap();
-            wal.append(&WALEntry::new(tx_id, WALEntryType::Operation, op_json.as_bytes().to_vec())).unwrap();
+            wal.append(&WALEntry::new(
+                tx_id,
+                WALEntryType::Operation,
+                op_json.as_bytes().to_vec(),
+            ))
+            .unwrap();
 
-            wal.append(&WALEntry::new(tx_id, WALEntryType::Commit, vec![])).unwrap();
+            wal.append(&WALEntry::new(tx_id, WALEntryType::Commit, vec![]))
+                .unwrap();
             wal.flush().unwrap();
         }
 
@@ -1167,7 +1252,7 @@ mod tests {
 
     #[test]
     fn test_wal_recovery_multiple_transactions() {
-        use crate::wal::{WriteAheadLog, WALEntry, WALEntryType};
+        use crate::wal::{WALEntry, WALEntryType, WriteAheadLog};
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.mlite");
@@ -1178,7 +1263,8 @@ mod tests {
             let mut wal = WriteAheadLog::open(&wal_path).unwrap();
 
             for tx_id in 1..=3 {
-                wal.append(&WALEntry::new(tx_id, WALEntryType::Begin, vec![])).unwrap();
+                wal.append(&WALEntry::new(tx_id, WALEntryType::Begin, vec![]))
+                    .unwrap();
 
                 let operation = crate::transaction::Operation::Insert {
                     collection: "users".to_string(),
@@ -1186,9 +1272,15 @@ mod tests {
                     doc: serde_json::json!({"name": format!("User {}", tx_id)}),
                 };
                 let op_json = serde_json::to_string(&operation).unwrap();
-                wal.append(&WALEntry::new(tx_id, WALEntryType::Operation, op_json.as_bytes().to_vec())).unwrap();
+                wal.append(&WALEntry::new(
+                    tx_id,
+                    WALEntryType::Operation,
+                    op_json.as_bytes().to_vec(),
+                ))
+                .unwrap();
 
-                wal.append(&WALEntry::new(tx_id, WALEntryType::Commit, vec![])).unwrap();
+                wal.append(&WALEntry::new(tx_id, WALEntryType::Commit, vec![]))
+                    .unwrap();
             }
             wal.flush().unwrap();
         }

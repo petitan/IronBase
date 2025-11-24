@@ -1,9 +1,9 @@
 use ironbase_core::{DatabaseCore, StorageEngine};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::collections::HashMap;
 
 fn usage() {
     eprintln!(
@@ -13,9 +13,7 @@ fn usage() {
 }
 
 fn parse_arg(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|w| w[0] == flag)
-        .map(|w| w[1].clone())
+    args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone())
 }
 
 fn remove_level(value: &mut Value) {
@@ -36,9 +34,11 @@ fn remove_level(value: &mut Value) {
 }
 
 fn value_to_map(value: Value) -> Result<HashMap<String, Value>, String> {
-    value.as_object().cloned().map(HashMap::from).ok_or_else(|| {
-        "Document root must be a JSON object".to_string()
-    })
+    value
+        .as_object()
+        .cloned()
+        .map(|m| m.into_iter().collect())
+        .ok_or_else(|| "Document root must be a JSON object".to_string())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

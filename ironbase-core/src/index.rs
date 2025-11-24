@@ -1,21 +1,21 @@
 // src/index.rs
 // B+ Tree Index Implementation
 
-use std::collections::HashMap;
-use std::io::{Read, Write, Seek, SeekFrom};
-use std::fs::File;
-use std::path::PathBuf;
-use serde::{Serialize, Deserialize};
 use crate::document::DocumentId;
-use crate::error::{Result, MongoLiteError};
+use crate::error::{MongoLiteError, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::PathBuf;
 
 // B+ Tree Configuration
 #[allow(dead_code)]
 const BTREE_ORDER: usize = 32;
 #[allow(dead_code)]
-const MAX_KEYS: usize = BTREE_ORDER - 1;  // 31
+const MAX_KEYS: usize = BTREE_ORDER - 1; // 31
 #[allow(dead_code)]
-const MIN_KEYS: usize = BTREE_ORDER / 2;   // 16
+const MIN_KEYS: usize = BTREE_ORDER / 2; // 16
 
 // Node page constants (for file-based persistence)
 pub const NODE_PAGE_SIZE: usize = 4096; // 4KB pages
@@ -56,7 +56,10 @@ impl Ord for OrderedFloat {
             (true, true) => std::cmp::Ordering::Equal,
             (true, false) => std::cmp::Ordering::Greater,
             (false, true) => std::cmp::Ordering::Less,
-            (false, false) => self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal),
+            (false, false) => self
+                .0
+                .partial_cmp(&other.0)
+                .unwrap_or(std::cmp::Ordering::Equal),
         }
     }
 }
@@ -133,7 +136,7 @@ pub struct InternalNode {
 pub struct LeafNode {
     pub keys: Vec<IndexKey>,
     pub document_ids: Vec<DocumentId>,
-    pub next_leaf_offset: u64,  // File offset to next leaf node (0 = none)
+    pub next_leaf_offset: u64, // File offset to next leaf node (0 = none)
 }
 
 /// B+ Tree - main index structure
@@ -153,7 +156,7 @@ pub struct IndexMetadata {
     pub num_keys: u64,
     pub tree_height: u32,
     #[serde(default)]
-    pub root_offset: u64,  // File offset to root node (0 = in-memory only)
+    pub root_offset: u64, // File offset to root node (0 = in-memory only)
 }
 
 impl BPlusTree {
@@ -250,9 +253,10 @@ impl BPlusTree {
     pub fn insert(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
         // Check unique constraint
         if self.metadata.unique && self.search(&key).is_some() {
-            return Err(MongoLiteError::IndexError(
-                format!("Duplicate key: {:?} (unique index)", key)
-            ));
+            return Err(MongoLiteError::IndexError(format!(
+                "Duplicate key: {:?} (unique index)",
+                key
+            )));
         }
 
         // For now, simplified insert into leaf
@@ -365,15 +369,18 @@ impl BPlusTree {
         let offset = file.seek(SeekFrom::End(0))?;
 
         // Serialize node to JSON (more compatible than bincode with untagged enums)
-        let node_json = serde_json::to_string(node)
-            .map_err(|e| MongoLiteError::Serialization(format!("Failed to serialize node: {}", e)))?;
+        let node_json = serde_json::to_string(node).map_err(|e| {
+            MongoLiteError::Serialization(format!("Failed to serialize node: {}", e))
+        })?;
         let node_bytes = node_json.as_bytes();
 
         // Ensure node fits in a page (4KB)
         if node_bytes.len() > NODE_PAGE_SIZE - 5 {
-            return Err(MongoLiteError::IndexError(
-                format!("Node size {} exceeds page size {}", node_bytes.len(), NODE_PAGE_SIZE - 5)
-            ));
+            return Err(MongoLiteError::IndexError(format!(
+                "Node size {} exceeds page size {}",
+                node_bytes.len(),
+                NODE_PAGE_SIZE - 5
+            )));
         }
 
         // Create page buffer (4KB) and write node data
@@ -419,18 +426,21 @@ impl BPlusTree {
         let node_bytes = &page[5..(5 + data_len)];
 
         // Deserialize node from JSON
-        let node_json = std::str::from_utf8(node_bytes)
-            .map_err(|e| MongoLiteError::Serialization(format!("Invalid UTF-8 in node data: {}", e)))?;
-        let node: BTreeNode = serde_json::from_str(node_json)
-            .map_err(|e| MongoLiteError::Serialization(format!("Failed to deserialize node: {}", e)))?;
+        let node_json = std::str::from_utf8(node_bytes).map_err(|e| {
+            MongoLiteError::Serialization(format!("Invalid UTF-8 in node data: {}", e))
+        })?;
+        let node: BTreeNode = serde_json::from_str(node_json).map_err(|e| {
+            MongoLiteError::Serialization(format!("Failed to deserialize node: {}", e))
+        })?;
 
         // Verify node type matches
         match (&node, node_type) {
             (BTreeNode::Internal(_), NODE_TYPE_INTERNAL) => Ok(node),
             (BTreeNode::Leaf(_), NODE_TYPE_LEAF) => Ok(node),
-            _ => Err(MongoLiteError::Corruption(
-                format!("Node type mismatch at offset {}", offset)
-            )),
+            _ => Err(MongoLiteError::Corruption(format!(
+                "Node type mismatch at offset {}",
+                offset
+            ))),
         }
     }
 
@@ -484,10 +494,7 @@ impl BPlusTree {
         // Load root node
         let root = Box::new(Self::load_node(file, metadata.root_offset)?);
 
-        Ok(BPlusTree {
-            root,
-            metadata,
-        })
+        Ok(BPlusTree { root, metadata })
     }
 
     /// Two-Phase Commit: Phase 1 - Prepare changes to a temporary file
@@ -511,8 +518,7 @@ impl BPlusTree {
         self.save_to_file(&mut temp_file)?;
 
         // Ensure data is written to disk
-        temp_file.sync_all()
-            .map_err(|e| MongoLiteError::Io(e))?;
+        temp_file.sync_all().map_err(|e| MongoLiteError::Io(e))?;
 
         Ok(temp_path)
     }
@@ -525,13 +531,11 @@ impl BPlusTree {
 
         // Ensure parent directory exists
         if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| MongoLiteError::Io(e))?;
+            fs::create_dir_all(parent).map_err(|e| MongoLiteError::Io(e))?;
         }
 
         // Atomic rename: temp → final
-        fs::rename(temp_path, final_path)
-            .map_err(|e| MongoLiteError::Io(e))?;
+        fs::rename(temp_path, final_path).map_err(|e| MongoLiteError::Io(e))?;
 
         Ok(())
     }
@@ -541,8 +545,7 @@ impl BPlusTree {
         use std::fs;
 
         if temp_path.exists() {
-            fs::remove_file(temp_path)
-                .map_err(|e| MongoLiteError::Io(e))?;
+            fs::remove_file(temp_path).map_err(|e| MongoLiteError::Io(e))?;
         }
 
         Ok(())
@@ -585,12 +588,14 @@ impl Index {
 
     pub fn insert(&mut self, key: String, doc_id: DocumentId) -> Result<()> {
         if self.definition.unique && self.entries.contains_key(&key) {
-            return Err(MongoLiteError::IndexError(
-                format!("Duplicate key: {} (unique index)", key)
-            ));
+            return Err(MongoLiteError::IndexError(format!(
+                "Duplicate key: {} (unique index)",
+                key
+            )));
         }
 
-        self.entries.entry(key)
+        self.entries
+            .entry(key)
             .or_insert_with(Vec::new)
             .push(doc_id);
 
@@ -645,9 +650,10 @@ impl IndexManager {
     /// Create B+ tree index
     pub fn create_btree_index(&mut self, name: String, field: String, unique: bool) -> Result<()> {
         if self.btree_indexes.contains_key(&name) {
-            return Err(MongoLiteError::IndexError(
-                format!("Index already exists: {}", name)
-            ));
+            return Err(MongoLiteError::IndexError(format!(
+                "Index already exists: {}",
+                name
+            )));
         }
 
         let tree = BPlusTree::new(name.clone(), field, unique);
@@ -660,9 +666,10 @@ impl IndexManager {
         let name = definition.name.clone();
 
         if self.legacy_indexes.contains_key(&name) {
-            return Err(MongoLiteError::IndexError(
-                format!("Index already exists: {}", name)
-            ));
+            return Err(MongoLiteError::IndexError(format!(
+                "Index already exists: {}",
+                name
+            )));
         }
 
         self.legacy_indexes.insert(name, Index::new(definition));
@@ -672,9 +679,10 @@ impl IndexManager {
     /// Drop index by name
     pub fn drop_index(&mut self, name: &str) -> Result<()> {
         if self.btree_indexes.remove(name).is_none() && self.legacy_indexes.remove(name).is_none() {
-            return Err(MongoLiteError::IndexError(
-                format!("Index not found: {}", name)
-            ));
+            return Err(MongoLiteError::IndexError(format!(
+                "Index not found: {}",
+                name
+            )));
         }
         // Also remove file path if it exists
         self.index_file_paths.remove(name);
@@ -703,7 +711,9 @@ impl IndexManager {
 
     /// List all index names
     pub fn list_indexes(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.btree_indexes.keys()
+        let mut names: Vec<String> = self
+            .btree_indexes
+            .keys()
             .chain(self.legacy_indexes.keys())
             .cloned()
             .collect();
@@ -751,9 +761,16 @@ mod tests {
     fn test_btree_unique_constraint() {
         let mut tree = BPlusTree::new("email_idx".to_string(), "email".to_string(), true);
 
-        tree.insert(IndexKey::String("test@example.com".to_string()), DocumentId::Int(1)).unwrap();
+        tree.insert(
+            IndexKey::String("test@example.com".to_string()),
+            DocumentId::Int(1),
+        )
+        .unwrap();
 
-        let result = tree.insert(IndexKey::String("test@example.com".to_string()), DocumentId::Int(2));
+        let result = tree.insert(
+            IndexKey::String("test@example.com".to_string()),
+            DocumentId::Int(2),
+        );
         assert!(result.is_err());
     }
 
@@ -772,12 +789,11 @@ mod tests {
             false, // exclusive end
         );
 
-        assert_eq!(results.len(), 10);  // 10..19
+        assert_eq!(results.len(), 10); // 10..19
     }
 
     #[test]
     fn test_node_save_load() {
-        
         use std::fs::OpenOptions;
 
         // Create temporary file
@@ -828,7 +844,8 @@ mod tests {
         let mut tree = BPlusTree::new("test_idx".to_string(), "age".to_string(), false);
 
         for i in 0..10 {
-            tree.insert(IndexKey::Int(i * 10), DocumentId::Int(i)).unwrap();
+            tree.insert(IndexKey::Int(i * 10), DocumentId::Int(i))
+                .unwrap();
         }
 
         // Save tree to file
@@ -849,9 +866,18 @@ mod tests {
         let loaded_tree = BPlusTree::load_from_file(&mut file, metadata_clone).unwrap();
 
         // Verify search still works
-        assert_eq!(loaded_tree.search(&IndexKey::Int(0)), Some(DocumentId::Int(0)));
-        assert_eq!(loaded_tree.search(&IndexKey::Int(50)), Some(DocumentId::Int(5)));
-        assert_eq!(loaded_tree.search(&IndexKey::Int(90)), Some(DocumentId::Int(9)));
+        assert_eq!(
+            loaded_tree.search(&IndexKey::Int(0)),
+            Some(DocumentId::Int(0))
+        );
+        assert_eq!(
+            loaded_tree.search(&IndexKey::Int(50)),
+            Some(DocumentId::Int(5))
+        );
+        assert_eq!(
+            loaded_tree.search(&IndexKey::Int(90)),
+            Some(DocumentId::Int(9))
+        );
         assert_eq!(loaded_tree.search(&IndexKey::Int(99)), None);
 
         // Cleanup

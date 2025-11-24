@@ -1,10 +1,10 @@
 // src/aggregation.rs
 // Aggregation pipeline implementation
 
-use serde_json::Value;
 use crate::document::Document;
+use crate::error::{MongoLiteError, Result};
 use crate::query::Query;
-use crate::error::{Result, MongoLiteError};
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// Aggregation pipeline
@@ -38,9 +38,9 @@ pub struct ProjectStage {
 
 #[derive(Debug, Clone)]
 pub enum ProjectField {
-    Include,                    // 1
-    Exclude,                    // 0
-    Rename(String),             // "$fieldName"
+    Include,        // 1
+    Exclude,        // 0
+    Rename(String), // "$fieldName"
 }
 
 /// $group stage - group documents and compute aggregates
@@ -52,14 +52,14 @@ pub struct GroupStage {
 
 #[derive(Debug, Clone)]
 pub enum GroupId {
-    Field(String),              // "$city"
-    Null,                       // null (all documents in one group)
+    Field(String), // "$city"
+    Null,          // null (all documents in one group)
 }
 
 #[derive(Debug, Clone)]
 pub enum Accumulator {
     Sum(SumExpression),
-    Avg(String),                // Field name
+    Avg(String), // Field name
     Min(String),
     Max(String),
     First(String),
@@ -69,8 +69,8 @@ pub enum Accumulator {
 
 #[derive(Debug, Clone)]
 pub enum SumExpression {
-    Constant(i64),              // {"$sum": 1} - count
-    Field(String),              // {"$sum": "$amount"} - sum field values
+    Constant(i64), // {"$sum": 1} - count
+    Field(String), // {"$sum": "$amount"} - sum field values
 }
 
 /// $sort stage - sort documents
@@ -102,7 +102,9 @@ impl Pipeline {
     pub fn from_json(pipeline_json: &Value) -> Result<Self> {
         if let Value::Array(stages_array) = pipeline_json {
             if stages_array.is_empty() {
-                return Err(MongoLiteError::AggregationError("Pipeline cannot be empty".to_string()));
+                return Err(MongoLiteError::AggregationError(
+                    "Pipeline cannot be empty".to_string(),
+                ));
             }
 
             let mut stages = Vec::new();
@@ -113,7 +115,9 @@ impl Pipeline {
 
             Ok(Pipeline { stages })
         } else {
-            Err(MongoLiteError::AggregationError("Pipeline must be an array".to_string()))
+            Err(MongoLiteError::AggregationError(
+                "Pipeline must be an array".to_string(),
+            ))
         }
     }
 
@@ -133,7 +137,7 @@ impl Stage {
             // Each stage should have exactly one key
             if obj.len() != 1 {
                 return Err(MongoLiteError::AggregationError(
-                    "Each stage must have exactly one operator".to_string()
+                    "Each stage must have exactly one operator".to_string(),
                 ));
             }
 
@@ -146,12 +150,15 @@ impl Stage {
                 "$sort" => Ok(Stage::Sort(SortStage::from_json(stage_spec)?)),
                 "$limit" => Ok(Stage::Limit(LimitStage::from_json(stage_spec)?)),
                 "$skip" => Ok(Stage::Skip(SkipStage::from_json(stage_spec)?)),
-                _ => Err(MongoLiteError::AggregationError(
-                    format!("Unknown pipeline stage: {}", stage_name)
-                )),
+                _ => Err(MongoLiteError::AggregationError(format!(
+                    "Unknown pipeline stage: {}",
+                    stage_name
+                ))),
             }
         } else {
-            Err(MongoLiteError::AggregationError("Stage must be an object".to_string()))
+            Err(MongoLiteError::AggregationError(
+                "Stage must be an object".to_string(),
+            ))
         }
     }
 
@@ -211,21 +218,25 @@ impl ProjectStage {
                     match n {
                         1 => ProjectField::Include,
                         0 => ProjectField::Exclude,
-                        _ => return Err(MongoLiteError::AggregationError(
-                            format!("Invalid project value: {}", n)
-                        )),
+                        _ => {
+                            return Err(MongoLiteError::AggregationError(format!(
+                                "Invalid project value: {}",
+                                n
+                            )))
+                        }
                     }
                 } else if let Some(s) = value.as_str() {
                     if s.starts_with('$') {
                         ProjectField::Rename(s.to_string())
                     } else {
-                        return Err(MongoLiteError::AggregationError(
-                            format!("Invalid project expression: {}", s)
-                        ));
+                        return Err(MongoLiteError::AggregationError(format!(
+                            "Invalid project expression: {}",
+                            s
+                        )));
                     }
                 } else {
                     return Err(MongoLiteError::AggregationError(
-                        "Project field must be 0, 1, or field reference".to_string()
+                        "Project field must be 0, 1, or field reference".to_string(),
                     ));
                 };
 
@@ -234,7 +245,9 @@ impl ProjectStage {
 
             Ok(ProjectStage { fields })
         } else {
-            Err(MongoLiteError::AggregationError("$project must be an object".to_string()))
+            Err(MongoLiteError::AggregationError(
+                "$project must be an object".to_string(),
+            ))
         }
     }
 
@@ -254,8 +267,13 @@ impl ProjectStage {
 
         if let Value::Object(obj) = doc {
             // Check if we're in include mode or exclude mode
-            let has_inclusions = self.fields.values().any(|f| matches!(f, ProjectField::Include | ProjectField::Rename(_)));
-            let has_non_id_exclusions = self.fields.iter()
+            let has_inclusions = self
+                .fields
+                .values()
+                .any(|f| matches!(f, ProjectField::Include | ProjectField::Rename(_)));
+            let has_non_id_exclusions = self
+                .fields
+                .iter()
                 .any(|(field, action)| matches!(action, ProjectField::Exclude) && field != "_id");
 
             // Determine mode: if we have any inclusions, we're in include mode
@@ -331,17 +349,17 @@ impl GroupStage {
                         GroupId::Field(s.to_string())
                     } else {
                         return Err(MongoLiteError::AggregationError(
-                            "Group _id field reference must start with $".to_string()
+                            "Group _id field reference must start with $".to_string(),
                         ));
                     }
                 } else {
                     return Err(MongoLiteError::AggregationError(
-                        "Group _id must be null or field reference".to_string()
+                        "Group _id must be null or field reference".to_string(),
                     ));
                 }
             } else {
                 return Err(MongoLiteError::AggregationError(
-                    "Group stage must have _id field".to_string()
+                    "Group stage must have _id field".to_string(),
                 ));
             };
 
@@ -358,7 +376,9 @@ impl GroupStage {
 
             Ok(GroupStage { id, accumulators })
         } else {
-            Err(MongoLiteError::AggregationError("$group must be an object".to_string()))
+            Err(MongoLiteError::AggregationError(
+                "$group must be an object".to_string(),
+            ))
         }
     }
 
@@ -420,7 +440,7 @@ impl Accumulator {
         if let Value::Object(obj) = spec {
             if obj.len() != 1 {
                 return Err(MongoLiteError::AggregationError(
-                    "Accumulator must have exactly one operator".to_string()
+                    "Accumulator must have exactly one operator".to_string(),
                 ));
             }
 
@@ -432,15 +452,17 @@ impl Accumulator {
                         Ok(Accumulator::Sum(SumExpression::Constant(n)))
                     } else if let Some(s) = value.as_str() {
                         if s.starts_with('$') {
-                            Ok(Accumulator::Sum(SumExpression::Field(s.trim_start_matches('$').to_string())))
+                            Ok(Accumulator::Sum(SumExpression::Field(
+                                s.trim_start_matches('$').to_string(),
+                            )))
                         } else {
                             Err(MongoLiteError::AggregationError(
-                                "$sum field reference must start with $".to_string()
+                                "$sum field reference must start with $".to_string(),
                             ))
                         }
                     } else {
                         Err(MongoLiteError::AggregationError(
-                            "$sum must be a number or field reference".to_string()
+                            "$sum must be a number or field reference".to_string(),
                         ))
                     }
                 }
@@ -450,12 +472,12 @@ impl Accumulator {
                             Ok(Accumulator::Avg(s.trim_start_matches('$').to_string()))
                         } else {
                             Err(MongoLiteError::AggregationError(
-                                "$avg field reference must start with $".to_string()
+                                "$avg field reference must start with $".to_string(),
                             ))
                         }
                     } else {
                         Err(MongoLiteError::AggregationError(
-                            "$avg must be a field reference".to_string()
+                            "$avg must be a field reference".to_string(),
                         ))
                     }
                 }
@@ -465,12 +487,12 @@ impl Accumulator {
                             Ok(Accumulator::Min(s.trim_start_matches('$').to_string()))
                         } else {
                             Err(MongoLiteError::AggregationError(
-                                "$min field reference must start with $".to_string()
+                                "$min field reference must start with $".to_string(),
                             ))
                         }
                     } else {
                         Err(MongoLiteError::AggregationError(
-                            "$min must be a field reference".to_string()
+                            "$min must be a field reference".to_string(),
                         ))
                     }
                 }
@@ -480,12 +502,12 @@ impl Accumulator {
                             Ok(Accumulator::Max(s.trim_start_matches('$').to_string()))
                         } else {
                             Err(MongoLiteError::AggregationError(
-                                "$max field reference must start with $".to_string()
+                                "$max field reference must start with $".to_string(),
                             ))
                         }
                     } else {
                         Err(MongoLiteError::AggregationError(
-                            "$max must be a field reference".to_string()
+                            "$max must be a field reference".to_string(),
                         ))
                     }
                 }
@@ -495,12 +517,12 @@ impl Accumulator {
                             Ok(Accumulator::First(s.trim_start_matches('$').to_string()))
                         } else {
                             Err(MongoLiteError::AggregationError(
-                                "$first field reference must start with $".to_string()
+                                "$first field reference must start with $".to_string(),
                             ))
                         }
                     } else {
                         Err(MongoLiteError::AggregationError(
-                            "$first must be a field reference".to_string()
+                            "$first must be a field reference".to_string(),
                         ))
                     }
                 }
@@ -510,61 +532,56 @@ impl Accumulator {
                             Ok(Accumulator::Last(s.trim_start_matches('$').to_string()))
                         } else {
                             Err(MongoLiteError::AggregationError(
-                                "$last field reference must start with $".to_string()
+                                "$last field reference must start with $".to_string(),
                             ))
                         }
                     } else {
                         Err(MongoLiteError::AggregationError(
-                            "$last must be a field reference".to_string()
+                            "$last must be a field reference".to_string(),
                         ))
                     }
                 }
-                _ => Err(MongoLiteError::AggregationError(
-                    format!("Unknown accumulator: {}", op)
-                )),
+                _ => Err(MongoLiteError::AggregationError(format!(
+                    "Unknown accumulator: {}",
+                    op
+                ))),
             }
         } else {
             Err(MongoLiteError::AggregationError(
-                "Accumulator must be an object".to_string()
+                "Accumulator must be an object".to_string(),
             ))
         }
     }
 
     fn compute(&self, docs: &[Value]) -> Result<Value> {
         match self {
-            Accumulator::Count => {
-                Ok(Value::from(docs.len() as i64))
-            }
+            Accumulator::Count => Ok(Value::from(docs.len() as i64)),
 
-            Accumulator::Sum(expr) => {
-                match expr {
-                    SumExpression::Constant(n) => {
-                        Ok(Value::from((*n) * (docs.len() as i64)))
-                    }
-                    SumExpression::Field(field) => {
-                        let mut sum_int: i64 = 0;
-                        let mut sum_float: f64 = 0.0;
-                        let mut has_float = false;
+            Accumulator::Sum(expr) => match expr {
+                SumExpression::Constant(n) => Ok(Value::from((*n) * (docs.len() as i64))),
+                SumExpression::Field(field) => {
+                    let mut sum_int: i64 = 0;
+                    let mut sum_float: f64 = 0.0;
+                    let mut has_float = false;
 
-                        for doc in docs {
-                            if let Some(value) = doc.get(field) {
-                                if let Some(n) = value.as_i64() {
-                                    sum_int += n;
-                                } else if let Some(f) = value.as_f64() {
-                                    sum_float += f;
-                                    has_float = true;
-                                }
+                    for doc in docs {
+                        if let Some(value) = doc.get(field) {
+                            if let Some(n) = value.as_i64() {
+                                sum_int += n;
+                            } else if let Some(f) = value.as_f64() {
+                                sum_float += f;
+                                has_float = true;
                             }
                         }
+                    }
 
-                        if has_float {
-                            Ok(Value::from(sum_float + sum_int as f64))
-                        } else {
-                            Ok(Value::from(sum_int))
-                        }
+                    if has_float {
+                        Ok(Value::from(sum_float + sum_int as f64))
+                    } else {
+                        Ok(Value::from(sum_int))
                     }
                 }
-            }
+            },
 
             Accumulator::Avg(field) => {
                 let mut sum = 0.0;
@@ -629,19 +646,21 @@ impl Accumulator {
                 Ok(max.map(Value::from).unwrap_or(Value::Null))
             }
 
-            Accumulator::First(field) => {
-                docs.first()
-                    .and_then(|doc| doc.get(field))
-                    .cloned()
-                    .ok_or_else(|| MongoLiteError::AggregationError("No documents in group".to_string()))
-            }
+            Accumulator::First(field) => docs
+                .first()
+                .and_then(|doc| doc.get(field))
+                .cloned()
+                .ok_or_else(|| {
+                    MongoLiteError::AggregationError("No documents in group".to_string())
+                }),
 
-            Accumulator::Last(field) => {
-                docs.last()
-                    .and_then(|doc| doc.get(field))
-                    .cloned()
-                    .ok_or_else(|| MongoLiteError::AggregationError("No documents in group".to_string()))
-            }
+            Accumulator::Last(field) => docs
+                .last()
+                .and_then(|doc| doc.get(field))
+                .cloned()
+                .ok_or_else(|| {
+                    MongoLiteError::AggregationError("No documents in group".to_string())
+                }),
         }
     }
 }
@@ -656,13 +675,15 @@ impl SortStage {
                     match n {
                         1 => SortDirection::Ascending,
                         -1 => SortDirection::Descending,
-                        _ => return Err(MongoLiteError::AggregationError(
-                            "Sort direction must be 1 or -1".to_string()
-                        )),
+                        _ => {
+                            return Err(MongoLiteError::AggregationError(
+                                "Sort direction must be 1 or -1".to_string(),
+                            ))
+                        }
                     }
                 } else {
                     return Err(MongoLiteError::AggregationError(
-                        "Sort direction must be 1 or -1".to_string()
+                        "Sort direction must be 1 or -1".to_string(),
                     ));
                 };
 
@@ -671,7 +692,9 @@ impl SortStage {
 
             Ok(SortStage { fields })
         } else {
-            Err(MongoLiteError::AggregationError("$sort must be an object".to_string()))
+            Err(MongoLiteError::AggregationError(
+                "$sort must be an object".to_string(),
+            ))
         }
     }
 
@@ -729,7 +752,9 @@ impl LimitStage {
         if let Some(n) = spec.as_u64() {
             Ok(LimitStage { limit: n as usize })
         } else {
-            Err(MongoLiteError::AggregationError("$limit must be a positive number".to_string()))
+            Err(MongoLiteError::AggregationError(
+                "$limit must be a positive number".to_string(),
+            ))
         }
     }
 
@@ -743,7 +768,9 @@ impl SkipStage {
         if let Some(n) = spec.as_u64() {
             Ok(SkipStage { skip: n as usize })
         } else {
-            Err(MongoLiteError::AggregationError("$skip must be a positive number".to_string()))
+            Err(MongoLiteError::AggregationError(
+                "$skip must be a positive number".to_string(),
+            ))
         }
     }
 
@@ -775,9 +802,7 @@ mod tests {
 
     #[test]
     fn test_project_stage_include() {
-        let docs = vec![
-            json!({"name": "Alice", "age": 25, "city": "NYC"}),
-        ];
+        let docs = vec![json!({"name": "Alice", "age": 25, "city": "NYC"})];
 
         let stage = ProjectStage::from_json(&json!({"name": 1, "age": 1})).unwrap();
         let results = stage.execute(docs).unwrap();
@@ -799,7 +824,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": "$city",
             "count": {"$sum": 1}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results.len(), 2);
@@ -823,11 +849,7 @@ mod tests {
 
     #[test]
     fn test_limit_stage() {
-        let docs = vec![
-            json!({"id": 1}),
-            json!({"id": 2}),
-            json!({"id": 3}),
-        ];
+        let docs = vec![json!({"id": 1}), json!({"id": 2}), json!({"id": 3})];
 
         let stage = LimitStage::from_json(&json!(2)).unwrap();
         let results = stage.execute(docs).unwrap();
@@ -837,11 +859,7 @@ mod tests {
 
     #[test]
     fn test_skip_stage() {
-        let docs = vec![
-            json!({"id": 1}),
-            json!({"id": 2}),
-            json!({"id": 3}),
-        ];
+        let docs = vec![json!({"id": 1}), json!({"id": 2}), json!({"id": 3})];
 
         let stage = SkipStage::from_json(&json!(1)).unwrap();
         let results = stage.execute(docs).unwrap();
@@ -863,7 +881,8 @@ mod tests {
             {"$match": {"age": {"$gte": 25}}},
             {"$group": {"_id": "$city", "count": {"$sum": 1}, "avgAge": {"$avg": "$age"}}},
             {"$sort": {"count": -1}}
-        ])).unwrap();
+        ]))
+        .unwrap();
 
         let results = pipeline.execute(docs).unwrap();
 

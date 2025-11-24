@@ -97,7 +97,13 @@ pub fn log_message(level: LogLevel, module: &str, message: &str) {
             message.to_string()
         };
 
-        eprintln!("{} [{}] {}: {}", level.icon(), level.as_str(), module, truncated);
+        eprintln!(
+            "{} [{}] {}: {}",
+            level.icon(),
+            level.as_str(),
+            module,
+            truncated
+        );
     }
 }
 

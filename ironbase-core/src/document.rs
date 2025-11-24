@@ -1,15 +1,15 @@
 // src/document.rs
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// MongoDB-szerű dokumentum
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     #[serde(rename = "_id")]
     pub id: DocumentId,
-    
+
     #[serde(flatten)]
     pub fields: HashMap<String, Value>,
 }
@@ -22,7 +22,7 @@ pub struct Document {
 pub enum DocumentId {
     Int(i64),
     String(String),
-    ObjectId(String),  // BSON ObjectId string reprezentáció
+    ObjectId(String), // BSON ObjectId string reprezentáció
 }
 
 impl DocumentId {
@@ -30,7 +30,7 @@ impl DocumentId {
     pub fn new_auto(last_id: u64) -> Self {
         DocumentId::Int((last_id + 1) as i64)
     }
-    
+
     /// Új ObjectId generálás (UUID v4)
     pub fn new_object_id() -> Self {
         DocumentId::ObjectId(Uuid::new_v4().to_string())
@@ -42,7 +42,7 @@ impl Document {
     pub fn new(id: DocumentId, fields: HashMap<String, Value>) -> Self {
         Document { id, fields }
     }
-    
+
     /// Dokumentum JSON-ből
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
         let mut doc: Self = serde_json::from_str(json)?;
@@ -50,16 +50,17 @@ impl Document {
         // WORKAROUND: serde's #[serde(rename = "_id")] + #[serde(flatten)]
         // consumes _id and doesn't put it in fields.
         // For query matching to work, we need _id in fields too.
-        doc.fields.insert("_id".to_string(), serde_json::to_value(&doc.id)?);
+        doc.fields
+            .insert("_id".to_string(), serde_json::to_value(&doc.id)?);
 
         Ok(doc)
     }
-    
+
     /// Dokumentum JSON-be
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string(self)
     }
-    
+
     /// Mező lekérése (includes _id)
     /// WORKAROUND: Since _id is in doc.id field after deserialization,
     /// we can't return a reference to it. The query engine must special-case _id matching.
@@ -94,17 +95,17 @@ impl Document {
     pub fn get_id_value(&self) -> Value {
         serde_json::to_value(&self.id).unwrap()
     }
-    
+
     /// Mező beállítása
     pub fn set(&mut self, field: String, value: Value) {
         self.fields.insert(field, value);
     }
-    
+
     /// Mező törlése
     pub fn remove(&mut self, field: &str) -> Option<Value> {
         self.fields.remove(field)
     }
-    
+
     /// Tartalmazza-e a mezőt
     pub fn contains(&self, field: &str) -> bool {
         self.fields.contains_key(field)
@@ -202,7 +203,10 @@ mod tests {
         assert_eq!(doc.id, DocumentId::Int(1));
         // With #[serde(flatten)], _id should NOT be duplicated in fields
         // because #[serde(rename = "_id")] on id field consumes it
-        assert!(!doc.fields.contains_key("_id"), "_id should NOT be in fields with flatten + rename!");
+        assert!(
+            !doc.fields.contains_key("_id"),
+            "_id should NOT be in fields with flatten + rename!"
+        );
         assert_eq!(doc.fields.len(), 2); // Only age and name
     }
 
@@ -335,7 +339,10 @@ mod tests {
         let mut fields = HashMap::new();
         fields.insert("name".to_string(), json!("Grace"));
         fields.insert("tags".to_string(), json!(["rust", "database"]));
-        fields.insert("metadata".to_string(), json!({"version": 1, "stable": true}));
+        fields.insert(
+            "metadata".to_string(),
+            json!({"version": 1, "stable": true}),
+        );
 
         let original = Document::new(DocumentId::Int(99), fields);
 
@@ -396,19 +403,22 @@ mod tests {
     #[test]
     fn test_document_complex_nested_data() {
         let mut fields = HashMap::new();
-        fields.insert("user".to_string(), json!({
-            "profile": {
-                "name": "Helen",
-                "contacts": {
-                    "email": "helen@example.com",
-                    "phones": ["+1234567890", "+0987654321"]
+        fields.insert(
+            "user".to_string(),
+            json!({
+                "profile": {
+                    "name": "Helen",
+                    "contacts": {
+                        "email": "helen@example.com",
+                        "phones": ["+1234567890", "+0987654321"]
+                    }
+                },
+                "settings": {
+                    "theme": "dark",
+                    "notifications": true
                 }
-            },
-            "settings": {
-                "theme": "dark",
-                "notifications": true
-            }
-        }));
+            }),
+        );
 
         let doc = Document::new(DocumentId::Int(1), fields);
 

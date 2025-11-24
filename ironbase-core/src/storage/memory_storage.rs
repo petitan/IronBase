@@ -13,11 +13,11 @@
 //! HashMap<String, Vec<Document>> (collections -> documents)
 //! ```
 
-use std::collections::HashMap;
-use serde_json::Value;
-use crate::error::{Result, MongoLiteError};
 use crate::document::{Document, DocumentId};
+use crate::error::{MongoLiteError, Result};
 use crate::storage::{CollectionMeta, Storage};
+use serde_json::Value;
+use std::collections::HashMap;
 
 /// In-memory storage backend (testing)
 ///
@@ -73,7 +73,8 @@ impl Storage for MemoryStorage {
 
     fn write_document(&mut self, collection: &str, doc: &Value) -> Result<u64> {
         // Parse document to extract/generate ID
-        let mut doc_obj = doc.as_object()
+        let mut doc_obj = doc
+            .as_object()
             .ok_or_else(|| MongoLiteError::Serialization("Document must be an object".to_string()))?
             .clone();
 
@@ -84,7 +85,9 @@ impl Storage for MemoryStorage {
                 .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id: {}", e)))?
         } else {
             // Generate new auto-incrementing ID
-            let meta = self.metadata.get_mut(collection)
+            let meta = self
+                .metadata
+                .get_mut(collection)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
 
             meta.last_id += 1;
@@ -103,7 +106,9 @@ impl Storage for MemoryStorage {
         let document = Document::from_json(&doc_json)?;
 
         // Add to collection
-        let docs = self.collections.get_mut(collection)
+        let docs = self
+            .collections
+            .get_mut(collection)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
 
         docs.push(document);
@@ -154,12 +159,14 @@ impl Storage for MemoryStorage {
         match self.collections.get(collection) {
             Some(docs) => {
                 // Filter out tombstones
-                let result = docs.iter()
+                let result = docs
+                    .iter()
                     .filter(|doc| {
                         // Check if document is a tombstone
                         doc.get("_tombstone")
                             .and_then(|v| v.as_bool())
-                            .unwrap_or(false) == false
+                            .unwrap_or(false)
+                            == false
                     })
                     .cloned()
                     .collect();
@@ -186,7 +193,7 @@ impl Storage for MemoryStorage {
             name: name.to_string(),
             document_count: 0,
             live_document_count: 0,
-            data_offset: 256, // Synthetic
+            data_offset: 256,  // Synthetic
             index_offset: 256, // Synthetic
             last_id: 0,
             document_catalog: HashMap::new(),
@@ -253,6 +260,10 @@ impl Storage for MemoryStorage {
 
     fn get_live_count(&self, collection: &str) -> Option<u64> {
         self.metadata.get(collection).map(|m| m.live_document_count)
+    }
+
+    fn get_file_path(&self) -> &str {
+        ""
     }
 }
 
@@ -329,7 +340,9 @@ mod tests {
         storage.write_document("users", &doc).unwrap();
 
         // Read document back
-        let read_doc = storage.read_document("users", &DocumentId::Int(42)).unwrap();
+        let read_doc = storage
+            .read_document("users", &DocumentId::Int(42))
+            .unwrap();
         assert!(read_doc.is_some());
 
         let read_doc = read_doc.unwrap();
@@ -358,7 +371,10 @@ mod tests {
 
         // Verify documents (order is preserved in Vec)
         for (i, doc) in docs.iter().enumerate() {
-            assert_eq!(doc.get("name").unwrap().as_str().unwrap(), format!("User {}", i + 1));
+            assert_eq!(
+                doc.get("name").unwrap().as_str().unwrap(),
+                format!("User {}", i + 1)
+            );
         }
     }
 
@@ -432,7 +448,9 @@ mod tests {
 
         storage.create_collection("users").unwrap();
 
-        let doc = storage.read_document("users", &DocumentId::Int(999)).unwrap();
+        let doc = storage
+            .read_document("users", &DocumentId::Int(999))
+            .unwrap();
         assert!(doc.is_none());
     }
 
@@ -440,7 +458,9 @@ mod tests {
     fn test_read_from_nonexistent_collection() {
         let mut storage = MemoryStorage::new();
 
-        let doc = storage.read_document("nonexistent", &DocumentId::Int(1)).unwrap();
+        let doc = storage
+            .read_document("nonexistent", &DocumentId::Int(1))
+            .unwrap();
         assert!(doc.is_none());
     }
 

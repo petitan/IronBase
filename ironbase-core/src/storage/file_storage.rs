@@ -14,12 +14,12 @@
 //! .mlite file (append-only with dynamic metadata)
 //! ```
 
-use std::path::Path;
-use serde_json::Value;
-use crate::error::{Result, MongoLiteError};
-use crate::document::{Document, DocumentId};
-use crate::storage::{CollectionMeta, Storage};
 use super::StorageEngine;
+use crate::document::{Document, DocumentId};
+use crate::error::{MongoLiteError, Result};
+use crate::storage::{CollectionMeta, Storage};
+use serde_json::Value;
+use std::path::Path;
 
 /// File-based storage backend (production)
 ///
@@ -64,7 +64,8 @@ impl Storage for FileStorage {
 
     fn write_document(&mut self, collection: &str, doc: &Value) -> Result<u64> {
         // Parse document to extract/generate ID
-        let mut doc_obj = doc.as_object()
+        let mut doc_obj = doc
+            .as_object()
             .ok_or_else(|| MongoLiteError::Serialization("Document must be an object".to_string()))?
             .clone();
 
@@ -77,7 +78,9 @@ impl Storage for FileStorage {
             // Need to generate new auto-incrementing ID
             // First get current last_id
             let last_id = {
-                let meta = self.inner.get_collection_meta(collection)
+                let meta = self
+                    .inner
+                    .get_collection_meta(collection)
                     .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
                 meta.last_id
             };
@@ -99,11 +102,9 @@ impl Storage for FileStorage {
 
         // Write document using StorageEngine's write_document method
         // This automatically updates catalog and document_count
-        let offset = self.inner.write_document(
-            collection,
-            &doc_id,
-            doc_json.as_bytes()
-        )?;
+        let offset = self
+            .inner
+            .write_document(collection, &doc_id, doc_json.as_bytes())?;
 
         // Update last_id if we generated a new auto-increment ID
         if let DocumentId::Int(id) = &doc_id {
@@ -163,7 +164,11 @@ impl Storage for FileStorage {
             let document = Document::from_json(&serde_json::to_string(&doc_value)?)?;
 
             // Skip tombstones (deleted documents)
-            if doc_value.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc_value
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -220,14 +225,18 @@ impl Storage for FileStorage {
     fn get_live_count(&self, collection: &str) -> Option<u64> {
         self.inner.get_live_count(collection)
     }
+
+    fn get_file_path(&self) -> &str {
+        self.inner.get_file_path()
+    }
 }
 
 // ============================================================================
 // OPTIONAL TRAIT IMPLEMENTATIONS
 // ============================================================================
 
-use crate::storage::traits::CompactableStorage;
 use crate::storage::compaction::CompactionStats;
+use crate::storage::traits::CompactableStorage;
 
 impl CompactableStorage for FileStorage {
     fn compact(&mut self) -> Result<CompactionStats> {
@@ -306,7 +315,9 @@ mod tests {
         storage.write_document("users", &doc).unwrap();
 
         // Read document back
-        let read_doc = storage.read_document("users", &DocumentId::Int(42)).unwrap();
+        let read_doc = storage
+            .read_document("users", &DocumentId::Int(42))
+            .unwrap();
         assert!(read_doc.is_some());
 
         let read_doc = read_doc.unwrap();
@@ -334,16 +345,17 @@ mod tests {
         assert_eq!(docs.len(), 5);
 
         // Sort by _id for deterministic testing (HashMap iteration is unordered)
-        docs.sort_by_key(|doc| {
-            match &doc.id {
-                DocumentId::Int(i) => *i,
-                _ => 0,
-            }
+        docs.sort_by_key(|doc| match &doc.id {
+            DocumentId::Int(i) => *i,
+            _ => 0,
         });
 
         // Verify documents
         for (i, doc) in docs.iter().enumerate() {
-            assert_eq!(doc.get("name").unwrap().as_str().unwrap(), format!("User {}", i + 1));
+            assert_eq!(
+                doc.get("name").unwrap().as_str().unwrap(),
+                format!("User {}", i + 1)
+            );
         }
     }
 
@@ -446,7 +458,9 @@ mod tests {
 
         storage.create_collection("users").unwrap();
 
-        let doc = storage.read_document("users", &DocumentId::Int(999)).unwrap();
+        let doc = storage
+            .read_document("users", &DocumentId::Int(999))
+            .unwrap();
         assert!(doc.is_none());
     }
 
@@ -454,7 +468,9 @@ mod tests {
     fn test_read_from_nonexistent_collection() {
         let (_temp, mut storage) = setup_test_storage();
 
-        let doc = storage.read_document("nonexistent", &DocumentId::Int(1)).unwrap();
+        let doc = storage
+            .read_document("nonexistent", &DocumentId::Int(1))
+            .unwrap();
         assert!(doc.is_none());
     }
 }

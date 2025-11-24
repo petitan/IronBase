@@ -1,15 +1,17 @@
 // storage/metadata.rs
 // Metadata management for storage engine
 
+use super::{CollectionMeta, Header, StorageEngine};
+use crate::error::{MongoLiteError, Result};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Write, Seek, SeekFrom};
-use crate::error::{Result, MongoLiteError};
-use super::{StorageEngine, Header, CollectionMeta};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 impl StorageEngine {
     /// Load metadata from file (supports both legacy and dynamic formats)
-    pub(super) fn load_metadata(file: &mut File) -> Result<(Header, HashMap<String, CollectionMeta>)> {
+    pub(super) fn load_metadata(
+        file: &mut File,
+    ) -> Result<(Header, HashMap<String, CollectionMeta>)> {
         file.seek(SeekFrom::Start(0))?;
 
         // Read header (with dynamic size for version 2+)
@@ -37,7 +39,10 @@ impl StorageEngine {
     }
 
     /// Load metadata from dynamic location (version 2+)
-    fn load_metadata_dynamic(file: &mut File, header: &Header) -> Result<HashMap<String, CollectionMeta>> {
+    fn load_metadata_dynamic(
+        file: &mut File,
+        header: &Header,
+    ) -> Result<HashMap<String, CollectionMeta>> {
         // Seek to metadata location
         file.seek(SeekFrom::Start(header.metadata_offset))?;
 
@@ -64,7 +69,10 @@ impl StorageEngine {
     }
 
     /// Load metadata from legacy fixed location (version 1)
-    fn load_metadata_legacy(file: &mut File, header: &Header) -> Result<HashMap<String, CollectionMeta>> {
+    fn load_metadata_legacy(
+        file: &mut File,
+        header: &Header,
+    ) -> Result<HashMap<String, CollectionMeta>> {
         // Metadata is right after header in legacy format
         file.seek(SeekFrom::Start(256))?; // After header
 
@@ -94,8 +102,8 @@ impl StorageEngine {
         writer.seek(SeekFrom::Start(0))?;
 
         // Header kiírása
-        let mut header_bytes = bincode::serialize(header)
-            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+        let mut header_bytes =
+            bincode::serialize(header).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
         if header_bytes.len() < super::HEADER_SIZE as usize {
             header_bytes.resize(super::HEADER_SIZE as usize, 0);
         }
@@ -213,7 +221,11 @@ impl StorageEngine {
 
     /// Calculate metadata offset by reading the last document's size
     /// Returns the offset where metadata should start
-    fn calculate_metadata_offset(file: &mut File, max_doc_offset: u64, file_len: u64) -> Result<u64> {
+    fn calculate_metadata_offset(
+        file: &mut File,
+        max_doc_offset: u64,
+        file_len: u64,
+    ) -> Result<u64> {
         // Seek to the last document to read its size
         file.seek(SeekFrom::Start(max_doc_offset))?;
 

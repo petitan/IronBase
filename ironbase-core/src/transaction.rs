@@ -1,12 +1,12 @@
 // ironbase-core/src/transaction.rs
 // Transaction management for ACD (Atomicity, Consistency, Durability)
 
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 use crate::document::DocumentId;
-use crate::error::{Result, MongoLiteError};
+use crate::error::{MongoLiteError, Result};
 
 /// Unique transaction identifier
 pub type TransactionId = u64;
@@ -42,7 +42,7 @@ pub enum Operation {
     Delete {
         collection: String,
         doc_id: DocumentId,
-        old_doc: Value,  // For potential rollback
+        old_doc: Value, // For potential rollback
     },
 }
 
@@ -98,7 +98,9 @@ impl PartialOrd for OrderedFloat {
 
 impl Ord for OrderedFloat {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0.partial_cmp(&other.0).unwrap_or(std::cmp::Ordering::Equal)
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
     }
 }
 
@@ -121,7 +123,7 @@ impl From<&Value> for IndexKey {
             Value::String(s) => IndexKey::String(s.clone()),
             Value::Bool(b) => IndexKey::Bool(*b),
             Value::Null => IndexKey::Null,
-            _ => IndexKey::Null,  // Arrays and objects as null for now
+            _ => IndexKey::Null, // Arrays and objects as null for now
         }
     }
 }
@@ -324,7 +326,10 @@ mod tests {
     #[test]
     fn test_index_key_from_value() {
         assert_eq!(IndexKey::from(&json!(42)), IndexKey::Int(42));
-        assert_eq!(IndexKey::from(&json!("test")), IndexKey::String("test".to_string()));
+        assert_eq!(
+            IndexKey::from(&json!("test")),
+            IndexKey::String("test".to_string())
+        );
         assert_eq!(IndexKey::from(&json!(true)), IndexKey::Bool(true));
         assert_eq!(IndexKey::from(&json!(null)), IndexKey::Null);
     }

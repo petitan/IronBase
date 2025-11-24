@@ -1,43 +1,43 @@
 // ironbase-core/src/lib.rs
 // Pure Rust API - NO Python/PyO3 dependencies
 
-pub mod error;
-pub mod document;
-pub mod storage;
-pub mod query;
-pub mod query_cache;
-pub mod index;
-pub mod btree;
-pub mod query_planner;
 pub mod aggregation;
-pub mod find_options;
+pub mod btree;
+pub mod catalog_serde;
 pub mod collection_core;
 pub mod database;
+pub mod document;
+pub mod durability;
+pub mod error;
+pub mod find_options;
+pub mod index;
+pub mod logging;
+pub mod query;
+pub mod query_cache;
+pub mod query_planner;
+pub mod storage;
 pub mod transaction;
 pub mod wal;
-pub mod catalog_serde;
-pub mod logging;
-pub mod durability;
 
 #[cfg(test)]
-mod transaction_property_tests;
-#[cfg(test)]
-mod transaction_integration_tests;
+mod test_auto_commit;
 #[cfg(test)]
 mod transaction_benchmarks;
 #[cfg(test)]
-mod test_auto_commit;
+mod transaction_integration_tests;
+#[cfg(test)]
+mod transaction_property_tests;
 
 // Public exports
-pub use error::{MongoLiteError, Result};
-pub use document::{Document, DocumentId};
-pub use storage::{StorageEngine, CompactionStats};
-pub use query::Query;
-pub use query_cache::{QueryCache, QueryHash, CacheStats};
-pub use find_options::FindOptions;
 pub use collection_core::{CollectionCore, InsertManyResult};
 pub use database::DatabaseCore;
-pub use transaction::{Transaction, TransactionId, TransactionState, Operation};
-pub use wal::{WriteAheadLog, WALEntry, WALEntryType};
-pub use logging::{LogLevel, set_log_level, get_log_level};
+pub use document::{Document, DocumentId};
 pub use durability::DurabilityMode;
+pub use error::{MongoLiteError, Result};
+pub use find_options::FindOptions;
+pub use logging::{get_log_level, set_log_level, LogLevel};
+pub use query::Query;
+pub use query_cache::{CacheStats, QueryCache, QueryHash};
+pub use storage::{CompactionStats, StorageEngine};
+pub use transaction::{Operation, Transaction, TransactionId, TransactionState};
+pub use wal::{WALEntry, WALEntryType, WriteAheadLog};

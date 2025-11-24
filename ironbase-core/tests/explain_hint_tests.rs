@@ -35,12 +35,14 @@ fn test_explain_range_query() {
     collection.create_index("price".to_string(), false).unwrap();
 
     // Explain range query - should use IndexRangeScan
-    let plan = collection.explain(&json!({
-        "price": {
-            "$gte": 100,
-            "$lt": 500
-        }
-    })).unwrap();
+    let plan = collection
+        .explain(&json!({
+            "price": {
+                "$gte": 100,
+                "$lt": 500
+            }
+        }))
+        .unwrap();
 
     assert_eq!(plan.get("queryPlan").unwrap(), "IndexRangeScan");
     assert_eq!(plan.get("indexUsed").unwrap(), "products_price");
@@ -91,10 +93,9 @@ fn test_hint_forces_index_usage() {
     }
 
     // Query with hint
-    let results = collection.find_with_hint(
-        &json!({"age": 5}),
-        "users_age"
-    ).unwrap();
+    let results = collection
+        .find_with_hint(&json!({"age": 5}), "users_age")
+        .unwrap();
 
     assert_eq!(results.len(), 5); // Should find all 5 docs with age=5
 }
@@ -119,15 +120,17 @@ fn test_hint_with_range_query() {
     }
 
     // Range query with hint
-    let results = collection.find_with_hint(
-        &json!({
-            "price": {
-                "$gte": 50,
-                "$lt": 150
-            }
-        }),
-        "products_price"
-    ).unwrap();
+    let results = collection
+        .find_with_hint(
+            &json!({
+                "price": {
+                    "$gte": 50,
+                    "$lt": 150
+                }
+            }),
+            "products_price",
+        )
+        .unwrap();
 
     assert_eq!(results.len(), 10); // Prices 50-140 (10 products)
 }
@@ -141,10 +144,7 @@ fn test_hint_invalid_index() {
     let collection = db.collection("users").unwrap();
 
     // Try to use non-existent index
-    let result = collection.find_with_hint(
-        &json!({"age": 25}),
-        "nonexistent_index"
-    );
+    let result = collection.find_with_hint(&json!({"age": 25}), "nonexistent_index");
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
@@ -162,10 +162,7 @@ fn test_hint_wrong_field() {
     collection.create_index("age".to_string(), false).unwrap();
 
     // Try to use age index for name query
-    let result = collection.find_with_hint(
-        &json!({"name": "Alice"}),
-        "users_age"
-    );
+    let result = collection.find_with_hint(&json!({"name": "Alice"}), "users_age");
 
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("Cannot use index"));

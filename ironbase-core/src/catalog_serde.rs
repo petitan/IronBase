@@ -1,11 +1,11 @@
 // catalog_serde.rs
 // Custom serialization for HashMap<DocumentId, u64> to preserve DocumentId types in JSON
 
-use std::collections::HashMap;
-use serde::{Serializer, Deserializer};
-use serde::ser::SerializeSeq;
-use serde::de::{SeqAccess, Visitor};
 use crate::document::DocumentId;
+use serde::de::{SeqAccess, Visitor};
+use serde::ser::SerializeSeq;
+use serde::{Deserializer, Serializer};
+use std::collections::HashMap;
 
 /// Serialize HashMap<DocumentId, u64> as array of [type_tag, value, offset] tuples
 /// This preserves DocumentId type information in JSON metadata
@@ -47,16 +47,24 @@ where
         {
             let mut catalog = HashMap::new();
 
-            while let Some((type_tag, value_str, offset)) = seq.next_element::<(String, String, u64)>()? {
+            while let Some((type_tag, value_str, offset)) =
+                seq.next_element::<(String, String, u64)>()?
+            {
                 let doc_id = match type_tag.as_str() {
                     "i" => {
-                        let val = value_str.parse::<i64>()
-                            .map_err(|e| serde::de::Error::custom(format!("Invalid Int value: {}", e)))?;
+                        let val = value_str.parse::<i64>().map_err(|e| {
+                            serde::de::Error::custom(format!("Invalid Int value: {}", e))
+                        })?;
                         DocumentId::Int(val)
-                    },
+                    }
                     "s" => DocumentId::String(value_str),
                     "o" => DocumentId::ObjectId(value_str),
-                    _ => return Err(serde::de::Error::custom(format!("Unknown type tag: {}", type_tag))),
+                    _ => {
+                        return Err(serde::de::Error::custom(format!(
+                            "Unknown type tag: {}",
+                            type_tag
+                        )))
+                    }
                 };
                 catalog.insert(doc_id, offset);
             }

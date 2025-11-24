@@ -4,10 +4,10 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::{DatabaseCore, DurabilityMode};
     use crate::storage::StorageEngine;
-    use std::collections::HashMap;
+    use crate::{DatabaseCore, DurabilityMode};
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn test_safe_mode_default() {
@@ -71,8 +71,9 @@ mod tests {
         // Open database in Batch mode
         let db = DatabaseCore::<StorageEngine>::open_with_durability(
             db_path,
-            DurabilityMode::Batch { batch_size: 3 }
-        ).unwrap();
+            DurabilityMode::Batch { batch_size: 3 },
+        )
+        .unwrap();
 
         assert_eq!(
             db.durability_mode(),
@@ -81,9 +82,7 @@ mod tests {
 
         // Insert 5 documents (should trigger 1 flush at 3, leaving 2 in buffer)
         for i in 0..5 {
-            let doc = HashMap::from([
-                ("value".to_string(), json!(i)),
-            ]);
+            let doc = HashMap::from([("value".to_string(), json!(i))]);
             db.insert_one_safe("test", doc).unwrap();
         }
 
@@ -110,17 +109,14 @@ mod tests {
         let _ = std::fs::remove_file(wal_path);
 
         // Open database in Unsafe mode
-        let db = DatabaseCore::<StorageEngine>::open_with_durability(
-            db_path,
-            DurabilityMode::Unsafe
-        ).unwrap();
+        let db =
+            DatabaseCore::<StorageEngine>::open_with_durability(db_path, DurabilityMode::Unsafe)
+                .unwrap();
 
         assert_eq!(db.durability_mode(), DurabilityMode::Unsafe);
 
         // Insert document (fast path, no WAL)
-        let doc = HashMap::from([
-            ("name".to_string(), json!("Bob")),
-        ]);
+        let doc = HashMap::from([("name".to_string(), json!("Bob"))]);
 
         db.insert_one_safe("users", doc).unwrap();
 

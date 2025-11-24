@@ -24,18 +24,25 @@
 // FUTURE REFACTOR: See COLLECTION_DESIGN.md for modular architecture plan
 
 use std::sync::Arc;
+
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
-use crate::storage::{Storage, RawStorage};
 use crate::document::{Document, DocumentId};
-use crate::error::{Result, MongoLiteError};
+use crate::error::{MongoLiteError, Result};
+use crate::index::{IndexKey, IndexManager};
 use crate::query::Query;
-use crate::index::{IndexManager, IndexKey};
-use crate::query_planner::{QueryPlanner, QueryPlan};
 use crate::query_cache::{QueryCache, QueryHash};
+use crate::query_planner::{QueryPlan, QueryPlanner};
+use crate::storage::{RawStorage, Storage};
 use crate::{log_debug, log_trace, log_warn};
+
+mod index_persistence;
+mod schema;
+
+use self::index_persistence::persist_index_to_disk;
+use self::schema::CompiledSchema;
 
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
@@ -61,142 +68,6 @@ pub struct CollectionCore<S: Storage + RawStorage> {
     schema: Arc<RwLock<Option<CompiledSchema>>>,
 }
 
-#[derive(Clone)]
-struct CompiledSchema {
-    required: Vec<String>,
-    properties: HashMap<String, SchemaType>,
-}
-
-#[derive(Clone, Copy, Debug)]
-enum SchemaType {
-    String,
-    Number,
-    Boolean,
-    Object,
-    Array,
-}
-
-impl CompiledSchema {
-    fn from_value(schema: &Value) -> Result<Self> {
-        let obj = schema
-            .as_object()
-            .ok_or_else(|| MongoLiteError::SchemaError("Schema must be a JSON object".to_string()))?;
-
-        if let Some(schema_type) = obj.get("type") {
-            let type_str = schema_type
-                .as_str()
-                .ok_or_else(|| MongoLiteError::SchemaError("Schema type must be a string".to_string()))?;
-            if type_str != "object" {
-                return Err(MongoLiteError::SchemaError(
-                    "Only object schemas are supported".to_string(),
-                ));
-            }
-        }
-
-        let mut required = Vec::new();
-        if let Some(required_value) = obj.get("required") {
-            let arr = required_value.as_array().ok_or_else(|| {
-                MongoLiteError::SchemaError("required must be an array of field names".to_string())
-            })?;
-            for entry in arr {
-                let field = entry.as_str().ok_or_else(|| {
-                    MongoLiteError::SchemaError("required entries must be strings".to_string())
-                })?;
-                required.push(field.to_string());
-            }
-        }
-
-        let mut properties = HashMap::new();
-        if let Some(props) = obj.get("properties") {
-            let props_obj = props.as_object().ok_or_else(|| {
-                MongoLiteError::SchemaError("properties must be an object".to_string())
-            })?;
-            for (field, spec) in props_obj {
-                if let Some(type_value) = spec.get("type") {
-                    let type_str = type_value.as_str().ok_or_else(|| {
-                        MongoLiteError::SchemaError(format!(
-                            "Property '{}' type must be a string",
-                            field
-                        ))
-                    })?;
-                    let parsed_type = SchemaType::from_str(type_str).ok_or_else(|| {
-                        MongoLiteError::SchemaError(format!(
-                            "Unsupported type '{}' for field '{}'",
-                            type_str, field
-                        ))
-                    })?;
-                    properties.insert(field.clone(), parsed_type);
-                }
-            }
-        }
-
-        Ok(Self { required, properties })
-    }
-
-    fn validate(&self, value: &Value) -> Result<()> {
-        let obj = value.as_object().ok_or_else(|| {
-            MongoLiteError::SchemaError("Document must be a JSON object".to_string())
-        })?;
-
-        for field in &self.required {
-            if !obj.contains_key(field) {
-                return Err(MongoLiteError::SchemaError(format!(
-                    "Missing required field '{}'",
-                    field
-                )));
-            }
-        }
-
-        for (field, schema_type) in &self.properties {
-            if let Some(field_value) = obj.get(field) {
-                if !schema_type.matches(field_value) {
-                    return Err(MongoLiteError::SchemaError(format!(
-                        "Field '{}' expected type {}",
-                        field,
-                        schema_type.as_str()
-                    )));
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-impl SchemaType {
-    fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "string" => Some(SchemaType::String),
-            "number" => Some(SchemaType::Number),
-            "integer" => Some(SchemaType::Number),
-            "boolean" => Some(SchemaType::Boolean),
-            "object" => Some(SchemaType::Object),
-            "array" => Some(SchemaType::Array),
-            _ => None,
-        }
-    }
-
-    fn matches(self, value: &Value) -> bool {
-        match self {
-            SchemaType::String => value.is_string(),
-            SchemaType::Number => value.is_number(),
-            SchemaType::Boolean => value.is_boolean(),
-            SchemaType::Object => value.is_object(),
-            SchemaType::Array => value.is_array(),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            SchemaType::String => "string",
-            SchemaType::Number => "number",
-            SchemaType::Boolean => "boolean",
-            SchemaType::Object => "object",
-            SchemaType::Array => "array",
-        }
-    }
-}
-
 impl<S: Storage + RawStorage> CollectionCore<S> {
     // ========== CONSTRUCTOR ==========
 
@@ -218,28 +89,34 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         index_manager.create_btree_index(
             id_index_name.clone(),
             "_id".to_string(),
-            true  // unique
+            true, // unique
         )?;
 
         // PERSISTENCE FIX: Load persisted indexes and rebuild from document catalog
         let schema_definition = {
             let storage_guard = storage.write();
-            let meta = storage_guard.get_collection_meta(&name)
+            let meta = storage_guard
+                .get_collection_meta(&name)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
             meta.schema.clone()
         };
 
         {
             let storage_guard = storage.write();
-            let meta = storage_guard.get_collection_meta(&name)
+            let meta = storage_guard
+                .get_collection_meta(&name)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
 
             // Clone metadata to avoid borrow issues
             let catalog = meta.document_catalog.clone();
             let persisted_indexes = meta.indexes.clone();
 
-            log_debug!("Collection '{}' - catalog size: {}, persisted indexes: {}",
-                      name, catalog.len(), persisted_indexes.len());
+            log_debug!(
+                "Collection '{}' - catalog size: {}, persisted indexes: {}",
+                name,
+                catalog.len(),
+                persisted_indexes.len()
+            );
 
             drop(storage_guard); // Release write lock before rebuilding
 
@@ -250,19 +127,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     continue;
                 }
 
-                log_debug!("Creating index '{}' on field '{}'",
-                          index_meta.name, index_meta.field);
+                log_debug!(
+                    "Creating index '{}' on field '{}'",
+                    index_meta.name,
+                    index_meta.field
+                );
 
                 // Create index
                 index_manager.create_btree_index(
                     index_meta.name.clone(),
                     index_meta.field.clone(),
-                    index_meta.unique
+                    index_meta.unique,
                 )?;
             }
 
             // Rebuild all indexes from document catalog
-            log_debug!("Starting index rebuild from {} catalog entries", catalog.len());
+            log_debug!(
+                "Starting index rebuild from {} catalog entries",
+                catalog.len()
+            );
             let mut storage_guard = storage.write();
             let mut rebuilt_count = 0;
             for (_id_key, offset) in catalog.iter() {
@@ -272,16 +155,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         match serde_json::from_slice::<Value>(&doc_bytes) {
                             Ok(doc) => {
                                 // Skip tombstones
-                                if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                if doc
+                                    .get("_tombstone")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false)
+                                {
                                     continue;
                                 }
 
                                 // Rebuild ALL indexes
                                 if let Some(id_value) = doc.get("_id") {
-                                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_value.clone()) {
+                                    if let Ok(doc_id) =
+                                        serde_json::from_value::<DocumentId>(id_value.clone())
+                                    {
                                         // Rebuild _id index
                                         let index_key = IndexKey::from(id_value);
-                                        if let Some(id_index) = index_manager.get_btree_index_mut(&id_index_name) {
+                                        if let Some(id_index) =
+                                            index_manager.get_btree_index_mut(&id_index_name)
+                                        {
                                             let _ = id_index.insert(index_key, doc_id.clone());
                                         }
 
@@ -293,7 +184,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                                             if let Some(field_value) = doc.get(&index_meta.field) {
                                                 let key = IndexKey::from(field_value);
-                                                if let Some(index) = index_manager.get_btree_index_mut(&index_meta.name) {
+                                                if let Some(index) = index_manager
+                                                    .get_btree_index_mut(&index_meta.name)
+                                                {
                                                     let _ = index.insert(key, doc_id.clone());
                                                     rebuilt_count += 1;
                                                 }
@@ -303,18 +196,27 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 }
                             }
                             Err(e) => {
-                                log_warn!("Failed to parse document JSON during index rebuild: {:?}", e);
+                                log_warn!(
+                                    "Failed to parse document JSON during index rebuild: {:?}",
+                                    e
+                                );
                                 continue;
                             }
                         }
                     }
                     Err(e) => {
-                        log_warn!("Failed to read document at offset during index rebuild: {:?}", e);
+                        log_warn!(
+                            "Failed to read document at offset during index rebuild: {:?}",
+                            e
+                        );
                         continue;
                     }
                 }
             }
-            log_debug!("Index rebuild completed - {} index entries rebuilt", rebuilt_count);
+            log_debug!(
+                "Index rebuild completed - {} index entries rebuilt",
+                rebuilt_count
+            );
         }
 
         let compiled_schema = if let Some(raw_schema) = schema_definition {
@@ -327,7 +229,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             name,
             storage,
             indexes: Arc::new(RwLock::new(index_manager)),
-            query_cache: Arc::new(QueryCache::new(1000)),  // LRU cache with 1000 query capacity
+            query_cache: Arc::new(QueryCache::new(1000)), // LRU cache with 1000 query capacity
             schema: Arc::new(RwLock::new(compiled_schema)),
         })
     }
@@ -360,7 +262,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         {
             let mut storage = self.storage.write();
-            let meta = storage.get_collection_meta_mut(&self.name)
+            let meta = storage
+                .get_collection_meta_mut(&self.name)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
             meta.schema = schema;
             storage.flush()?;
@@ -378,7 +281,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut storage = self.storage.write();
 
         // Get mutable reference to collection metadata
-        let meta = storage.get_collection_meta_mut(&self.name)
+        let meta = storage
+            .get_collection_meta_mut(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
         // Check if _id already exists in fields
@@ -467,7 +371,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut live_delta = 0i64;
 
         // Get mutable reference to collection metadata ONCE
-        let meta = storage.get_collection_meta_mut(&self.name)
+        let meta = storage
+            .get_collection_meta_mut(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
         // Generate all IDs upfront
@@ -568,12 +473,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     pub fn find_with_options(
         &self,
         query_json: &Value,
-        options: crate::find_options::FindOptions
+        options: crate::find_options::FindOptions,
     ) -> Result<Vec<Value>> {
-        use crate::find_options::{apply_projection, apply_sort};
+        use crate::find_options::{apply_limit_skip, apply_projection, apply_sort};
 
-        let skip = options.skip.unwrap_or(0);
-        let limit = options.limit;
+        let original_skip = options.skip.unwrap_or(0);
+        let original_limit = options.limit;
 
         let mut sort_field_ref: Option<&str> = None;
         let mut sort_desc = false;
@@ -584,13 +489,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
+        let apply_limit_after_sort = options.sort.is_some();
+        let fetch_skip = if apply_limit_after_sort {
+            0
+        } else {
+            original_skip
+        };
+        let fetch_limit = if apply_limit_after_sort {
+            None
+        } else {
+            original_limit
+        };
+
         let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
             query_json,
             None,
             sort_field_ref,
             sort_desc,
-            skip,
-            limit,
+            fetch_skip,
+            fetch_limit,
             sort_field_ref.is_none(),
         )?;
 
@@ -608,9 +525,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // 3. Apply projection
+        // 3. Apply post-sort limit/skip if needed
+        if apply_limit_after_sort {
+            docs = apply_limit_skip(docs, original_limit, options.skip);
+        }
+
+        // 4. Apply projection
         if let Some(ref projection) = options.projection {
-            docs = docs.into_iter()
+            docs = docs
+                .into_iter()
                 .map(|doc| apply_projection(&doc, projection))
                 .collect();
         }
@@ -620,7 +543,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Streaming cursor for large result sets
     pub fn find_streaming(&self, query_json: &Value) -> Result<FindCursor<'_, S>> {
-        let (doc_ids, _) = self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
         Ok(FindCursor {
             collection: self,
             doc_ids,
@@ -683,7 +607,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         if let Some(doc_id) = Self::extract_id_query(query_json) {
-            return Ok(if self.read_document_by_id(&doc_id)?.is_some() { 1 } else { 0 });
+            return Ok(if self.read_document_by_id(&doc_id)?.is_some() {
+                1
+            } else {
+                0
+            });
         }
 
         let parsed_query = Query::from_json(query_json)?;
@@ -774,7 +702,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     // Write updated document WITH catalog tracking
                     let updated_json = document.to_json()?;
-                    storage.write_document_raw(&self.name, &document.id, updated_json.as_bytes())?;
+                    storage.write_document_raw(
+                        &self.name,
+                        &document.id,
+                        updated_json.as_bytes(),
+                    )?;
                     storage.adjust_live_count(&self.name, -1);
                     storage.adjust_live_count(&self.name, 1);
 
@@ -806,7 +738,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         for (_, doc) in docs_by_id {
             // Skip tombstones (deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -936,7 +872,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         for (_, doc) in docs_by_id {
             // Skip tombstones (already deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
@@ -994,22 +934,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         for (_, doc) in docs_by_id {
             // Skip tombstones (deleted documents)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 
             let matches = if let Some(query) = &parsed_query {
-                    let doc_json_str = serde_json::to_string(&doc)?;
-                    let document = Document::from_json(&doc_json_str)?;
-                    query.matches(&document)
-                } else {
-                    true
-                };
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
+                query.matches(&document)
+            } else {
+                true
+            };
 
             if matches {
                 if let Some(field_value) = doc.get(field) {
-                    let value_key = serde_json::to_string(field_value)
-                        .unwrap_or_else(|_| "null".to_string());
+                    let value_key =
+                        serde_json::to_string(field_value).unwrap_or_else(|_| "null".to_string());
 
                     if seen_values.insert(value_key) {
                         distinct_values.push(field_value.clone());
@@ -1027,13 +971,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     fn extract_field_from_index_name(&self, index_name: &str) -> String {
         // Remove collection prefix: "users_age" -> "age"
         let prefix = format!("{}_", self.name);
-        index_name.strip_prefix(&prefix)
+        index_name
+            .strip_prefix(&prefix)
             .unwrap_or(index_name)
             .to_string()
     }
 
     /// Create a query plan for a hinted index
-    fn create_plan_for_hint(&self, query_json: &Value, index_name: &str, field: &str) -> Result<QueryPlan> {
+    fn create_plan_for_hint(
+        &self,
+        query_json: &Value,
+        index_name: &str,
+        field: &str,
+    ) -> Result<QueryPlan> {
         // Parse the query to understand what we're looking for
         if let Value::Object(ref map) = query_json {
             // Check if querying this field
@@ -1084,14 +1034,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        Err(MongoLiteError::IndexError(
-            format!("Cannot use index '{}' for this query", index_name)
-        ))
+        Err(MongoLiteError::IndexError(format!(
+            "Cannot use index '{}' for this query",
+            index_name
+        )))
     }
 
     /// Execute query using an index
     fn find_with_index(&self, parsed_query: Query, plan: QueryPlan) -> Result<Vec<Value>> {
-        let (doc_ids, _) = self.collect_doc_ids_from_plan(&parsed_query, plan, None, false, 0, None)?;
+        let (doc_ids, _) =
+            self.collect_doc_ids_from_plan(&parsed_query, plan, None, false, 0, None)?;
         let mut results = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
@@ -1121,11 +1073,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             for (field, inc_value) in field_values {
                                 if let Some(current) = document.get(field) {
                                     // Try int first to preserve integer types
-                                    if let (Some(curr_int), Some(inc_int)) = (current.as_i64(), inc_value.as_i64()) {
-                                        document.set(field.clone(), Value::from(curr_int + inc_int));
+                                    if let (Some(curr_int), Some(inc_int)) =
+                                        (current.as_i64(), inc_value.as_i64())
+                                    {
+                                        document
+                                            .set(field.clone(), Value::from(curr_int + inc_int));
                                         was_modified = true;
-                                    } else if let (Some(curr_num), Some(inc_num)) = (current.as_f64(), inc_value.as_f64()) {
-                                        document.set(field.clone(), Value::from(curr_num + inc_num));
+                                    } else if let (Some(curr_num), Some(inc_num)) =
+                                        (current.as_f64(), inc_value.as_f64())
+                                    {
+                                        document
+                                            .set(field.clone(), Value::from(curr_num + inc_num));
                                         was_modified = true;
                                     }
                                 }
@@ -1144,7 +1102,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         if let Value::Object(ref field_values) = fields {
                             for (field, value) in field_values {
                                 // Handle modifiers: $each, $position, $slice
-                                let (items, position, slice) = if let Value::Object(ref modifiers) = value {
+                                let (items, position, slice) = if let Value::Object(ref modifiers) =
+                                    value
+                                {
                                     let items = if let Some(each_val) = modifiers.get("$each") {
                                         // $each: push multiple items
                                         if let Value::Array(ref arr) = each_val {
@@ -1157,12 +1117,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         vec![value.clone()]
                                     };
 
-                                    let position = modifiers.get("$position")
+                                    let position = modifiers
+                                        .get("$position")
                                         .and_then(|v| v.as_i64())
                                         .map(|p| p as usize);
 
-                                    let slice = modifiers.get("$slice")
-                                        .and_then(|v| v.as_i64());
+                                    let slice = modifiers.get("$slice").and_then(|v| v.as_i64());
 
                                     (items, position, slice)
                                 } else {
@@ -1174,9 +1134,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 let mut array = match document.get(field) {
                                     Some(Value::Array(arr)) => arr.clone(),
                                     Some(_) => {
-                                        return Err(MongoLiteError::InvalidQuery(
-                                            format!("$push: field '{}' is not an array", field)
-                                        ));
+                                        return Err(MongoLiteError::InvalidQuery(format!(
+                                            "$push: field '{}' is not an array",
+                                            field
+                                        )));
                                     }
                                     None => vec![],
                                 };
@@ -1216,8 +1177,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             for (field, condition) in field_values {
                                 if let Some(Value::Array(ref arr)) = document.get(field) {
                                     // Filter out matching elements
-                                    let filtered: Vec<Value> = arr.iter()
-                                        .filter(|item| !self.value_matches_condition(item, condition))
+                                    let filtered: Vec<Value> = arr
+                                        .iter()
+                                        .filter(|item| {
+                                            !self.value_matches_condition(item, condition)
+                                        })
                                         .cloned()
                                         .collect();
 
@@ -1226,9 +1190,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         was_modified = true;
                                     }
                                 } else if document.get(field).is_some() {
-                                    return Err(MongoLiteError::InvalidQuery(
-                                        format!("$pull: field '{}' is not an array", field)
-                                    ));
+                                    return Err(MongoLiteError::InvalidQuery(format!(
+                                        "$pull: field '{}' is not an array",
+                                        field
+                                    )));
                                 }
                             }
                         }
@@ -1255,9 +1220,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 let mut array = match document.get(field) {
                                     Some(Value::Array(arr)) => arr.clone(),
                                     Some(_) => {
-                                        return Err(MongoLiteError::InvalidQuery(
-                                            format!("$addToSet: field '{}' is not an array", field)
-                                        ));
+                                        return Err(MongoLiteError::InvalidQuery(format!(
+                                            "$addToSet: field '{}' is not an array",
+                                            field
+                                        )));
                                     }
                                     None => vec![],
                                 };
@@ -1295,23 +1261,28 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                             was_modified = true;
                                         }
                                         _ => {
-                                            return Err(MongoLiteError::InvalidQuery(
-                                                format!("$pop: value must be -1 or 1, got {:?}", direction)
-                                            ));
+                                            return Err(MongoLiteError::InvalidQuery(format!(
+                                                "$pop: value must be -1 or 1, got {:?}",
+                                                direction
+                                            )));
                                         }
                                     }
 
                                     document.set(field.clone(), Value::Array(new_array));
                                 } else if document.get(field).is_some() {
-                                    return Err(MongoLiteError::InvalidQuery(
-                                        format!("$pop: field '{}' is not an array", field)
-                                    ));
+                                    return Err(MongoLiteError::InvalidQuery(format!(
+                                        "$pop: field '{}' is not an array",
+                                        field
+                                    )));
                                 }
                             }
                         }
                     }
                     _ => {
-                        return Err(MongoLiteError::InvalidQuery(format!("Unsupported update operator: {}", op)));
+                        return Err(MongoLiteError::InvalidQuery(format!(
+                            "Unsupported update operator: {}",
+                            op
+                        )));
                     }
                 }
             }
@@ -1347,25 +1318,37 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         }
                         "$gt" => {
                             use std::cmp::Ordering;
-                            if !Self::compare_values(value, op_value).map(|cmp| cmp == Ordering::Greater).unwrap_or(false) {
+                            if !Self::compare_values(value, op_value)
+                                .map(|cmp| cmp == Ordering::Greater)
+                                .unwrap_or(false)
+                            {
                                 return false;
                             }
                         }
                         "$gte" => {
                             use std::cmp::Ordering;
-                            if !Self::compare_values(value, op_value).map(|cmp| matches!(cmp, Ordering::Greater | Ordering::Equal)).unwrap_or(false) {
+                            if !Self::compare_values(value, op_value)
+                                .map(|cmp| matches!(cmp, Ordering::Greater | Ordering::Equal))
+                                .unwrap_or(false)
+                            {
                                 return false;
                             }
                         }
                         "$lt" => {
                             use std::cmp::Ordering;
-                            if !Self::compare_values(value, op_value).map(|cmp| cmp == Ordering::Less).unwrap_or(false) {
+                            if !Self::compare_values(value, op_value)
+                                .map(|cmp| cmp == Ordering::Less)
+                                .unwrap_or(false)
+                            {
                                 return false;
                             }
                         }
                         "$lte" => {
                             use std::cmp::Ordering;
-                            if !Self::compare_values(value, op_value).map(|cmp| matches!(cmp, Ordering::Less | Ordering::Equal)).unwrap_or(false) {
+                            if !Self::compare_values(value, op_value)
+                                .map(|cmp| matches!(cmp, Ordering::Less | Ordering::Equal))
+                                .unwrap_or(false)
+                            {
                                 return false;
                             }
                         }
@@ -1427,9 +1410,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         {
             let indexes = self.indexes.read();
             if indexes.get_btree_index(hint).is_none() {
-                return Err(MongoLiteError::IndexError(
-                    format!("Index '{}' not found (hint)", hint)
-                ));
+                return Err(MongoLiteError::IndexError(format!(
+                    "Index '{}' not found (hint)",
+                    hint
+                )));
             }
         }
 
@@ -1552,6 +1536,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                 // Save metadata to disk
                 storage.flush()?;
+
+                // PERSIST index data to .idx file
+                let db_file_path = storage.get_file_path().to_string();
+                drop(storage); // Release storage lock before acquiring index lock
+
+                if !db_file_path.is_empty() {
+                    let mut indexes = self.indexes.write();
+                    if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                        persist_index_to_disk(&db_file_path, &index_name, |file| {
+                            index.save_to_file(file)
+                        })?;
+                    }
+                }
             }
         }
 
@@ -1589,12 +1586,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// Note: Index changes are tracked but not yet applied atomically.
     /// See INDEX_CONSISTENCY.md for future two-phase commit implementation.
-    pub fn insert_one_tx(&self, doc: HashMap<String, Value>, tx: &mut crate::transaction::Transaction) -> Result<DocumentId> {
+    pub fn insert_one_tx(
+        &self,
+        doc: HashMap<String, Value>,
+        tx: &mut crate::transaction::Transaction,
+    ) -> Result<DocumentId> {
         use crate::transaction::Operation;
 
         // Generate document ID
         let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta_mut(&self.name)
+        let meta = storage
+            .get_collection_meta_mut(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
         let doc_id = DocumentId::new_auto(meta.last_id);
@@ -1632,7 +1634,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             operation: crate::transaction::IndexOperation::Insert,
                             key,
                             doc_id: doc_id.clone(),
-                        }
+                        },
                     )?;
                 }
             }
@@ -1646,7 +1648,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Note: Pass the new_doc directly (not update operators).
     /// Index changes are tracked but not yet applied atomically.
     /// See INDEX_CONSISTENCY.md for future two-phase commit implementation.
-    pub fn update_one_tx(&self, query: &Value, new_doc: Value, tx: &mut crate::transaction::Transaction) -> Result<(u64, u64)> {
+    pub fn update_one_tx(
+        &self,
+        query: &Value,
+        new_doc: Value,
+        tx: &mut crate::transaction::Transaction,
+    ) -> Result<(u64, u64)> {
         use crate::transaction::Operation;
 
         // Find the document first
@@ -1654,14 +1661,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
-            let id_value = old_doc.get("_id")
+            let id_value = old_doc
+                .get("_id")
                 .ok_or_else(|| MongoLiteError::DocumentNotFound)?;
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
                 Value::Number(n) if n.is_u64() => DocumentId::Int(n.as_u64().unwrap() as i64),
                 Value::String(s) => DocumentId::String(s.clone()),
-                _ => return Err(MongoLiteError::Serialization("Invalid _id type".to_string())),
+                _ => {
+                    return Err(MongoLiteError::Serialization(
+                        "Invalid _id type".to_string(),
+                    ))
+                }
             };
 
             // Ensure new_doc has _id and _collection fields
@@ -1670,7 +1682,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 map.insert("_collection".to_string(), Value::String(self.name.clone()));
                 Value::Object(map)
             } else {
-                return Err(MongoLiteError::Serialization("new_doc must be an object".to_string()));
+                return Err(MongoLiteError::Serialization(
+                    "new_doc must be an object".to_string(),
+                ));
             };
 
             // Prepare new_doc for index tracking
@@ -1708,7 +1722,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 operation: crate::transaction::IndexOperation::Delete,
                                 key: old_key,
                                 doc_id: doc_id.clone(),
-                            }
+                            },
                         )?;
                     }
 
@@ -1721,7 +1735,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 operation: crate::transaction::IndexOperation::Insert,
                                 key: new_key,
                                 doc_id: doc_id.clone(),
-                            }
+                            },
                         )?;
                     }
                 }
@@ -1737,7 +1751,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// Note: Index changes are tracked but not yet applied atomically.
     /// See INDEX_CONSISTENCY.md for future two-phase commit implementation.
-    pub fn delete_one_tx(&self, query: &Value, tx: &mut crate::transaction::Transaction) -> Result<u64> {
+    pub fn delete_one_tx(
+        &self,
+        query: &Value,
+        tx: &mut crate::transaction::Transaction,
+    ) -> Result<u64> {
         use crate::transaction::Operation;
 
         // Find the document first
@@ -1745,14 +1763,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
-            let id_value = old_doc.get("_id")
+            let id_value = old_doc
+                .get("_id")
                 .ok_or_else(|| MongoLiteError::DocumentNotFound)?;
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
                 Value::Number(n) if n.is_u64() => DocumentId::Int(n.as_u64().unwrap() as i64),
                 Value::String(s) => DocumentId::String(s.clone()),
-                _ => return Err(MongoLiteError::Serialization("Invalid _id type".to_string())),
+                _ => {
+                    return Err(MongoLiteError::Serialization(
+                        "Invalid _id type".to_string(),
+                    ))
+                }
             };
 
             // Add operation to transaction
@@ -1777,7 +1800,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 operation: crate::transaction::IndexOperation::Delete,
                                 key: old_key,
                                 doc_id: doc_id.clone(),
-                            }
+                            },
                         )?;
                     }
                 }
@@ -1796,11 +1819,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Returns None if document not found or is tombstone
     fn read_document_by_id(&self, doc_id: &DocumentId) -> Result<Option<Value>> {
         let mut storage = self.storage.write();
-        let meta = storage.get_collection_meta(&self.name)
+        let meta = storage
+            .get_collection_meta(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        log_trace!("read_document_by_id({:?}) - catalog has {} entries",
-                  doc_id, meta.document_catalog.len());
+        log_trace!(
+            "read_document_by_id({:?}) - catalog has {} entries",
+            doc_id,
+            meta.document_catalog.len()
+        );
 
         // O(1) lookup in document_catalog (direct DocumentId lookup - no serialization!)
         if let Some(&offset) = meta.document_catalog.get(doc_id) {
@@ -1809,15 +1836,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
             // Check if document is a tombstone (deleted)
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 log_trace!("Document is tombstone");
                 return Ok(None);
             }
 
             Ok(Some(doc))
         } else {
-            log_trace!("doc_id {:?} NOT in catalog! Catalog keys: {:?}",
-                      doc_id, meta.document_catalog.keys().collect::<Vec<_>>());
+            log_trace!(
+                "doc_id {:?} NOT in catalog! Catalog keys: {:?}",
+                doc_id,
+                meta.document_catalog.keys().collect::<Vec<_>>()
+            );
             Ok(None)
         }
     }
@@ -1829,8 +1863,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Clone the catalog to avoid borrow checker issues
         let catalog = {
-            let meta = storage.get_collection_meta(&self.name)
+            let meta = storage
+                .get_collection_meta(&self.name)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            log_debug!(
+                "Collection '{}' has {} documents in catalog",
+                self.name,
+                meta.document_catalog.len()
+            );
             meta.document_catalog.clone()
         };
 
@@ -1844,7 +1884,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     match serde_json::from_slice::<Value>(&doc_bytes) {
                         Ok(doc) => {
                             // Skip tombstones (deleted documents)
-                            if !doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+                            if !doc
+                                .get("_tombstone")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                            {
                                 docs_by_id.insert(doc_id.clone(), doc);
                             }
                         }
@@ -1859,7 +1903,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     fn collect_doc_ids(&self, query_json: &Value) -> Result<Vec<DocumentId>> {
-        let (ids, _) = self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
         Ok(ids)
     }
 
@@ -1873,7 +1918,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         limit: Option<usize>,
         use_cache: bool,
     ) -> Result<(Vec<DocumentId>, bool)> {
-        let cache_hash = if use_cache && hint.is_none() && sort_field.is_none() && skip == 0 && limit.is_none() {
+        let cache_hash = if use_cache
+            && hint.is_none()
+            && sort_field.is_none()
+            && skip == 0
+            && limit.is_none()
+        {
             Some(QueryHash::new(&self.name, query_json))
         } else {
             None
@@ -1898,17 +1948,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         };
 
         let (doc_ids_vec, used_sort) = if let Some(plan) = plan {
-            self.collect_doc_ids_from_plan(
-                &parsed_query,
-                plan,
-                sort_field,
-                sort_desc,
-                skip,
-                limit,
-            )?
+            self.collect_doc_ids_from_plan(&parsed_query, plan, sort_field, sort_desc, skip, limit)?
         } else {
             // Fallback to full scan using catalog
             let docs_by_id = self.scan_documents_via_catalog()?;
+            log_debug!(
+                "scan_documents_via_catalog returned {} documents",
+                docs_by_id.len()
+            );
             let mut doc_ids = Vec::new();
             let mut skipped = 0usize;
 
@@ -1952,7 +1999,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut doc_ids = {
             let indexes = self.indexes.read();
             match plan {
-                QueryPlan::IndexScan { ref index_name, ref key, .. } => {
+                QueryPlan::IndexScan {
+                    ref index_name,
+                    ref key,
+                    ..
+                } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         index.range_scan(key, key, true, true)
                     } else {
@@ -2047,12 +2098,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Filter documents by query and exclude tombstones
     /// Returns only live documents matching the query
-    fn filter_documents(&self, docs_by_id: HashMap<DocumentId, Value>, query: &Query) -> Result<Vec<Value>> {
+    fn filter_documents(
+        &self,
+        docs_by_id: HashMap<DocumentId, Value>,
+        query: &Query,
+    ) -> Result<Vec<Value>> {
         let mut results = Vec::new();
 
         for (_, doc) in docs_by_id {
             // Skip tombstones
-            if doc.get("_tombstone").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 continue;
             }
 

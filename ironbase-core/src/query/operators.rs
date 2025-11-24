@@ -22,11 +22,11 @@
 //! - **Reduced Complexity**: Each operator has CC ~2-4 instead of one giant function
 //! - **Type Safety**: Compile-time guarantees for operator implementations
 
-use serde_json::Value;
 use crate::document::Document;
-use crate::error::{Result, MongoLiteError};
-use std::collections::HashMap;
+use crate::error::{MongoLiteError, Result};
 use lazy_static::lazy_static;
+use serde_json::Value;
+use std::collections::HashMap;
 
 // ============================================================================
 // TRAIT DEFINITION
@@ -440,7 +440,9 @@ impl OperatorMatcher for ElemMatchOperator {
                                 if let Value::Object(op_obj) = value {
                                     for (op_name, op_value) in op_obj {
                                         if op_name.starts_with('$') {
-                                            if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
+                                            if let Some(operator) =
+                                                OPERATOR_REGISTRY.get(op_name.as_str())
+                                            {
                                                 if !operator.matches(field_value, op_value, None)? {
                                                     matches_all = false;
                                                     break;
@@ -566,9 +568,10 @@ impl OperatorMatcher for TypeOperator {
                         Some(16) => "int",
                         Some(18) => "long",
                         _ => {
-                            return Err(MongoLiteError::InvalidQuery(
-                                format!("Unknown BSON type number: {}", n),
-                            ))
+                            return Err(MongoLiteError::InvalidQuery(format!(
+                                "Unknown BSON type number: {}",
+                                n
+                            )))
                         }
                     }
                 } else {
@@ -586,9 +589,10 @@ impl OperatorMatcher for TypeOperator {
                     "null" => val.is_null(),
                     "int" | "long" => val.is_i64() || val.is_u64(),
                     _ => {
-                        return Err(MongoLiteError::InvalidQuery(
-                            format!("Unknown type name: {}", type_name),
-                        ))
+                        return Err(MongoLiteError::InvalidQuery(format!(
+                            "Unknown type name: {}",
+                            type_name
+                        )))
                     }
                 };
 
@@ -903,9 +907,9 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
         return Ok(true);
     }
 
-    let filter_obj = filter.as_object().ok_or_else(|| {
-        MongoLiteError::InvalidQuery("Filter must be an object".to_string())
-    })?;
+    let filter_obj = filter
+        .as_object()
+        .ok_or_else(|| MongoLiteError::InvalidQuery("Filter must be an object".to_string()))?;
 
     for (key, value) in filter_obj {
         if key.starts_with('$') {
@@ -970,16 +974,24 @@ mod tests {
     #[test]
     fn test_eq_operator() {
         let op = EqOperator;
-        assert!(op.matches(Some(&json!("Alice")), &json!("Alice"), None).unwrap());
-        assert!(!op.matches(Some(&json!("Bob")), &json!("Alice"), None).unwrap());
+        assert!(op
+            .matches(Some(&json!("Alice")), &json!("Alice"), None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("Bob")), &json!("Alice"), None)
+            .unwrap());
         assert!(!op.matches(None, &json!("Alice"), None).unwrap());
     }
 
     #[test]
     fn test_ne_operator() {
         let op = NeOperator;
-        assert!(op.matches(Some(&json!("Bob")), &json!("Alice"), None).unwrap());
-        assert!(!op.matches(Some(&json!("Alice")), &json!("Alice"), None).unwrap());
+        assert!(op
+            .matches(Some(&json!("Bob")), &json!("Alice"), None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("Alice")), &json!("Alice"), None)
+            .unwrap());
         assert!(op.matches(None, &json!("Alice"), None).unwrap()); // Missing field != value
     }
 
@@ -1002,7 +1014,9 @@ mod tests {
     #[test]
     fn test_exists_operator() {
         let op = ExistsOperator;
-        assert!(op.matches(Some(&json!("value")), &json!(true), None).unwrap());
+        assert!(op
+            .matches(Some(&json!("value")), &json!(true), None)
+            .unwrap());
         assert!(!op.matches(None, &json!(true), None).unwrap());
         assert!(op.matches(None, &json!(false), None).unwrap());
     }
@@ -1048,10 +1062,13 @@ mod tests {
 
     #[test]
     fn test_matches_filter_nested_dot_notation() {
-        let doc = create_test_document(1, vec![
-            ("address", json!({"city": "Budapest", "zip": 1111})),
-            ("stats", json!({"login_count": 42}))
-        ]);
+        let doc = create_test_document(
+            1,
+            vec![
+                ("address", json!({"city": "Budapest", "zip": 1111})),
+                ("stats", json!({"login_count": 42})),
+            ],
+        );
         let filter = json!({"address.city": "Budapest", "stats.login_count": {"$gte": 40}});
         assert!(matches_filter(&doc, &filter).unwrap());
     }
@@ -1077,22 +1094,34 @@ mod tests {
         assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
 
         let filter_value_fail = json!(["apple", "grape"]);
-        assert!(!op.matches(Some(&doc_value), &filter_value_fail, None).unwrap());
+        assert!(!op
+            .matches(Some(&doc_value), &filter_value_fail, None)
+            .unwrap());
     }
 
     #[test]
     fn test_type_operator() {
         let op = TypeOperator;
-        assert!(op.matches(Some(&json!("hello")), &json!("string"), None).unwrap());
-        assert!(op.matches(Some(&json!(42)), &json!("number"), None).unwrap());
+        assert!(op
+            .matches(Some(&json!("hello")), &json!("string"), None)
+            .unwrap());
+        assert!(op
+            .matches(Some(&json!(42)), &json!("number"), None)
+            .unwrap());
         assert!(op.matches(Some(&json!([])), &json!("array"), None).unwrap());
-        assert!(!op.matches(Some(&json!("hello")), &json!("number"), None).unwrap());
+        assert!(!op
+            .matches(Some(&json!("hello")), &json!("number"), None)
+            .unwrap());
     }
 
     #[test]
     fn test_regex_operator() {
         let op = RegexOperator;
-        assert!(op.matches(Some(&json!("hello world")), &json!("world"), None).unwrap());
-        assert!(!op.matches(Some(&json!("hello world")), &json!("xyz"), None).unwrap());
+        assert!(op
+            .matches(Some(&json!("hello world")), &json!("world"), None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("hello world")), &json!("xyz"), None)
+            .unwrap());
     }
 }

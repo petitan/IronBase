@@ -16,10 +16,10 @@
 //!   └── Future: S3Storage, RedisStorage, etc.
 //! ```
 
-use serde_json::Value;
-use crate::error::Result;
 use crate::document::{Document, DocumentId};
-use crate::storage::CollectionMeta;  // CollectionMeta is in storage::mod.rs
+use crate::error::Result;
+use crate::storage::CollectionMeta; // CollectionMeta is in storage::mod.rs
+use serde_json::Value;
 use std::path::Path;
 
 /// Core storage abstraction for MongoLite
@@ -134,6 +134,10 @@ pub trait Storage: Send + Sync {
 
     /// Get the current live document count for a collection
     fn get_live_count(&self, collection: &str) -> Option<u64>;
+
+    /// Get the database file path (for index file naming)
+    /// Returns empty string for in-memory storage
+    fn get_file_path(&self) -> &str;
 }
 
 // ============================================================================
@@ -174,7 +178,12 @@ pub trait RawStorage: Storage {
     /// # Returns
     ///
     /// File offset where document was written
-    fn write_document_raw(&mut self, collection: &str, doc_id: &DocumentId, data: &[u8]) -> Result<u64>;
+    fn write_document_raw(
+        &mut self,
+        collection: &str,
+        doc_id: &DocumentId,
+        data: &[u8],
+    ) -> Result<u64>;
 
     /// Read document at specific offset
     ///

@@ -1,18 +1,18 @@
 // ironbase-core/src/database.rs
 // Pure Rust database API - NO PyO3 dependencies
 
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::storage::{StorageEngine, Storage, RawStorage};
 use crate::collection_core::CollectionCore;
-use crate::error::Result;
-use crate::transaction::{Transaction, TransactionId, Operation};
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
+use crate::error::Result;
+use crate::storage::{RawStorage, Storage, StorageEngine};
+use crate::transaction::{Operation, Transaction, TransactionId};
 use serde_json::Value;
 
 /// Internal trait to flush any pending batch buffers before metadata sync
@@ -29,13 +29,14 @@ impl BatchFlush for DatabaseCore<StorageEngine> {
     }
 }
 
-
 /// Convert transaction::IndexKey to index::IndexKey
 fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
     match tx_key {
         crate::transaction::IndexKey::Int(i) => crate::index::IndexKey::Int(*i),
         crate::transaction::IndexKey::String(s) => crate::index::IndexKey::String(s.clone()),
-        crate::transaction::IndexKey::Float(f) => crate::index::IndexKey::Float(crate::index::OrderedFloat(f.value())),
+        crate::transaction::IndexKey::Float(f) => {
+            crate::index::IndexKey::Float(crate::index::OrderedFloat(f.value()))
+        }
         crate::transaction::IndexKey::Bool(b) => crate::index::IndexKey::Bool(*b),
         crate::transaction::IndexKey::Null => crate::index::IndexKey::Null,
     }
@@ -90,7 +91,8 @@ impl DatabaseCore<StorageEngine> {
 
         // Apply recovered index changes to collections
         // Group index changes by collection name
-        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> = HashMap::new();
+        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> =
+            HashMap::new();
 
         for change in recovered_index_changes {
             // Group by collection name (now properly included in RecoveredIndexChange)
@@ -176,7 +178,8 @@ impl DatabaseCore<StorageEngine> {
 
         // Apply recovered index changes to collections
         // Group index changes by collection name
-        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> = HashMap::new();
+        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> =
+            HashMap::new();
 
         for change in recovered_index_changes {
             // Group by collection name (now properly included in RecoveredIndexChange)
@@ -230,10 +233,12 @@ impl DatabaseCore<StorageEngine> {
         // Remove transaction from active list
         let mut transaction = {
             let mut active = self.active_transactions.write();
-            active.remove(&tx_id)
-                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                    format!("Transaction {} not found", tx_id)
-                ))?
+            active.remove(&tx_id).ok_or_else(|| {
+                crate::error::MongoLiteError::TransactionAborted(format!(
+                    "Transaction {} not found",
+                    tx_id
+                ))
+            })?
         };
 
         // Commit through storage engine
@@ -248,10 +253,12 @@ impl DatabaseCore<StorageEngine> {
         // Remove transaction from active list
         let mut transaction = {
             let mut active = self.active_transactions.write();
-            active.remove(&tx_id)
-                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                    format!("Transaction {} not found", tx_id)
-                ))?
+            active.remove(&tx_id).ok_or_else(|| {
+                crate::error::MongoLiteError::TransactionAborted(format!(
+                    "Transaction {} not found",
+                    tx_id
+                ))
+            })?
         };
 
         // Rollback through storage engine
@@ -266,10 +273,12 @@ impl DatabaseCore<StorageEngine> {
         // Remove transaction from active list
         let mut transaction = {
             let mut active = self.active_transactions.write();
-            active.remove(&tx_id)
-                .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                    format!("Transaction {} not found", tx_id)
-                ))?
+            active.remove(&tx_id).ok_or_else(|| {
+                crate::error::MongoLiteError::TransactionAborted(format!(
+                    "Transaction {} not found",
+                    tx_id
+                ))
+            })?
         };
 
         // Commit through storage engine with index operations
@@ -378,7 +387,7 @@ impl DatabaseCore<StorageEngine> {
     pub fn insert_one_safe(
         &self,
         collection_name: &str,
-        document: HashMap<String, Value>
+        document: HashMap<String, Value>,
     ) -> Result<DocumentId> {
         match self.durability_mode {
             DurabilityMode::Safe => {
@@ -465,13 +474,11 @@ impl DatabaseCore<StorageEngine> {
     /// Extract collection name from transaction's first operation
     #[cfg(test)]
     fn get_collection_from_transaction(transaction: &Transaction) -> Option<String> {
-        transaction.operations()
-            .first()
-            .map(|op| match op {
-                crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
-                crate::transaction::Operation::Update { collection, .. } => collection.clone(),
-                crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
-            })
+        transaction.operations().first().map(|op| match op {
+            crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
+            crate::transaction::Operation::Update { collection, .. } => collection.clone(),
+            crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
+        })
     }
 }
 
@@ -561,10 +568,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         F: FnOnce(&mut Transaction) -> Result<R>,
     {
         let mut active = self.active_transactions.write();
-        let transaction = active.get_mut(&tx_id)
-            .ok_or_else(|| crate::error::MongoLiteError::TransactionAborted(
-                format!("Transaction {} not found", tx_id)
-            ))?;
+        let transaction = active.get_mut(&tx_id).ok_or_else(|| {
+            crate::error::MongoLiteError::TransactionAborted(format!(
+                "Transaction {} not found",
+                tx_id
+            ))
+        })?;
 
         f(transaction)
     }
@@ -579,7 +588,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         &self,
         collection_name: &str,
         document: HashMap<String, Value>,
-        tx_id: TransactionId
+        tx_id: TransactionId,
     ) -> Result<DocumentId> {
         let collection = self.collection(collection_name)?;
 
@@ -596,7 +605,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         collection_name: &str,
         query: &Value,
         update: Value,
-        tx_id: TransactionId
+        tx_id: TransactionId,
     ) -> Result<(u64, u64)> {
         let collection = self.collection(collection_name)?;
 
@@ -612,7 +621,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         &self,
         collection_name: &str,
         query: &Value,
-        tx_id: TransactionId
+        tx_id: TransactionId,
     ) -> Result<u64> {
         let collection = self.collection(collection_name)?;
 
@@ -630,10 +639,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::TempDir;
+    use crate::document::DocumentId;
     use crate::transaction::Operation;
     use serde_json::json;
-    use crate::document::DocumentId;
+    use tempfile::TempDir;
 
     #[test]
     fn test_begin_transaction() {
@@ -684,7 +693,8 @@ mod tests {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
             doc: json!({"name": "Alice"}),
-        }).unwrap();
+        })
+        .unwrap();
         db.update_transaction(tx_id, tx).unwrap();
 
         // Rollback
@@ -713,12 +723,14 @@ mod tests {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
             doc: json!({"name": "Alice", "age": 30}),
-        }).unwrap();
+        })
+        .unwrap();
         tx.add_operation(Operation::Insert {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(2),
             doc: json!({"name": "Bob", "age": 25}),
-        }).unwrap();
+        })
+        .unwrap();
         db.update_transaction(tx_id, tx).unwrap();
 
         // Commit
@@ -767,11 +779,12 @@ mod tests {
                     operation: crate::transaction::IndexOperation::Insert,
                     key: crate::transaction::IndexKey::Int(30),
                     doc_id: DocumentId::Int(1),
-                }
+                },
             )?;
 
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         // Commit with indexes
         let result = db.commit_transaction_with_indexes(tx_id);
@@ -801,7 +814,8 @@ mod tests {
                 doc: json!({"name": "Bob"}),
             })?;
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
 
         // Commit with indexes (should delegate to simple commit)
         let result = db.commit_transaction_with_indexes(tx_id);
@@ -820,7 +834,7 @@ mod tests {
 
         // Should be TransactionAborted error
         match result {
-            Err(crate::error::MongoLiteError::TransactionAborted(_)) => {},
+            Err(crate::error::MongoLiteError::TransactionAborted(_)) => {}
             _ => panic!("Expected TransactionAborted error"),
         }
     }
@@ -843,11 +857,13 @@ mod tests {
         let mut transaction = crate::transaction::Transaction::new(1);
 
         // Add insert operation
-        transaction.add_operation(Operation::Insert {
-            collection: "users".to_string(),
-            doc_id: DocumentId::Int(1),
-            doc: json!({"name": "Alice"}),
-        }).unwrap();
+        transaction
+            .add_operation(Operation::Insert {
+                collection: "users".to_string(),
+                doc_id: DocumentId::Int(1),
+                doc: json!({"name": "Alice"}),
+            })
+            .unwrap();
 
         // Extract collection name
         let collection_name = DatabaseCore::get_collection_from_transaction(&transaction);

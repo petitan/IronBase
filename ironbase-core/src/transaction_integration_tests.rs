@@ -4,11 +4,11 @@
 #[cfg(test)]
 mod integration_tests {
     use crate::database::DatabaseCore;
-    use crate::transaction::Operation;
     use crate::document::DocumentId;
+    use crate::transaction::Operation;
     use serde_json::json;
     use tempfile::TempDir;
-    
+
     use std::thread;
 
     #[test]
@@ -31,19 +31,22 @@ mod integration_tests {
             collection: "users".to_string(),
             doc_id: DocumentId::Int(1),
             doc: json!({"name": "Alice", "email": "alice@example.com"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         tx.add_operation(Operation::Insert {
             collection: "posts".to_string(),
             doc_id: DocumentId::Int(1),
             doc: json!({"user_id": 1, "title": "First Post"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         tx.add_operation(Operation::Insert {
             collection: "comments".to_string(),
             doc_id: DocumentId::Int(1),
             doc: json!({"post_id": 1, "text": "Nice post!"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         db.update_transaction(tx_id, tx).unwrap();
 
@@ -75,7 +78,8 @@ mod integration_tests {
                 collection: "large_test".to_string(),
                 doc_id: DocumentId::Int(i),
                 doc: json!({"id": i, "value": format!("item_{}", i)}),
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         assert_eq!(tx.operation_count(), 1000);
@@ -104,7 +108,8 @@ mod integration_tests {
                 collection: "very_large_test".to_string(),
                 doc_id: DocumentId::Int(i),
                 doc: json!({"id": i, "data": i * 2}),
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         assert_eq!(tx.operation_count(), 10000);
@@ -132,26 +137,30 @@ mod integration_tests {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(1),
             doc: json!({"name": "Item 1"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         tx.add_operation(Operation::Update {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(1),
             old_doc: json!({"name": "Item 1"}),
             new_doc: json!({"name": "Updated Item 1"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         tx.add_operation(Operation::Insert {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(2),
             doc: json!({"name": "Item 2"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         tx.add_operation(Operation::Delete {
             collection: "mixed".to_string(),
             doc_id: DocumentId::Int(2),
             old_doc: json!({"name": "Item 2"}),
-        }).unwrap();
+        })
+        .unwrap();
 
         assert_eq!(tx.operation_count(), 4);
 
@@ -194,7 +203,8 @@ mod integration_tests {
                 collection: "concurrent_test".to_string(),
                 doc_id: DocumentId::Int(1),
                 doc: json!({"data": "test"}),
-            }).unwrap();
+            })
+            .unwrap();
 
             db.update_transaction(tx_id, tx).unwrap();
 
@@ -219,34 +229,40 @@ mod integration_tests {
         // Transaction 1: Insert
         let tx1 = db.begin_transaction();
         let mut tx1_obj = db.get_transaction(tx1).unwrap();
-        tx1_obj.add_operation(Operation::Insert {
-            collection: "isolation_test".to_string(),
-            doc_id: DocumentId::Int(1),
-            doc: json!({"value": 100}),
-        }).unwrap();
+        tx1_obj
+            .add_operation(Operation::Insert {
+                collection: "isolation_test".to_string(),
+                doc_id: DocumentId::Int(1),
+                doc: json!({"value": 100}),
+            })
+            .unwrap();
         db.update_transaction(tx1, tx1_obj).unwrap();
         db.commit_transaction(tx1).unwrap();
 
         // Transaction 2: Update
         let tx2 = db.begin_transaction();
         let mut tx2_obj = db.get_transaction(tx2).unwrap();
-        tx2_obj.add_operation(Operation::Update {
-            collection: "isolation_test".to_string(),
-            doc_id: DocumentId::Int(1),
-            old_doc: json!({"value": 100}),
-            new_doc: json!({"value": 200}),
-        }).unwrap();
+        tx2_obj
+            .add_operation(Operation::Update {
+                collection: "isolation_test".to_string(),
+                doc_id: DocumentId::Int(1),
+                old_doc: json!({"value": 100}),
+                new_doc: json!({"value": 200}),
+            })
+            .unwrap();
         db.update_transaction(tx2, tx2_obj).unwrap();
         db.commit_transaction(tx2).unwrap();
 
         // Transaction 3: Delete
         let tx3 = db.begin_transaction();
         let mut tx3_obj = db.get_transaction(tx3).unwrap();
-        tx3_obj.add_operation(Operation::Delete {
-            collection: "isolation_test".to_string(),
-            doc_id: DocumentId::Int(1),
-            old_doc: json!({"value": 200}),
-        }).unwrap();
+        tx3_obj
+            .add_operation(Operation::Delete {
+                collection: "isolation_test".to_string(),
+                doc_id: DocumentId::Int(1),
+                old_doc: json!({"value": 200}),
+            })
+            .unwrap();
         db.update_transaction(tx3, tx3_obj).unwrap();
         db.commit_transaction(tx3).unwrap();
 
@@ -273,7 +289,8 @@ mod integration_tests {
                 collection: format!("col_{}", i),
                 doc_id: DocumentId::Int(1),
                 doc: json!({"collection": i}),
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         assert_eq!(tx.operation_count(), 50);
@@ -305,7 +322,8 @@ mod integration_tests {
                 collection: "rollback_test".to_string(),
                 doc_id: DocumentId::Int(i),
                 doc: json!({"id": i}),
-            }).unwrap();
+            })
+            .unwrap();
         }
 
         assert_eq!(tx.operation_count(), 500);
@@ -333,33 +351,39 @@ mod integration_tests {
             // TX 1
             let tx1 = db.begin_transaction();
             let mut tx1_obj = db.get_transaction(tx1).unwrap();
-            tx1_obj.add_operation(Operation::Insert {
-                collection: "recovery_test".to_string(),
-                doc_id: DocumentId::Int(1),
-                doc: json!({"tx": 1}),
-            }).unwrap();
+            tx1_obj
+                .add_operation(Operation::Insert {
+                    collection: "recovery_test".to_string(),
+                    doc_id: DocumentId::Int(1),
+                    doc: json!({"tx": 1}),
+                })
+                .unwrap();
             db.update_transaction(tx1, tx1_obj).unwrap();
             db.commit_transaction(tx1).unwrap();
 
             // TX 2
             let tx2 = db.begin_transaction();
             let mut tx2_obj = db.get_transaction(tx2).unwrap();
-            tx2_obj.add_operation(Operation::Insert {
-                collection: "recovery_test".to_string(),
-                doc_id: DocumentId::Int(2),
-                doc: json!({"tx": 2}),
-            }).unwrap();
+            tx2_obj
+                .add_operation(Operation::Insert {
+                    collection: "recovery_test".to_string(),
+                    doc_id: DocumentId::Int(2),
+                    doc: json!({"tx": 2}),
+                })
+                .unwrap();
             db.update_transaction(tx2, tx2_obj).unwrap();
             db.commit_transaction(tx2).unwrap();
 
             // TX 3
             let tx3 = db.begin_transaction();
             let mut tx3_obj = db.get_transaction(tx3).unwrap();
-            tx3_obj.add_operation(Operation::Insert {
-                collection: "recovery_test".to_string(),
-                doc_id: DocumentId::Int(3),
-                doc: json!({"tx": 3}),
-            }).unwrap();
+            tx3_obj
+                .add_operation(Operation::Insert {
+                    collection: "recovery_test".to_string(),
+                    doc_id: DocumentId::Int(3),
+                    doc: json!({"tx": 3}),
+                })
+                .unwrap();
             db.update_transaction(tx3, tx3_obj).unwrap();
             db.commit_transaction(tx3).unwrap();
 
