@@ -194,7 +194,18 @@ fn remove_block_recursive(blocks: &mut Vec<Block>, label: &str) -> Option<Block>
     // First, try to find and remove from this level
     for (i, block) in blocks.iter().enumerate() {
         if block.label() == Some(label) {
-            return Some(blocks.remove(i));
+            // Remove the block
+            let removed = blocks.remove(i);
+
+            // Orphan promotion: insert children at the same position
+            if let Some(children) = removed.children() {
+                // Insert children in reverse order to maintain original order
+                for (offset, child) in children.iter().enumerate() {
+                    blocks.insert(i + offset, child.clone());
+                }
+            }
+
+            return Some(removed);
         }
     }
 
