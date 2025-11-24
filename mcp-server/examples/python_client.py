@@ -126,6 +126,7 @@ class MCPDocJLClient:
         content_contains: Optional[str] = None,
         has_label: Optional[bool] = None,
         has_compliance_note: Optional[bool] = None,
+        label: Optional[str] = None,
         label_prefix: Optional[str] = None,
     ) -> List[Dict]:
         """Search for blocks in a document"""
@@ -139,6 +140,8 @@ class MCPDocJLClient:
             query["has_label"] = has_label
         if has_compliance_note is not None:
             query["has_compliance_note"] = has_compliance_note
+        if label:
+            query["label"] = label
         if label_prefix:
             query["label_prefix"] = label_prefix
 
@@ -146,6 +149,51 @@ class MCPDocJLClient:
 
         result = self._request("mcp_docjl_search_blocks", params)
         return result.get("results", [])
+
+    def search_content(
+        self,
+        document_id: str,
+        query: str,
+        case_sensitive: bool = False,
+        max_results: int = 100,
+    ) -> Dict:
+        """Search for text content within a document.
+
+        Returns only blocks that match the search query, solving the context window
+        problem by avoiding the need to download entire large documents.
+
+        Args:
+            document_id: Document to search in
+            query: Text to search for
+            case_sensitive: Whether search should be case-sensitive (default: False)
+            max_results: Maximum number of matches to return (default: 100)
+
+        Returns:
+            Dictionary with search results:
+            {
+                "document_id": str,
+                "query": str,
+                "total_matches": int,
+                "matches": [
+                    {
+                        "block_index": int,
+                        "block_type": str,
+                        "label": str or None,
+                        "text": str,
+                        "block": dict
+                    },
+                    ...
+                ]
+            }
+        """
+        params = {
+            "document_id": document_id,
+            "query": query,
+            "case_sensitive": case_sensitive,
+            "max_results": max_results,
+        }
+
+        return self._request("mcp_docjl_search_content", params)
 
     def validate_references(self, document_id: str) -> Dict:
         """Validate all cross-references in a document"""
@@ -310,6 +358,38 @@ def example_search_blocks():
         print(f"Label: {result['label']}")
         print(f"Path: {' > '.join(result['path'])}")
         print(f"Score: {result['score']}")
+        print()
+
+
+def example_search_content():
+    """Example: Search for text content in a document
+
+    This is optimized for LLM context window usage - it returns only
+    matching blocks instead of the entire document.
+    """
+    client = MCPDocJLClient(api_key="dev_key_12345")
+
+    # Search for content in document
+    result = client.search_content(
+        document_id="mk_manual_v1",
+        query="calibration",  # Search term
+        case_sensitive=False,  # Case-insensitive search
+        max_results=10,  # Limit to 10 results
+    )
+
+    print(f"=== Content Search Results ===")
+    print(f"Document: {result['document_id']}")
+    print(f"Query: '{result['query']}'")
+    print(f"Total matches: {result['total_matches']}")
+    print()
+
+    # Show first few matches
+    for i, match in enumerate(result.get("matches", [])[:3], 1):
+        print(f"Match {i}:")
+        print(f"  Block index: {match['block_index']}")
+        print(f"  Block type: {match['block_type']}")
+        print(f"  Label: {match.get('label', 'N/A')}")
+        print(f"  Text preview: {match['text'][:100]}...")
         print()
 
 
