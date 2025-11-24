@@ -317,17 +317,7 @@ impl RealIronBaseAdapter {
         format!("op_{}", timestamp)
     }
 
-    /// Helper: Find block index by label
-    fn find_block_index(blocks: &[Block], label: &str) -> DomainResult<usize> {
-        blocks
-            .iter()
-            .position(|b| b.label() == Some(label))
-            .ok_or_else(|| DomainError::BlockNotFound {
-                label: label.to_string(),
-            })
-    }
-
-    /// Insert block into document at specified position
+    /// Insert block into document at specified position (NESTED format - uses children arrays)
     fn insert_block_into_document(
         &self,
         document: &mut Document,
@@ -361,7 +351,7 @@ impl RealIronBaseAdapter {
             }
         }
 
-        // Insert based on position
+        // Insert based on position (recursive for nested structure)
         match options.position {
             InsertPosition::End => {
                 document.docjll.push(block.clone());
@@ -373,8 +363,7 @@ impl RealIronBaseAdapter {
                         reason: "Before position requires anchor_label".to_string(),
                     })?;
 
-                let index = Self::find_block_index(&document.docjll, anchor)?;
-                document.docjll.insert(index, block.clone());
+                Self::insert_before_recursive(&mut document.docjll, anchor, block.clone())?;
             }
 
             InsertPosition::After => {
@@ -383,19 +372,17 @@ impl RealIronBaseAdapter {
                         reason: "After position requires anchor_label".to_string(),
                     })?;
 
-                let index = Self::find_block_index(&document.docjll, anchor)?;
-                document.docjll.insert(index + 1, block.clone());
+                Self::insert_after_recursive(&mut document.docjll, anchor, block.clone())?;
             }
 
             InsertPosition::Inside => {
-                // In a flat list, "Inside" means inserting right after the parent
+                // NESTED format: Inside means adding to parent's children array
                 let parent = options.parent_label.as_ref()
                     .ok_or_else(|| DomainError::InvalidOperation {
                         reason: "Inside position requires parent_label".to_string(),
                     })?;
 
-                let index = Self::find_block_index(&document.docjll, parent)?;
-                document.docjll.insert(index + 1, block.clone());
+                Self::insert_inside_recursive(&mut document.docjll, parent, block.clone())?;
             }
         }
 
@@ -409,6 +396,80 @@ impl RealIronBaseAdapter {
         }
 
         Ok(block_label)
+    }
+
+    /// Recursive insert BEFORE a block (searches nested children)
+    fn insert_before_recursive(blocks: &mut Vec<Block>, anchor_label: &str, new_block: Block) -> DomainResult<()> {
+        for (i, block) in blocks.iter().enumerate() {
+            if block.label() == Some(anchor_label) {
+                blocks.insert(i, new_block);
+                return Ok(());
+            }
+        }
+
+        // Search in children recursively
+        for block in blocks.iter_mut() {
+            if let Some(children) = block.children_mut() {
+                if Self::insert_before_recursive(children, anchor_label, new_block.clone()).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(DomainError::BlockNotFound {
+            label: anchor_label.to_string(),
+        })
+    }
+
+    /// Recursive insert AFTER a block (searches nested children)
+    fn insert_after_recursive(blocks: &mut Vec<Block>, anchor_label: &str, new_block: Block) -> DomainResult<()> {
+        for (i, block) in blocks.iter().enumerate() {
+            if block.label() == Some(anchor_label) {
+                blocks.insert(i + 1, new_block);
+                return Ok(());
+            }
+        }
+
+        // Search in children recursively
+        for block in blocks.iter_mut() {
+            if let Some(children) = block.children_mut() {
+                if Self::insert_after_recursive(children, anchor_label, new_block.clone()).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(DomainError::BlockNotFound {
+            label: anchor_label.to_string(),
+        })
+    }
+
+    /// Recursive insert INSIDE a parent block (adds to children array)
+    fn insert_inside_recursive(blocks: &mut Vec<Block>, parent_label: &str, new_block: Block) -> DomainResult<()> {
+        for block in blocks.iter_mut() {
+            if block.label() == Some(parent_label) {
+                // Found parent - add to its children
+                if let Some(children) = block.children_mut() {
+                    children.push(new_block);
+                    return Ok(());
+                } else {
+                    return Err(DomainError::InvalidOperation {
+                        reason: format!("Block {} does not support children", parent_label),
+                    });
+                }
+            }
+
+            // Search deeper
+            if let Some(children) = block.children_mut() {
+                if Self::insert_inside_recursive(children, parent_label, new_block.clone()).is_ok() {
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(DomainError::BlockNotFound {
+            label: parent_label.to_string(),
+        })
     }
 }
 
