@@ -15,7 +15,19 @@ require_auth = false  # Set to true for production
 [[api_keys]]
 key = "dev_key_12345"
 name = "Development Key"
-allowed_commands = ["mcp_docjl_*"]  # Wildcard: allow all MCP commands
+allowed_commands = [
+    "mcp_docjl_list_documents",
+    "mcp_docjl_get_document",
+    "mcp_docjl_list_headings",
+    "mcp_docjl_search_blocks",
+    "mcp_docjl_search_content",
+    "mcp_docjl_insert_block",
+    "mcp_docjl_update_block",
+    "mcp_docjl_delete_block",
+    "mcp_docjl_validate_references",
+    "mcp_docjl_validate_schema",
+    "mcp_docjl_get_audit_log"
+]
 allowed_documents = ["*"]           # Wildcard: allow all documents
 
 [api_keys.rate_limit]

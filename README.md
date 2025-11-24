@@ -127,6 +127,36 @@ print(f"Query plan: {plan['queryPlan']}")  # IndexRangeScan
 db.close()
 ```
 
+## 🧰 Fejlesztői workflow (lokális)
+
+Az ismétlődő build/test lépésekre felkerült egy **justfile** és egy egyszerű futtató script:
+
+| Parancs | Mit csinál |
+| --- | --- |
+| `just test-core` | `cargo test -p ironbase-core` |
+| `just test-mcp` | MCP szerver Rust tesztek (`cd mcp-server && cargo test`) |
+| `just seed-test-doc` | Aktiválja a `venv`-et és lefuttatja a `mcp-server/seed_test_doc.py`-t |
+| `just test-python-auto` | Python auto-commit smoke teszt (`test_python_auto_commit.py`) |
+| `just run-dev-checks` | A `scripts/run_dev_checks.sh` fut: fmt + clippy + Rust tesztek + Python smoke teszt |
+
+A `scripts/run_dev_checks.sh` Bash script egymás után lefuttatja:
+
+1. `cargo fmt`, `cargo clippy`, `cargo test -p ironbase-core`
+2. `cd mcp-server && cargo fmt && cargo clippy && cargo test`
+3. ha van `venv`, akkor `python3 mcp-server/test_python_auto_commit.py`
+
+Használat:
+
+```bash
+# egyszerűen
+just run-dev-checks
+
+# vagy közvetlenül
+./scripts/run_dev_checks.sh
+```
+
+Ezekkel a parancsokkal helyben is gyorsan végigfuthat a fő Rust + Python ellenőrzés, mielőtt manuális E2E teszteket futtatnánk.
+
 ## 📚 API Dokumentáció
 
 ### Database (ironbase)

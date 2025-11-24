@@ -31,7 +31,7 @@ pub fn handle_list_documents(
         .iter()
         .map(|doc| {
             serde_json::json!({
-                "id": doc.id,
+                "id": doc.identifier(),
                 "title": doc.metadata.title,
                 "version": doc.metadata.version,
                 "blocks_count": doc.metadata.blocks_count,
@@ -66,6 +66,90 @@ pub fn handle_get_document(
         .map_err(|e| format!("Failed to serialize document: {}", e))?;
 
     Ok(serde_json::json!({ "document": doc_value }))
+}
+
+/// Search document content command
+#[derive(Debug, Deserialize)]
+pub struct SearchContentParams {
+    pub document_id: String,
+    pub query: String,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default = "default_max_results")]
+    pub max_results: usize,
+}
+
+fn default_max_results() -> usize {
+    100
+}
+
+pub fn handle_search_content(
+    adapter: &IronBaseAdapter,
+    params: SearchContentParams,
+) -> CommandResult {
+    // Helper function to extract text from paragraphs/headings
+    fn extract_text_from_block(block: &Block) -> String {
+        // Serialize to JSON and extract text content
+        if let Ok(json) = serde_json::to_string(block) {
+            json
+        } else {
+            String::new()
+        }
+    }
+
+    let document = adapter
+        .get_document(&params.document_id)
+        .map_err(|e| format!("Failed to get document: {}", e))?;
+
+    let query = if params.case_sensitive {
+        params.query.clone()
+    } else {
+        params.query.to_lowercase()
+    };
+
+    let mut matches = Vec::new();
+    let mut match_count = 0;
+
+    // Search through all blocks
+    for (block_index, block) in document.docjll.iter().enumerate() {
+        if match_count >= params.max_results {
+            break;
+        }
+
+        let mut block_text = String::new();
+        let mut block_label = None;
+        let mut block_type = String::new();
+
+        // Serialize block to JSON for searching
+        block_text = extract_text_from_block(block);
+        block_label = block.label().map(|s| s.to_string());
+        block_type = format!("{:?}", block.block_type());
+
+        // Perform search
+        let search_text = if params.case_sensitive {
+            block_text.clone()
+        } else {
+            block_text.to_lowercase()
+        };
+
+        if search_text.contains(&query) {
+            matches.push(serde_json::json!({
+                "block_index": block_index,
+                "block_type": block_type,
+                "label": block_label,
+                "text": block_text,
+                "block": block,
+            }));
+            match_count += 1;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "document_id": document.identifier(),
+        "query": params.query,
+        "total_matches": matches.len(),
+        "matches": matches,
+    }))
 }
 
 /// Insert block command
@@ -265,6 +349,7 @@ pub struct SearchQueryParams {
     pub content_contains: Option<String>,
     pub has_label: Option<bool>,
     pub has_compliance_note: Option<bool>,
+    pub label: Option<String>,  // Exact label match
     pub label_prefix: Option<String>,
 }
 
@@ -282,6 +367,7 @@ pub fn handle_search_blocks(
         content_contains: params.query.content_contains,
         has_label: params.query.has_label,
         has_compliance_note: params.query.has_compliance_note,
+        label: params.query.label,
         label_prefix: params.query.label_prefix,
     };
 
@@ -432,6 +518,11 @@ pub fn dispatch_command(
             let params: GetAuditLogParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid parameters: {}", e))?;
             handle_get_audit_log(audit_log_path, params)
+        }
+        "mcp_docjl_search_content" => {
+            let params: SearchContentParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid parameters: {}", e))?;
+            handle_search_content(adapter, params)
         }
         _ => Err(format!("Unknown command: {}", method)),
     }

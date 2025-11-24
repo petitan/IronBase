@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ironbase_core::{DatabaseCore, CollectionCore, DocumentId, StorageEngine, DurabilityMode};
+use ironbase_core::{CollectionCore, DatabaseCore, DocumentId, DurabilityMode, StorageEngine};
 
 /// IronBase Database - Python wrapper
 #[pyclass]
@@ -49,12 +49,10 @@ impl IronBase {
             "batch" => DurabilityMode::Batch { batch_size },
             "unsafe" => DurabilityMode::Unsafe,
             _ => {
-                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    format!(
-                        "Invalid durability mode '{}'. Must be 'safe', 'batch', or 'unsafe'",
-                        durability
-                    )
-                ));
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid durability mode '{}'. Must be 'safe', 'batch', or 'unsafe'",
+                    durability
+                )));
             }
         };
 
@@ -66,7 +64,9 @@ impl IronBase {
 
     /// Collection lekérése (ha nem létezik, létrehozza)
     fn collection(&self, name: String) -> PyResult<Collection> {
-        let coll_core = self.db.collection(&name)
+        let coll_core = self
+            .db
+            .collection(&name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Ok(Collection {
@@ -99,13 +99,15 @@ impl IronBase {
 
     /// Collection törlése
     fn drop_collection(&self, name: String) -> PyResult<()> {
-        self.db.drop_collection(&name)
+        self.db
+            .drop_collection(&name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
     /// Adatbázis bezárása és flush
     fn close(&self) -> PyResult<()> {
-        self.db.flush()
+        self.db
+            .flush()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 
@@ -119,7 +121,8 @@ impl IronBase {
     ///         if i % 1000 == 0:
     ///             db.checkpoint()  # Prevent WAL from growing indefinitely
     fn checkpoint(&self) -> PyResult<()> {
-        self.db.checkpoint()
+        self.db
+            .checkpoint()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 
@@ -139,10 +142,12 @@ impl IronBase {
     ///     db.set_log_level("TRACE")  # Show everything (very verbose)
     #[staticmethod]
     fn set_log_level(level: String) -> PyResult<()> {
-        let log_level = ironbase_core::LogLevel::from_str(&level)
-            .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                format!("Invalid log level '{}'. Must be one of: ERROR, WARN, INFO, DEBUG, TRACE", level)
-            ))?;
+        let log_level = ironbase_core::LogLevel::from_str(&level).ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                "Invalid log level '{}'. Must be one of: ERROR, WARN, INFO, DEBUG, TRACE",
+                level
+            ))
+        })?;
 
         ironbase_core::set_log_level(log_level);
         Ok(())
@@ -161,7 +166,9 @@ impl IronBase {
     /// Storage compaction - removes tombstones and old document versions
     /// Returns compaction statistics as a dict
     fn compact(&self) -> PyResult<PyObject> {
-        let stats = self.db.compact()
+        let stats = self
+            .db
+            .compact()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
@@ -192,13 +199,15 @@ impl IronBase {
 
     /// Commit a transaction (applies all buffered operations atomically)
     fn commit_transaction(&self, tx_id: u64) -> PyResult<()> {
-        self.db.commit_transaction(tx_id)
+        self.db
+            .commit_transaction(tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
     /// Rollback a transaction (discard all buffered operations)
     fn rollback_transaction(&self, tx_id: u64) -> PyResult<()> {
-        self.db.rollback_transaction(tx_id)
+        self.db
+            .rollback_transaction(tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
@@ -218,7 +227,12 @@ impl IronBase {
     ///     tx_id = db.begin_transaction()
     ///     db.insert_one_tx("users", {"name": "Alice"}, tx_id)
     ///     db.commit_transaction(tx_id)
-    fn insert_one_tx(&self, collection_name: String, document: &PyDict, tx_id: u64) -> PyResult<PyObject> {
+    fn insert_one_tx(
+        &self,
+        collection_name: String,
+        document: &PyDict,
+        tx_id: u64,
+    ) -> PyResult<PyObject> {
         // Convert Python dict to HashMap
         let mut doc_map: HashMap<String, Value> = HashMap::new();
         for (key, value) in document.iter() {
@@ -228,7 +242,9 @@ impl IronBase {
         }
 
         // Call Rust core (ALL logic in core)
-        let inserted_id = self.db.insert_one_tx(&collection_name, doc_map, tx_id)
+        let inserted_id = self
+            .db
+            .insert_one_tx(&collection_name, doc_map, tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Return result
@@ -262,13 +278,21 @@ impl IronBase {
     ///     tx_id = db.begin_transaction()
     ///     db.update_one_tx("users", {"name": "Alice"}, {"name": "Alice", "age": 30}, tx_id)
     ///     db.commit_transaction(tx_id)
-    fn update_one_tx(&self, collection_name: String, query: &PyDict, new_doc: &PyDict, tx_id: u64) -> PyResult<PyObject> {
+    fn update_one_tx(
+        &self,
+        collection_name: String,
+        query: &PyDict,
+        new_doc: &PyDict,
+        tx_id: u64,
+    ) -> PyResult<PyObject> {
         // Convert Python dicts to JSON
         let query_json = python_dict_to_json_value(query)?;
         let new_doc_json = python_dict_to_json_value(new_doc)?;
 
         // Call Rust core (ALL logic in core)
-        let (matched_count, modified_count) = self.db.update_one_tx(&collection_name, &query_json, new_doc_json, tx_id)
+        let (matched_count, modified_count) = self
+            .db
+            .update_one_tx(&collection_name, &query_json, new_doc_json, tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Return result
@@ -295,12 +319,19 @@ impl IronBase {
     ///     tx_id = db.begin_transaction()
     ///     db.delete_one_tx("users", {"name": "Alice"}, tx_id)
     ///     db.commit_transaction(tx_id)
-    fn delete_one_tx(&self, collection_name: String, query: &PyDict, tx_id: u64) -> PyResult<PyObject> {
+    fn delete_one_tx(
+        &self,
+        collection_name: String,
+        query: &PyDict,
+        tx_id: u64,
+    ) -> PyResult<PyObject> {
         // Convert Python dict to JSON
         let query_json = python_dict_to_json_value(query)?;
 
         // Call Rust core (ALL logic in core)
-        let deleted_count = self.db.delete_one_tx(&collection_name, &query_json, tx_id)
+        let deleted_count = self
+            .db
+            .delete_one_tx(&collection_name, &query_json, tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Return result
@@ -352,7 +383,9 @@ impl Collection {
         }
 
         // Call database-level insert_one_safe (respects durability mode)
-        let inserted_id = self.db.insert_one_safe(&self.name, doc_map)
+        let inserted_id = self
+            .db
+            .insert_one_safe(&self.name, doc_map)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Eredmény visszaadása
@@ -389,7 +422,9 @@ impl Collection {
         }
 
         // Call Rust core insert_many (ALL logic in core)
-        let result = self.core.insert_many(docs)
+        let result = self
+            .core
+            .insert_many(docs)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Convert result back to Python
@@ -463,7 +498,9 @@ impl Collection {
         options.skip = skip;
 
         // Call core method
-        let results = self.core.find_with_options(&query_json, options)
+        let results = self
+            .core
+            .find_with_options(&query_json, options)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Convert to Python list
@@ -487,18 +524,18 @@ impl Collection {
         };
 
         // Call core method
-        let result = self.core.find_one(&query_json)
+        let result = self
+            .core
+            .find_one(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Convert to Python
-        Python::with_gil(|py| {
-            match result {
-                Some(doc) => {
-                    let py_dict = json_to_python_dict(py, &doc)?;
-                    Ok(py_dict.into())
-                }
-                None => Ok(py.None()),
+        Python::with_gil(|py| match result {
+            Some(doc) => {
+                let py_dict = json_to_python_dict(py, &doc)?;
+                Ok(py_dict.into())
             }
+            None => Ok(py.None()),
         })
     }
 
@@ -509,7 +546,8 @@ impl Collection {
             None => serde_json::json!({}),
         };
 
-        self.core.count_documents(&query_json)
+        self.core
+            .count_documents(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
@@ -520,7 +558,9 @@ impl Collection {
             None => serde_json::json!({}),
         };
 
-        let distinct_values = self.core.distinct(field, &query_json)
+        let distinct_values = self
+            .core
+            .distinct(field, &query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Convert to Python list
@@ -539,7 +579,9 @@ impl Collection {
         let query_json = python_dict_to_json_value(query)?;
         let update_json = python_dict_to_json_value(update)?;
 
-        let (matched_count, modified_count) = self.core.update_one(&query_json, &update_json)
+        let (matched_count, modified_count) = self
+            .core
+            .update_one(&query_json, &update_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
@@ -556,7 +598,9 @@ impl Collection {
         let query_json = python_dict_to_json_value(query)?;
         let update_json = python_dict_to_json_value(update)?;
 
-        let (matched_count, modified_count) = self.core.update_many(&query_json, &update_json)
+        let (matched_count, modified_count) = self
+            .core
+            .update_many(&query_json, &update_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
@@ -572,7 +616,9 @@ impl Collection {
     fn delete_one(&self, query: &PyDict) -> PyResult<PyObject> {
         let query_json = python_dict_to_json_value(query)?;
 
-        let deleted_count = self.core.delete_one(&query_json)
+        let deleted_count = self
+            .core
+            .delete_one(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
@@ -587,7 +633,9 @@ impl Collection {
     fn delete_many(&self, query: &PyDict) -> PyResult<PyObject> {
         let query_json = python_dict_to_json_value(query)?;
 
-        let deleted_count = self.core.delete_many(&query_json)
+        let deleted_count = self
+            .core
+            .delete_many(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Python::with_gil(|py| {
@@ -612,7 +660,8 @@ impl Collection {
     ///     collection.create_index("age")
     #[pyo3(signature = (field, unique=false))]
     fn create_index(&self, field: String, unique: bool) -> PyResult<String> {
-        self.core.create_index(field, unique)
+        self.core
+            .create_index(field, unique)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
@@ -624,7 +673,8 @@ impl Collection {
     /// Example:
     ///     collection.drop_index("users_email")
     fn drop_index(&self, index_name: String) -> PyResult<()> {
-        self.core.drop_index(&index_name)
+        self.core
+            .drop_index(&index_name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
@@ -655,7 +705,9 @@ impl Collection {
     fn explain(&self, query: &PyDict) -> PyResult<PyObject> {
         let query_json = python_dict_to_json_value(query)?;
 
-        let plan = self.core.explain(&query_json)
+        let plan = self
+            .core
+            .explain(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Convert JSON Value to Python dict
@@ -680,7 +732,9 @@ impl Collection {
     fn find_with_hint(&self, query: &PyDict, hint: String) -> PyResult<PyObject> {
         let query_json = python_dict_to_json_value(query)?;
 
-        let results = self.core.find_with_hint(&query_json, &hint)
+        let results = self
+            .core
+            .find_with_hint(&query_json, &hint)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Convert to Python list
@@ -723,7 +777,9 @@ impl Collection {
         let pipeline_json = serde_json::Value::Array(stages);
 
         // Execute aggregation
-        let results = self.core.aggregate(&pipeline_json)
+        let results = self
+            .core
+            .aggregate(&pipeline_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         // Convert to Python list
@@ -774,9 +830,10 @@ fn python_to_json(value: &PyAny) -> PyResult<Value> {
         }
         Ok(Value::Object(map))
     } else {
-        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(
-            format!("Unsupported type: {:?}", value.get_type())
-        ))
+        Err(PyErr::new::<pyo3::exceptions::PyTypeError, _>(format!(
+            "Unsupported type: {:?}",
+            value.get_type()
+        )))
     }
 }
 

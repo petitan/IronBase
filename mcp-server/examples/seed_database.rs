@@ -18,7 +18,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create test document 1
     let doc1 = Document {
-        id: "test_doc_1".to_string(),
+        db_id: None,
+        id: Some("test_doc_1".to_string()),
         metadata: DocumentMetadata {
             title: "Test Document 1".to_string(),
             version: "1.0".to_string(),
@@ -31,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         docjll: vec![
             Block::Heading(Heading {
-                level: 1,
+                level: Some(1),
                 label: Some("sec:1".to_string()),
                 content: vec![InlineContent::Text {
                     content: "Introduction".to_string(),
@@ -51,10 +52,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 ],
                 label: Some("para:1".to_string()),
-                children: None,
+                compliance_note: None,
             }),
             Block::Heading(Heading {
-                level: 2,
+                level: Some(2),
                 label: Some("sec:2".to_string()),
                 content: vec![InlineContent::Text {
                     content: "Features".to_string(),
@@ -69,7 +70,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create test document 2
     let doc2 = Document {
-        id: "test_doc_2".to_string(),
+        db_id: None,
+        id: Some("test_doc_2".to_string()),
         metadata: DocumentMetadata {
             title: "Requirements Specification".to_string(),
             version: "2.0".to_string(),
@@ -82,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         docjll: vec![
             Block::Heading(Heading {
-                level: 1,
+                level: Some(1),
                 label: Some("sec:1".to_string()),
                 content: vec![InlineContent::Text {
                     content: "Functional Requirements".to_string(),
@@ -102,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                 ],
                 label: Some("req:1".to_string()),
-                children: None,
+                compliance_note: None,
             }),
             Block::Paragraph(Paragraph {
                 content: vec![InlineContent::Text {
@@ -111,10 +113,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     target: "req:1".to_string(),
                 }],
                 label: Some("req:2".to_string()),
-                children: None,
+                compliance_note: None,
             }),
             Block::Heading(Heading {
-                level: 2,
+                level: Some(2),
                 label: Some("sec:2".to_string()),
                 content: vec![InlineContent::Text {
                     content: "Non-Functional Requirements".to_string(),

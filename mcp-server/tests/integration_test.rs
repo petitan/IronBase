@@ -1,8 +1,8 @@
 // Integration tests for MCP DOCJL Server
 
 use mcp_docjl::{
-    Block, DeleteOptions, Document, DocumentOperations, InsertOptions, InsertPosition,
-    IronBaseAdapter, MoveOptions, SearchQuery,
+    Block, Document, DocumentOperations, InsertOptions, InsertPosition, IronBaseAdapter,
+    SearchQuery,
 };
 use std::collections::HashMap;
 use tempfile::tempdir;
@@ -13,7 +13,8 @@ fn create_test_document(id: &str) -> Document {
     use mcp_docjl::domain::document::DocumentMetadata;
 
     Document {
-        id: id.to_string(),
+        db_id: None,
+        id: Some(id.to_string()),
         metadata: DocumentMetadata {
             title: "Test Document".to_string(),
             version: "1.0".to_string(),
@@ -26,7 +27,7 @@ fn create_test_document(id: &str) -> Document {
         },
         docjll: vec![
             Block::Heading(Heading {
-                level: 1,
+                level: Some(1),
                 content: vec![InlineContent::Text {
                     content: "Introduction".to_string(),
                 }],
@@ -40,7 +41,7 @@ fn create_test_document(id: &str) -> Document {
                 })]),
             }),
             Block::Heading(Heading {
-                level: 1,
+                level: Some(1),
                 content: vec![InlineContent::Text {
                     content: "Methods".to_string(),
                 }],
@@ -142,12 +143,26 @@ fn test_search_blocks() {
         content_contains: None,
         has_label: Some(true),
         has_compliance_note: None,
+        label: None,
         label_prefix: None,
     };
 
     let results = adapter.search_blocks("test_doc_3", query).unwrap();
 
     assert_eq!(results.len(), 2); // Two headings in the document
+
+    // Verify label filter returns a single match
+    let label_query = SearchQuery {
+        block_type: None,
+        content_contains: None,
+        has_label: Some(true),
+        has_compliance_note: None,
+        label: Some("sec:1".to_string()),
+        label_prefix: None,
+    };
+    let filtered = adapter.search_blocks("test_doc_3", label_query).unwrap();
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].label, "sec:1");
 }
 
 #[test]
@@ -314,7 +329,7 @@ fn test_invalid_block_validation() {
 
     // Create heading with invalid level
     let invalid_heading = Block::Heading(Heading {
-        level: 10, // Invalid - should be 1-6
+        level: Some(10), // Invalid - should be 1-6
         content: vec![],
         label: None,
         children: None,

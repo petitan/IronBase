@@ -86,15 +86,26 @@ impl IronBaseAdapter {
         }
     }
 
-    /// Get a document by ID
+    /// Get a document by ID (supports both _id and semantic id field lookup)
     pub fn get_document(&self, document_id: &str) -> DomainResult<Document> {
         let documents = self.documents.read();
-        documents
-            .get(document_id)
-            .cloned()
-            .ok_or_else(|| DomainError::StorageError {
-                message: format!("Document not found: {}", document_id),
-            })
+
+        // First try direct lookup by HashMap key (_id)
+        if let Some(doc) = documents.get(document_id) {
+            return Ok(doc.clone());
+        }
+
+        // If not found, search by semantic id or db_id
+        for doc in documents.values() {
+            if doc.matches_identifier(document_id) {
+                return Ok(doc.clone());
+            }
+        }
+
+        // Not found by either method
+        Err(DomainError::StorageError {
+            message: format!("Document not found: {}", document_id),
+        })
     }
 
     /// Save a document
@@ -107,8 +118,12 @@ impl IronBaseAdapter {
         // )?;
 
         // Temporary in-memory storage
+        let key = document.identifier().ok_or_else(|| DomainError::StorageError {
+            message: "Document missing identifier".to_string(),
+        })?;
+
         let mut documents = self.documents.write();
-        documents.insert(document.id.clone(), document.clone());
+        documents.insert(key, document.clone());
         Ok(())
     }
 
@@ -289,7 +304,9 @@ impl IronBaseAdapter {
     /// This method is public for integration testing purposes.
     /// Do not use in production code!
     pub fn insert_document_for_test(&mut self, document: Document) {
-        self.documents.write().insert(document.id.clone(), document);
+        if let Some(key) = document.identifier() {
+            self.documents.write().insert(key, document);
+        }
     }
 }
 
@@ -518,7 +535,7 @@ impl DocumentOperations for IronBaseAdapter {
                     };
 
                     items.push(OutlineItem {
-                        level: h.level,
+                        level: h.level.unwrap_or(1),  // Default to level 1 if not specified
                         label: h.label.clone().unwrap_or_default(),
                         title,
                         children,
@@ -573,6 +590,18 @@ impl DocumentOperations for IronBaseAdapter {
                 // Label filter
                 if let Some(has_label) = query.has_label {
                     matches = matches && (block.label().is_some() == has_label);
+                }
+
+                // Exact label match
+                if let Some(ref exact_label) = query.label {
+                    matches =
+                        matches && block.label().map(|l| l == exact_label).unwrap_or(false);
+                }
+
+                // Label prefix match
+                if let Some(ref prefix) = query.label_prefix {
+                    matches =
+                        matches && block.label().map(|l| l.starts_with(prefix)).unwrap_or(false);
                 }
 
                 if matches {
@@ -649,7 +678,8 @@ mod tests {
 
         // Create test document
         let doc = Document {
-            id: "test_doc".to_string(),
+            db_id: None,
+            id: Some("test_doc".to_string()),
             metadata: crate::domain::document::DocumentMetadata {
                 title: "Test".to_string(),
                 version: "1.0".to_string(),
@@ -663,7 +693,7 @@ mod tests {
             docjll: vec![],
         };
 
-        adapter.documents.write().insert(doc.id.clone(), doc);
+        adapter.insert_document_for_test(doc);
 
         // Insert block
         let block = Block::Paragraph(Paragraph {

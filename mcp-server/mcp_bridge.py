@@ -121,6 +121,20 @@ def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
                         }
                     },
                     {
+                        "name": "mcp_docjl_search_content",
+                        "description": "Search for text content within a document. Returns only matching blocks to solve context window problems. Case-insensitive by default.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "document_id": {"type": "string", "description": "Document ID to search in"},
+                                "query": {"type": "string", "description": "Text to search for"},
+                                "case_sensitive": {"type": "boolean", "description": "Whether search should be case-sensitive (default: false)"},
+                                "max_results": {"type": "integer", "description": "Maximum number of matches to return (default: 100)"}
+                            },
+                            "required": ["document_id", "query"]
+                        }
+                    },
+                    {
                         "name": "mcp_docjl_insert_block",
                         "description": "Insert new content block into document. Label format: 'type:number' (e.g. para:1, sec:2). Use next available number for the type.",
                         "inputSchema": {

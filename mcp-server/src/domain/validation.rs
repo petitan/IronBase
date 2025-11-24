@@ -144,13 +144,16 @@ impl SchemaValidator {
                 }
             }
             Block::Heading(h) => {
-                if h.level < 1 || h.level > 6 {
-                    result.add_error(ValidationError {
-                        block_label: h.label.clone(),
-                        field: Some("level".to_string()),
-                        message: format!("Heading level {} is invalid (must be 1-6)", h.level),
-                        error_type: ErrorType::InvalidValue,
-                    });
+                // Only validate level if it's specified
+                if let Some(level) = h.level {
+                    if level < 1 || level > 6 {
+                        result.add_error(ValidationError {
+                            block_label: h.label.clone(),
+                            field: Some("level".to_string()),
+                            message: format!("Heading level {} is invalid (must be 1-6)", level),
+                            error_type: ErrorType::InvalidValue,
+                        });
+                    }
                 }
                 if h.content.is_empty() {
                     result.add_error(ValidationError {
@@ -247,7 +250,7 @@ impl SchemaValidator {
                     });
                 }
             }
-            Block::Code(c) => {
+            Block::CodeBlock(c) => {
                 if c.content.is_empty() {
                     result.add_error(ValidationError {
                         block_label: c.label.clone(),
@@ -257,6 +260,8 @@ impl SchemaValidator {
                     });
                 }
             }
+            // For now, skip validation for other new block types
+            _ => {}
         }
 
         // Apply JSON schema validation if provided
@@ -314,7 +319,7 @@ mod tests {
         let validator = SchemaValidator::default();
 
         let block = Block::Heading(Heading {
-            level: 10,
+            level: Some(10),
             content: vec![InlineContent::Text {
                 content: "Test".to_string(),
             }],

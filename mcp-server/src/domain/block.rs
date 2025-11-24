@@ -2,17 +2,52 @@
 
 use serde::{Deserialize, Serialize};
 
+// Import all new block types
+pub use super::block_new_types::*;
+
 /// A DOCJL block - can be a paragraph, heading, table, list, etc.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Block {
     Paragraph(Paragraph),
     Heading(Heading),
     Table(Table),
+    #[serde(rename = "list")]
     List(List),
+    #[serde(rename = "list_ordered")]
+    ListOrdered(List),
+    #[serde(rename = "list_unordered")]
+    ListUnordered(List),
+    #[serde(rename = "list_description")]
+    ListDescription(ListDescription),
     Section(Section),
     Image(Image),
-    Code(Code),
+    #[serde(rename = "code_block")]
+    CodeBlock(CodeBlock),
+    Equation(Equation),
+    Align(Align),
+    Split(Split),
+    Quote(Quote),
+    #[serde(rename = "horizontal_rule")]
+    HorizontalRule(HorizontalRule),
+    #[serde(rename = "latex_command")]
+    LatexCommand(LatexCommand),
+    Pagebreak(Pagebreak),
+    Vspace(Vspace),
+    Bibliography(Bibliography),
+    Abstract(Abstract),
+    Subfigure(Subfigure),
+    #[serde(rename = "appendix_start")]
+    AppendixStart(AppendixStart),
+    #[serde(rename = "document_header")]
+    DocumentHeader(DocumentHeader),
+    Infobox(Infobox),
+    Resultbox(Resultbox),
+    #[serde(rename = "signature_table")]
+    SignatureTable(SignatureTable),
+    #[serde(rename = "equation_block")]
+    EquationBlock(EquationBlock),
+    Figure(Figure),
 }
 
 impl Block {
@@ -22,10 +57,29 @@ impl Block {
             Block::Paragraph(p) => p.label.as_deref(),
             Block::Heading(h) => h.label.as_deref(),
             Block::Table(t) => t.label.as_deref(),
-            Block::List(l) => l.label.as_deref(),
+            Block::List(l) | Block::ListOrdered(l) | Block::ListUnordered(l) => l.label.as_deref(),
+            Block::ListDescription(l) => l.label.as_deref(),
             Block::Section(s) => s.label.as_deref(),
             Block::Image(i) => i.label.as_deref(),
-            Block::Code(c) => c.label.as_deref(),
+            Block::CodeBlock(c) => c.label.as_deref(),
+            Block::Equation(e) => e.label.as_deref(),
+            Block::Align(_) => None,
+            Block::Split(_) => None,
+            Block::Quote(q) => q.label.as_deref(),
+            Block::HorizontalRule(_) => None,
+            Block::LatexCommand(_) => None,
+            Block::Pagebreak(_) => None,
+            Block::Vspace(_) => None,
+            Block::Bibliography(b) => b.label.as_deref(),
+            Block::Abstract(a) => a.label.as_deref(),
+            Block::Subfigure(s) => s.label.as_deref(),
+            Block::AppendixStart(_) => None,
+            Block::DocumentHeader(_) => None,
+            Block::Infobox(i) => i.label.as_deref(),
+            Block::Resultbox(r) => r.label.as_deref(),
+            Block::SignatureTable(s) => s.label.as_deref(),
+            Block::EquationBlock(e) => e.label.as_deref(),
+            Block::Figure(f) => f.label.as_deref(),
         }
     }
 
@@ -35,10 +89,29 @@ impl Block {
             Block::Paragraph(p) => p.label = Some(label),
             Block::Heading(h) => h.label = Some(label),
             Block::Table(t) => t.label = Some(label),
-            Block::List(l) => l.label = Some(label),
+            Block::List(l) | Block::ListOrdered(l) | Block::ListUnordered(l) => l.label = Some(label),
+            Block::ListDescription(l) => l.label = Some(label),
             Block::Section(s) => s.label = Some(label),
             Block::Image(i) => i.label = Some(label),
-            Block::Code(c) => c.label = Some(label),
+            Block::CodeBlock(c) => c.label = Some(label),
+            Block::Equation(e) => e.label = Some(label),
+            Block::Align(_) => {},
+            Block::Split(_) => {},
+            Block::Quote(q) => q.label = Some(label),
+            Block::HorizontalRule(_) => {},
+            Block::LatexCommand(_) => {},
+            Block::Pagebreak(_) => {},
+            Block::Vspace(_) => {},
+            Block::Bibliography(b) => b.label = Some(label),
+            Block::Abstract(a) => a.label = Some(label),
+            Block::Subfigure(s) => s.label = Some(label),
+            Block::AppendixStart(_) => {},
+            Block::DocumentHeader(_) => {},
+            Block::Infobox(i) => i.label = Some(label),
+            Block::Resultbox(r) => r.label = Some(label),
+            Block::SignatureTable(s) => s.label = Some(label),
+            Block::EquationBlock(e) => e.label = Some(label),
+            Block::Figure(f) => f.label = Some(label),
         }
     }
 
@@ -91,17 +164,32 @@ impl Block {
             Block::Paragraph(_) => BlockType::Paragraph,
             Block::Heading(_) => BlockType::Heading,
             Block::Table(_) => BlockType::Table,
-            Block::List(_) => BlockType::List,
+            Block::List(_) | Block::ListOrdered(_) | Block::ListUnordered(_) | Block::ListDescription(_) => BlockType::List,
             Block::Section(_) => BlockType::Section,
             Block::Image(_) => BlockType::Image,
-            Block::Code(_) => BlockType::Code,
+            Block::CodeBlock(_) => BlockType::Code,
+            Block::Equation(_) | Block::EquationBlock(_) => BlockType::Equation,
+            Block::Align(_) | Block::Split(_) => BlockType::Equation,
+            Block::Quote(_) => BlockType::Quote,
+            Block::HorizontalRule(_) => BlockType::HorizontalRule,
+            Block::LatexCommand(_) => BlockType::LatexCommand,
+            Block::Pagebreak(_) => BlockType::Pagebreak,
+            Block::Vspace(_) => BlockType::Vspace,
+            Block::Bibliography(_) => BlockType::Bibliography,
+            Block::Abstract(_) => BlockType::Abstract,
+            Block::Subfigure(_) | Block::Figure(_) => BlockType::Figure,
+            Block::AppendixStart(_) => BlockType::AppendixStart,
+            Block::DocumentHeader(_) => BlockType::DocumentHeader,
+            Block::Infobox(_) => BlockType::Infobox,
+            Block::Resultbox(_) => BlockType::Resultbox,
+            Block::SignatureTable(_) => BlockType::SignatureTable,
         }
     }
 }
 
 /// Block type enumeration (for queries)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum BlockType {
     Paragraph,
     Heading,
@@ -110,6 +198,20 @@ pub enum BlockType {
     Section,
     Image,
     Code,
+    Equation,
+    Quote,
+    HorizontalRule,
+    LatexCommand,
+    Pagebreak,
+    Vspace,
+    Bibliography,
+    Abstract,
+    Figure,
+    AppendixStart,
+    DocumentHeader,
+    Infobox,
+    Resultbox,
+    SignatureTable,
 }
 
 /// Paragraph block
@@ -125,7 +227,8 @@ pub struct Paragraph {
 /// Heading block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Heading {
-    pub level: u8,  // 1-6
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<u8>,  // 1-6, optional for compatibility
     pub content: Vec<InlineContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -136,7 +239,9 @@ pub struct Heading {
 /// Table block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Table {
+    #[serde(default)]
     pub headers: Vec<String>,
+    #[serde(default)]
     pub rows: Vec<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption: Option<String>,
@@ -147,17 +252,12 @@ pub struct Table {
 /// List block
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct List {
+    #[serde(default)]
     pub ordered: bool,
-    pub items: Vec<ListItem>,
+    #[serde(default)]
+    pub items: Vec<String>,  // Simplified to just strings for now, default to empty
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ListItem {
-    pub content: Vec<InlineContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub children: Option<Vec<ListItem>>,
 }
 
 /// Section block (container)
@@ -181,16 +281,6 @@ pub struct Image {
     pub label: Option<String>,
 }
 
-/// Code block
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Code {
-    pub language: Option<String>,
-    pub content: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub caption: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
 
 /// Inline content (for paragraphs and headings)
 #[derive(Debug, Clone, Serialize, Deserialize)]

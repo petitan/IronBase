@@ -2,17 +2,21 @@
 
 use super::Block;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 
 /// A complete DOCJL document
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
-    #[serde(rename = "_id")]
-    pub id: String,
+    #[serde(alias = "_id", skip_serializing)]
+    pub db_id: Option<Value>,
 
-    #[serde(flatten)]
+    #[serde(default)]
+    pub id: Option<String>,
+
     pub metadata: DocumentMetadata,
 
+    #[serde(alias = "blocks")]
     pub docjll: Vec<Block>,
 }
 
@@ -45,6 +49,40 @@ impl Document {
     /// Count total blocks (including nested)
     pub fn count_blocks(&self) -> usize {
         count_blocks_recursive(&self.docjll)
+    }
+
+    /// Preferred identifier (semantic id or fallback to db_id)
+    pub fn identifier(&self) -> Option<String> {
+        self.id
+            .as_ref()
+            .map(|s| s.to_string())
+            .or_else(|| self.db_id_as_string())
+    }
+
+    /// True if given identifier matches semantic id or underlying db_id
+    pub fn matches_identifier(&self, candidate: &str) -> bool {
+        if self.id.as_deref() == Some(candidate) {
+            return true;
+        }
+        match self.db_id.as_ref() {
+            Some(Value::String(s)) => s == candidate,
+            Some(Value::Number(n)) => n.to_string() == candidate,
+            Some(Value::Bool(b)) => b.to_string() == candidate,
+            Some(other) if other.is_null() => false,
+            Some(other) => other.to_string() == candidate,
+            None => false,
+        }
+    }
+
+    /// Convert stored db_id into a printable string if available
+    pub fn db_id_as_string(&self) -> Option<String> {
+        self.db_id.as_ref().and_then(|value| match value {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            Value::Bool(b) => Some(b.to_string()),
+            Value::Null => None,
+            other => Some(other.to_string()),
+        })
     }
 
     /// Find a block by label
@@ -180,7 +218,8 @@ mod tests {
     #[test]
     fn test_count_blocks() {
         let doc = Document {
-            id: "doc1".to_string(),
+            db_id: None,
+            id: Some("doc1".to_string()),
             metadata: DocumentMetadata {
                 title: "Test".to_string(),
                 version: "1.0".to_string(),
@@ -215,7 +254,8 @@ mod tests {
     #[test]
     fn test_find_block() {
         let doc = Document {
-            id: "doc1".to_string(),
+            db_id: None,
+            id: Some("doc1".to_string()),
             metadata: DocumentMetadata {
                 title: "Test".to_string(),
                 version: "1.0".to_string(),
@@ -257,7 +297,8 @@ mod tests {
     #[test]
     fn test_collect_labels() {
         let doc = Document {
-            id: "doc1".to_string(),
+            db_id: None,
+            id: Some("doc1".to_string()),
             metadata: DocumentMetadata {
                 title: "Test".to_string(),
                 version: "1.0".to_string(),

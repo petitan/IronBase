@@ -3,6 +3,7 @@
 // while maintaining structural integrity, label consistency, and cross-references.
 
 pub mod block;
+pub mod block_new_types;
 pub mod document;
 pub mod label;
 pub mod reference;
@@ -289,6 +290,7 @@ pub struct SearchQuery {
     pub content_contains: Option<String>,
     pub has_label: Option<bool>,
     pub has_compliance_note: Option<bool>,
+    pub label: Option<String>,  // Exact label match
     pub label_prefix: Option<String>,
 }
 
