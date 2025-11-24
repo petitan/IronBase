@@ -11,12 +11,13 @@ pub struct Label {
     pub number: LabelNumber,
 }
 
-/// Label number - can be simple (5) or hierarchical (4.2.1)
+/// Label number - can be simple (5), hierarchical (4.2.1), or alphanumeric (test, demo)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum LabelNumber {
     Simple(u32),
     Hierarchical(Vec<u32>),
+    Alphanumeric(String),
 }
 
 impl Label {
@@ -41,20 +42,22 @@ impl Label {
             match nums {
                 Ok(nums) => LabelNumber::Hierarchical(nums),
                 Err(_) => {
-                    return Err(DomainError::InvalidLabel {
-                        label: s.to_string(),
-                        reason: "Invalid hierarchical number".to_string(),
-                    })
+                    // Not a valid hierarchical number, treat as alphanumeric
+                    LabelNumber::Alphanumeric(number_str.to_string())
                 }
             }
         } else {
             match number_str.parse::<u32>() {
                 Ok(n) => LabelNumber::Simple(n),
                 Err(_) => {
-                    return Err(DomainError::InvalidLabel {
-                        label: s.to_string(),
-                        reason: "Invalid number".to_string(),
-                    })
+                    // Not a number, accept as alphanumeric identifier
+                    if number_str.is_empty() {
+                        return Err(DomainError::InvalidLabel {
+                            label: s.to_string(),
+                            reason: "Label number cannot be empty".to_string(),
+                        });
+                    }
+                    LabelNumber::Alphanumeric(number_str.to_string())
                 }
             }
         };
@@ -74,6 +77,7 @@ impl Label {
                     .join(".");
                 format!("{}:{}", self.prefix, num_str)
             }
+            LabelNumber::Alphanumeric(s) => format!("{}:{}", self.prefix, s),
         }
     }
 
@@ -87,6 +91,19 @@ impl Label {
                     *last += 1;
                 }
                 LabelNumber::Hierarchical(new_nums)
+            }
+            LabelNumber::Alphanumeric(s) => {
+                // For alphanumeric labels, append "_1" or increment suffix
+                if let Some((base, suffix)) = s.rsplit_once('_') {
+                    if let Ok(num) = suffix.parse::<u32>() {
+                        return Label {
+                            prefix: self.prefix.clone(),
+                            number: LabelNumber::Alphanumeric(format!("{}_{}", base, num + 1)),
+                        };
+                    }
+                }
+                // No suffix found, append "_1"
+                LabelNumber::Alphanumeric(format!("{}_1", s))
             }
         };
 
@@ -151,10 +168,11 @@ impl LabelGenerator {
         let parsed = Label::parse(label)?;
         self.existing.insert(label.to_string());
 
-        // Update counter if this number is higher
+        // Update counter if this number is higher (only for numeric labels)
         let num = match parsed.number {
             LabelNumber::Simple(n) => n,
             LabelNumber::Hierarchical(nums) => *nums.first().unwrap_or(&0),
+            LabelNumber::Alphanumeric(_) => return Ok(()), // Alphanumeric labels don't update counters
         };
 
         self.counters
