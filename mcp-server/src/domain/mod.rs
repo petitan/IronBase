@@ -97,7 +97,9 @@ pub enum InsertPosition {
     After,
     /// As first child inside the anchor block
     Inside,
-    /// As last child inside the anchor block
+    /// At the beginning of the document (prepend to top-level blocks)
+    Start,
+    /// As last child inside the anchor block or at the end of the document
     End,
 }
 
@@ -211,6 +213,7 @@ pub enum ChangeReason {
     Moved,
     Renumbered,
     Generated,
+    UserProvided,
 }
 
 /// Document operations interface
@@ -292,6 +295,7 @@ pub struct SearchQuery {
     pub has_compliance_note: Option<bool>,
     pub label: Option<String>,  // Exact label match
     pub label_prefix: Option<String>,
+    pub level: Option<u8>,  // Filter by heading level (1-6)
 }
 
 /// Search result

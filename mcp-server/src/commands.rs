@@ -182,6 +182,7 @@ pub fn handle_insert_block(
         "before" => InsertPosition::Before,
         "after" => InsertPosition::After,
         "inside" => InsertPosition::Inside,
+        "start" => InsertPosition::Start,
         "end" => InsertPosition::End,
         _ => {
             return Err(format!("Invalid position: {}", params.position));
@@ -252,6 +253,7 @@ pub fn handle_move_block(adapter: &mut IronBaseAdapter, params: MoveBlockParams)
         "before" => InsertPosition::Before,
         "after" => InsertPosition::After,
         "inside" => InsertPosition::Inside,
+        "start" => InsertPosition::Start,
         "end" => InsertPosition::End,
         _ => {
             return Err(format!("Invalid position: {}", params.position));
@@ -351,6 +353,7 @@ pub struct SearchQueryParams {
     pub has_compliance_note: Option<bool>,
     pub label: Option<String>,  // Exact label match
     pub label_prefix: Option<String>,
+    pub level: Option<u8>,  // Filter by heading level (1-6)
 }
 
 pub fn handle_search_blocks(
@@ -369,6 +372,7 @@ pub fn handle_search_blocks(
         has_compliance_note: params.query.has_compliance_note,
         label: params.query.label,
         label_prefix: params.query.label_prefix,
+        level: params.query.level,
     };
 
     let results = adapter

@@ -323,18 +323,27 @@ impl RealIronBaseAdapter {
         document: &mut Document,
         mut block: Block,
         options: &InsertOptions,
-    ) -> DomainResult<String> {
-        // Auto-generate label if needed
-        let block_label = if block.label().is_none() && options.auto_label {
+    ) -> DomainResult<(String, ChangeReason)> {
+        // Auto-generate label if needed, track whether it was generated or user-provided
+        let (block_label, change_reason) = if block.label().is_none() && options.auto_label {
             let prefix = crate::domain::label::default_prefix_for_type(
                 &format!("{:?}", block.block_type()).to_lowercase(),
             );
             let label = self.label_generator.write().generate(prefix);
             block.set_label(label.clone());
-            label
+            (label, ChangeReason::Generated)
         } else {
-            block.label().unwrap_or("unlabeled").to_string()
+            (block.label().unwrap_or("unlabeled").to_string(), ChangeReason::UserProvided)
         };
+
+        // Check for duplicate labels (only for user-provided labels)
+        if change_reason == ChangeReason::UserProvided {
+            if Self::label_exists_in_blocks(&document.docjll, &block_label) {
+                return Err(DomainError::DuplicateLabel {
+                    label: block_label,
+                });
+            }
+        }
 
         // Validate if requested
         if options.validate {
@@ -353,6 +362,10 @@ impl RealIronBaseAdapter {
 
         // Insert based on position (recursive for nested structure)
         match options.position {
+            InsertPosition::Start => {
+                document.docjll.insert(0, block.clone());
+            }
+
             InsertPosition::End => {
                 document.docjll.push(block.clone());
             }
@@ -395,7 +408,27 @@ impl RealIronBaseAdapter {
             }
         }
 
-        Ok(block_label)
+        Ok((block_label, change_reason))
+    }
+
+    /// Check if a label already exists in the document (recursive search through children)
+    fn label_exists_in_blocks(blocks: &[Block], target_label: &str) -> bool {
+        for block in blocks {
+            // Check current block's label
+            if let Some(label) = block.label() {
+                if label == target_label {
+                    return true;
+                }
+            }
+
+            // Recursively check children
+            if let Some(children) = block.children() {
+                if Self::label_exists_in_blocks(children, target_label) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Recursive insert BEFORE a block (searches nested children)
@@ -482,7 +515,7 @@ impl DocumentOperations for RealIronBaseAdapter {
     ) -> DomainResult<OperationResult> {
         let mut document = self.get_document(document_id)?;
 
-        let block_label = self.insert_block_into_document(&mut document, block, &options)?;
+        let (block_label, change_reason) = self.insert_block_into_document(&mut document, block, &options)?;
 
         // Update document metadata
         document.update_blocks_count();
@@ -496,7 +529,7 @@ impl DocumentOperations for RealIronBaseAdapter {
             affected_labels: vec![LabelChange {
                 old_label: String::new(),
                 new_label: block_label,
-                reason: ChangeReason::Generated,
+                reason: change_reason,
             }],
             warnings: Vec::new(),
         })
@@ -569,6 +602,9 @@ impl DocumentOperations for RealIronBaseAdapter {
         if options.target_parent.is_none() {
             // Insert at document level based on position
             match options.position {
+                InsertPosition::Start => {
+                    document.docjll.insert(0, block);
+                }
                 InsertPosition::End => {
                     document.docjll.push(block);
                 }
@@ -716,12 +752,8 @@ impl DocumentOperations for RealIronBaseAdapter {
                         children,
                     });
                 }
-
-                if let Some(children) = block.children() {
-                    if max_depth.map_or(true, |max| depth < max) {
-                        items.extend(extract_headings(children, depth + 1, max_depth));
-                    }
-                }
+                // Note: We don't need to process block.children() here because
+                // heading children are already processed above (lines 739-746)
             }
 
             items
@@ -750,9 +782,7 @@ impl DocumentOperations for RealIronBaseAdapter {
 
                 // Filter by block type
                 if let Some(ref target_type) = query.block_type {
-                    if &block.block_type() != target_type {
-                        matches = false;
-                    }
+                    matches = matches && (&block.block_type() == target_type);
                 }
 
                 // Filter by has_label
@@ -768,6 +798,14 @@ impl DocumentOperations for RealIronBaseAdapter {
                 // Filter by label prefix
                 if let Some(ref prefix) = query.label_prefix {
                     matches = matches && block.label().map(|l| l.starts_with(prefix)).unwrap_or(false);
+                }
+
+                // Filter by level (for headings)
+                if let Some(target_level) = query.level {
+                    matches = matches && match block {
+                        Block::Heading(h) => h.level == Some(target_level),
+                        _ => false, // Non-heading blocks don't match level filter
+                    };
                 }
 
                 if matches {
