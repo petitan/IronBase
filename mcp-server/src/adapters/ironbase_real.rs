@@ -24,8 +24,36 @@ pub struct RealIronBaseAdapter {
 }
 
 impl RealIronBaseAdapter {
+    fn parse_document_value(raw: serde_json::Value) -> DomainResult<Document> {
+        let mut doc: Document = serde_json::from_value(raw.clone())
+            .map_err(|e| DomainError::StorageError {
+                message: format!("Failed to parse document: {}", e),
+            })?;
+
+        if doc.db_id.is_none() {
+            doc.db_id = raw.get("_id").cloned();
+        }
+
+        if doc.id.is_none() {
+            if let Some(Value::String(id)) = raw.get("id") {
+                doc.id = Some(id.clone());
+            } else if let Some(db_id) = doc.db_id_as_string() {
+                doc.id = Some(db_id);
+            }
+        }
+
+        Ok(doc)
+    }
     /// Create a new adapter with real IronBase
     pub fn new(path: PathBuf, collection_name: String) -> DomainResult<Self> {
+        // Debug: print the absolute path being opened
+        let abs_path = std::fs::canonicalize(&path)
+            .unwrap_or_else(|_| path.clone());
+        eprintln!("🔍 DEBUG: Opening database at: {:?}", abs_path);
+        eprintln!("🔍 DEBUG: File exists: {}", abs_path.exists());
+        eprintln!("🔍 DEBUG: File size: {} bytes", std::fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0));
+        eprintln!("🔍 DEBUG: Collection name: {}", collection_name);
+
         // Open IronBase database
         let db = DatabaseCore::open(&path)
             .map_err(|e| DomainError::StorageError {
@@ -53,36 +81,52 @@ impl RealIronBaseAdapter {
 
     /// Load all documents and build indexes
     fn initialize(&self) -> DomainResult<()> {
+        eprintln!("🔍 DEBUG: Starting initialization...");
         let db = self.db.read();
-        let collection = db.collection(&self.collection_name)
+
+        // List all collections
+        let collections = db.list_collections();
+        eprintln!("🔍 DEBUG: Found {} collections: {:?}", collections.len(), collections);
+
+        // Try to get collection - it might not exist yet (created on first insert)
+        let collection = match db.collection(&self.collection_name) {
+            Ok(coll) => {
+                eprintln!("🔍 DEBUG: Successfully got '{}' collection", self.collection_name);
+                coll
+            }
+            Err(e) => {
+                eprintln!("🔍 DEBUG: Collection '{}' doesn't exist yet: {}", self.collection_name, e);
+                // Collection doesn't exist yet, skip initialization
+                return Ok(());
+            }
+        };
+
+        // Create secondary index on "id" field for O(log N) lookups
+        // This allows us to efficiently find documents by semantic ID
+        // Ignore errors if index already exists
+        let _ = collection.create_index("id".to_string(), true);
+
+        // Count documents first
+        let count = collection.count_documents(&serde_json::json!({}))
             .map_err(|e| DomainError::StorageError {
-                message: format!("Failed to get collection: {}", e),
+                message: format!("Failed to count documents: {}", e),
             })?;
+        eprintln!("🔍 DEBUG: Collection has {} documents", count);
 
         // Find all documents
+        eprintln!("🔍 DEBUG: Calling find({{}})...");
         let docs_json = collection.find(&serde_json::json!({}))
             .map_err(|e| DomainError::StorageError {
                 message: format!("Failed to find documents: {}", e),
             })?;
+        eprintln!("🔍 DEBUG: find() returned {} documents", docs_json.len());
 
         let mut label_gen = self.label_generator.write();
         let mut cross_ref = self.cross_ref.write();
 
         // Process each document
-        for mut doc_json in docs_json {
-            // Convert integer _id to string if needed (IronBase uses integer IDs)
-            if let Some(id) = doc_json.get("_id") {
-                if let Some(id_num) = id.as_i64() {
-                    doc_json["_id"] = serde_json::json!(id_num.to_string());
-                }
-            }
-
-            // Parse as DOCJL Document
-            let doc: Document = serde_json::from_value(doc_json)
-                .map_err(|e| DomainError::StorageError {
-                    message: format!("Failed to parse document: {}", e),
-                })?;
-
+        for doc_json in docs_json {
+            let doc = Self::parse_document_value(doc_json)?;
             // Extract labels (skip duplicates across documents)
             for label in doc.collect_labels() {
                 if !label_gen.exists(&label) {
@@ -117,7 +161,7 @@ impl RealIronBaseAdapter {
         }
     }
 
-    /// Get a document by ID from IronBase
+    /// Get a document by ID from IronBase (supports both _id and semantic id field lookup)
     pub fn get_document(&self, document_id: &str) -> DomainResult<Document> {
         let db = self.db.read();
         let collection = db.collection(&self.collection_name)
@@ -125,16 +169,45 @@ impl RealIronBaseAdapter {
                 message: format!("Failed to get collection: {}", e),
             })?;
 
-        // Try to parse document_id as integer for IronBase query
+        // Try to parse document_id as integer for _id lookup
         let id_value = document_id.parse::<i64>()
             .map(|n| serde_json::json!(n))
             .unwrap_or_else(|_| serde_json::json!(document_id));
 
+        // First try lookup by _id field
         let query = serde_json::json!({"_id": id_value});
-        let docs = collection.find(&query)
+        let mut docs = collection.find(&query)
             .map_err(|e| DomainError::StorageError {
-                message: format!("Failed to find document: {}", e),
+                message: format!("Failed to find document by _id: {}", e),
             })?;
+
+        // If not found by _id, try lookup by semantic "id" field (O(log N) via secondary index)
+        if docs.is_empty() {
+            let query = serde_json::json!({"id": document_id});
+            docs = collection.find(&query)
+                .map_err(|e| DomainError::StorageError {
+                    message: format!("Failed to find document by semantic id: {}", e),
+                })?;
+        }
+
+        // Fallback: If index query didn't work (index might be empty for existing docs),
+        // do full scan and manual filter by "id" field
+        if docs.is_empty() {
+            let all_docs = collection.find(&serde_json::json!({}))
+                .map_err(|e| DomainError::StorageError {
+                    message: format!("Failed to scan documents: {}", e),
+                })?;
+
+            // Manual filter by "id" field
+            for doc in all_docs {
+                if let Some(doc_id) = doc.get("id").and_then(|v| v.as_str()) {
+                    if doc_id == document_id {
+                        docs.push(doc);
+                        break;
+                    }
+                }
+            }
+        }
 
         if docs.is_empty() {
             return Err(DomainError::StorageError {
@@ -142,21 +215,7 @@ impl RealIronBaseAdapter {
             });
         }
 
-        let mut doc_json = docs[0].clone();
-
-        // Convert integer _id to string if needed (IronBase uses integer IDs)
-        if let Some(id) = doc_json.get("_id") {
-            if let Some(id_num) = id.as_i64() {
-                doc_json["_id"] = serde_json::json!(id_num.to_string());
-            }
-        }
-
-        let doc: Document = serde_json::from_value(doc_json)
-            .map_err(|e| DomainError::StorageError {
-                message: format!("Failed to parse document: {}", e),
-            })?;
-
-        Ok(doc)
+        Self::parse_document_value(docs[0].clone())
     }
 
     /// Save a document to IronBase
@@ -173,22 +232,56 @@ impl RealIronBaseAdapter {
                 message: format!("Failed to serialize document: {}", e),
             })?;
 
-        // Convert string _id to integer for IronBase
-        let id_int = document.id.parse::<i64>()
-            .map_err(|_| DomainError::StorageError {
-                message: format!("Invalid document ID format: {}", document.id),
-            })?;
+        // Determine DB identifier (_id)
+        let db_identifier = if let Some(id_value) = &document.db_id {
+            id_value.clone()
+        } else if let Some(semantic_id) = document.id.as_deref() {
+            if let Ok(id_num) = semantic_id.parse::<i64>() {
+                serde_json::json!(id_num)
+            } else {
+                let query = serde_json::json!({"id": semantic_id});
+                let docs = collection.find(&query)
+                    .map_err(|e| DomainError::StorageError {
+                        message: format!("Failed to find document by semantic id: {}", e),
+                    })?;
 
-        doc_value["_id"] = serde_json::json!(id_int);
+                if docs.is_empty() {
+                    return Err(DomainError::StorageError {
+                        message: format!("Document not found by semantic ID: {}", semantic_id),
+                    });
+                }
+
+                docs[0]
+                    .get("_id")
+                    .cloned()
+                    .ok_or_else(|| DomainError::StorageError {
+                        message: format!("Document missing _id field: {}", semantic_id),
+                    })?
+            }
+        } else {
+            return Err(DomainError::StorageError {
+                message: "Document missing id and _id".to_string(),
+            });
+        };
+
+        doc_value["_id"] = db_identifier.clone();
 
         // Use IronBase update_one with $set operator to replace document
-        let query = serde_json::json!({"_id": id_int});
+        let query = serde_json::json!({"_id": db_identifier.clone()});
         let update = serde_json::json!({"$set": doc_value});
 
-        collection.update_one(&query, &update)
+        let (matched, _) = collection.update_one(&query, &update)
             .map_err(|e| DomainError::StorageError {
                 message: format!("Failed to update document: {}", e),
             })?;
+        if matched == 0 {
+            let doc_id = document
+                .identifier()
+                .unwrap_or_else(|| "<unknown>".to_string());
+            return Err(DomainError::StorageError {
+                message: format!("Document not found: {}", doc_id),
+            });
+        }
 
         Ok(())
     }
@@ -207,19 +300,8 @@ impl RealIronBaseAdapter {
             })?;
 
         let mut documents = Vec::new();
-        for mut doc_json in docs_json {
-            // Convert integer _id to string if needed (IronBase uses integer IDs)
-            if let Some(id) = doc_json.get("_id") {
-                if let Some(id_num) = id.as_i64() {
-                    doc_json["_id"] = serde_json::json!(id_num.to_string());
-                }
-            }
-
-            let doc: Document = serde_json::from_value(doc_json)
-                .map_err(|e| DomainError::StorageError {
-                    message: format!("Failed to parse document: {}", e),
-                })?;
-            documents.push(doc);
+        for doc_json in docs_json {
+            documents.push(Self::parse_document_value(doc_json)?);
         }
 
         Ok(documents)
@@ -233,6 +315,16 @@ impl RealIronBaseAdapter {
             .unwrap()
             .as_millis();
         format!("op_{}", timestamp)
+    }
+
+    /// Helper: Find block index by label
+    fn find_block_index(blocks: &[Block], label: &str) -> DomainResult<usize> {
+        blocks
+            .iter()
+            .position(|b| b.label() == Some(label))
+            .ok_or_else(|| DomainError::BlockNotFound {
+                label: label.to_string(),
+            })
     }
 
     /// Insert block into document at specified position
@@ -274,11 +366,36 @@ impl RealIronBaseAdapter {
             InsertPosition::End => {
                 document.docjll.push(block.clone());
             }
-            _ => {
-                // TODO: Implement other positions
-                return Err(DomainError::InvalidOperation {
-                    reason: "Only 'end' position is currently supported".to_string(),
-                });
+
+            InsertPosition::Before => {
+                let anchor = options.anchor_label.as_ref()
+                    .ok_or_else(|| DomainError::InvalidOperation {
+                        reason: "Before position requires anchor_label".to_string(),
+                    })?;
+
+                let index = Self::find_block_index(&document.docjll, anchor)?;
+                document.docjll.insert(index, block.clone());
+            }
+
+            InsertPosition::After => {
+                let anchor = options.anchor_label.as_ref()
+                    .ok_or_else(|| DomainError::InvalidOperation {
+                        reason: "After position requires anchor_label".to_string(),
+                    })?;
+
+                let index = Self::find_block_index(&document.docjll, anchor)?;
+                document.docjll.insert(index + 1, block.clone());
+            }
+
+            InsertPosition::Inside => {
+                // In a flat list, "Inside" means inserting right after the parent
+                let parent = options.parent_label.as_ref()
+                    .ok_or_else(|| DomainError::InvalidOperation {
+                        reason: "Inside position requires parent_label".to_string(),
+                    })?;
+
+                let index = Self::find_block_index(&document.docjll, parent)?;
+                document.docjll.insert(index + 1, block.clone());
             }
         }
 
@@ -532,7 +649,7 @@ impl DocumentOperations for RealIronBaseAdapter {
                     };
 
                     items.push(OutlineItem {
-                        level: h.level,
+                        level: h.level.unwrap_or(1),  // Default to level 1 if not specified
                         label: h.label.clone().unwrap_or_default(),
                         title,
                         children,
@@ -570,14 +687,26 @@ impl DocumentOperations for RealIronBaseAdapter {
             for block in blocks {
                 let mut matches = true;
 
+                // Filter by block type
                 if let Some(ref target_type) = query.block_type {
                     if &block.block_type() != target_type {
                         matches = false;
                     }
                 }
 
+                // Filter by has_label
                 if let Some(has_label) = query.has_label {
                     matches = matches && (block.label().is_some() == has_label);
+                }
+
+                // Filter by exact label match
+                if let Some(ref exact_label) = query.label {
+                    matches = matches && block.label().map(|l| l == exact_label).unwrap_or(false);
+                }
+
+                // Filter by label prefix
+                if let Some(ref prefix) = query.label_prefix {
+                    matches = matches && block.label().map(|l| l.starts_with(prefix)).unwrap_or(false);
                 }
 
                 if matches {
@@ -635,5 +764,63 @@ impl DocumentOperations for RealIronBaseAdapter {
 
         let validator = self.schema_validator.read();
         Ok(validator.validate_document(&document))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+
+    fn seed_test_document(db_path: &PathBuf) {
+        let db = DatabaseCore::<StorageEngine>::open(db_path).unwrap();
+        let collection = db.collection("documents").unwrap();
+        let doc = json!({
+            "id": "mk_manual_v1",
+            "metadata": {
+                "title": "Manual",
+                "version": "1.0"
+            },
+            "docjll": [
+                {
+                    "type": "paragraph",
+                    "label": "para:1",
+                    "content": [
+                        {"type": "text", "content": "Original paragraph"}
+                    ]
+                }
+            ]
+        });
+        let map = doc
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<HashMap<_, _>>();
+        collection.insert_one(map).unwrap();
+    }
+
+    #[test]
+    fn insert_block_supports_numeric_ids() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        seed_test_document(&db_path);
+
+        let mut adapter = RealIronBaseAdapter::new(db_path.clone(), "documents".to_string()).unwrap();
+        let block: Block = serde_json::from_value(json!({
+            "type": "paragraph",
+            "content": [{"type": "text", "content": "Inserted via test"}]
+        }))
+        .unwrap();
+
+        let result = adapter
+            .insert_block("1", block, InsertOptions::default())
+            .unwrap();
+        assert!(result.success);
+
+        let updated = adapter.get_document("1").unwrap();
+        assert!(updated.docjll.len() >= 2);
     }
 }
