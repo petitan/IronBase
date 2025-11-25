@@ -172,6 +172,31 @@ struct McpError {
     details: Option<serde_json::Value>,
 }
 
+/// MCP initialize result
+#[derive(Debug, Serialize)]
+struct InitializeResult {
+    #[serde(rename = "protocolVersion")]
+    protocol_version: String,
+    capabilities: Capabilities,
+    #[serde(rename = "serverInfo")]
+    server_info: ServerInfo,
+}
+
+/// MCP server capabilities
+#[derive(Debug, Serialize)]
+struct Capabilities {
+    tools: serde_json::Value,
+    resources: serde_json::Value,
+    prompts: serde_json::Value,
+}
+
+/// MCP server info
+#[derive(Debug, Serialize)]
+struct ServerInfo {
+    name: String,
+    version: String,
+}
+
 /// Handle MCP request
 async fn handle_mcp_request(
     State(state): State<Arc<AppState>>,
@@ -200,6 +225,17 @@ async fn handle_mcp_request(
         // Direct method call (backward compatibility)
         (request.method.clone(), request.params.clone())
     };
+
+    // Handle MCP protocol methods (initialize, tools/list, resources/*, prompts/list)
+    // These don't require authentication or rate limiting
+    if is_mcp_protocol_method(&actual_method) {
+        return handle_mcp_protocol_method(
+            &actual_method,
+            &actual_params,
+            request.jsonrpc,
+            request.id,
+        );
+    }
 
     // Extract API key from Authorization header
     let api_key_str = match extract_api_key(&headers) {
@@ -394,4 +430,90 @@ async fn health_check() -> impl IntoResponse {
             "version": mcp_docjl::VERSION
         })),
     )
+}
+
+/// Check if method is an MCP protocol method (not a command)
+fn is_mcp_protocol_method(method: &str) -> bool {
+    matches!(method, "initialize" | "tools/list" | "resources/list" | "resources/read" | "prompts/list")
+}
+
+/// Handle MCP protocol methods (initialize, tools/list, resources/list, etc.)
+fn handle_mcp_protocol_method(
+    method: &str,
+    _params: &serde_json::Value,
+    jsonrpc: Option<String>,
+    id: Option<serde_json::Value>,
+) -> Response {
+    info!("Handling MCP protocol method: {}", method);
+
+    match method {
+        "initialize" => {
+            // Return MCP initialize response
+            let result = InitializeResult {
+                protocol_version: "2024-11-05".to_string(),
+                capabilities: Capabilities {
+                    tools: serde_json::json!({}),
+                    resources: serde_json::json!({}),
+                    prompts: serde_json::json!({}),
+                },
+                server_info: ServerInfo {
+                    name: "docjl-editor".to_string(),
+                    version: mcp_docjl::VERSION.to_string(),
+                },
+            };
+
+            success_response_with_id(
+                serde_json::to_value(result).unwrap(),
+                jsonrpc,
+                id,
+            )
+        }
+        "tools/list" => {
+            // TODO: Implement tools/list
+            error_response_with_id(
+                StatusCode::NOT_IMPLEMENTED,
+                "NOT_IMPLEMENTED",
+                "tools/list not yet implemented",
+                jsonrpc,
+                id,
+            )
+        }
+        "resources/list" => {
+            // TODO: Implement resources/list
+            error_response_with_id(
+                StatusCode::NOT_IMPLEMENTED,
+                "NOT_IMPLEMENTED",
+                "resources/list not yet implemented",
+                jsonrpc,
+                id,
+            )
+        }
+        "resources/read" => {
+            // TODO: Implement resources/read
+            error_response_with_id(
+                StatusCode::NOT_IMPLEMENTED,
+                "NOT_IMPLEMENTED",
+                "resources/read not yet implemented",
+                jsonrpc,
+                id,
+            )
+        }
+        "prompts/list" => {
+            // TODO: Implement prompts/list
+            error_response_with_id(
+                StatusCode::NOT_IMPLEMENTED,
+                "NOT_IMPLEMENTED",
+                "prompts/list not yet implemented",
+                jsonrpc,
+                id,
+            )
+        }
+        _ => error_response_with_id(
+            StatusCode::NOT_FOUND,
+            "METHOD_NOT_FOUND",
+            &format!("Unknown MCP method: {}", method),
+            jsonrpc,
+            id,
+        ),
+    }
 }
