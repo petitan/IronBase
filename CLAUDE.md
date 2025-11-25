@@ -43,14 +43,17 @@ MongoLite/
 ### Core Module Responsibilities
 
 **database.rs** - Database lifecycle and durability:
-- `DatabaseCore<S: Storage>` - generic over storage backend
+- `DatabaseCore<S: Storage + RawStorage>` - generic over storage backend
+- `DatabaseCore::open(path)` - File-based storage (production)
+- `DatabaseCore::<MemoryStorage>::open_memory()` - In-memory storage (testing, 10-100x faster)
 - Durability modes: Safe (auto-commit), Batch, Unsafe
 - Transaction management and WAL recovery
 
 **collection_core/mod.rs** - All CRUD and query operations:
 - insert_one/many, find/find_one, update_one/many, delete_one/many
 - Aggregation pipeline ($match, $group, $project, $sort, $limit, $skip)
-- Index management (create_index, drop_index, explain, hint)
+- Index management (create_index, create_compound_index, drop_index, explain, hint)
+- Cursor/streaming: find_streaming() returns FindCursor for memory-efficient iteration
 
 **query.rs + query/operators.rs** - Query engine with strategy pattern:
 - Comparison: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
@@ -58,9 +61,17 @@ MongoLite/
 - Element: $exists, $type | Array: $all, $elemMatch, $size | Regex: $regex
 
 **storage/** - Append-only storage engine:
-- file_storage.rs - File-based persistence (.mlite files)
-- memory_storage.rs - In-memory backend for testing
-- compaction.rs - Garbage collection for tombstoned documents
+- **traits.rs** - Storage trait hierarchy:
+  - `Storage` - High-level document operations (read/write Document)
+  - `RawStorage: Storage` - Low-level byte operations (offsets, catalog)
+- **file_storage.rs** - File-based persistence (.mlite files)
+- **memory_storage.rs** - In-memory backend (implements both Storage + RawStorage)
+- **compaction.rs** - Garbage collection for tombstoned documents
+
+**index.rs + btree.rs** - B+ tree indexing:
+- Single-field indexes: `create_index("field", unique)`
+- Compound indexes: `create_compound_index(["field1", "field2"], unique)`
+- Automatic query optimization with index selection
 
 **transaction.rs + wal.rs** - ACD transactions:
 - Write-Ahead Log with CRC32 checksums
@@ -128,3 +139,41 @@ mcp-server/src/
 - **pyo3**: Python bindings
 - **maturin**: Build Python wheels from Rust
 - **ahash/dashmap**: Fast hashing
+
+## Quick Reference
+
+### Creating Tests with MemoryStorage (fast, no files)
+```rust
+use ironbase_core::{DatabaseCore, storage::MemoryStorage};
+
+let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+let coll = db.collection("test").unwrap();
+// ... test code - no cleanup needed
+```
+
+### Using Cursors for Large Results
+```rust
+let mut cursor = collection.find_streaming(&json!({}))?;
+while cursor.remaining() > 0 {
+    let batch = cursor.next_chunk(100)?;
+    // process batch
+}
+```
+
+### Creating Compound Indexes
+```rust
+collection.create_compound_index(
+    vec!["country".to_string(), "city".to_string()],
+    false  // unique
+)?;
+```
+
+## Current Test Coverage
+
+- **Total**: 85%+ coverage
+- **schema.rs**: 99%
+- **aggregation.rs**: 96%
+- **operators.rs**: 93%
+- **collection_core/mod.rs**: 70%
+
+Run coverage: `cargo llvm-cov -p ironbase-core`

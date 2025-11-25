@@ -10,12 +10,15 @@
 - 💾 **Single file** - Simple backup and version control
 - 🔧 **Zero-config** - No installation or setup required
 - 🐍 **Python API** - Easy to use from Python
+- 🧪 **In-memory mode** - 10-100x faster for testing, no file I/O
 - 🔍 **Full indexing support** - B+ tree indexes with automatic query optimization
+- 🔗 **Compound indexes** - Multi-field indexes for complex queries
 - 📊 **Query explanation** - See which indexes are used with `explain()`
 - 🔄 **Aggregation Pipeline** - MongoDB-compatible data processing with $match, $group, $project, $sort, $limit, $skip
 - 🔎 **Advanced find()** - Projection, sort, limit, skip for powerful queries
+- 📜 **Cursor/Streaming** - Memory-efficient iteration over large result sets
 - ⚡ **Performance** - 1.26M inserts/sec, 1.39µs index lookups, 1.4-1.6x query speedup
-- ✅ **136 tests passing** - Comprehensive test coverage including ACD transactions (storage, query, document, aggregation, find, transactions, WAL, crash recovery, property-based, integration, benchmarks)
+- ✅ **400+ tests passing** - Comprehensive test coverage (85%+) including ACD transactions, crash recovery, property-based tests
 - 🌐 **Multi-language support** - Rust core with language-specific bindings (Python, C# planned)
 - 🔒 **ACD Transactions** - Atomicity, Consistency, Durability with Write-Ahead Log and crash recovery (Python API ✅)
 - 🛡️ **Auto-commit Durability Modes** - Safe (ZERO data loss), Batch (bounded loss), Unsafe (manual checkpoint) - configurable per database
@@ -188,6 +191,43 @@ db.checkpoint()
 # Bezárás
 db.close()
 ```
+
+### 🧪 In-Memory Database (Testing)
+
+Az in-memory mód **10-100x gyorsabb** mint a fájl-alapú storage, tökéletes unit tesztekhez:
+
+```python
+from ironbase import ironbase
+
+# In-memory database (nincs fájl, nincs perzisztencia)
+db = ironbase(":memory:")
+
+# Használat pont ugyanaz mint a fájl-alapú
+users = db.collection("users")
+users.insert_one({"name": "Alice", "age": 30})
+
+# Tesztek után automatikusan törlődik
+```
+
+**Rust API:**
+```rust
+use ironbase_core::{DatabaseCore, storage::MemoryStorage};
+
+// In-memory database
+let db = DatabaseCore::<MemoryStorage>::open_memory()?;
+let users = db.collection("users")?;
+
+users.insert_one(HashMap::from([
+    ("name".to_string(), json!("Alice")),
+]))?;
+```
+
+**Mikor használd:**
+- ✅ Unit tesztek (gyors, izolált)
+- ✅ Integration tesztek
+- ✅ Prototípusok
+- ✅ Benchmarkok
+- ❌ Production (nincs perzisztencia!)
 
 ### Durability Modes (Auto-Commit)
 
@@ -461,9 +501,13 @@ collection.create_index("age")
 # Create unique index
 collection.create_index("email", unique=True)
 
+# Create compound index (multi-field)
+collection.create_compound_index(["country", "city"])
+collection.create_compound_index(["category", "price"], unique=True)
+
 # List all indexes
 indexes = collection.list_indexes()
-# Returns: ['users_id', 'users_age', 'users_email']
+# Returns: ['users_id', 'users_age', 'users_country_city']
 
 # Explain query execution plan
 plan = collection.explain({"age": {"$gte": 18}})
@@ -479,6 +523,16 @@ results = collection.find_with_hint(
 
 # Drop an index
 collection.drop_index("users_age")
+```
+
+**Compound Index példa:**
+```python
+# E-commerce: termékek country + city szerinti gyors keresése
+products = db.collection("products")
+products.create_compound_index(["country", "city"])
+
+# Ez a query használja a compound indexet
+results = products.find({"country": "HU", "city": "Budapest"})
 ```
 
 **For detailed index documentation, see [INDEXES.md](INDEXES.md)**
@@ -499,6 +553,56 @@ results = collection.aggregate([
 ```
 
 **For detailed aggregation documentation, see [AGGREGATION.md](AGGREGATION.md)**
+
+#### CURSOR / STREAMING operations
+
+Nagy eredményhalmazok memória-hatékony feldolgozásához:
+
+```python
+# Cursor létrehozása (nem tölti be az összes dokumentumot egyszerre)
+cursor = collection.find_streaming({"status": "active"})
+
+print(f"Total: {cursor.total()}")        # Összes találat
+print(f"Remaining: {cursor.remaining()}") # Hátralévő
+
+# Iterálás egyenként
+doc = cursor.next()
+
+# Batch-ekben feldolgozás (hatékonyabb)
+batch = cursor.next_batch(100)  # Következő 100 dokumentum
+
+# Skip (átugrás)
+cursor.skip(50)
+
+# Visszaugrás az elejére
+cursor.rewind()
+
+# Első N dokumentum
+first_10 = cursor.take(10)
+
+# Összes begyűjtése (ha elfér memóriában)
+all_docs = cursor.collect_all()
+
+# For-each feldolgozás
+cursor.for_each(lambda doc: print(doc["name"]))
+```
+
+**Rust API:**
+```rust
+let mut cursor = collection.find_streaming(&json!({}))?;
+
+// Batch feldolgozás
+while cursor.remaining() > 0 {
+    let batch = cursor.next_chunk(100)?;
+    process_batch(batch);
+}
+```
+
+**Mikor használd:**
+- 📊 Nagy adathalmazok (>10,000 dokumentum)
+- 💾 Memória-korlátozott környezet
+- 🔄 Streaming feldolgozás
+- 📄 Lapozás (pagination)
 
 #### Complex Queries
 
@@ -561,14 +665,26 @@ results = collection.find({
 - `$set` - Set field value
 - `$inc` - Increment/decrement numeric field
 - `$unset` - Remove field
-
-### Planned Operators
-- `$exists` - Field exists
-- `$type` - Type check
-- `$regex` - Regular expression match
 - `$push` - Add to array
 - `$pull` - Remove from array
 - `$addToSet` - Add unique to array
+- `$pop` - Remove first/last from array
+
+### Element Operators ✅
+- `$exists` - Field exists check
+- `$type` - Type check (string, number, boolean, object, array)
+
+### Array Operators ✅
+- `$all` - Array contains all values
+- `$elemMatch` - Array element matches condition
+- `$size` - Array size check
+
+### String Operators ✅
+- `$regex` - Regular expression match
+
+### Planned Operators
+- `$expr` - Aggregation expressions in queries
+- `$text` - Full-text search
 
 ## 🏗️ Architektúra
 
@@ -698,8 +814,10 @@ ironbase/
 - [ ] C# bindings (bindings/csharp)
 - [ ] JavaScript/Node.js bindings (napi-rs)
 - [ ] More aggregation operators (expression operators, array operators)
-- [ ] More update operators (`$push`, `$pull`, `$addToSet`)
-- [ ] Compound indexes (multi-field)
+- [x] More update operators (`$push`, `$pull`, `$addToSet`, `$pop`) ✅
+- [x] Compound indexes (multi-field) ✅
+- [x] Cursor/streaming API for large result sets ✅
+- [x] In-memory storage for fast testing ✅
 - [ ] Nested field access in projection/sort (`"user.name"`)
 
 **Medium-term:**
