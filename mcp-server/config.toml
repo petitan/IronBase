@@ -27,7 +27,9 @@ allowed_commands = [
     "mcp_docjl_delete_block",
     "mcp_docjl_validate_references",
     "mcp_docjl_validate_schema",
-    "mcp_docjl_get_audit_log"
+    "mcp_docjl_get_audit_log",
+    "mcp_docjl_get_section",
+    "mcp_docjl_estimate_tokens"
 ]
 allowed_documents = ["*"]           # Wildcard: allow all documents
 
@@ -43,9 +45,12 @@ allowed_commands = [
     "mcp_docjl_get_document",
     "mcp_docjl_list_headings",
     "mcp_docjl_search_blocks",
+    "mcp_docjl_search_content",
     "mcp_docjl_validate_references",
     "mcp_docjl_validate_schema",
-    "mcp_docjl_get_audit_log"
+    "mcp_docjl_get_audit_log",
+    "mcp_docjl_get_section",
+    "mcp_docjl_estimate_tokens"
 ]
 allowed_documents = ["doc_*"]  # Only documents starting with "doc_"
 

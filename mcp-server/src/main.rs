@@ -769,6 +769,32 @@ fn get_tools_list() -> Vec<serde_json::Value> {
                 "required": ["document_id", "block_label"]
             }
         }),
+        serde_json::json!({
+            "name": "mcp_docjl_get_section",
+            "description": "Get specific section with children (Phase 3.1: Chunking Support). Helps work with large documents by retrieving only specific sections with controlled depth to fit context window.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "description": "Document ID"},
+                    "section_label": {"type": "string", "description": "Section label to retrieve (e.g., 'sec:4.2.1')"},
+                    "include_subsections": {"type": "boolean", "description": "Whether to include child blocks (default: true)"},
+                    "max_depth": {"type": "integer", "description": "Maximum depth of children to include (default: 10)"}
+                },
+                "required": ["document_id", "section_label"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_estimate_tokens",
+            "description": "Estimate token count for document or section (Phase 3.2: Chunking Support). Helps plan context usage by estimating tokens before retrieval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "description": "Document ID"},
+                    "section_label": {"type": "string", "description": "Optional: Specific section label to estimate (if omitted, estimates entire document)"}
+                },
+                "required": ["document_id"]
+            }
+        }),
     ]
 }
 

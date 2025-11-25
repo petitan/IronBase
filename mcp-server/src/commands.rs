@@ -95,6 +95,180 @@ pub fn handle_get_document(
     Ok(serde_json::json!({ "document": doc_value }))
 }
 
+/// Get specific section with children command (Phase 3.1)
+#[derive(Debug, Deserialize)]
+pub struct GetSectionParams {
+    pub document_id: String,
+    pub section_label: String,
+    #[serde(default = "default_true")]
+    pub include_subsections: bool,
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_max_depth() -> usize {
+    10  // Reasonable default to prevent infinite recursion
+}
+
+pub fn handle_get_section(
+    adapter: &IronBaseAdapter,
+    params: GetSectionParams,
+) -> CommandResult {
+    let document = adapter
+        .get_document(&params.document_id)
+        .map_err(|e| format!("Failed to get document: {}", e))?;
+
+    // Find the block with the specified label
+    let section_block = find_block_by_label(&document.docjll, &params.section_label)
+        .ok_or_else(|| format!("Section '{}' not found in document", params.section_label))?;
+
+    // Clone the block and optionally limit depth
+    let result_block = if params.include_subsections {
+        limit_block_depth(section_block.clone(), params.max_depth)
+    } else {
+        // Return block without children
+        strip_children(section_block.clone())
+    };
+
+    let section_value = serde_json::to_value(&result_block)
+        .map_err(|e| format!("Failed to serialize section: {}", e))?;
+
+    Ok(serde_json::json!({
+        "section": section_value,
+        "document_id": params.document_id,
+        "label": params.section_label
+    }))
+}
+
+/// Recursively search for a block by label
+fn find_block_by_label<'a>(blocks: &'a [Block], label: &str) -> Option<&'a Block> {
+    for block in blocks {
+        if block.label() == Some(label) {
+            return Some(block);
+        }
+        // Recursively search in children
+        if let Some(children) = block.children() {
+            if let Some(found) = find_block_by_label(children, label) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Limit the depth of a block's children
+fn limit_block_depth(block: Block, max_depth: usize) -> Block {
+    if max_depth == 0 {
+        return strip_children(block);
+    }
+
+    let mut result_block = block;
+    if let Some(children) = result_block.children_mut() {
+        *children = children
+            .iter()
+            .map(|child| limit_block_depth(child.clone(), max_depth - 1))
+            .collect();
+    }
+    result_block
+}
+
+/// Remove all children from a block
+fn strip_children(mut block: Block) -> Block {
+    if let Some(children) = block.children_mut() {
+        children.clear();
+    }
+    block
+}
+
+/// Estimate token count for document or section (Phase 3.2)
+#[derive(Debug, Deserialize)]
+pub struct EstimateTokensParams {
+    pub document_id: String,
+    #[serde(default)]
+    pub section_label: Option<String>,
+}
+
+pub fn handle_estimate_tokens(
+    adapter: &IronBaseAdapter,
+    params: EstimateTokensParams,
+) -> CommandResult {
+    let document = adapter
+        .get_document(&params.document_id)
+        .map_err(|e| format!("Failed to get document: {}", e))?;
+
+    // Get the blocks to estimate
+    let blocks_to_estimate: &[Block] = if let Some(label) = &params.section_label {
+        // Find specific section
+        let section_block = find_block_by_label(&document.docjll, label)
+            .ok_or_else(|| format!("Section '{}' not found in document", label))?;
+        // Create a slice with just this block (we need to estimate it recursively)
+        std::slice::from_ref(section_block)
+    } else {
+        // Estimate entire document
+        &document.docjll
+    };
+
+    // Estimate tokens using a simple heuristic
+    let token_estimate = estimate_tokens_for_blocks(blocks_to_estimate);
+
+    // Calculate some useful stats
+    let char_count = count_chars_in_blocks(blocks_to_estimate);
+    let block_count = count_blocks_recursive(blocks_to_estimate);
+
+    Ok(serde_json::json!({
+        "document_id": params.document_id,
+        "section_label": params.section_label,
+        "estimated_tokens": token_estimate,
+        "character_count": char_count,
+        "block_count": block_count,
+        "estimation_method": "GPT-style (chars/4 + blocks*20)"
+    }))
+}
+
+/// Estimate tokens for blocks recursively
+/// Uses a simple heuristic: ~4 chars per token + overhead for structure
+fn estimate_tokens_for_blocks(blocks: &[Block]) -> usize {
+    let char_count = count_chars_in_blocks(blocks);
+    let block_count = count_blocks_recursive(blocks);
+
+    // Heuristic:
+    // - ~4 characters per token (GPT-style)
+    // - ~20 tokens overhead per block for structure/labels
+    (char_count / 4) + (block_count * 20)
+}
+
+/// Count total characters in blocks recursively
+fn count_chars_in_blocks(blocks: &[Block]) -> usize {
+    let mut count = 0;
+    for block in blocks {
+        // Serialize block to JSON and count characters
+        if let Ok(json_str) = serde_json::to_string(block) {
+            count += json_str.len();
+        }
+
+        // Recursively count children
+        if let Some(children) = block.children() {
+            count += count_chars_in_blocks(children);
+        }
+    }
+    count
+}
+
+/// Count total number of blocks recursively
+fn count_blocks_recursive(blocks: &[Block]) -> usize {
+    let mut count = blocks.len();
+    for block in blocks {
+        if let Some(children) = block.children() {
+            count += count_blocks_recursive(children);
+        }
+    }
+    count
+}
+
 /// Search document content command
 #[derive(Debug, Deserialize)]
 pub struct SearchContentParams {
@@ -559,6 +733,16 @@ pub fn dispatch_command(
             let params: SearchContentParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid parameters: {}", e))?;
             handle_search_content(adapter, params)
+        }
+        "mcp_docjl_get_section" => {
+            let params: GetSectionParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid parameters: {}", e))?;
+            handle_get_section(adapter, params)
+        }
+        "mcp_docjl_estimate_tokens" => {
+            let params: EstimateTokensParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid parameters: {}", e))?;
+            handle_estimate_tokens(adapter, params)
         }
         _ => Err(format!("Unknown command: {}", method)),
     }

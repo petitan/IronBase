@@ -46,10 +46,10 @@ TOOLS_RESPONSE=$(curl -s -X POST http://127.0.0.1:8080/mcp \
   }')
 
 TOOL_COUNT=$(echo "$TOOLS_RESPONSE" | python3 -c "import sys, json; d=json.load(sys.stdin); print(len(d['result']['tools']))")
-if [ "$TOOL_COUNT" -eq 9 ]; then
-  echo "✅ tools/list successful (9 tools available)"
+if [ "$TOOL_COUNT" -eq 11 ]; then
+  echo "✅ tools/list successful (11 tools available)"
 else
-  echo "❌ FAILED: tools/list (expected 9 tools, got $TOOL_COUNT)"
+  echo "❌ FAILED: tools/list (expected 11 tools, got $TOOL_COUNT)"
   exit 1
 fi
 
@@ -237,7 +237,7 @@ echo "============================================================"
 echo ""
 echo "Test Summary:"
 echo "  1. initialize ✅"
-echo "  2. tools/list (9 tools) ✅"
+echo "  2. tools/list (11 tools) ✅"
 echo "  3. tools/call (create_document) ✅"
 echo "  4. resources/list ✅"
 echo "  5. resources/read ✅"

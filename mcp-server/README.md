@@ -14,11 +14,12 @@ AI-assisted DOCJL document editing server implementing the Model Context Protoco
 
 ### MCP Protocol Support (NEW!)
 - **Full MCP Implementation**: All MCP protocol logic in Rust server
-- **9 Tools**: Complete DOCJL document operations
+- **11 Tools**: Complete DOCJL document operations (9 core + 2 chunking tools)
 - **Resources**: Documents exposed as `docjl://document/{id}` resources
 - **15 Prompts**: 10 Balanced MVP + 5 ISO 17025 Calibration prompts
 - **Claude Desktop Integration**: STDIO bridge for seamless desktop integration
 - **HTTP API**: Full MCP functionality over HTTP for all clients
+- **Chunking Support**: Handle large documents with section-based retrieval and token estimation
 
 ## Quick Start
 
@@ -73,6 +74,9 @@ See [docs/MCP_DOCJL_SPEC.md](../docs/MCP_DOCJL_SPEC.md) for complete API documen
 - `mcp_docjl_get_document` - Retrieve document
 - `mcp_docjl_list_headings` - Get document outline
 - `mcp_docjl_search_blocks` - Search for blocks
+- `mcp_docjl_search_content` - Full-text content search
+- `mcp_docjl_get_section` - Get specific section with controlled depth (Phase 3: Chunking Support)
+- `mcp_docjl_estimate_tokens` - Estimate token count for documents/sections (Phase 3: Chunking Support)
 
 ### Write Operations
 
@@ -165,12 +169,12 @@ let collection = db.collection("documents")?;
 ## Roadmap
 
 - [x] Phase 1: Core infrastructure, auth, audit
-- [ ] Phase 2: Read operations (list, get, search)
-- [ ] Phase 3: Write operations (insert, update)
-- [ ] Phase 4: Advanced features (move, delete, references)
-- [ ] Phase 5: IronBase integration
-- [ ] Phase 6: Performance optimization
-- [ ] Phase 7: Production hardening
+- [x] Phase 2: Read operations (list, get, search)
+- [x] Phase 3: Chunking support (get_section, estimate_tokens)
+- [x] Phase 4: Write operations (insert, update, delete)
+- [x] MCP Integration: Full protocol support with 15 prompts
+- [ ] Phase 5: Performance optimization
+- [ ] Phase 6: Production hardening
 
 ## License
 

@@ -109,7 +109,7 @@ Claude Desktop → Python Bridge → Rust HTTP Server
 }
 ```
 
-**Available Tools (9 total)**:
+**Available Tools (11 total)**:
 1. `mcp_docjl_create_document` - Create new document
 2. `mcp_docjl_list_documents` - List all documents
 3. `mcp_docjl_get_document` - Get full document by ID
@@ -119,6 +119,8 @@ Claude Desktop → Python Bridge → Rust HTTP Server
 7. `mcp_docjl_insert_block` - Insert new block (supports numeric, hierarchical, alphanumeric labels)
 8. `mcp_docjl_update_block` - Update existing block
 9. `mcp_docjl_delete_block` - Delete block from document
+10. `mcp_docjl_get_section` - Get specific section with controlled depth (Phase 3: Chunking Support)
+11. `mcp_docjl_estimate_tokens` - Estimate token count for documents/sections (Phase 3: Chunking Support)
 
 **Implementation**: `src/main.rs:449-489`
 
@@ -396,7 +398,8 @@ curl -X POST http://127.0.0.1:8080/mcp \
 
 **Test Scripts**:
 - `test_mcp_initialize.sh` - Test initialize handler
-- `test_mcp_tools_list.sh` - Test tools/list with 9 tools
+- `test_mcp_tools_list.sh` - Test tools/list with 11 tools
+- `test_chunking_tools.sh` - Test Phase 3 chunking tools (get_section, estimate_tokens)
 - `test_mcp_resources.sh` - Test resources/* handlers
 - `test_mcp_prompts.sh` - Test prompts/list with 15 prompts
 - `test_full_mcp_flow.sh` - Full integration test
