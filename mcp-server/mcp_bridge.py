@@ -77,6 +77,26 @@ def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
             "result": {
                 "tools": [
                     {
+                        "name": "mcp_docjl_create_document",
+                        "description": "Create a new DOCJL document",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "document": {
+                                    "type": "object",
+                                    "description": "Full document with id, metadata, and docjll blocks",
+                                    "properties": {
+                                        "id": {"type": "string", "description": "Document identifier"},
+                                        "metadata": {"type": "object", "description": "Document metadata (title, version, etc.)"},
+                                        "docjll": {"type": "array", "description": "Array of top-level blocks"}
+                                    },
+                                    "required": ["id", "metadata", "docjll"]
+                                }
+                            },
+                            "required": ["document"]
+                        }
+                    },
+                    {
                         "name": "mcp_docjl_list_documents",
                         "description": "List all DOCJL documents",
                         "inputSchema": {
@@ -192,11 +212,14 @@ def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
         tool_name = params.get("name")
         tool_arguments = params.get("arguments", {})
 
-        # Forward to backend as direct method call
+        # Forward to backend with MCP tools/call wrapper
         backend_request = {
             "jsonrpc": "2.0",
-            "method": tool_name,
-            "params": tool_arguments,
+            "method": "tools/call",
+            "params": {
+                "name": tool_name,
+                "arguments": tool_arguments
+            },
             "id": request_id
         }
 

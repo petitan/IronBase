@@ -286,7 +286,45 @@ impl RealIronBaseAdapter {
         Ok(())
     }
 
-    /// List all documents from IronBase
+    /// Create a new document
+    pub fn create_document(&self, document: Document) -> DomainResult<String> {
+        let document_id = document.id.clone();
+
+        // Serialize document to JSON
+        let doc_value = serde_json::to_value(&document)
+            .map_err(|e| DomainError::StorageError {
+                message: format!("Failed to serialize document: {}", e),
+            })?;
+
+        // Convert to HashMap (required by IronBase insert_one)
+        let doc_map: HashMap<String, Value> = serde_json::from_value(doc_value)
+            .map_err(|e| DomainError::StorageError {
+                message: format!("Failed to convert document to map: {}", e),
+            })?;
+
+        // Get collection (auto-creates if doesn't exist) and insert
+        let collection = self.db.read().collection(&self.collection_name)
+            .map_err(|e| DomainError::StorageError {
+                message: format!("Failed to get collection: {}", e),
+            })?;
+
+        // Insert document
+        collection.insert_one(doc_map)
+            .map_err(|e| DomainError::StorageError {
+                message: format!("Failed to insert document: {}", e),
+            })?;
+
+        // CRITICAL: Flush database to persist collection metadata
+        // Without this, collection metadata is not saved and documents are lost on restart
+        self.db.read().flush()
+            .map_err(|e| DomainError::StorageError {
+                message: format!("Failed to flush database: {}", e),
+            })?;
+
+        // Return the document ID
+        Ok(document_id.unwrap_or_else(|| "<no id>".to_string()))
+    }
+
     pub fn list_documents(&self) -> DomainResult<Vec<Document>> {
         let db = self.db.read();
         let collection = db.collection(&self.collection_name)

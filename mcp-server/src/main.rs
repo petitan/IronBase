@@ -128,16 +128,40 @@ fn default_config() -> Config {
 /// MCP JSON-RPC request
 #[derive(Debug, Deserialize)]
 struct McpRequest {
+    #[serde(default)]
+    jsonrpc: Option<String>,
+    #[serde(default)]
+    id: Option<serde_json::Value>,
     method: String,
     params: serde_json::Value,
+}
+
+/// Tools/call wrapper params (MCP protocol)
+#[derive(Debug, Deserialize)]
+struct ToolsCallParams {
+    name: String,
+    #[serde(default)]
+    arguments: Option<serde_json::Value>,
 }
 
 /// MCP JSON-RPC response
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum McpResponse {
-    Success { result: serde_json::Value },
-    Error { error: McpError },
+    Success {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        jsonrpc: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<serde_json::Value>,
+        result: serde_json::Value,
+    },
+    Error {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        jsonrpc: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<serde_json::Value>,
+        error: McpError,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -154,14 +178,39 @@ async fn handle_mcp_request(
     headers: HeaderMap,
     Json(request): Json<McpRequest>,
 ) -> Response {
+    // Unwrap tools/call wrapper if present (MCP protocol support)
+    let (actual_method, actual_params) = if request.method == "tools/call" {
+        // Parse tools/call params
+        match serde_json::from_value::<ToolsCallParams>(request.params.clone()) {
+            Ok(tools_params) => (
+                tools_params.name,
+                tools_params.arguments.unwrap_or_else(|| serde_json::json!({})),
+            ),
+            Err(e) => {
+                return error_response_with_id(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_TOOLS_CALL",
+                    &format!("Invalid tools/call params: {}", e),
+                    request.jsonrpc,
+                    request.id,
+                );
+            }
+        }
+    } else {
+        // Direct method call (backward compatibility)
+        (request.method.clone(), request.params.clone())
+    };
+
     // Extract API key from Authorization header
     let api_key_str = match extract_api_key(&headers) {
         Some(key) => key,
         None if state.config.require_auth => {
-            return error_response(
+            return error_response_with_id(
                 StatusCode::UNAUTHORIZED,
                 "INVALID_API_KEY",
                 "Missing or invalid Authorization header",
+                request.jsonrpc,
+                request.id,
             );
         }
         None => "anonymous", // Allow anonymous if auth not required
@@ -175,7 +224,13 @@ async fn handle_mcp_request(
                 .audit_logger
                 .log_auth("unknown", false, Some(e.to_string()))
                 .ok();
-            return error_response(StatusCode::UNAUTHORIZED, "INVALID_API_KEY", &e.to_string());
+            return error_response_with_id(
+                StatusCode::UNAUTHORIZED,
+                "INVALID_API_KEY",
+                &e.to_string(),
+                request.jsonrpc,
+                request.id,
+            );
         }
         Err(_) => ApiKey {
             key: "anonymous".to_string(),
@@ -187,34 +242,52 @@ async fn handle_mcp_request(
     };
 
     // Authorize command
-    if let Err(e) = state.auth_manager.authorize(&api_key, &request.method) {
+    if let Err(e) = state.auth_manager.authorize(&api_key, &actual_method) {
         state
             .audit_logger
             .log_auth(&api_key.name, false, Some(e.to_string()))
             .ok();
-        return error_response(StatusCode::FORBIDDEN, "COMMAND_NOT_ALLOWED", &e.to_string());
+        return error_response_with_id(
+            StatusCode::FORBIDDEN,
+            "COMMAND_NOT_ALLOWED",
+            &e.to_string(),
+            request.jsonrpc,
+            request.id,
+        );
     }
 
     // Check rate limit
-    let is_write_command = !mcp_docjl::host::security::read_only_commands().contains(&request.method);
+    let is_write_command = !mcp_docjl::host::security::read_only_commands().contains(&actual_method);
     if is_write_command {
         if let Err(e) = state.auth_manager.check_write_rate_limit(&api_key.key) {
             state
                 .audit_logger
-                .log_rate_limit(&api_key.name, &request.method)
+                .log_rate_limit(&api_key.name, &actual_method)
                 .ok();
-            return error_response(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMIT_EXCEEDED", &e.to_string());
+            return error_response_with_id(
+                StatusCode::TOO_MANY_REQUESTS,
+                "RATE_LIMIT_EXCEEDED",
+                &e.to_string(),
+                request.jsonrpc,
+                request.id,
+            );
         }
     } else if let Err(e) = state.auth_manager.check_rate_limit(&api_key.key) {
         state
             .audit_logger
-            .log_rate_limit(&api_key.name, &request.method)
+            .log_rate_limit(&api_key.name, &actual_method)
             .ok();
-        return error_response(StatusCode::TOO_MANY_REQUESTS, "RATE_LIMIT_EXCEEDED", &e.to_string());
+        return error_response_with_id(
+            StatusCode::TOO_MANY_REQUESTS,
+            "RATE_LIMIT_EXCEEDED",
+            &e.to_string(),
+            request.jsonrpc,
+            request.id,
+        );
     }
 
     // Execute command
-    let result = execute_command(&state, &request.method, &request.params).await;
+    let result = execute_command(&state, &actual_method, &actual_params).await;
 
     // Log to audit
     let command_result = match &result {
@@ -225,9 +298,9 @@ async fn handle_mcp_request(
     };
 
     if let Ok(audit_id) = state.audit_logger.log_command(
-        &request.method,
+        &actual_method,
         &api_key.name,
-        request.params,
+        actual_params,
         command_result,
     ) {
         info!("Command logged: audit_id={}", audit_id);
@@ -235,8 +308,14 @@ async fn handle_mcp_request(
 
     // Return response
     match result {
-        Ok(value) => success_response(value),
-        Err(e) => error_response(StatusCode::INTERNAL_SERVER_ERROR, "COMMAND_FAILED", &e),
+        Ok(value) => success_response_with_id(value, request.jsonrpc, request.id),
+        Err(e) => error_response_with_id(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "COMMAND_FAILED",
+            &e,
+            request.jsonrpc,
+            request.id,
+        ),
     }
 }
 
@@ -266,16 +345,36 @@ fn extract_api_key(headers: &HeaderMap) -> Option<&str> {
         .and_then(|s| s.strip_prefix("Bearer "))
 }
 
-/// Create success response
-fn success_response(result: serde_json::Value) -> Response {
-    (StatusCode::OK, Json(McpResponse::Success { result })).into_response()
+/// Create success response with JSON-RPC fields
+fn success_response_with_id(
+    result: serde_json::Value,
+    jsonrpc: Option<String>,
+    id: Option<serde_json::Value>,
+) -> Response {
+    (
+        StatusCode::OK,
+        Json(McpResponse::Success {
+            jsonrpc,
+            id,
+            result,
+        }),
+    )
+        .into_response()
 }
 
-/// Create error response
-fn error_response(status: StatusCode, code: &str, message: &str) -> Response {
+/// Create error response with JSON-RPC fields
+fn error_response_with_id(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    jsonrpc: Option<String>,
+    id: Option<serde_json::Value>,
+) -> Response {
     (
         status,
         Json(McpResponse::Error {
+            jsonrpc,
+            id,
             error: McpError {
                 code: code.to_string(),
                 message: message.to_string(),
