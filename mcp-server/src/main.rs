@@ -469,11 +469,12 @@ fn handle_mcp_protocol_method(
             )
         }
         "tools/list" => {
-            // TODO: Implement tools/list
-            error_response_with_id(
-                StatusCode::NOT_IMPLEMENTED,
-                "NOT_IMPLEMENTED",
-                "tools/list not yet implemented",
+            // Return list of available MCP tools
+            let tools_list = get_tools_list();
+            success_response_with_id(
+                serde_json::json!({
+                    "tools": tools_list
+                }),
                 jsonrpc,
                 id,
             )
@@ -516,4 +517,135 @@ fn handle_mcp_protocol_method(
             id,
         ),
     }
+}
+
+/// Get list of available MCP tools
+fn get_tools_list() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "mcp_docjl_create_document",
+            "description": "Create a new DOCJL document",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document": {
+                        "type": "object",
+                        "description": "Full document with id, metadata, and docjll blocks",
+                        "properties": {
+                            "id": {"type": "string", "description": "Document identifier"},
+                            "metadata": {"type": "object", "description": "Document metadata (title, version, etc.)"},
+                            "docjll": {"type": "array", "description": "Array of top-level blocks"}
+                        },
+                        "required": ["id", "metadata", "docjll"]
+                    }
+                },
+                "required": ["document"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_list_documents",
+            "description": "List all DOCJL documents",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "filter": {"type": "object", "description": "Optional filter"}
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_get_document",
+            "description": "Get full DOCJL document by ID",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "description": "Document ID"}
+                },
+                "required": ["document_id"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_list_headings",
+            "description": "Get document outline/table of contents",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "description": "Document ID"}
+                },
+                "required": ["document_id"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_search_blocks",
+            "description": "Search for blocks in documents",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "description": "Document ID"},
+                    "query": {"type": "object", "description": "Search query"}
+                },
+                "required": ["document_id", "query"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_search_content",
+            "description": "Search for text content within a document. Returns only matching blocks to solve context window problems. Case-insensitive by default.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "description": "Document ID to search in"},
+                    "query": {"type": "string", "description": "Text to search for"},
+                    "case_sensitive": {"type": "boolean", "description": "Whether search should be case-sensitive (default: false)"},
+                    "max_results": {"type": "integer", "description": "Maximum number of matches to return (default: 100)"}
+                },
+                "required": ["document_id", "query"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_insert_block",
+            "description": "Insert new content block into document. Label format: 'type:id' - supports numeric (para:1), hierarchical (sec:4.2.1), or alphanumeric (para:test, sec:demo_1) identifiers.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string", "description": "Document ID (as string)"},
+                    "block": {
+                        "type": "object",
+                        "description": "Block to insert with type, label (format: 'type:id' - numeric, hierarchical, or alphanumeric), and content array",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["paragraph", "heading"], "description": "Block type"},
+                            "label": {"type": "string", "pattern": "^(para|sec|fig|tbl|eq|lst|def|thm|lem|proof|ex|note|warn|info|tip):([a-zA-Z0-9._]+)$", "description": "Label in format 'type:id' (e.g. para:1, sec:4.2.1, para:test, sec:demo_1)"},
+                            "content": {"type": "array", "description": "Content array with {type, content} objects"}
+                        },
+                        "required": ["type", "label", "content"]
+                    },
+                    "position": {"type": "string", "description": "Insert position: 'start', 'end', or 'before:label' / 'after:label'"}
+                },
+                "required": ["document_id", "block"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_update_block",
+            "description": "Update existing block",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "block_label": {"type": "string"},
+                    "updates": {"type": "object"}
+                },
+                "required": ["document_id", "block_label", "updates"]
+            }
+        }),
+        serde_json::json!({
+            "name": "mcp_docjl_delete_block",
+            "description": "Delete block from document",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "document_id": {"type": "string"},
+                    "block_label": {"type": "string"}
+                },
+                "required": ["document_id", "block_label"]
+            }
+        }),
+    ]
 }
