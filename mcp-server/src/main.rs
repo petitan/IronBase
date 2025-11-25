@@ -622,11 +622,11 @@ async fn handle_mcp_protocol_method(
             }
         }
         "prompts/list" => {
-            // TODO: Implement prompts/list
-            error_response_with_id(
-                StatusCode::NOT_IMPLEMENTED,
-                "NOT_IMPLEMENTED",
-                "prompts/list not yet implemented",
+            let prompts_list = get_prompts_list();
+            success_response_with_id(
+                serde_json::json!({
+                    "prompts": prompts_list
+                }),
                 jsonrpc,
                 id,
             )
@@ -769,5 +769,29 @@ fn get_tools_list() -> Vec<serde_json::Value> {
                 "required": ["document_id", "block_label"]
             }
         }),
+    ]
+}
+
+/// Get MCP prompts list (15 prompts: 10 Balanced + 5 Calibration)
+fn get_prompts_list() -> Vec<serde_json::Value> {
+    vec![
+        // Balanced MVP (10 prompts)
+        serde_json::json!({"name": "validate-structure", "description": "Validate DOCJL document structure and label hierarchy", "arguments": [{"name": "document_id", "description": "Document ID to validate", "required": true}]}),
+        serde_json::json!({"name": "validate-compliance", "description": "Check ISO 17025 compliance requirements", "arguments": [{"name": "document_id", "description": "Document ID (Quality Manual, SOP, etc.)", "required": true}, {"name": "document_type", "description": "Type: quality_manual | sop | work_instruction | audit_report", "required": true}]}),
+        serde_json::json!({"name": "create-section", "description": "Create new DOCJL section with appropriate structure", "arguments": [{"name": "section_type", "description": "Type: procedure | requirement | evidence | reference", "required": true}, {"name": "topic", "description": "Section topic/title", "required": true}]}),
+        serde_json::json!({"name": "summarize-document", "description": "Generate executive summary of DOCJL document", "arguments": [{"name": "document_id", "description": "Document ID to summarize", "required": true}, {"name": "max_length", "description": "Maximum summary length in words", "required": false}]}),
+        serde_json::json!({"name": "suggest-improvements", "description": "Analyze document and suggest improvements", "arguments": [{"name": "document_id", "description": "Document ID to analyze", "required": true}, {"name": "focus_areas", "description": "Areas to focus: clarity | completeness | compliance | consistency", "required": false}]}),
+        serde_json::json!({"name": "audit-readiness", "description": "Check document readiness for ISO 17025 audit", "arguments": [{"name": "document_id", "description": "Document ID to check", "required": true}, {"name": "audit_scope", "description": "Audit scope: full | partial | specific_clause", "required": false}]}),
+        serde_json::json!({"name": "create-outline", "description": "Generate document outline based on document type", "arguments": [{"name": "document_type", "description": "Type: quality_manual | sop | work_instruction", "required": true}, {"name": "topic", "description": "Document topic", "required": true}]}),
+        serde_json::json!({"name": "analyze-changes", "description": "Compare two document versions and analyze changes", "arguments": [{"name": "document_id_old", "description": "Old version document ID", "required": true}, {"name": "document_id_new", "description": "New version document ID", "required": true}]}),
+        serde_json::json!({"name": "check-consistency", "description": "Check internal consistency across document sections", "arguments": [{"name": "document_id", "description": "Document ID to check", "required": true}]}),
+        serde_json::json!({"name": "resolve-reference", "description": "Resolve and explain a label reference", "arguments": [{"name": "document_id", "description": "Document ID", "required": true}, {"name": "label", "description": "Label to resolve (e.g. sec:4.2.1)", "required": true}, {"name": "include_context", "description": "Include surrounding context", "required": false}]}),
+        
+        // Calibration-specific (5 prompts)
+        serde_json::json!({"name": "calculate-measurement-uncertainty", "description": "Calculate measurement uncertainty for calibration data", "arguments": [{"name": "measurement_data", "description": "Measurement data array", "required": true}, {"name": "instrument_specs", "description": "Instrument specifications", "required": true}, {"name": "environmental_data", "description": "Environmental conditions", "required": false}]}),
+        serde_json::json!({"name": "generate-calibration-hierarchy", "description": "Generate traceability hierarchy for calibration", "arguments": [{"name": "instrument_type", "description": "Type of instrument", "required": true}, {"name": "measurement_range", "description": "Measurement range", "required": true}, {"name": "criticality", "description": "Criticality: high | medium | low", "required": false}]}),
+        serde_json::json!({"name": "determine-calibration-interval", "description": "Determine optimal calibration interval", "arguments": [{"name": "instrument_data", "description": "Instrument usage and history data", "required": true}, {"name": "risk_tolerance", "description": "Risk tolerance level", "required": false}]}),
+        serde_json::json!({"name": "create-calibration-certificate", "description": "Generate calibration certificate from data", "arguments": [{"name": "instrument_data", "description": "Instrument information", "required": true}, {"name": "calibration_results", "description": "Calibration results", "required": true}, {"name": "uncertainty_data", "description": "Uncertainty budget data", "required": true}, {"name": "reference_standard", "description": "Reference standard details", "required": true}, {"name": "environmental_conditions", "description": "Environmental conditions during calibration", "required": false}]}),
+        serde_json::json!({"name": "generate-uncertainty-budget", "description": "Create detailed measurement uncertainty budget", "arguments": [{"name": "measurement_process", "description": "Description of measurement process", "required": true}, {"name": "uncertainty_components", "description": "List of uncertainty sources", "required": true}]}),
     ]
 }
