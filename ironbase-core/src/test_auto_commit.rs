@@ -108,12 +108,12 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_file(wal_path);
 
-        // Open database in Unsafe mode
+        // Open database in Unsafe mode (manual checkpoint)
         let db =
-            DatabaseCore::<StorageEngine>::open_with_durability(db_path, DurabilityMode::Unsafe)
+            DatabaseCore::<StorageEngine>::open_with_durability(db_path, DurabilityMode::unsafe_manual())
                 .unwrap();
 
-        assert_eq!(db.durability_mode(), DurabilityMode::Unsafe);
+        assert_eq!(db.durability_mode(), DurabilityMode::unsafe_manual());
 
         // Insert document (fast path, no WAL)
         let doc = HashMap::from([("name".to_string(), json!("Bob"))]);

@@ -241,6 +241,8 @@ pub fn default_whitelist() -> HashSet<String> {
         "mcp_docjl_validate_references",
         "mcp_docjl_validate_schema",
         "mcp_docjl_get_audit_log",
+        "mcp_docjl_get_section",
+        "mcp_docjl_estimate_tokens",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -258,6 +260,8 @@ pub fn read_only_commands() -> HashSet<String> {
         "mcp_docjl_validate_references",
         "mcp_docjl_validate_schema",
         "mcp_docjl_get_audit_log",
+        "mcp_docjl_get_section",
+        "mcp_docjl_estimate_tokens",
     ]
     .iter()
     .map(|s| s.to_string())

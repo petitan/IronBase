@@ -6,248 +6,125 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **IronBase** is a lightweight embedded NoSQL document database written in Rust with Python bindings via PyO3. It provides a MongoDB-like API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
 
-**Technology Stack:**
-- **Backend**: Rust (core library, storage engine, query processing)
-- **Python Binding**: PyO3 (Rust-Python bridge)
-- **Build System**: Maturin (builds Python wheels from Rust)
-- **Storage**: Append-only file format with memory-mapped I/O
-- **Serialization**: JSON (serde_json) + BSON for documents
-
 ## Build and Development Commands
 
-### Initial Setup
 ```bash
-# Install Maturin (required for building)
+# Initial setup
 pip install maturin
+maturin develop              # Development build with Python bindings
 
-# Development build (debug, fast iteration)
-maturin develop
+# Testing
+cargo test -p ironbase-core                    # All Rust unit tests
+cargo test -p ironbase-core -- test_name       # Single test by name
+cargo test -p ironbase-core -- --nocapture     # Tests with stdout
+just run-dev-checks                            # Full CI check: fmt + clippy + tests
 
-# Release build (optimized)
-maturin build --release
+# MCP Server (separate workspace)
+cd mcp-server && cargo build --release
+cd mcp-server && cargo test
 
-# Install from wheel
-pip install target/wheels/ironbase-*.whl
-```
-
-### Testing
-```bash
-# Rust unit tests
-cargo test
-
-# Rust tests with release optimizations
-cargo test --release
-
-# Run Python example
-python example.py
-
-# Python code formatting/linting
-ruff check .
-ruff format .
-```
-
-### Benchmarking
-```bash
-# Run performance benchmarks
-cargo bench
-```
-
-### Cleaning
-```bash
-# Clean Rust build artifacts
-cargo clean
-
-# Remove generated Python packages
-rm -rf target/
+# Python integration tests
+source venv/bin/activate && python test_python_auto_commit.py
 ```
 
 ## Architecture
 
-### High-Level Structure
+### Workspace Structure
+
+The project is a Cargo workspace with the MCP server excluded (separate build):
+
 ```
-Python API (PyO3 bindings)
-         ↓
-Rust Core Library (CRUD operations, query engine)
-         ↓
-Storage Engine (memory-mapped I/O, file management)
-         ↓
-.mlite File (single-file database)
+MongoLite/
+├── ironbase-core/           # Pure Rust core library
+├── bindings/python/         # PyO3 Python bindings
+└── mcp-server/              # MCP protocol server (excluded from workspace)
 ```
 
-### Module Responsibilities
+### Core Module Responsibilities
 
-**lib.rs** - Main entry point, PyO3 module definition, `IronBase` database class exposed to Python
+**database.rs** - Database lifecycle and durability:
+- `DatabaseCore<S: Storage>` - generic over storage backend
+- Durability modes: Safe (auto-commit), Batch, Unsafe
+- Transaction management and WAL recovery
 
-**storage.rs** - Core storage engine:
-- File format: Header (128 bytes) → Collection metadata → Document data → Indexes
-- Append-only write strategy for data integrity
-- Memory-mapped I/O for files < 1GB (falls back to regular I/O for larger files)
-- Manages `Header` (magic number "MONGOLTE", version, page size) and `CollectionMeta` (document count, offsets, last_id)
+**collection_core/mod.rs** - All CRUD and query operations:
+- insert_one/many, find/find_one, update_one/many, delete_one/many
+- Aggregation pipeline ($match, $group, $project, $sort, $limit, $skip)
+- Index management (create_index, drop_index, explain, hint)
 
-**collection.rs** - Collection operations (CRUD):
-- `insert_one()` / `insert_many()` - Implemented ✅
-- `find()` / `find_one()` - Stub implementation, needs query engine 🚧
-- `update_one()` / `update_many()` - Stub implementation 🚧
-- `delete_one()` / `delete_many()` - Stub implementation 🚧
-- `count_documents()` - Implemented ✅
-- Handles Python dict ↔ JSON conversion via `python_to_json()`
+**query.rs + query/operators.rs** - Query engine with strategy pattern:
+- Comparison: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
+- Logical: $and, $or, $not, $nor
+- Element: $exists, $type | Array: $all, $elemMatch, $size | Regex: $regex
 
-**document.rs** - Document structure and ID generation:
-- `DocumentId` enum: Int, String, or ObjectId
-- Auto-incrementing ID generation based on `CollectionMeta.last_id`
+**storage/** - Append-only storage engine:
+- file_storage.rs - File-based persistence (.mlite files)
+- memory_storage.rs - In-memory backend for testing
+- compaction.rs - Garbage collection for tombstoned documents
 
-**query.rs** - Query engine (MongoDB operators):
-- Currently placeholder for future implementation
-- Should handle: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`, `$and`, `$or`, `$exists`, `$regex`
+**transaction.rs + wal.rs** - ACD transactions:
+- Write-Ahead Log with CRC32 checksums
+- Crash recovery with automatic replay
 
-**index.rs** - Indexing system:
-- Placeholder for B-tree based indexing
-- Future: automatic `_id` index, `create_index()`, unique indexes
+### MCP Server Architecture
 
-**error.rs** - Error types using `thiserror`:
-- `IronBaseError` variants: IoError, Corruption, CollectionNotFound, CollectionExists, Serialization, etc.
+The MCP server (`mcp-server/`) implements Model Context Protocol for DOCJL document editing:
+
+```
+mcp-server/src/
+├── main.rs              # HTTP server + JSON-RPC handler
+├── commands.rs          # MCP command implementations
+├── domain/              # DOCJL business logic (block, document, label, validation)
+├── host/                # Security (auth, rate-limit) and audit logging
+└── adapters/            # Storage adapters (ironbase integration)
+```
+
+**Key MCP tools**: list_documents, get_document, search_blocks, insert_block, update_block, delete_block, get_section, estimate_tokens
 
 ### Storage File Format (.mlite)
 
 ```
 ┌─────────────────────────────────────┐
-│  Header (128 bytes, bincode)        │
-│  - magic: "MONGOLTE" (8 bytes)      │
-│  - version: u32                     │
-│  - page_size: u32 (default 4096)    │
-│  - collection_count: u32            │
-│  - free_list_head: u64              │
+│  Header (128 bytes)                 │
+│  - magic: "MONGOLTE", version       │
 ├─────────────────────────────────────┤
-│  Collection Metadata (JSON, length-prefixed) │
-│  [u32 len][JSON bytes]              │
-│  Repeated for each collection       │
+│  Collection Metadata (JSON)         │
+│  - document_catalog, indexes        │
 ├─────────────────────────────────────┤
 │  Document Data (append-only)        │
-│  [u32 len][JSON bytes]              │
-│  [u32 len][JSON bytes]              │
-│  ...                                │
-├─────────────────────────────────────┤
-│  Index Data (future)                │
+│  [u32 len][JSON bytes]...           │
 └─────────────────────────────────────┘
 ```
-
-**Important**: Metadata is rewritten on every collection create/drop/update. Document data is append-only.
-
-## Current MVP Status (v0.1.0)
-
-### ✅ Implemented
-- Database open/create
-- Collection management (create, list, drop)
-- `insert_one()` - single document insert with auto ID generation
-- `insert_many()` - bulk insert
-- `count_documents()` - returns collection document count
-- Persistent file storage with header and metadata
-- Python API via PyO3
-
-### 🚧 Under Development (Next Steps)
-- `find()` / `find_one()` - requires full scan implementation and query engine
-- Query operators (`$gt`, `$lt`, `$in`, `$eq`, etc.)
-- `update_one()` / `update_many()` - document modification
-- `delete_one()` / `delete_many()` - document deletion
-- Indexing (B-tree based)
-
-### Known Limitations
-- No transactions (only atomic single writes)
-- No cursors (all results loaded into memory)
-- No aggregation pipeline
-- No replication or sharding
-- Files > 1GB don't use memory-mapped I/O (performance impact)
 
 ## Development Guidelines
 
 ### When Adding Features
-
-1. **Start with Rust implementation** in the appropriate module (collection.rs, query.rs, etc.)
-2. **Add PyO3 bindings** in collection.rs `#[pymethods]` block
-3. **Update metadata** if collection state changes (document count, offsets)
-4. **Test with example.py** before considering complete
-5. **Use Ruff** for Python code formatting and linting
+1. Implement in Rust first (ironbase-core)
+2. Add PyO3 bindings (bindings/python/src/lib.rs)
+3. Update tests (cargo test + Python tests)
+4. Use `just run-dev-checks` before committing
 
 ### Thread Safety
-
-The codebase uses:
-- `Arc<RwLock<StorageEngine>>` - shared storage across collections
-- `parking_lot::RwLock` - faster RwLock implementation
-- Write lock needed for: insert, update, delete, metadata changes
-- Read lock sufficient for: find, count, list_collections
+- `Arc<RwLock<StorageEngine>>` for shared storage (parking_lot::RwLock)
+- Write lock: insert, update, delete
+- Read lock: find, count, list_collections
 
 ### Error Handling
-
-Always propagate errors properly:
-- Rust: Use `Result<T>` with `IronBaseError`
-- Python bindings: Map to appropriate `PyErr` types (`PyIOError`, `PyRuntimeError`, `PyValueError`)
-
-### Memory-Mapped I/O
-
-Currently enabled for files < 1GB:
-```rust
-let mmap = if file.metadata()?.len() < 1_000_000_000 {
-    unsafe { MmapOptions::new().map_mut(&file).ok() }
-} else {
-    None
-};
-```
-
-Future optimization: use mmap for reads, update strategy for larger files.
+- Rust: `Result<T>` with `MongoLiteError` (thiserror)
+- Python: Map to PyIOError, PyRuntimeError, PyValueError
 
 ## Testing Strategy
 
-- **Rust unit tests**: `cargo test` - test storage engine, serialization, error handling
-- **Python integration tests**: Run `example.py` to verify end-to-end workflows
-- **Benchmarks**: `cargo bench` for performance regression testing
+- **Test first** approach
+- Rust unit tests: `cargo test -p ironbase-core`
+- Property tests: proptest in `ironbase-core/tests/property_tests.rs`
+- Python integration: `test_*.py` files in project root
+- MCP tests: `cd mcp-server && cargo test`
 
-## Detailed Implementation Documentation
+## Key Dependencies
 
-**IMPORTANT:** For detailed implementation plans with algorithms, pseudocode, and trade-off analysis, refer to these documents:
-
-### Core Implementation Guides
-- **`IMPLEMENTATION_UPDATE.md`** - Update operations ($set, $inc, $push, $pull, etc.)
-  - Append-only vs. in-place strategy decision
-  - All MongoDB update operators with pseudocode
-  - Tombstone pattern for versioning
-  - Edge cases and error handling
-
-- **`IMPLEMENTATION_DELETE.md`** - Delete operations and compaction
-  - Tombstone-based logical deletion
-  - Full compaction algorithm (garbage collection)
-  - Trigger strategies and performance analysis
-  - Crash recovery mechanisms
-
-- **`IMPLEMENTATION_INDEX.md`** - B+ tree indexing system
-  - B+ tree vs. alternatives comparison
-  - Node structure and file format
-  - Insert/Search/Delete/Range-scan algorithms
-  - Unique constraints and sparse indexes
-
-- **`IMPLEMENTATION_QUERY_OPTIMIZER.md`** - Query optimization
-  - Index selection heuristics
-  - Cost-based optimization model
-  - Query rewrite rules
-  - Execution plan generation
-
-### Reference Documentation
-- **`ALGORITHMS.md`** - Complete algorithm reference
-  - All critical algorithms with pseudocode
-  - Complexity analysis (time/space/I/O)
-  - Cross-references to implementation guides
-  - Performance characteristics summary
-
-### When to Consult These Docs
-- **Before implementing** any CRUD operation beyond insert
-- **When designing** query optimization logic
-- **When debugging** performance issues
-- **When making** architectural decisions about storage/indexing
-
-## File Locations
-
-- Rust source: `*.rs` files in root directory (flat structure, no src/ subdirectory)
-- Documentation: `README.md`, `ARCHITECTURE.md`, `BUILD.md`, `PROJECT_OVERVIEW.md`, `START_HERE.md`, `SUMMARY.md`
-- Implementation guides: `IMPLEMENTATION_*.md`, `ALGORITHMS.md`
-- Build config: `Cargo.toml` (Rust), `pyproject.toml` (Python package)
-- Python example: `example.py`
-- test first modszer mindig
+- **serde/serde_json**: Serialization
+- **parking_lot**: Fast RwLock
+- **pyo3**: Python bindings
+- **maturin**: Build Python wheels from Rust
+- **ahash/dashmap**: Fast hashing

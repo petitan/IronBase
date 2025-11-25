@@ -24,11 +24,14 @@ impl IronBase {
     ///     path (str): Database file path (.mlite)
     ///     durability (str, optional): Durability mode - "safe" (default), "batch", or "unsafe"
     ///     batch_size (int, optional): Batch size for "batch" mode (default: 100)
+    ///     auto_checkpoint (int, optional): For "unsafe" mode - auto checkpoint every N ops (default: None = manual)
     ///
     /// Durability modes:
     ///     - "safe": Every operation auto-committed (like SQL) - ZERO data loss, ~1-5K inserts/sec
     ///     - "batch": Operations batched, periodic commit - Bounded loss (max batch_size ops), ~20-50K inserts/sec
-    ///     - "unsafe": No auto-commit, manual checkpoint required - High data loss risk, ~50-100K inserts/sec
+    ///     - "unsafe": No auto-commit - High data loss risk, ~50-100K inserts/sec
+    ///       - auto_checkpoint=None: Manual checkpoint() required
+    ///       - auto_checkpoint=N: Auto checkpoint every N operations
     ///
     /// Examples:
     ///     # Safe mode (default)
@@ -38,16 +41,25 @@ impl IronBase {
     ///     # Batch mode (good balance)
     ///     db = IronBase("app.mlite", durability="batch", batch_size=100)
     ///
-    ///     # Unsafe mode (opt-in for performance)
+    ///     # Unsafe mode - manual checkpoint
     ///     db = IronBase("app.mlite", durability="unsafe")
+    ///
+    ///     # Unsafe mode - auto checkpoint every 10000 ops
+    ///     db = IronBase("app.mlite", durability="unsafe", auto_checkpoint=10000)
     #[new]
-    #[pyo3(signature = (path, durability="safe", batch_size=100))]
-    fn new(path: String, durability: &str, batch_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (path, durability="safe", batch_size=100, auto_checkpoint=None))]
+    fn new(path: String, durability: &str, batch_size: usize, auto_checkpoint: Option<usize>) -> PyResult<Self> {
         // Parse durability mode
         let mode = match durability {
             "safe" => DurabilityMode::Safe,
             "batch" => DurabilityMode::Batch { batch_size },
-            "unsafe" => DurabilityMode::Unsafe,
+            "unsafe" => {
+                if let Some(checkpoint_ops) = auto_checkpoint {
+                    DurabilityMode::unsafe_auto(checkpoint_ops)
+                } else {
+                    DurabilityMode::unsafe_manual()
+                }
+            }
             _ => {
                 return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                     "Invalid durability mode '{}'. Must be 'safe', 'batch', or 'unsafe'",
@@ -665,6 +677,45 @@ impl Collection {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
+    /// Create a compound index on multiple fields
+    ///
+    /// Compound indexes allow efficient queries on multiple fields in order.
+    /// The field order matters - queries can use the index if they query
+    /// the first N fields in order (prefix matching).
+    ///
+    /// Args:
+    ///     fields: list[str] - Ordered list of field names to index
+    ///     unique: bool - Whether the compound key should be unique (default: False)
+    ///
+    /// Returns:
+    ///     str - Index name (format: "collection_field1_field2_...")
+    ///
+    /// Examples:
+    ///     # Create compound index on (country, city)
+    ///     collection.create_compound_index(["country", "city"])
+    ///
+    ///     # Create unique compound index
+    ///     collection.create_compound_index(["user_id", "product_id"], unique=True)
+    ///
+    ///     # These queries can use the (country, city) index:
+    ///     collection.find({"country": "US"})                    # prefix match
+    ///     collection.find({"country": "US", "city": "NYC"})     # full match
+    ///
+    ///     # This query CANNOT use the index efficiently:
+    ///     collection.find({"city": "NYC"})                      # not a prefix
+    #[pyo3(signature = (fields, unique=false))]
+    fn create_compound_index(&self, fields: Vec<String>, unique: bool) -> PyResult<String> {
+        if fields.is_empty() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Compound index must have at least one field",
+            ));
+        }
+
+        self.core
+            .create_compound_index(fields, unique)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
     /// Drop an index
     ///
     /// Args:
@@ -795,8 +846,197 @@ impl Collection {
         })
     }
 
+    /// Create a cursor for streaming through large result sets
+    ///
+    /// This is more memory efficient than find() for large collections
+    /// as it processes documents in batches rather than loading all at once.
+    ///
+    /// Args:
+    ///     query: dict - Query filter (default: match all)
+    ///     batch_size: int - Number of documents per batch (default: 100)
+    ///
+    /// Returns:
+    ///     Cursor - A cursor object for iterating through results
+    ///
+    /// Example:
+    ///     # Process 1 million documents without loading all into memory
+    ///     cursor = collection.find_cursor({}, batch_size=500)
+    ///
+    ///     # Iterate one at a time
+    ///     while (doc := cursor.next()) is not None:
+    ///         process(doc)
+    ///
+    ///     # Or process in batches
+    ///     cursor.rewind()
+    ///     while not cursor.is_finished():
+    ///         batch = cursor.next_batch()
+    ///         for doc in batch:
+    ///             process(doc)
+    #[pyo3(signature = (query=None, batch_size=100))]
+    fn find_cursor(&self, query: Option<&PyDict>, batch_size: usize) -> PyResult<Cursor> {
+        let query_json = match query {
+            Some(q) => python_dict_to_json_value(q)?,
+            None => serde_json::json!({}),
+        };
+
+        // Get all matching document IDs (not the documents themselves)
+        let results = self
+            .core
+            .find(&query_json)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        // Convert documents to owned values for the cursor
+        Ok(Cursor {
+            documents: results,
+            position: 0,
+            batch_size,
+        })
+    }
+
     fn __repr__(&self) -> String {
         format!("Collection('{}')", self.core.name)
+    }
+}
+
+/// Cursor for iterating through query results
+///
+/// Provides memory-efficient iteration over large result sets.
+#[pyclass]
+pub struct Cursor {
+    documents: Vec<Value>,
+    position: usize,
+    batch_size: usize,
+}
+
+#[pymethods]
+impl Cursor {
+    /// Get the next document, or None if exhausted
+    fn next(&mut self) -> PyResult<PyObject> {
+        if self.position >= self.documents.len() {
+            return Python::with_gil(|py| Ok(py.None()));
+        }
+
+        let doc = &self.documents[self.position];
+        self.position += 1;
+
+        Python::with_gil(|py| {
+            let py_dict = json_to_python_dict(py, doc)?;
+            Ok(py_dict.into())
+        })
+    }
+
+    /// Get the next batch of documents
+    fn next_batch(&mut self) -> PyResult<PyObject> {
+        self.next_chunk(self.batch_size)
+    }
+
+    /// Get the next chunk of documents (up to chunk_size)
+    fn next_chunk(&mut self, chunk_size: usize) -> PyResult<PyObject> {
+        if self.position >= self.documents.len() {
+            return Python::with_gil(|py| Ok(PyList::empty(py).into()));
+        }
+
+        let end = (self.position + chunk_size).min(self.documents.len());
+
+        Python::with_gil(|py| {
+            let py_list = PyList::empty(py);
+            for doc in &self.documents[self.position..end] {
+                let py_dict = json_to_python_dict(py, doc)?;
+                py_list.append(py_dict)?;
+            }
+            self.position = end;
+            Ok(py_list.into())
+        })
+    }
+
+    /// Get remaining document count
+    fn remaining(&self) -> usize {
+        self.documents.len().saturating_sub(self.position)
+    }
+
+    /// Get total document count
+    fn total(&self) -> usize {
+        self.documents.len()
+    }
+
+    /// Get current position
+    fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Check if cursor is exhausted
+    fn is_finished(&self) -> bool {
+        self.position >= self.documents.len()
+    }
+
+    /// Reset cursor to the beginning
+    fn rewind(&mut self) {
+        self.position = 0;
+    }
+
+    /// Skip the next N documents
+    fn skip(&mut self, n: usize) {
+        self.position = (self.position + n).min(self.documents.len());
+    }
+
+    /// Take the next N documents
+    fn take(&mut self, n: usize) -> PyResult<PyObject> {
+        Python::with_gil(|py| {
+            let py_list = PyList::empty(py);
+            for _ in 0..n {
+                if self.position >= self.documents.len() {
+                    break;
+                }
+                let doc = &self.documents[self.position];
+                self.position += 1;
+                let py_dict = json_to_python_dict(py, doc)?;
+                py_list.append(py_dict)?;
+            }
+            Ok(py_list.into())
+        })
+    }
+
+    /// Collect all remaining documents into a list
+    fn collect_all(&mut self) -> PyResult<PyObject> {
+        Python::with_gil(|py| {
+            let py_list = PyList::empty(py);
+            while self.position < self.documents.len() {
+                let doc = &self.documents[self.position];
+                self.position += 1;
+                let py_dict = json_to_python_dict(py, doc)?;
+                py_list.append(py_dict)?;
+            }
+            Ok(py_list.into())
+        })
+    }
+
+    /// Support Python iteration protocol
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    /// Get next item for Python iteration
+    fn __next__(&mut self) -> PyResult<Option<PyObject>> {
+        if self.position >= self.documents.len() {
+            return Ok(None);
+        }
+
+        let doc = &self.documents[self.position];
+        self.position += 1;
+
+        Python::with_gil(|py| {
+            let py_dict = json_to_python_dict(py, doc)?;
+            Ok(Some(py_dict.into()))
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Cursor(position={}, total={}, remaining={})",
+            self.position,
+            self.documents.len(),
+            self.remaining()
+        )
     }
 }
 
@@ -898,5 +1138,6 @@ fn json_value_to_python(py: Python, value: &Value) -> PyResult<PyObject> {
 fn ironbase(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<IronBase>()?;
     m.add_class::<Collection>()?;
+    m.add_class::<Cursor>()?;
     Ok(())
 }

@@ -971,6 +971,422 @@ mod tests {
         Document::new(DocumentId::Int(id), field_map)
     }
 
+    // ========== Additional comparison operator tests ==========
+
+    #[test]
+    fn test_gte_operator() {
+        let op = GteOperator;
+        assert!(op.matches(Some(&json!(10)), &json!(5), None).unwrap());
+        assert!(op.matches(Some(&json!(5)), &json!(5), None).unwrap()); // Equal
+        assert!(!op.matches(Some(&json!(3)), &json!(5), None).unwrap());
+        assert!(!op.matches(None, &json!(5), None).unwrap()); // Missing field
+    }
+
+    #[test]
+    fn test_lt_operator() {
+        let op = LtOperator;
+        assert!(op.matches(Some(&json!(3)), &json!(5), None).unwrap());
+        assert!(!op.matches(Some(&json!(5)), &json!(5), None).unwrap()); // Equal
+        assert!(!op.matches(Some(&json!(10)), &json!(5), None).unwrap());
+        assert!(!op.matches(None, &json!(5), None).unwrap()); // Missing field
+    }
+
+    #[test]
+    fn test_lte_operator() {
+        let op = LteOperator;
+        assert!(op.matches(Some(&json!(3)), &json!(5), None).unwrap());
+        assert!(op.matches(Some(&json!(5)), &json!(5), None).unwrap()); // Equal
+        assert!(!op.matches(Some(&json!(10)), &json!(5), None).unwrap());
+        assert!(!op.matches(None, &json!(5), None).unwrap()); // Missing field
+    }
+
+    #[test]
+    fn test_gt_missing_field() {
+        let op = GtOperator;
+        assert!(!op.matches(None, &json!(5), None).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_strings() {
+        let op = GtOperator;
+        assert!(op.matches(Some(&json!("b")), &json!("a"), None).unwrap());
+        assert!(!op.matches(Some(&json!("a")), &json!("b"), None).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_booleans() {
+        let op = GtOperator;
+        assert!(op.matches(Some(&json!(true)), &json!(false), None).unwrap());
+        assert!(!op.matches(Some(&json!(false)), &json!(true), None).unwrap());
+    }
+
+    #[test]
+    fn test_comparison_incompatible_types() {
+        let op = GtOperator;
+        // String vs number - incompatible
+        assert!(!op.matches(Some(&json!("10")), &json!(5), None).unwrap());
+    }
+
+    // ========== Array operator tests ==========
+
+    #[test]
+    fn test_nin_operator() {
+        let op = NinOperator;
+        let array = json!(["NYC", "LA", "SF"]);
+        assert!(op.matches(Some(&json!("Chicago")), &array, None).unwrap());
+        assert!(!op.matches(Some(&json!("NYC")), &array, None).unwrap());
+        assert!(op.matches(None, &array, None).unwrap()); // Missing field returns true
+    }
+
+    #[test]
+    fn test_in_missing_field() {
+        let op = InOperator;
+        let array = json!(["NYC", "LA"]);
+        assert!(!op.matches(None, &array, None).unwrap());
+    }
+
+    #[test]
+    fn test_in_not_array_error() {
+        let op = InOperator;
+        let result = op.matches(Some(&json!("NYC")), &json!("not an array"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires an array"));
+    }
+
+    #[test]
+    fn test_nin_not_array_error() {
+        let op = NinOperator;
+        let result = op.matches(Some(&json!("NYC")), &json!("not an array"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires an array"));
+    }
+
+    #[test]
+    fn test_all_missing_field() {
+        let op = AllOperator;
+        assert!(!op.matches(None, &json!(["a"]), None).unwrap());
+    }
+
+    #[test]
+    fn test_all_not_array_doc() {
+        let op = AllOperator;
+        // Doc value is not an array
+        assert!(!op.matches(Some(&json!("not an array")), &json!(["a"]), None).unwrap());
+    }
+
+    #[test]
+    fn test_all_not_array_filter_error() {
+        let op = AllOperator;
+        let result = op.matches(Some(&json!(["a", "b"])), &json!("not an array"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires an array"));
+    }
+
+    // ========== Element operator tests ==========
+
+    #[test]
+    fn test_exists_not_boolean_error() {
+        let op = ExistsOperator;
+        let result = op.matches(Some(&json!("value")), &json!("not a boolean"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires a boolean"));
+    }
+
+    #[test]
+    fn test_regex_missing_field() {
+        let op = RegexOperator;
+        assert!(!op.matches(None, &json!("pattern"), None).unwrap());
+    }
+
+    #[test]
+    fn test_regex_not_string_doc() {
+        let op = RegexOperator;
+        // Doc value is not a string
+        assert!(!op.matches(Some(&json!(123)), &json!("pattern"), None).unwrap());
+    }
+
+    #[test]
+    fn test_regex_not_string_filter_error() {
+        let op = RegexOperator;
+        let result = op.matches(Some(&json!("hello")), &json!(123), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires a string pattern"));
+    }
+
+    #[test]
+    fn test_type_bson_numbers() {
+        let op = TypeOperator;
+        // BSON type 1 = double
+        assert!(op.matches(Some(&json!(3.14)), &json!(1), None).unwrap());
+        // BSON type 2 = string
+        assert!(op.matches(Some(&json!("hello")), &json!(2), None).unwrap());
+        // BSON type 3 = object
+        assert!(op.matches(Some(&json!({"a": 1})), &json!(3), None).unwrap());
+        // BSON type 4 = array
+        assert!(op.matches(Some(&json!([1, 2])), &json!(4), None).unwrap());
+        // BSON type 8 = bool
+        assert!(op.matches(Some(&json!(true)), &json!(8), None).unwrap());
+        // BSON type 10 = null
+        assert!(op.matches(Some(&json!(null)), &json!(10), None).unwrap());
+        // BSON type 16 = int
+        assert!(op.matches(Some(&json!(42)), &json!(16), None).unwrap());
+        // BSON type 18 = long
+        assert!(op.matches(Some(&json!(9223372036854775807_i64)), &json!(18), None).unwrap());
+    }
+
+    #[test]
+    fn test_type_unknown_bson_number() {
+        let op = TypeOperator;
+        let result = op.matches(Some(&json!("hello")), &json!(999), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown BSON type number"));
+    }
+
+    #[test]
+    fn test_type_unknown_type_name() {
+        let op = TypeOperator;
+        let result = op.matches(Some(&json!("hello")), &json!("unknown_type"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown type name"));
+    }
+
+    #[test]
+    fn test_type_invalid_filter_error() {
+        let op = TypeOperator;
+        let result = op.matches(Some(&json!("hello")), &json!([1, 2]), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires a string or number"));
+    }
+
+    #[test]
+    fn test_type_missing_field() {
+        let op = TypeOperator;
+        assert!(!op.matches(None, &json!("string"), None).unwrap());
+    }
+
+    #[test]
+    fn test_type_boolean_alias() {
+        let op = TypeOperator;
+        assert!(op.matches(Some(&json!(true)), &json!("boolean"), None).unwrap());
+        assert!(op.matches(Some(&json!(false)), &json!("bool"), None).unwrap());
+    }
+
+    #[test]
+    fn test_type_int_long() {
+        let op = TypeOperator;
+        assert!(op.matches(Some(&json!(42)), &json!("int"), None).unwrap());
+        assert!(op.matches(Some(&json!(42)), &json!("long"), None).unwrap());
+    }
+
+    // ========== Logical operator tests ==========
+
+    #[test]
+    fn test_nor_operator() {
+        let doc = create_test_document(1, vec![("age", json!(25))]);
+        // age is not < 18 AND age is not > 65, so $nor should return true
+        let filter = json!([{"age": {"$lt": 18}}, {"age": {"$gt": 65}}]);
+        let op = NorOperator;
+        assert!(op.matches(None, &filter, Some(&doc)).unwrap());
+    }
+
+    #[test]
+    fn test_nor_operator_fails() {
+        let doc = create_test_document(1, vec![("age", json!(15))]);
+        // age < 18 is TRUE, so $nor should return false
+        let filter = json!([{"age": {"$lt": 18}}, {"age": {"$gt": 65}}]);
+        let op = NorOperator;
+        assert!(!op.matches(None, &filter, Some(&doc)).unwrap());
+    }
+
+    #[test]
+    fn test_nor_not_array_error() {
+        let doc = create_test_document(1, vec![("age", json!(25))]);
+        let op = NorOperator;
+        let result = op.matches(None, &json!({"age": 25}), Some(&doc));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires an array"));
+    }
+
+    #[test]
+    fn test_nor_no_document_error() {
+        let op = NorOperator;
+        let result = op.matches(None, &json!([{"age": 25}]), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires document context"));
+    }
+
+    #[test]
+    fn test_and_not_array_error() {
+        let doc = create_test_document(1, vec![("age", json!(25))]);
+        let op = AndOperator;
+        let result = op.matches(None, &json!({"age": 25}), Some(&doc));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires an array"));
+    }
+
+    #[test]
+    fn test_and_no_document_error() {
+        let op = AndOperator;
+        let result = op.matches(None, &json!([{"age": 25}]), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires document context"));
+    }
+
+    #[test]
+    fn test_or_not_array_error() {
+        let doc = create_test_document(1, vec![("age", json!(25))]);
+        let op = OrOperator;
+        let result = op.matches(None, &json!({"age": 25}), Some(&doc));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires an array"));
+    }
+
+    #[test]
+    fn test_or_no_document_error() {
+        let op = OrOperator;
+        let result = op.matches(None, &json!([{"age": 25}]), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires document context"));
+    }
+
+    #[test]
+    fn test_or_no_match() {
+        let doc = create_test_document(1, vec![("age", json!(30))]);
+        let filter = json!([{"age": {"$lt": 18}}, {"age": {"$gt": 65}}]);
+        let op = OrOperator;
+        assert!(!op.matches(None, &filter, Some(&doc)).unwrap());
+    }
+
+    #[test]
+    fn test_and_fails() {
+        let doc = create_test_document(1, vec![("age", json!(25)), ("city", json!("LA"))]);
+        let filter = json!([{"age": {"$gt": 18}}, {"city": "NYC"}]); // city doesn't match
+        let op = AndOperator;
+        assert!(!op.matches(None, &filter, Some(&doc)).unwrap());
+    }
+
+    #[test]
+    fn test_not_operator() {
+        let doc = create_test_document(1, vec![("age", json!(25))]);
+        let op = NotOperator;
+        // $not: { $gt: 30 } should return true for age=25
+        let filter = json!({"$gt": 30});
+        assert!(op.matches(Some(&json!(25)), &filter, Some(&doc)).unwrap());
+    }
+
+    #[test]
+    fn test_not_no_document_error() {
+        let op = NotOperator;
+        let result = op.matches(Some(&json!(25)), &json!({"$gt": 30}), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires document context"));
+    }
+
+    // ========== matches_filter tests ==========
+
+    #[test]
+    fn test_matches_filter_empty() {
+        let doc = create_test_document(1, vec![("name", json!("Alice"))]);
+        let filter = json!({});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_matches_filter_unknown_operator() {
+        let doc = create_test_document(1, vec![("age", json!(25))]);
+        let filter = json!({"age": {"$unknown": 25}});
+        let result = matches_filter(&doc, &filter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown operator"));
+    }
+
+    #[test]
+    fn test_matches_filter_top_level_unknown_operator() {
+        let doc = create_test_document(1, vec![("age", json!(25))]);
+        let filter = json!({"$unknown": [{"age": 25}]});
+        let result = matches_filter(&doc, &filter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown operator"));
+    }
+
+    #[test]
+    fn test_matches_filter_not_object_error() {
+        let doc = create_test_document(1, vec![("name", json!("Alice"))]);
+        let filter = json!("not an object");
+        let result = matches_filter(&doc, &filter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Filter must be an object"));
+    }
+
+    #[test]
+    fn test_matches_filter_direct_mismatch() {
+        let doc = create_test_document(1, vec![("name", json!("Alice"))]);
+        let filter = json!({"name": "Bob"});
+        assert!(!matches_filter(&doc, &filter).unwrap());
+    }
+
+    // ========== $elemMatch tests ==========
+
+    #[test]
+    fn test_elemmatch_operator() {
+        let op = ElemMatchOperator;
+        let doc_value = json!([
+            {"name": "Alice", "age": 25},
+            {"name": "Bob", "age": 30}
+        ]);
+        let filter_value = json!({"name": "Alice", "age": {"$gte": 20}});
+        assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_no_match() {
+        let op = ElemMatchOperator;
+        let doc_value = json!([
+            {"name": "Alice", "age": 15},
+            {"name": "Bob", "age": 18}
+        ]);
+        let filter_value = json!({"name": "Alice", "age": {"$gte": 20}});
+        assert!(!op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_missing_field() {
+        let op = ElemMatchOperator;
+        assert!(!op.matches(None, &json!({"name": "Alice"}), None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_not_array() {
+        let op = ElemMatchOperator;
+        assert!(!op.matches(Some(&json!("not an array")), &json!({"name": "Alice"}), None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_non_object_elements() {
+        let op = ElemMatchOperator;
+        let doc_value = json!([1, 2, 3]); // Array of non-objects
+        let filter_value = json!({"name": "Alice"});
+        assert!(!op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    // ========== matches_filter_value tests ==========
+
+    #[test]
+    fn test_matches_filter_value_unknown_operator() {
+        let result = matches_filter_value(Some(&json!(25)), &json!({"$unknown": 25}), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown operator"));
+    }
+
+    #[test]
+    fn test_matches_filter_value_direct() {
+        assert!(matches_filter_value(Some(&json!(25)), &json!(25), None).unwrap());
+        assert!(!matches_filter_value(Some(&json!(25)), &json!(30), None).unwrap());
+        assert!(!matches_filter_value(None, &json!(25), None).unwrap());
+    }
+
+    // ========== Existing tests ==========
+
     #[test]
     fn test_eq_operator() {
         let op = EqOperator;

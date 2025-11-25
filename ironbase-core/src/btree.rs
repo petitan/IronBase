@@ -49,7 +49,8 @@ impl BPlusTreeFull {
             root,
             metadata: IndexMetadata {
                 name,
-                field,
+                field: field.clone(),
+                fields: vec![field], // Single-field index
                 unique,
                 sparse: false,
                 num_keys: 0,

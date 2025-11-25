@@ -38,8 +38,11 @@ use serde::{Deserialize, Serialize};
 /// // Batch mode with 100 operations per commit
 /// let mode = DurabilityMode::Batch { batch_size: 100 };
 ///
-/// // Unsafe mode (opt-in for performance)
-/// let mode = DurabilityMode::Unsafe;
+/// // Unsafe mode - manual checkpoint only
+/// let mode = DurabilityMode::unsafe_manual();
+///
+/// // Unsafe mode - auto checkpoint every 10000 operations
+/// let mode = DurabilityMode::unsafe_auto(10000);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DurabilityMode {
@@ -58,11 +61,17 @@ pub enum DurabilityMode {
         batch_size: usize,
     },
 
-    /// Unsafe mode: No auto-commit, manual checkpoint required
+    /// Unsafe mode: No auto-commit, optional auto-checkpoint
     /// - No WAL for normal operations
     /// - Fast but data loss on crash
-    /// - User must explicitly call checkpoint()
-    Unsafe,
+    /// - User can set auto_checkpoint_ops for periodic checkpoint
+    /// - If None, user must explicitly call checkpoint()
+    Unsafe {
+        /// Optional: automatically checkpoint after N operations
+        /// None = manual checkpoint only (original behavior)
+        /// Some(n) = checkpoint every n operations
+        auto_checkpoint_ops: Option<usize>,
+    },
 }
 
 impl Default for DurabilityMode {
@@ -78,7 +87,7 @@ impl DurabilityMode {
         match self {
             DurabilityMode::Safe => true,
             DurabilityMode::Batch { .. } => true,
-            DurabilityMode::Unsafe => false,
+            DurabilityMode::Unsafe { .. } => false,
         }
     }
 
@@ -92,6 +101,28 @@ impl DurabilityMode {
         match self {
             DurabilityMode::Batch { batch_size } => Some(*batch_size),
             _ => None,
+        }
+    }
+
+    /// Get auto checkpoint ops if in unsafe mode with auto checkpoint
+    pub fn auto_checkpoint_ops(&self) -> Option<usize> {
+        match self {
+            DurabilityMode::Unsafe { auto_checkpoint_ops } => *auto_checkpoint_ops,
+            _ => None,
+        }
+    }
+
+    /// Create Unsafe mode without auto checkpoint (original behavior)
+    pub fn unsafe_manual() -> Self {
+        DurabilityMode::Unsafe {
+            auto_checkpoint_ops: None,
+        }
+    }
+
+    /// Create Unsafe mode with auto checkpoint every N operations
+    pub fn unsafe_auto(checkpoint_every: usize) -> Self {
+        DurabilityMode::Unsafe {
+            auto_checkpoint_ops: Some(checkpoint_every),
         }
     }
 }
@@ -109,14 +140,15 @@ mod tests {
     fn test_is_auto_commit() {
         assert!(DurabilityMode::Safe.is_auto_commit());
         assert!(DurabilityMode::Batch { batch_size: 100 }.is_auto_commit());
-        assert!(!DurabilityMode::Unsafe.is_auto_commit());
+        assert!(!DurabilityMode::unsafe_manual().is_auto_commit());
+        assert!(!DurabilityMode::unsafe_auto(1000).is_auto_commit());
     }
 
     #[test]
     fn test_is_safe() {
         assert!(DurabilityMode::Safe.is_safe());
         assert!(!DurabilityMode::Batch { batch_size: 100 }.is_safe());
-        assert!(!DurabilityMode::Unsafe.is_safe());
+        assert!(!DurabilityMode::unsafe_manual().is_safe());
     }
 
     #[test]
@@ -126,6 +158,23 @@ mod tests {
             DurabilityMode::Batch { batch_size: 100 }.batch_size(),
             Some(100)
         );
-        assert_eq!(DurabilityMode::Unsafe.batch_size(), None);
+        assert_eq!(DurabilityMode::unsafe_manual().batch_size(), None);
+    }
+
+    #[test]
+    fn test_auto_checkpoint_ops() {
+        assert_eq!(DurabilityMode::Safe.auto_checkpoint_ops(), None);
+        assert_eq!(DurabilityMode::Batch { batch_size: 100 }.auto_checkpoint_ops(), None);
+        assert_eq!(DurabilityMode::unsafe_manual().auto_checkpoint_ops(), None);
+        assert_eq!(DurabilityMode::unsafe_auto(5000).auto_checkpoint_ops(), Some(5000));
+    }
+
+    #[test]
+    fn test_unsafe_constructors() {
+        let manual = DurabilityMode::unsafe_manual();
+        assert!(matches!(manual, DurabilityMode::Unsafe { auto_checkpoint_ops: None }));
+
+        let auto = DurabilityMode::unsafe_auto(10000);
+        assert!(matches!(auto, DurabilityMode::Unsafe { auto_checkpoint_ops: Some(10000) }));
     }
 }

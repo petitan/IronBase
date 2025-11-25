@@ -11,7 +11,7 @@ use crate::collection_core::CollectionCore;
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use crate::error::Result;
-use crate::storage::{RawStorage, Storage, StorageEngine};
+use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
 use serde_json::Value;
 
@@ -62,6 +62,9 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
 
     // NEW: Batch buffer for Batch mode
     batch_buffer: Arc<RwLock<Vec<Operation>>>,
+
+    // NEW: Operation counter for Unsafe mode auto-checkpoint
+    unsafe_op_counter: AtomicU64,
 }
 
 // ============================================================================
@@ -87,6 +90,7 @@ impl DatabaseCore<StorageEngine> {
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: DurabilityMode::default(), // Safe mode by default
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
+            unsafe_op_counter: AtomicU64::new(0),
         };
 
         // Apply recovered index changes to collections
@@ -152,10 +156,16 @@ impl DatabaseCore<StorageEngine> {
     ///     DurabilityMode::Batch { batch_size: 100 }
     /// )?;
     ///
-    /// // Unsafe mode (fast, opt-in for performance)
+    /// // Unsafe mode - manual checkpoint only
     /// let db = DatabaseCore::<StorageEngine>::open_with_durability(
     ///     "app.mlite",
-    ///     DurabilityMode::Unsafe
+    ///     DurabilityMode::unsafe_manual()
+    /// )?;
+    ///
+    /// // Unsafe mode - auto checkpoint every 10000 ops
+    /// let db = DatabaseCore::<StorageEngine>::open_with_durability(
+    ///     "app.mlite",
+    ///     DurabilityMode::unsafe_auto(10000)
     /// )?;
     /// # Ok::<(), ironbase_core::MongoLiteError>(())
     /// ```
@@ -174,6 +184,7 @@ impl DatabaseCore<StorageEngine> {
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: mode,
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
+            unsafe_op_counter: AtomicU64::new(0),
         };
 
         // Apply recovered index changes to collections
@@ -441,10 +452,21 @@ impl DatabaseCore<StorageEngine> {
                 Ok(doc_id)
             }
 
-            DurabilityMode::Unsafe => {
-                // Unsafe mode: Fast path, no auto-commit
+            DurabilityMode::Unsafe { auto_checkpoint_ops } => {
+                // Unsafe mode: Fast path, optional auto-checkpoint
                 let collection = self.collection(collection_name)?;
-                collection.insert_one(document)
+                let doc_id = collection.insert_one(document)?;
+
+                // Auto checkpoint if configured
+                if let Some(threshold) = auto_checkpoint_ops {
+                    let count = self.unsafe_op_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count >= threshold as u64 {
+                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
+                        self.checkpoint()?;
+                    }
+                }
+
+                Ok(doc_id)
             }
         }
     }
@@ -478,6 +500,62 @@ impl DatabaseCore<StorageEngine> {
             crate::transaction::Operation::Insert { collection, .. } => collection.clone(),
             crate::transaction::Operation::Update { collection, .. } => collection.clone(),
             crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
+        })
+    }
+}
+
+// ============================================================================
+// MEMORYSTORAGE-SPECIFIC IMPLEMENTATION (in-memory, no WAL)
+// ============================================================================
+
+impl BatchFlush for DatabaseCore<MemoryStorage> {
+    fn flush_pending_batch(&self) -> Result<()> {
+        // No-op for MemoryStorage (no persistence)
+        Ok(())
+    }
+}
+
+impl DatabaseCore<MemoryStorage> {
+    /// Create an in-memory database (for testing)
+    ///
+    /// This provides a fast, ephemeral database that doesn't persist to disk.
+    /// Perfect for unit tests where you don't need data to survive restarts.
+    ///
+    /// # Performance
+    ///
+    /// - **10-100x faster** than file-based storage
+    /// - No file I/O overhead
+    /// - No WAL recovery needed
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use ironbase_core::DatabaseCore;
+    /// use ironbase_core::storage::MemoryStorage;
+    ///
+    /// let db = DatabaseCore::<MemoryStorage>::open_memory()?;
+    /// let users = db.collection("users")?;
+    ///
+    /// // Use like normal - all CRUD operations work
+    /// users.insert_one(std::collections::HashMap::from([
+    ///     ("name".to_string(), serde_json::json!("Alice")),
+    /// ]))?;
+    ///
+    /// let count = users.count_documents(&serde_json::json!({}))?;
+    /// assert_eq!(count, 1);
+    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// ```
+    pub fn open_memory() -> Result<Self> {
+        let storage = MemoryStorage::new();
+
+        Ok(DatabaseCore {
+            storage: Arc::new(RwLock::new(storage)),
+            db_path: String::new(), // No file path for memory storage
+            next_tx_id: AtomicU64::new(1),
+            active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            durability_mode: DurabilityMode::default(),
+            batch_buffer: Arc::new(RwLock::new(Vec::new())),
+            unsafe_op_counter: AtomicU64::new(0),
         })
     }
 }
@@ -877,5 +955,121 @@ mod tests {
         // Empty transaction has no operations
         let collection_name = DatabaseCore::get_collection_from_transaction(&transaction);
         assert_eq!(collection_name, None);
+    }
+
+    // ========== MemoryStorage Tests ==========
+
+    #[test]
+    fn test_open_memory() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+        // Should be able to create collections
+        let coll = db.collection("users").unwrap();
+
+        // And insert documents
+        let doc = std::collections::HashMap::from([("name".to_string(), json!("Alice"))]);
+        let id = coll.insert_one(doc).unwrap();
+        assert!(matches!(id, DocumentId::Int(_)));
+    }
+
+    #[test]
+    fn test_memory_crud_operations() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("users").unwrap();
+
+        // Insert
+        let doc = std::collections::HashMap::from([
+            ("name".to_string(), json!("Alice")),
+            ("age".to_string(), json!(30)),
+        ]);
+        let id = coll.insert_one(doc).unwrap();
+
+        // Find
+        let found = coll.find_one(&json!({"_id": id})).unwrap();
+        assert!(found.is_some());
+        assert_eq!(found.unwrap()["name"], "Alice");
+
+        // Update
+        coll.update_one(&json!({"_id": id}), &json!({"$set": {"age": 31}}))
+            .unwrap();
+        let updated = coll.find_one(&json!({"_id": id})).unwrap().unwrap();
+        assert_eq!(updated["age"], 31);
+
+        // Delete
+        coll.delete_one(&json!({"_id": id})).unwrap();
+        let count = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_memory_multiple_collections() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+        let users = db.collection("users").unwrap();
+        let posts = db.collection("posts").unwrap();
+
+        users
+            .insert_one(std::collections::HashMap::from([(
+                "name".to_string(),
+                json!("Alice"),
+            )]))
+            .unwrap();
+        posts
+            .insert_one(std::collections::HashMap::from([(
+                "title".to_string(),
+                json!("Hello"),
+            )]))
+            .unwrap();
+
+        assert_eq!(users.count_documents(&json!({})).unwrap(), 1);
+        assert_eq!(posts.count_documents(&json!({})).unwrap(), 1);
+
+        let collections = db.list_collections();
+        assert_eq!(collections.len(), 2);
+    }
+
+    #[test]
+    fn test_memory_aggregation() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("sales").unwrap();
+
+        for (city, amount) in &[("NYC", 100), ("LA", 200), ("NYC", 150), ("LA", 50)] {
+            coll.insert_one(std::collections::HashMap::from([
+                ("city".to_string(), json!(city)),
+                ("amount".to_string(), json!(amount)),
+            ]))
+            .unwrap();
+        }
+
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {"_id": "$city", "total": {"$sum": "$amount"}}}
+            ]))
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_memory_index() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("users").unwrap();
+
+        // Create index
+        let index_name = coll.create_index("age".to_string(), false).unwrap();
+        assert!(index_name.contains("age"));
+
+        // Insert with index
+        for i in 0..10 {
+            coll.insert_one(std::collections::HashMap::from([(
+                "age".to_string(),
+                json!(i * 10),
+            )]))
+            .unwrap();
+        }
+
+        // Query using index
+        let results = coll.find(&json!({"age": {"$gte": 50}})).unwrap();
+        assert_eq!(results.len(), 5);
     }
 }

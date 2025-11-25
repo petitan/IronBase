@@ -1,27 +1,5 @@
-// ironbase-core/src/collection_core.rs
+// ironbase-core/src/collection_core/mod.rs
 // Pure Rust collection logic - NO PyO3 dependencies
-//
-// FILE STRUCTURE (1,244 lines):
-// ├── Constructor (lines 25-125)
-// ├── CRUD Operations (lines 127-595)
-// │   ├── insert_one, update_one, update_many
-// │   ├── delete_one, delete_many
-// │   └── distinct
-// ├── Query Operations (lines 186-664)
-// │   ├── find, find_one, count_documents
-// │   ├── find_with_options, find_with_hint
-// │   └── explain
-// ├── Aggregation (lines 906-917)
-// ├── Index Operations (lines 922-1004)
-// │   ├── create_index, drop_index, list_indexes
-// ├── Transaction Operations (lines 1012-1124)
-// │   ├── insert_one_tx, update_one_tx, delete_one_tx
-// └── Private Helpers (lines 1126-1244)
-//     ├── read_document_by_id, scan_documents_via_catalog
-//     ├── filter_documents, find_with_index
-//     └── apply_update_operators
-//
-// FUTURE REFACTOR: See COLLECTION_DESIGN.md for modular architecture plan
 
 use std::sync::Arc;
 
@@ -542,14 +520,30 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Streaming cursor for large result sets
+    ///
+    /// Returns a cursor that lazily loads documents, allowing memory-efficient
+    /// iteration over large result sets.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Process 1 million documents without loading all into memory
+    /// let mut cursor = collection.find_streaming(&json!({}))?;
+    ///
+    /// // Set batch size (optional, default is 100)
+    /// let mut cursor = cursor.with_batch_size(500);
+    ///
+    /// // Process in batches
+    /// while !cursor.is_finished() {
+    ///     let batch = cursor.next_batch()?;
+    ///     for doc in batch {
+    ///         process_document(&doc);
+    ///     }
+    /// }
+    /// ```
     pub fn find_streaming(&self, query_json: &Value) -> Result<FindCursor<'_, S>> {
         let (doc_ids, _) =
             self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
-        Ok(FindCursor {
-            collection: self,
-            doc_ids,
-            position: 0,
-        })
+        Ok(FindCursor::new(self, doc_ids))
     }
 
     /// Find one document matching query
@@ -1486,6 +1480,99 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     // ========== INDEX OPERATIONS ==========
 
+    /// Create a compound B+ tree index on multiple fields
+    ///
+    /// Compound indexes allow efficient queries on multiple fields in order.
+    /// The field order matters - queries can use the index if they query
+    /// the first N fields in order (prefix matching).
+    ///
+    /// # Arguments
+    /// * `fields` - Ordered list of fields (e.g., ["country", "city"])
+    /// * `unique` - Whether the compound key must be unique
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Create compound index on (country, city)
+    /// collection.create_compound_index(
+    ///     vec!["country".to_string(), "city".to_string()],
+    ///     false
+    /// )?;
+    ///
+    /// // These queries can use the index:
+    /// // - {"country": "US"}                    (prefix match)
+    /// // - {"country": "US", "city": "NYC"}    (full match)
+    ///
+    /// // This query CANNOT use the index efficiently:
+    /// // - {"city": "NYC"}                      (not a prefix)
+    /// ```
+    pub fn create_compound_index(&self, fields: Vec<String>, unique: bool) -> Result<String> {
+        if fields.is_empty() {
+            return Err(MongoLiteError::IndexError(
+                "Compound index must have at least one field".to_string(),
+            ));
+        }
+
+        // Create index name from all fields: users_country_city
+        let index_name = format!("{}_{}", self.name, fields.join("_"));
+
+        let mut indexes = self.indexes.write();
+        indexes.create_compound_index(index_name.clone(), fields.clone(), unique)?;
+
+        // Populate index with existing documents
+        let docs_by_id = {
+            drop(indexes); // Release write lock before acquiring storage lock
+            self.scan_documents_via_catalog()?
+        };
+
+        // Re-acquire write lock to populate index
+        let mut indexes = self.indexes.write();
+
+        for (doc_id, doc) in &docs_by_id {
+            if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                let key = index.extract_key(doc);
+                let _ = index.insert(key, doc_id.clone());
+            }
+        }
+
+        drop(indexes); // Release index lock
+
+        // PERSIST index metadata to collection metadata
+        {
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                use crate::index::IndexMetadata;
+                let index_meta = IndexMetadata {
+                    name: index_name.clone(),
+                    field: fields[0].clone(), // Primary field for backward compat
+                    fields: fields.clone(),
+                    unique,
+                    sparse: false,
+                    num_keys: 0,
+                    tree_height: 1,
+                    root_offset: 0,
+                };
+
+                meta.indexes.push(index_meta);
+                storage.flush()?;
+
+                // PERSIST index data to .idx file
+                let db_file_path = storage.get_file_path().to_string();
+                drop(storage);
+
+                if !db_file_path.is_empty() {
+                    let mut indexes = self.indexes.write();
+                    if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                        persist_index_to_disk(&db_file_path, &index_name, |file| {
+                            index.save_to_file(file)
+                        })?;
+                    }
+                }
+            }
+        }
+
+        Ok(index_name)
+    }
+
     /// Create a B+ tree index on a field
     pub fn create_index(&self, field: String, unique: bool) -> Result<String> {
         let index_name = format!("{}_{}", self.name, field);
@@ -1524,6 +1611,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 let index_meta = IndexMetadata {
                     name: index_name.clone(),
                     field: field.clone(),
+                    fields: vec![field.clone()], // Single-field index
                     unique,
                     sparse: false,
                     num_keys: 0,
@@ -2090,52 +2178,76 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         None
     }
 
-    /// Scan all documents in this collection and return latest version by _id
-    /// This helper reduces code duplication across find(), update(), delete(), etc.
-    /// DEPRECATED: Use scan_documents_via_catalog() for better performance
-    // Dead code removed - use scan_documents_via_catalog() instead
-    // which is faster (O(n) catalog iteration vs O(n) file scan)
-
-    /// Filter documents by query and exclude tombstones
-    /// Returns only live documents matching the query
-    fn filter_documents(
-        &self,
-        docs_by_id: HashMap<DocumentId, Value>,
-        query: &Query,
-    ) -> Result<Vec<Value>> {
-        let mut results = Vec::new();
-
-        for (_, doc) in docs_by_id {
-            // Skip tombstones
-            if doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-
-            // Convert to Document and check query
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
-
-            if query.matches(&document) {
-                results.push(doc);
-            }
-        }
-
-        Ok(results)
-    }
 }
 
 /// Streaming cursor over query results
+///
+/// Provides memory-efficient iteration over large result sets without
+/// loading all documents into memory at once.
+///
+/// # Example
+/// ```rust,ignore
+/// let mut cursor = collection.find_streaming(&query)?;
+///
+/// // Option 1: Process in chunks
+/// while !cursor.is_finished() {
+///     let batch = cursor.next_chunk(100)?;
+///     for doc in batch {
+///         process(doc);
+///     }
+/// }
+///
+/// // Option 2: Process one at a time
+/// while let Some(doc) = cursor.next()? {
+///     process(doc);
+/// }
+///
+/// // Option 3: Process with for_each
+/// cursor.for_each(|doc| {
+///     process(doc);
+///     Ok(())  // Return Err to stop iteration
+/// })?;
+/// ```
 pub struct FindCursor<'a, S: Storage + RawStorage> {
     collection: &'a CollectionCore<S>,
     doc_ids: Vec<DocumentId>,
     position: usize,
+    /// Default batch size for chunk operations
+    batch_size: usize,
 }
 
 impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
+    /// Create a new cursor with the given document IDs
+    pub(crate) fn new(collection: &'a CollectionCore<S>, doc_ids: Vec<DocumentId>) -> Self {
+        FindCursor {
+            collection,
+            doc_ids,
+            position: 0,
+            batch_size: 100, // Default batch size
+        }
+    }
+
+    /// Set the default batch size for chunk operations
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = batch_size;
+        self
+    }
+
+    /// Fetch the next document, or None if exhausted
+    pub fn next(&mut self) -> Result<Option<Value>> {
+        if self.position >= self.doc_ids.len() {
+            return Ok(None);
+        }
+
+        let doc_id = &self.doc_ids[self.position];
+        self.position += 1;
+
+        match self.collection.read_document_by_id(doc_id)? {
+            Some(doc) => Ok(Some(doc)),
+            None => self.next(), // Skip tombstones, get next
+        }
+    }
+
     /// Fetch the next chunk of documents (up to `chunk_size`)
     pub fn next_chunk(&mut self, chunk_size: usize) -> Result<Vec<Value>> {
         if self.position >= self.doc_ids.len() {
@@ -2153,12 +2265,74 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
         Ok(results)
     }
 
+    /// Fetch the next chunk using the default batch size
+    pub fn next_batch(&mut self) -> Result<Vec<Value>> {
+        self.next_chunk(self.batch_size)
+    }
+
     /// Remaining documents in the cursor
     pub fn remaining(&self) -> usize {
         self.doc_ids.len().saturating_sub(self.position)
     }
 
+    /// Total document count
+    pub fn total(&self) -> usize {
+        self.doc_ids.len()
+    }
+
+    /// Current position in the cursor
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Check if cursor is exhausted
     pub fn is_finished(&self) -> bool {
         self.position >= self.doc_ids.len()
+    }
+
+    /// Reset cursor to the beginning
+    pub fn rewind(&mut self) {
+        self.position = 0;
+    }
+
+    /// Skip the next N documents
+    pub fn skip(&mut self, n: usize) {
+        self.position = (self.position + n).min(self.doc_ids.len());
+    }
+
+    /// Process each document with a closure
+    ///
+    /// The closure can return Err to stop iteration early
+    pub fn for_each<F>(&mut self, mut f: F) -> Result<()>
+    where
+        F: FnMut(Value) -> Result<()>,
+    {
+        while let Some(doc) = self.next()? {
+            f(doc)?;
+        }
+        Ok(())
+    }
+
+    /// Collect all remaining documents into a Vec
+    ///
+    /// Warning: This loads all remaining documents into memory
+    pub fn collect_all(&mut self) -> Result<Vec<Value>> {
+        let mut results = Vec::with_capacity(self.remaining());
+        while let Some(doc) = self.next()? {
+            results.push(doc);
+        }
+        Ok(results)
+    }
+
+    /// Take the next N documents
+    pub fn take(&mut self, n: usize) -> Result<Vec<Value>> {
+        let mut results = Vec::with_capacity(n);
+        for _ in 0..n {
+            match self.next()? {
+                Some(doc) => results.push(doc),
+                None => break,
+            }
+        }
+        Ok(results)
     }
 }

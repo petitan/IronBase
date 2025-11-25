@@ -784,6 +784,496 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    // ========== Pipeline tests ==========
+
+    #[test]
+    fn test_pipeline_not_array() {
+        let result = Pipeline::from_json(&json!({"$match": {}}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an array"));
+    }
+
+    #[test]
+    fn test_pipeline_empty() {
+        let result = Pipeline::from_json(&json!([]));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    // ========== Stage parsing tests ==========
+
+    #[test]
+    fn test_stage_not_object() {
+        let result = Stage::from_json(&json!("invalid"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an object"));
+    }
+
+    #[test]
+    fn test_stage_multiple_operators() {
+        let result = Stage::from_json(&json!({"$match": {}, "$sort": {"a": 1}}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exactly one operator"));
+    }
+
+    #[test]
+    fn test_stage_unknown_operator() {
+        let result = Stage::from_json(&json!({"$unknown": {}}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown pipeline stage"));
+    }
+
+    // ========== ProjectStage tests ==========
+
+    #[test]
+    fn test_project_exclude() {
+        let docs = vec![json!({"name": "Alice", "age": 25, "secret": "hidden"})];
+        let stage = ProjectStage::from_json(&json!({"secret": 0})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert!(results[0].get("name").is_some());
+        assert!(results[0].get("age").is_some());
+        assert!(results[0].get("secret").is_none());
+    }
+
+    #[test]
+    fn test_project_rename() {
+        let docs = vec![json!({"name": "Alice", "age": 25})];
+        let stage = ProjectStage::from_json(&json!({"userName": "$name"})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert!(results[0].get("userName").is_some());
+        assert_eq!(results[0]["userName"], "Alice");
+    }
+
+    #[test]
+    fn test_project_invalid_value() {
+        let result = ProjectStage::from_json(&json!({"field": 5}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid project value"));
+    }
+
+    #[test]
+    fn test_project_invalid_expression() {
+        let result = ProjectStage::from_json(&json!({"field": "not_a_ref"}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid project expression"));
+    }
+
+    #[test]
+    fn test_project_invalid_type() {
+        let result = ProjectStage::from_json(&json!({"field": [1, 2]}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be 0, 1, or field reference"));
+    }
+
+    #[test]
+    fn test_project_not_object() {
+        let result = ProjectStage::from_json(&json!("invalid"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an object"));
+    }
+
+    // ========== GroupStage tests ==========
+
+    #[test]
+    fn test_group_null_id() {
+        let docs = vec![
+            json!({"value": 10}),
+            json!({"value": 20}),
+            json!({"value": 30}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "total": {"$sum": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["_id"].is_null());
+        assert_eq!(results[0]["total"], 60);
+    }
+
+    #[test]
+    fn test_group_missing_id() {
+        let result = GroupStage::from_json(&json!({"count": {"$sum": 1}}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must have _id field"));
+    }
+
+    #[test]
+    fn test_group_id_not_field_ref() {
+        let result = GroupStage::from_json(&json!({"_id": "notARef"}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must start with $"));
+    }
+
+    #[test]
+    fn test_group_id_invalid_type() {
+        let result = GroupStage::from_json(&json!({"_id": 123}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be null or field reference"));
+    }
+
+    #[test]
+    fn test_group_not_object() {
+        let result = GroupStage::from_json(&json!("invalid"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an object"));
+    }
+
+    #[test]
+    fn test_group_missing_field() {
+        let docs = vec![
+            json!({"city": "NYC"}),
+            json!({}), // missing city
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": "$city",
+            "count": {"$sum": 1}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        // Should have NYC group and null group
+        assert_eq!(results.len(), 2);
+    }
+
+    // ========== Accumulator tests ==========
+
+    #[test]
+    fn test_accumulator_avg() {
+        let docs = vec![
+            json!({"value": 10}),
+            json!({"value": 20}),
+            json!({"value": 30}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "avg": {"$avg": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["avg"], 20.0);
+    }
+
+    #[test]
+    fn test_accumulator_avg_empty() {
+        let docs = vec![json!({})]; // No value field
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "avg": {"$avg": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert!(results[0]["avg"].is_null());
+    }
+
+    #[test]
+    fn test_accumulator_min() {
+        let docs = vec![
+            json!({"value": 30}),
+            json!({"value": 10}),
+            json!({"value": 20}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "min": {"$min": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["min"], 10.0);
+    }
+
+    #[test]
+    fn test_accumulator_max() {
+        let docs = vec![
+            json!({"value": 10}),
+            json!({"value": 30}),
+            json!({"value": 20}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "max": {"$max": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["max"], 30.0);
+    }
+
+    #[test]
+    fn test_accumulator_first_last() {
+        let docs = vec![
+            json!({"value": "first"}),
+            json!({"value": "middle"}),
+            json!({"value": "last"}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "first": {"$first": "$value"},
+            "last": {"$last": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["first"], "first");
+        assert_eq!(results[0]["last"], "last");
+    }
+
+    #[test]
+    fn test_accumulator_sum_float() {
+        let docs = vec![
+            json!({"value": 1.5}),
+            json!({"value": 2.5}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "sum": {"$sum": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["sum"], 4.0);
+    }
+
+    #[test]
+    fn test_accumulator_min_max_empty() {
+        let docs = vec![json!({})];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "min": {"$min": "$value"},
+            "max": {"$max": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert!(results[0]["min"].is_null());
+        assert!(results[0]["max"].is_null());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_sum_ref() {
+        let result = Accumulator::from_json(&json!({"$sum": "notARef"}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must start with $"));
+    }
+
+    #[test]
+    fn test_accumulator_invalid_sum_type() {
+        let result = Accumulator::from_json(&json!({"$sum": [1, 2]}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a number or field reference"));
+    }
+
+    #[test]
+    fn test_accumulator_invalid_avg_ref() {
+        let result = Accumulator::from_json(&json!({"$avg": "notARef"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_avg_type() {
+        let result = Accumulator::from_json(&json!({"$avg": 123}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_min_ref() {
+        let result = Accumulator::from_json(&json!({"$min": "notARef"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_min_type() {
+        let result = Accumulator::from_json(&json!({"$min": 123}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_max_ref() {
+        let result = Accumulator::from_json(&json!({"$max": "notARef"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_max_type() {
+        let result = Accumulator::from_json(&json!({"$max": 123}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_first_ref() {
+        let result = Accumulator::from_json(&json!({"$first": "notARef"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_first_type() {
+        let result = Accumulator::from_json(&json!({"$first": 123}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_last_ref() {
+        let result = Accumulator::from_json(&json!({"$last": "notARef"}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_invalid_last_type() {
+        let result = Accumulator::from_json(&json!({"$last": 123}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_accumulator_unknown() {
+        let result = Accumulator::from_json(&json!({"$unknown": "$field"}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown accumulator"));
+    }
+
+    #[test]
+    fn test_accumulator_not_object() {
+        let result = Accumulator::from_json(&json!("invalid"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an object"));
+    }
+
+    #[test]
+    fn test_accumulator_multiple_operators() {
+        let result = Accumulator::from_json(&json!({"$sum": 1, "$avg": "$x"}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exactly one operator"));
+    }
+
+    // ========== SortStage tests ==========
+
+    #[test]
+    fn test_sort_descending() {
+        let docs = vec![
+            json!({"name": "Alice", "age": 25}),
+            json!({"name": "Bob", "age": 35}),
+            json!({"name": "Charlie", "age": 30}),
+        ];
+
+        let stage = SortStage::from_json(&json!({"age": -1})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["age"], 35);
+        assert_eq!(results[1]["age"], 30);
+        assert_eq!(results[2]["age"], 25);
+    }
+
+    #[test]
+    fn test_sort_invalid_direction_value() {
+        let result = SortStage::from_json(&json!({"field": 0}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be 1 or -1"));
+    }
+
+    #[test]
+    fn test_sort_invalid_direction_type() {
+        let result = SortStage::from_json(&json!({"field": "asc"}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be 1 or -1"));
+    }
+
+    #[test]
+    fn test_sort_not_object() {
+        let result = SortStage::from_json(&json!("invalid"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be an object"));
+    }
+
+    #[test]
+    fn test_sort_by_string() {
+        let docs = vec![
+            json!({"name": "Charlie"}),
+            json!({"name": "Alice"}),
+            json!({"name": "Bob"}),
+        ];
+
+        let stage = SortStage::from_json(&json!({"name": 1})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["name"], "Alice");
+        assert_eq!(results[1]["name"], "Bob");
+        assert_eq!(results[2]["name"], "Charlie");
+    }
+
+    #[test]
+    fn test_sort_by_boolean() {
+        let docs = vec![
+            json!({"active": true}),
+            json!({"active": false}),
+            json!({"active": true}),
+        ];
+
+        let stage = SortStage::from_json(&json!({"active": 1})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["active"], false);
+        assert_eq!(results[1]["active"], true);
+    }
+
+    #[test]
+    fn test_sort_with_missing_field() {
+        let docs = vec![
+            json!({"name": "Alice", "age": 25}),
+            json!({"name": "Bob"}), // missing age
+            json!({"name": "Charlie", "age": 30}),
+        ];
+
+        let stage = SortStage::from_json(&json!({"age": 1})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Missing value should come first
+        assert_eq!(results[0]["name"], "Bob");
+    }
+
+    #[test]
+    fn test_sort_multi_field() {
+        let docs = vec![
+            json!({"city": "NYC", "age": 30}),
+            json!({"city": "LA", "age": 25}),
+            json!({"city": "NYC", "age": 25}),
+        ];
+
+        let stage = SortStage::from_json(&json!({"city": 1, "age": 1})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["city"], "LA");
+        assert_eq!(results[1]["city"], "NYC");
+        assert_eq!(results[1]["age"], 25);
+        assert_eq!(results[2]["city"], "NYC");
+        assert_eq!(results[2]["age"], 30);
+    }
+
+    // ========== LimitStage tests ==========
+
+    #[test]
+    fn test_limit_invalid() {
+        let result = LimitStage::from_json(&json!("invalid"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a positive number"));
+    }
+
+    // ========== SkipStage tests ==========
+
+    #[test]
+    fn test_skip_invalid() {
+        let result = SkipStage::from_json(&json!("invalid"));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a positive number"));
+    }
+
+    // ========== Existing tests ==========
+
     #[test]
     fn test_match_stage() {
         let docs = vec![

@@ -29,7 +29,7 @@ mod transaction_integration_tests;
 mod transaction_property_tests;
 
 // Public exports
-pub use collection_core::{CollectionCore, InsertManyResult};
+pub use collection_core::{CollectionCore, FindCursor, InsertManyResult};
 pub use database::DatabaseCore;
 pub use document::{Document, DocumentId};
 pub use durability::DurabilityMode;

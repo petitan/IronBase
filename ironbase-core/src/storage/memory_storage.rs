@@ -15,7 +15,7 @@
 
 use crate::document::{Document, DocumentId};
 use crate::error::{MongoLiteError, Result};
-use crate::storage::{CollectionMeta, Storage};
+use crate::storage::{CollectionMeta, RawStorage, Storage};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -47,15 +47,24 @@ pub struct MemoryStorage {
 
     /// Auto-incrementing offset counter (synthetic for compatibility)
     next_offset: u64,
+
+    /// Raw byte buffer for RawStorage trait (simulates file storage)
+    raw_data: Vec<u8>,
 }
 
 impl MemoryStorage {
     /// Create a new empty in-memory storage
     pub fn new() -> Self {
+        // Pre-allocate header space (256 bytes) to match file-based storage
+        let mut raw_data = vec![0u8; 256];
+        // Write magic header for consistency
+        raw_data[0..8].copy_from_slice(b"MONGOLTE");
+
         MemoryStorage {
             collections: HashMap::new(),
             metadata: HashMap::new(),
             next_offset: 256, // Start after header size for consistency
+            raw_data,
         }
     }
 }
@@ -264,6 +273,102 @@ impl Storage for MemoryStorage {
 
     fn get_file_path(&self) -> &str {
         ""
+    }
+}
+
+// ============================================================================
+// RAW STORAGE IMPLEMENTATION
+// ============================================================================
+
+impl RawStorage for MemoryStorage {
+    /// Write raw document bytes with catalog tracking
+    ///
+    /// Format: [u32 length][raw bytes]
+    fn write_document_raw(
+        &mut self,
+        collection: &str,
+        doc_id: &DocumentId,
+        data: &[u8],
+    ) -> Result<u64> {
+        let offset = self.raw_data.len() as u64;
+
+        // Write length prefix (4 bytes, little-endian)
+        let len = data.len() as u32;
+        self.raw_data.extend_from_slice(&len.to_le_bytes());
+
+        // Write raw document bytes
+        self.raw_data.extend_from_slice(data);
+
+        // Update catalog in metadata
+        if let Some(meta) = self.metadata.get_mut(collection) {
+            meta.document_catalog.insert(doc_id.clone(), offset);
+        }
+
+        // Update next_offset for consistency
+        self.next_offset = self.raw_data.len() as u64;
+
+        Ok(offset)
+    }
+
+    /// Read document bytes at specific offset
+    fn read_document_at(&mut self, _collection: &str, offset: u64) -> Result<Vec<u8>> {
+        let start = offset as usize;
+
+        // Check bounds
+        if start + 4 > self.raw_data.len() {
+            return Err(MongoLiteError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("Offset {} out of bounds (len={})", offset, self.raw_data.len()),
+            )));
+        }
+
+        // Read length prefix
+        let len_bytes: [u8; 4] = self.raw_data[start..start + 4]
+            .try_into()
+            .map_err(|_| MongoLiteError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Failed to read length prefix",
+            )))?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
+
+        // Check data bounds
+        if start + 4 + len > self.raw_data.len() {
+            return Err(MongoLiteError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("Data extends beyond buffer: offset={}, len={}", offset, len),
+            )));
+        }
+
+        // Return raw bytes (without length prefix)
+        Ok(self.raw_data[start + 4..start + 4 + len].to_vec())
+    }
+
+    /// Write raw data without catalog tracking (for tombstones)
+    fn write_data(&mut self, data: &[u8]) -> Result<u64> {
+        let offset = self.raw_data.len() as u64;
+
+        // Write length prefix (4 bytes, little-endian)
+        let len = data.len() as u32;
+        self.raw_data.extend_from_slice(&len.to_le_bytes());
+
+        // Write raw bytes
+        self.raw_data.extend_from_slice(data);
+
+        // Update next_offset
+        self.next_offset = self.raw_data.len() as u64;
+
+        Ok(offset)
+    }
+
+    /// Read raw data at offset
+    fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
+        // Same implementation as read_document_at (no collection context needed)
+        self.read_document_at("", offset)
+    }
+
+    /// Get current "file" length (raw_data buffer size)
+    fn file_len(&self) -> Result<u64> {
+        Ok(self.raw_data.len() as u64)
     }
 }
 
@@ -500,5 +605,102 @@ mod tests {
         // Data should still be accessible
         let docs = storage.scan_documents("users").unwrap();
         assert_eq!(docs.len(), 1);
+    }
+
+    // ========== RawStorage Tests ==========
+
+    #[test]
+    fn test_raw_storage_write_and_read() {
+        let mut storage = MemoryStorage::new();
+        storage.create_collection("test").unwrap();
+
+        let doc_id = DocumentId::Int(1);
+        let data = b"{\"name\":\"Alice\"}";
+
+        let offset = storage
+            .write_document_raw("test", &doc_id, data)
+            .unwrap();
+
+        // Offset should be after header (256 bytes)
+        assert_eq!(offset, 256);
+
+        // Read back
+        let read_data = storage.read_document_at("test", offset).unwrap();
+        assert_eq!(read_data, data);
+    }
+
+    #[test]
+    fn test_raw_storage_multiple_writes() {
+        let mut storage = MemoryStorage::new();
+        storage.create_collection("test").unwrap();
+
+        let data1 = b"first document";
+        let data2 = b"second document";
+
+        let offset1 = storage
+            .write_document_raw("test", &DocumentId::Int(1), data1)
+            .unwrap();
+        let offset2 = storage
+            .write_document_raw("test", &DocumentId::Int(2), data2)
+            .unwrap();
+
+        // Second offset should be after first data
+        assert!(offset2 > offset1);
+
+        // Read both back
+        assert_eq!(storage.read_document_at("test", offset1).unwrap(), data1);
+        assert_eq!(storage.read_document_at("test", offset2).unwrap(), data2);
+    }
+
+    #[test]
+    fn test_raw_storage_write_data() {
+        let mut storage = MemoryStorage::new();
+
+        let tombstone = b"{\"_tombstone\":true}";
+        let offset = storage.write_data(tombstone).unwrap();
+
+        // Should be able to read back
+        let read_data = storage.read_data(offset).unwrap();
+        assert_eq!(read_data, tombstone);
+    }
+
+    #[test]
+    fn test_raw_storage_file_len() {
+        let mut storage = MemoryStorage::new();
+
+        // Initial length is header size (256)
+        assert_eq!(storage.file_len().unwrap(), 256);
+
+        // Write some data
+        storage.write_data(b"test").unwrap();
+
+        // Length should have increased: 256 + 4 (len prefix) + 4 (data)
+        assert_eq!(storage.file_len().unwrap(), 264);
+    }
+
+    #[test]
+    fn test_raw_storage_read_invalid_offset() {
+        let mut storage = MemoryStorage::new();
+
+        // Try to read beyond buffer
+        let result = storage.read_document_at("test", 9999);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_raw_storage_catalog_update() {
+        let mut storage = MemoryStorage::new();
+        storage.create_collection("test").unwrap();
+
+        let doc_id = DocumentId::String("doc1".to_string());
+        let data = b"{\"_id\":\"doc1\"}";
+
+        let offset = storage
+            .write_document_raw("test", &doc_id, data)
+            .unwrap();
+
+        // Check catalog was updated
+        let meta = storage.get_collection_meta("test").unwrap();
+        assert_eq!(meta.document_catalog.get(&doc_id), Some(&offset));
     }
 }

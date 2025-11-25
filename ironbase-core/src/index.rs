@@ -30,6 +30,8 @@ pub enum IndexKey {
     Int(i64),
     Float(OrderedFloat),
     String(String),
+    /// Compound key for multi-field indexes (e.g., ["country", "city"])
+    Compound(Vec<IndexKey>),
 }
 
 /// OrderedFloat wrapper for f64 to enable Ord
@@ -92,6 +94,11 @@ impl Ord for IndexKey {
             (_, Float(_)) => std::cmp::Ordering::Greater,
 
             (String(a), String(b)) => a.cmp(b),
+            (String(_), Compound(_)) => std::cmp::Ordering::Less,
+
+            // Compound keys - compare element by element (lexicographic order)
+            (Compound(a), Compound(b)) => a.cmp(b),
+            (Compound(_), _) => std::cmp::Ordering::Greater,
         }
     }
 }
@@ -150,7 +157,12 @@ pub struct BPlusTree {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMetadata {
     pub name: String,
+    /// Primary field for single-field indexes (backward compatibility)
     pub field: String,
+    /// All fields for compound indexes (e.g., ["country", "city", "zipcode"])
+    /// For single-field indexes, this will contain just one field matching `field`
+    #[serde(default)]
+    pub fields: Vec<String>,
     pub unique: bool,
     pub sparse: bool,
     pub num_keys: u64,
@@ -159,8 +171,15 @@ pub struct IndexMetadata {
     pub root_offset: u64, // File offset to root node (0 = in-memory only)
 }
 
+impl IndexMetadata {
+    /// Check if this is a compound index (multiple fields)
+    pub fn is_compound(&self) -> bool {
+        self.fields.len() > 1
+    }
+}
+
 impl BPlusTree {
-    /// Create new B+ tree index
+    /// Create new B+ tree index (single field)
     pub fn new(name: String, field: String, unique: bool) -> Self {
         // Start with empty leaf node as root
         let root = Box::new(BTreeNode::Leaf(LeafNode {
@@ -173,13 +192,77 @@ impl BPlusTree {
             root,
             metadata: IndexMetadata {
                 name,
-                field,
+                field: field.clone(),
+                fields: vec![field], // Single-field index
                 unique,
                 sparse: false,
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
             },
+        }
+    }
+
+    /// Create new compound B+ tree index (multiple fields)
+    ///
+    /// # Arguments
+    /// * `name` - Index name
+    /// * `fields` - List of fields in order (e.g., ["country", "city"])
+    /// * `unique` - Whether the compound key must be unique
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let index = BPlusTree::new_compound(
+    ///     "users_location".to_string(),
+    ///     vec!["country".to_string(), "city".to_string()],
+    ///     false
+    /// );
+    /// ```
+    pub fn new_compound(name: String, fields: Vec<String>, unique: bool) -> Self {
+        assert!(!fields.is_empty(), "Compound index must have at least one field");
+
+        let root = Box::new(BTreeNode::Leaf(LeafNode {
+            keys: Vec::new(),
+            document_ids: Vec::new(),
+            next_leaf_offset: 0,
+        }));
+
+        let primary_field = fields[0].clone();
+
+        BPlusTree {
+            root,
+            metadata: IndexMetadata {
+                name,
+                field: primary_field, // First field for backward compatibility
+                fields,               // All fields for compound key
+                unique,
+                sparse: false,
+                num_keys: 0,
+                tree_height: 1,
+                root_offset: 0,
+            },
+        }
+    }
+
+    /// Extract compound key from a document
+    ///
+    /// For compound indexes, creates an IndexKey::Compound from multiple fields
+    /// For single-field indexes, returns a simple IndexKey
+    pub fn extract_key(&self, doc: &serde_json::Value) -> IndexKey {
+        if self.metadata.is_compound() {
+            let keys: Vec<IndexKey> = self.metadata.fields
+                .iter()
+                .map(|field| {
+                    doc.get(field)
+                        .map(IndexKey::from)
+                        .unwrap_or(IndexKey::Null)
+                })
+                .collect();
+            IndexKey::Compound(keys)
+        } else {
+            doc.get(&self.metadata.field)
+                .map(IndexKey::from)
+                .unwrap_or(IndexKey::Null)
         }
     }
 
@@ -647,7 +730,7 @@ impl IndexManager {
         self.index_file_paths.get(index_name)
     }
 
-    /// Create B+ tree index
+    /// Create B+ tree index (single field)
     pub fn create_btree_index(&mut self, name: String, field: String, unique: bool) -> Result<()> {
         if self.btree_indexes.contains_key(&name) {
             return Err(MongoLiteError::IndexError(format!(
@@ -657,6 +740,45 @@ impl IndexManager {
         }
 
         let tree = BPlusTree::new(name.clone(), field, unique);
+        self.btree_indexes.insert(name, tree);
+        Ok(())
+    }
+
+    /// Create compound B+ tree index (multiple fields)
+    ///
+    /// # Arguments
+    /// * `name` - Index name
+    /// * `fields` - Ordered list of fields (e.g., ["country", "city"])
+    /// * `unique` - Whether the compound key must be unique
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// manager.create_compound_index(
+    ///     "users_location".to_string(),
+    ///     vec!["country".to_string(), "city".to_string()],
+    ///     false
+    /// )?;
+    /// ```
+    pub fn create_compound_index(
+        &mut self,
+        name: String,
+        fields: Vec<String>,
+        unique: bool,
+    ) -> Result<()> {
+        if self.btree_indexes.contains_key(&name) {
+            return Err(MongoLiteError::IndexError(format!(
+                "Index already exists: {}",
+                name
+            )));
+        }
+
+        if fields.is_empty() {
+            return Err(MongoLiteError::IndexError(
+                "Compound index must have at least one field".to_string(),
+            ));
+        }
+
+        let tree = BPlusTree::new_compound(name.clone(), fields, unique);
         self.btree_indexes.insert(name, tree);
         Ok(())
     }
@@ -882,5 +1004,196 @@ mod tests {
 
         // Cleanup
         std::fs::remove_file(temp_path).ok();
+    }
+
+    #[test]
+    fn test_compound_index_key_ordering() {
+        // Test that compound keys are ordered lexicographically
+        let key1 = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("NYC".to_string()),
+        ]);
+        let key2 = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("LA".to_string()),
+        ]);
+        let key3 = IndexKey::Compound(vec![
+            IndexKey::String("CA".to_string()),
+            IndexKey::String("Toronto".to_string()),
+        ]);
+
+        // CA < US, so key3 < key1
+        assert!(key3 < key1);
+        assert!(key3 < key2);
+
+        // LA < NYC, so key2 < key1
+        assert!(key2 < key1);
+    }
+
+    #[test]
+    fn test_compound_index_create() {
+        let tree = BPlusTree::new_compound(
+            "users_location".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            false,
+        );
+
+        assert_eq!(tree.metadata.name, "users_location");
+        assert_eq!(tree.metadata.field, "country"); // Primary field
+        assert_eq!(
+            tree.metadata.fields,
+            vec!["country".to_string(), "city".to_string()]
+        );
+        assert!(tree.metadata.is_compound());
+    }
+
+    #[test]
+    fn test_compound_index_extract_key() {
+        let tree = BPlusTree::new_compound(
+            "users_location".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            false,
+        );
+
+        let doc = serde_json::json!({
+            "_id": 1,
+            "name": "Alice",
+            "country": "US",
+            "city": "NYC"
+        });
+
+        let key = tree.extract_key(&doc);
+        let expected = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("NYC".to_string()),
+        ]);
+        assert_eq!(key, expected);
+    }
+
+    #[test]
+    fn test_compound_index_insert_search() {
+        let mut tree = BPlusTree::new_compound(
+            "users_location".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            false,
+        );
+
+        // Insert compound keys
+        let key1 = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("NYC".to_string()),
+        ]);
+        let key2 = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("LA".to_string()),
+        ]);
+        let key3 = IndexKey::Compound(vec![
+            IndexKey::String("CA".to_string()),
+            IndexKey::String("Toronto".to_string()),
+        ]);
+
+        tree.insert(key1.clone(), DocumentId::Int(1)).unwrap();
+        tree.insert(key2.clone(), DocumentId::Int(2)).unwrap();
+        tree.insert(key3.clone(), DocumentId::Int(3)).unwrap();
+
+        // Search should work
+        assert_eq!(tree.search(&key1), Some(DocumentId::Int(1)));
+        assert_eq!(tree.search(&key2), Some(DocumentId::Int(2)));
+        assert_eq!(tree.search(&key3), Some(DocumentId::Int(3)));
+
+        // Non-existent key
+        let key_missing = IndexKey::Compound(vec![
+            IndexKey::String("UK".to_string()),
+            IndexKey::String("London".to_string()),
+        ]);
+        assert_eq!(tree.search(&key_missing), None);
+    }
+
+    #[test]
+    fn test_compound_index_range_scan() {
+        let mut tree = BPlusTree::new_compound(
+            "users_location".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            false,
+        );
+
+        // Insert several compound keys
+        let keys = vec![
+            (vec!["CA", "Montreal"], 1),
+            (vec!["CA", "Toronto"], 2),
+            (vec!["CA", "Vancouver"], 3),
+            (vec!["US", "Chicago"], 4),
+            (vec!["US", "LA"], 5),
+            (vec!["US", "NYC"], 6),
+        ];
+
+        for (fields, id) in &keys {
+            let key = IndexKey::Compound(vec![
+                IndexKey::String(fields[0].to_string()),
+                IndexKey::String(fields[1].to_string()),
+            ]);
+            tree.insert(key, DocumentId::Int(*id)).unwrap();
+        }
+
+        // Range scan for all US cities
+        let start = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("".to_string()), // Empty string sorts before any city
+        ]);
+        let end = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("\u{10ffff}".to_string()), // Max unicode sorts after any city
+        ]);
+
+        let results = tree.range_scan(&start, &end, true, true);
+        assert_eq!(results.len(), 3); // Chicago, LA, NYC
+    }
+
+    #[test]
+    fn test_compound_index_unique() {
+        let mut tree = BPlusTree::new_compound(
+            "users_location".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            true, // unique
+        );
+
+        let key = IndexKey::Compound(vec![
+            IndexKey::String("US".to_string()),
+            IndexKey::String("NYC".to_string()),
+        ]);
+
+        // First insert should succeed
+        tree.insert(key.clone(), DocumentId::Int(1)).unwrap();
+
+        // Second insert with same compound key should fail
+        let result = tree.insert(key, DocumentId::Int(2));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_index_manager_compound() {
+        let mut manager = IndexManager::new();
+
+        // Create compound index
+        manager
+            .create_compound_index(
+                "users_country_city".to_string(),
+                vec!["country".to_string(), "city".to_string()],
+                false,
+            )
+            .unwrap();
+
+        // Verify it exists
+        let index = manager.get_btree_index("users_country_city").unwrap();
+        assert!(index.metadata.is_compound());
+        assert_eq!(index.metadata.fields.len(), 2);
+
+        // Duplicate should fail
+        let result = manager.create_compound_index(
+            "users_country_city".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            false,
+        );
+        assert!(result.is_err());
     }
 }

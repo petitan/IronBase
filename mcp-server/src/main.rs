@@ -435,7 +435,7 @@ async fn health_check() -> impl IntoResponse {
 
 /// Check if method is an MCP protocol method (not a command)
 fn is_mcp_protocol_method(method: &str) -> bool {
-    matches!(method, "initialize" | "tools/list" | "resources/list" | "resources/read" | "prompts/list")
+    matches!(method, "initialize" | "tools/list" | "resources/list" | "resources/read" | "prompts/list" | "prompts/get")
 }
 
 /// Handle MCP protocol methods (initialize, tools/list, resources/list, etc.)
@@ -630,6 +630,47 @@ async fn handle_mcp_protocol_method(
                 jsonrpc,
                 id,
             )
+        }
+        "prompts/get" => {
+            // Parse prompt name from params
+            let prompt_name = match params.get("name").and_then(|n| n.as_str()) {
+                Some(name) => name,
+                None => {
+                    return error_response_with_id(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_PARAMS",
+                        "Missing 'name' parameter for prompts/get",
+                        jsonrpc,
+                        id,
+                    );
+                }
+            };
+
+            // Find prompt in the list
+            let prompts_list = get_prompts_list();
+            match prompts_list.iter().find(|p| {
+                p.get("name").and_then(|n| n.as_str()) == Some(prompt_name)
+            }) {
+                Some(prompt) => {
+                    // TODO: Future enhancement - parameter substitution
+                    // If params.arguments is provided, substitute them into the prompt template
+
+                    success_response_with_id(
+                        prompt.clone(),
+                        jsonrpc,
+                        id,
+                    )
+                }
+                None => {
+                    error_response_with_id(
+                        StatusCode::NOT_FOUND,
+                        "PROMPT_NOT_FOUND",
+                        &format!("Prompt '{}' not found. Use prompts/list to see available prompts.", prompt_name),
+                        jsonrpc,
+                        id,
+                    )
+                }
+            }
         }
         _ => error_response_with_id(
             StatusCode::NOT_FOUND,

@@ -134,11 +134,9 @@ def test_complex_queries():
     print(f"✓ Price >= 300: {len(expensive)} items")
 
     # Query 3: Range query
-    # NOTE: Current implementation includes all docs, filters in post-processing
     mid_price = products.find({"price": {"$gt": 50, "$lt": 500}})
-    # Should be 4 (Keyboard 75, Chair 150, Desk 300, Monitor 400)
-    # But currently returns 5 (includes Laptop 1200) - query engine bug
-    assert len(mid_price) >= 4  # Relaxed assertion for known bug
+    # Should be 4: Keyboard 75, Chair 150, Desk 300, Monitor 400
+    assert len(mid_price) == 4, f"Expected 4 items, got {len(mid_price)}: {[p['name'] for p in mid_price]}"
     print(f"✓ Price range query: {len(mid_price)} items")
 
     # Query 4: $in operator
