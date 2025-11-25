@@ -1,6 +1,8 @@
-# TODO: MCP Balanced MVP Implementation
+# TODO: MCP Balanced MVP + Calibration Implementation
 
-**Döntés**: Balanced MVP (10 prompt) + 4 dokumentum típus támogatás
+**Döntés**: Extended MVP (15 prompt) + 4 dokumentum típus támogatás
+- 10 Balanced prompts (általános + ISO 17025 alap)
+- 5 Calibration-specific prompts (kalibrálás, mérési bizonytalanság)
 
 **Dokumentum Típusok**:
 1. Minőségirányítási kézikönyv (Quality Manual)
@@ -418,6 +420,338 @@ Include objective evidence requirements.
     }
   ]
 }
+```
+
+---
+
+##### **ISO 17025 Calibration-Specific Prompts (5 db)**
+
+**11. calculate-measurement-uncertainty** ⏱️ ~20 perc
+```json
+{
+  "name": "calculate-measurement-uncertainty",
+  "description": "Calculate measurement uncertainty using GUM method",
+  "arguments": [
+    {
+      "name": "measurement_data",
+      "description": "Measurement results and conditions",
+      "required": true
+    },
+    {
+      "name": "instrument_specs",
+      "description": "Instrument specifications (resolution, accuracy)",
+      "required": true
+    },
+    {
+      "name": "environmental_data",
+      "description": "Environmental conditions (temp, humidity, pressure)",
+      "required": false
+    }
+  ]
+}
+```
+**Prompt szöveg**:
+```
+Calculate measurement uncertainty according to GUM (Guide to the Expression of Uncertainty in Measurement):
+
+INPUT DATA:
+- Measurement data: {measurement_data}
+- Instrument specs: {instrument_specs}
+- Environmental: {environmental_data}
+
+CALCULATE:
+1. Type A uncertainties (statistical - standard deviation of repeated measurements)
+2. Type B uncertainties (systematic):
+   - Instrument resolution: u(res) = resolution / (2√3)
+   - Instrument accuracy: u(acc) = accuracy / √3
+   - Temperature effect: u(temp) = coefficient × ΔT / √3
+   - Other systematic effects
+
+3. Combined standard uncertainty: u_c = √(Σ u_i²)
+4. Expanded uncertainty: U = k × u_c (k=2 for 95% confidence)
+
+OUTPUT:
+- Uncertainty budget table (component, value, distribution, divisor, uncertainty)
+- Combined standard uncertainty (u_c)
+- Expanded uncertainty (U) with coverage factor k
+- Uncertainty statement for certificate
+```
+
+---
+
+**12. generate-calibration-hierarchy** ⏱️ ~15 perc
+```json
+{
+  "name": "generate-calibration-hierarchy",
+  "description": "Generate calibration traceability chain to national/international standards",
+  "arguments": [
+    {
+      "name": "instrument_type",
+      "description": "Type of instrument (mass, length, temperature, pressure, etc.)",
+      "required": true
+    },
+    {
+      "name": "measurement_range",
+      "description": "Measurement range and uncertainty required",
+      "required": true
+    },
+    {
+      "name": "country",
+      "description": "Country (for national metrology institute)",
+      "required": false
+    }
+  ]
+}
+```
+**Prompt szöveg**:
+```
+Generate calibration traceability hierarchy for {instrument_type}:
+
+TRACEABILITY CHAIN:
+Level 1: International standard
+  - SI unit definition (BIPM)
+  - Primary realization
+
+Level 2: National standard
+  - National Metrology Institute: {determine based on country, e.g., NIST, PTB, NPL}
+  - Primary/Secondary standard
+  - Uncertainty: [typical NMI uncertainty]
+
+Level 3: Reference standard (laboratory)
+  - Calibrated by NMI or accredited lab
+  - Reference standard type and ID
+  - Uncertainty: [NMI uncertainty × ~2-3]
+  - Calibration interval: [recommend based on stability]
+
+Level 4: Working standard (this instrument)
+  - Instrument: {instrument_type}
+  - Range: {measurement_range}
+  - Expected uncertainty: [Level 3 × ~2-3]
+  - Calibration interval: [recommend based on usage]
+
+OUTPUT:
+- Diagram (ASCII art or description)
+- Uncertainty ratios (TUR - Test Uncertainty Ratio ≥ 4:1 recommended)
+- Calibration lab requirements (accreditation scope)
+- Traceability statement for Quality Manual
+```
+
+---
+
+**13. determine-calibration-interval** ⏱️ ~15 perc
+```json
+{
+  "name": "determine-calibration-interval",
+  "description": "Determine optimal calibration interval using statistical methods",
+  "arguments": [
+    {
+      "name": "instrument_id",
+      "description": "Instrument identifier",
+      "required": true
+    },
+    {
+      "name": "historical_data",
+      "description": "Previous calibration results (drift data)",
+      "required": true
+    },
+    {
+      "name": "usage_frequency",
+      "description": "Usage intensity (daily, weekly, monthly)",
+      "required": true
+    },
+    {
+      "name": "criticality",
+      "description": "Process criticality (high, medium, low)",
+      "required": false
+    }
+  ]
+}
+```
+**Prompt szöveg**:
+```
+Determine calibration interval for instrument {instrument_id}:
+
+ANALYSIS METHOD:
+1. Historical drift analysis
+   - Plot calibration values over time
+   - Calculate drift rate (change per time unit)
+   - Identify trend (linear, exponential, random)
+
+2. Failure rate analysis
+   - Count out-of-tolerance findings
+   - Calculate probability of being in-tolerance at interval
+
+3. Usage-based adjustment
+   - Usage frequency: {usage_frequency}
+   - Adjust base interval by usage factor
+   - High usage → shorter interval
+   - Low usage → consider condition-based monitoring
+
+4. Risk assessment
+   - Process criticality: {criticality}
+   - Consequences of out-of-tolerance condition
+   - Critical processes → shorter interval
+
+RECOMMENDED INTERVAL CALCULATION:
+- Base interval from manufacturer: [extract if available]
+- Drift-based interval: [time to reach 75% of tolerance]
+- Risk-adjusted interval: [apply safety factor based on criticality]
+
+OUTPUT:
+- Recommended calibration interval (months/years)
+- Statistical confidence level
+- Justification and supporting data
+- Next review date (typically annual)
+- ISO 17025 clause 6.4.13 compliance statement
+```
+
+---
+
+**14. create-calibration-certificate** ⏱️ ~20 perc
+```json
+{
+  "name": "create-calibration-certificate",
+  "description": "Generate ISO 17025 compliant calibration certificate",
+  "arguments": [
+    {
+      "name": "instrument_data",
+      "description": "Instrument details (ID, type, manufacturer, serial)",
+      "required": true
+    },
+    {
+      "name": "calibration_results",
+      "description": "Measurement results table",
+      "required": true
+    },
+    {
+      "name": "uncertainty_data",
+      "description": "Uncertainty calculation results",
+      "required": true
+    },
+    {
+      "name": "reference_standard",
+      "description": "Reference standard used (ID, cert number, due date)",
+      "required": true
+    },
+    {
+      "name": "environmental_conditions",
+      "description": "Temperature, humidity during calibration",
+      "required": true
+    }
+  ]
+}
+```
+**Prompt szöveg**:
+```
+Generate calibration certificate per ISO 17025:2017 clause 7.8.2:
+
+CERTIFICATE STRUCTURE (DOCJL format):
+
+sec:1 - Certificate Header
+  - Laboratory name and accreditation details
+  - Certificate number (unique)
+  - Page X of Y
+  - Accreditation logo (reference)
+
+sec:2 - Customer Information
+  - Customer name and address
+  - Contact person
+
+sec:3 - Instrument Under Calibration
+  - Description: {instrument_data.type}
+  - Manufacturer: {instrument_data.manufacturer}
+  - Model: {instrument_data.model}
+  - Serial number: {instrument_data.serial}
+  - ID number: {instrument_data.id}
+  - Location: {instrument_data.location}
+
+sec:4 - Calibration Details
+  - Date of calibration
+  - Calibration method/procedure reference
+  - Environmental conditions: {environmental_conditions}
+  - Reference standard: {reference_standard}
+    - ID, certificate number, calibration due date
+
+sec:5 - Calibration Results
+  - Results table: {calibration_results}
+    - Nominal value | Actual reading | Deviation | Tolerance | Pass/Fail
+  - Measurement uncertainty: {uncertainty_data.expanded}
+  - Coverage factor: k={uncertainty_data.k}
+  - Confidence level: {uncertainty_data.confidence}%
+
+sec:6 - Statements
+  - Traceability statement to SI units
+  - Uncertainty statement (GUM compliance)
+  - "This certificate shall not be reproduced except in full..."
+  - Accreditation mark usage restrictions
+
+sec:7 - Signatures
+  - Calibration technician
+  - Technical manager
+  - Date of issue
+
+OUTPUT: Complete DOCJL document structure ready for document creation
+```
+
+---
+
+**15. generate-uncertainty-budget** ⏱️ ~15 perc
+```json
+{
+  "name": "generate-uncertainty-budget",
+  "description": "Create detailed measurement uncertainty budget table",
+  "arguments": [
+    {
+      "name": "measurement_process",
+      "description": "Description of measurement process",
+      "required": true
+    },
+    {
+      "name": "uncertainty_components",
+      "description": "List of uncertainty sources",
+      "required": true
+    }
+  ]
+}
+```
+**Prompt szöveg**:
+```
+Generate measurement uncertainty budget for: {measurement_process}
+
+UNCERTAINTY COMPONENTS (from {uncertainty_components}):
+
+For each component:
+1. Identify source
+2. Estimate value
+3. Probability distribution (normal, rectangular, triangular, U-shaped)
+4. Divisor (√3 for rectangular, 2 for triangular, etc.)
+5. Standard uncertainty u(x_i)
+6. Sensitivity coefficient c_i
+7. Contribution u_i(y) = c_i × u(x_i)
+
+COMMON COMPONENTS:
+- Repeatability (Type A): s/√n
+- Resolution: resolution/(2√3)
+- Reference standard: U_ref/k
+- Temperature effect: temp_coeff × ΔT/√3
+- Drift: drift_rate × time/√3
+- Operator variability: range/√3
+
+UNCERTAINTY BUDGET TABLE (markdown):
+| Component | Value | Distribution | Divisor | u(x_i) | c_i | u_i(y) | % Contribution |
+|-----------|-------|--------------|---------|--------|-----|--------|----------------|
+| ...       | ...   | ...          | ...     | ...    | ... | ...    | ...            |
+
+COMBINED UNCERTAINTY:
+- u_c = √(Σ u_i²(y))
+- Degrees of freedom (Welch-Satterthwaite if needed)
+- Expanded uncertainty: U = k × u_c
+- Coverage factor k = 2 (95% confidence)
+
+OUTPUT:
+- Formatted table (DOCJL table block if possible, or formatted text)
+- Combined and expanded uncertainty
+- Dominant contributors highlighted
 ```
 
 ---
