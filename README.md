@@ -222,12 +222,13 @@ users.insert_one(HashMap::from([
 ]))?;
 ```
 
-**Mikor használd:**
+**Mikor használd az in-memory módot:**
 - ✅ Unit tesztek (gyors, izolált)
 - ✅ Integration tesztek
 - ✅ Prototípusok
 - ✅ Benchmarkok
-- ❌ Production (nincs perzisztencia!)
+
+**⚠️ Figyelem:** Az in-memory mód NEM perzisztál - a process végén minden adat elveszik! Production-ben használd a fájl-alapú módot (`ironbase("myapp.mlite")`), ami teljes WAL + crash recovery támogatással rendelkezik.
 
 ### Durability Modes (Auto-Commit)
 
