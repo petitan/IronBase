@@ -2,8 +2,10 @@
 """
 MCP Bridge for Windows Claude Desktop -> WSL HTTP Server
 
-This script acts as a bridge between Claude Desktop (Windows) and the
-MCP DOCJL Server running in WSL via HTTP.
+This script acts as a simple STDIO <-> HTTP proxy between Claude Desktop (Windows)
+and the MCP DOCJL Server running in WSL via HTTP.
+
+All MCP protocol logic is handled by the Rust server.
 
 Usage:
     python mcp_bridge.py
@@ -41,256 +43,12 @@ def log_debug(message: str):
         except:
             pass  # Ignore file logging errors
 
-def handle_mcp_protocol(request: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Handle MCP protocol messages (initialize, tools/list, tools/call)
-
-    Returns MCP protocol response directly without forwarding to server
-    """
-    method = request.get("method")
-    request_id = request.get("id")
-
-    # Handle initialize - MCP handshake
-    if method == "initialize":
-        log_debug("Handling MCP initialize")
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {
-                    "tools": {}
-                },
-                "serverInfo": {
-                    "name": "docjl-editor",
-                    "version": "0.1.0"
-                }
-            }
-        }
-
-    # Handle tools/list - List available MCP tools
-    elif method == "tools/list":
-        log_debug("Handling tools/list")
-        return {
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "tools": [
-                    {
-                        "name": "mcp_docjl_create_document",
-                        "description": "Create a new DOCJL document",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document": {
-                                    "type": "object",
-                                    "description": "Full document with id, metadata, and docjll blocks",
-                                    "properties": {
-                                        "id": {"type": "string", "description": "Document identifier"},
-                                        "metadata": {"type": "object", "description": "Document metadata (title, version, etc.)"},
-                                        "docjll": {"type": "array", "description": "Array of top-level blocks"}
-                                    },
-                                    "required": ["id", "metadata", "docjll"]
-                                }
-                            },
-                            "required": ["document"]
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_list_documents",
-                        "description": "List all DOCJL documents",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "filter": {"type": "object", "description": "Optional filter"}
-                            }
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_get_document",
-                        "description": "Get full DOCJL document by ID",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document_id": {"type": "string", "description": "Document ID"}
-                            },
-                            "required": ["document_id"]
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_list_headings",
-                        "description": "Get document outline/table of contents",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document_id": {"type": "string", "description": "Document ID"}
-                            },
-                            "required": ["document_id"]
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_search_blocks",
-                        "description": "Search for blocks in documents",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document_id": {"type": "string", "description": "Document ID"},
-                                "query": {"type": "object", "description": "Search query"}
-                            },
-                            "required": ["document_id", "query"]
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_search_content",
-                        "description": "Search for text content within a document. Returns only matching blocks to solve context window problems. Case-insensitive by default.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document_id": {"type": "string", "description": "Document ID to search in"},
-                                "query": {"type": "string", "description": "Text to search for"},
-                                "case_sensitive": {"type": "boolean", "description": "Whether search should be case-sensitive (default: false)"},
-                                "max_results": {"type": "integer", "description": "Maximum number of matches to return (default: 100)"}
-                            },
-                            "required": ["document_id", "query"]
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_insert_block",
-                        "description": "Insert new content block into document. Label format: 'type:id' - supports numeric (para:1), hierarchical (sec:4.2.1), or alphanumeric (para:test, sec:demo_1) identifiers.",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document_id": {"type": "string", "description": "Document ID (as string)"},
-                                "block": {
-                                    "type": "object",
-                                    "description": "Block to insert with type, label (format: 'type:id' - numeric, hierarchical, or alphanumeric), and content array",
-                                    "properties": {
-                                        "type": {"type": "string", "enum": ["paragraph", "heading"], "description": "Block type"},
-                                        "label": {"type": "string", "pattern": "^(para|sec|fig|tbl|eq|lst|def|thm|lem|proof|ex|note|warn|info|tip):([a-zA-Z0-9._]+)$", "description": "Label in format 'type:id' (e.g. para:1, sec:4.2.1, para:test, sec:demo_1)"},
-                                        "content": {"type": "array", "description": "Content array with {type, content} objects"}
-                                    },
-                                    "required": ["type", "label", "content"]
-                                },
-                                "position": {"type": "string", "description": "Insert position: 'start', 'end', or 'before:label' / 'after:label'"}
-                            },
-                            "required": ["document_id", "block"]
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_update_block",
-                        "description": "Update existing block",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document_id": {"type": "string"},
-                                "block_label": {"type": "string"},
-                                "updates": {"type": "object"}
-                            },
-                            "required": ["document_id", "block_label", "updates"]
-                        }
-                    },
-                    {
-                        "name": "mcp_docjl_delete_block",
-                        "description": "Delete block from document",
-                        "inputSchema": {
-                            "type": "object",
-                            "properties": {
-                                "document_id": {"type": "string"},
-                                "block_label": {"type": "string"}
-                            },
-                            "required": ["document_id", "block_label"]
-                        }
-                    }
-                ]
-            }
-        }
-
-    # Handle tools/call - Execute a tool
-    elif method == "tools/call":
-        log_debug("Handling tools/call")
-        params = request.get("params", {})
-        tool_name = params.get("name")
-        tool_arguments = params.get("arguments", {})
-
-        # Forward to backend with MCP tools/call wrapper
-        backend_request = {
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": tool_name,
-                "arguments": tool_arguments
-            },
-            "id": request_id
-        }
-
-        try:
-            response = requests.post(
-                MCP_SERVER_URL,
-                json=backend_request,
-                headers={"Content-Type": "application/json"},
-                timeout=30
-            )
-
-            if response.status_code == 200:
-                backend_result = response.json()
-
-                # Wrap backend result in MCP tools/call response format
-                if "result" in backend_result:
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "result": {
-                            "content": [
-                                {
-                                    "type": "text",
-                                    "text": json.dumps(backend_result["result"], indent=2, ensure_ascii=False)
-                                }
-                            ]
-                        }
-                    }
-                elif "error" in backend_result:
-                    # Backend returned error - ensure proper format
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": backend_result["error"]
-                    }
-                else:
-                    # Unknown backend response
-                    return {
-                        "jsonrpc": "2.0",
-                        "id": request_id,
-                        "error": {
-                            "code": -32603,
-                            "message": f"Unexpected backend response: {json.dumps(backend_result)}"
-                        }
-                    }
-            else:
-                return {
-                    "jsonrpc": "2.0",
-                    "id": request_id,
-                    "error": {
-                        "code": -32603,
-                        "message": f"Backend error {response.status_code}: {response.text}"
-                    }
-                }
-        except Exception as e:
-            return {
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "error": {
-                    "code": -32603,
-                    "message": f"Tool execution error: {str(e)}"
-                }
-            }
-
-    # Unknown MCP method
-    else:
-        return None  # Not an MCP protocol message
-
 def process_request(request_line: str) -> Dict[str, Any]:
     """
     Process a single JSON-RPC request from stdin
+
+    Forwards all requests to the Rust HTTP server unchanged.
+    The Rust server handles all MCP protocol logic.
 
     Args:
         request_line: JSON-RPC request string
@@ -301,15 +59,12 @@ def process_request(request_line: str) -> Dict[str, Any]:
     try:
         # Parse incoming JSON-RPC request
         request = json.loads(request_line)
-        log_debug(f"Received request: {request.get('method', 'unknown')}")
+        method = request.get("method", "unknown")
+        request_id = request.get("id")
 
-        # Check if this is an MCP protocol message
-        mcp_response = handle_mcp_protocol(request)
-        if mcp_response is not None:
-            log_debug(f"Handled as MCP protocol message")
-            return mcp_response
+        log_debug(f"Forwarding request: {method} (id: {request_id})")
 
-        # Not MCP protocol - forward to WSL HTTP server
+        # Forward to Rust HTTP server (handles all MCP protocol logic)
         response = requests.post(
             MCP_SERVER_URL,
             json=request,
@@ -317,16 +72,16 @@ def process_request(request_line: str) -> Dict[str, Any]:
             timeout=30  # 30 second timeout
         )
 
-        # Parse response
+        # Parse and return response unchanged
         if response.status_code == 200:
             result = response.json()
-            log_debug(f"Response successful")
+            log_debug(f"Response successful for {method}")
             return result
         else:
-            log_debug(f"HTTP error: {response.status_code}")
+            log_debug(f"HTTP error {response.status_code} for {method}")
             return {
                 "jsonrpc": "2.0",
-                "id": request.get("id") if request.get("id") is not None else -1,
+                "id": request_id if request_id is not None else -1,
                 "error": {
                     "code": -32603,
                     "message": f"HTTP error {response.status_code}: {response.text}"
@@ -337,7 +92,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug(f"JSON decode error: {e}")
         return {
             "jsonrpc": "2.0",
-            "id": -1,  # Use -1 instead of None for parse errors (no valid request ID available)
+            "id": -1,  # Use -1 for parse errors (no valid request ID available)
             "error": {
                 "code": -32700,
                 "message": f"Parse error: {str(e)}"
@@ -378,7 +133,7 @@ def main():
     """
     Main loop: Read JSON-RPC from stdin, forward to HTTP server, write response to stdout
     """
-    log_debug("MCP Bridge starting...")
+    log_debug("MCP Bridge starting (dumb proxy mode)...")
     log_debug(f"Target server: {MCP_SERVER_URL}")
 
     # Test connection to server
@@ -404,7 +159,7 @@ def main():
 
         log_debug(f"Processing request ({len(line)} bytes)")
 
-        # Process request
+        # Process request (simple forward to HTTP server)
         response = process_request(line)
 
         # Write response to stdout
