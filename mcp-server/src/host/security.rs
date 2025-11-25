@@ -228,6 +228,7 @@ impl std::error::Error for AuthError {}
 /// Command whitelist - only these commands are allowed for AI agents
 pub fn default_whitelist() -> HashSet<String> {
     [
+        "mcp_docjl_create_document",
         "mcp_docjl_list_documents",
         "mcp_docjl_get_document",
         "mcp_docjl_insert_block",

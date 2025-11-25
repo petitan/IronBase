@@ -86,6 +86,17 @@ impl IronBaseAdapter {
         }
     }
 
+    /// Create a new document
+    pub fn create_document(&self, document: Document) -> DomainResult<String> {
+        let mut documents = self.documents.write();
+        let document_id = document.id.clone().unwrap_or_else(|| format!("doc_{}", documents.len() + 1));
+
+        // Store by document ID
+        documents.insert(document_id.clone(), document);
+
+        Ok(document_id)
+    }
+
     /// Get a document by ID (supports both _id and semantic id field lookup)
     pub fn get_document(&self, document_id: &str) -> DomainResult<Document> {
         let documents = self.documents.read();

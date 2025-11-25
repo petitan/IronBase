@@ -11,6 +11,33 @@ use std::collections::HashMap;
 /// Command execution result
 pub type CommandResult = Result<Value, String>;
 
+/// Create document command
+#[derive(Debug, Deserialize)]
+pub struct CreateDocumentParams {
+    pub document: Value,  // Full document as JSON
+}
+
+pub fn handle_create_document(
+    adapter: &IronBaseAdapter,
+    params: CreateDocumentParams,
+) -> CommandResult {
+    use mcp_docjl::Document;
+
+    // Parse document from JSON
+    let document: Document = serde_json::from_value(params.document)
+        .map_err(|e| format!("Invalid document structure: {}", e))?;
+
+    // Create document
+    let document_id = adapter
+        .create_document(document)
+        .map_err(|e| format!("Failed to create document: {}", e))?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "document_id": document_id
+    }))
+}
+
 /// List documents command
 #[derive(Debug, Deserialize)]
 pub struct ListDocumentsParams {
@@ -468,6 +495,11 @@ pub fn dispatch_command(
     audit_log_path: &std::path::PathBuf,
 ) -> CommandResult {
     match method {
+        "mcp_docjl_create_document" => {
+            let params: CreateDocumentParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid parameters: {}", e))?;
+            handle_create_document(adapter, params)
+        }
         "mcp_docjl_list_documents" => {
             let params: ListDocumentsParams = serde_json::from_value(params)
                 .map_err(|e| format!("Invalid parameters: {}", e))?;

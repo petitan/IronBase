@@ -1,0 +1,22 @@
+[2m2025-11-24T21:14:55.759259Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Starting MCP DOCJL Server v0.1.0
+[2m2025-11-24T21:14:55.759493Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Server listening on 127.0.0.1:8080
+[2m2025-11-24T21:15:25.344408Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_get_document
+[2m2025-11-24T21:15:25.344470Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764018925344_2d07cea8
+[2m2025-11-24T21:18:30.397301Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_get_document
+[2m2025-11-24T21:18:30.397363Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019110397_c9eed092
+[2m2025-11-24T21:20:21.633314Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
+[2m2025-11-24T21:20:21.633461Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221633_1b450e90
+[2m2025-11-24T21:20:21.673134Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
+[2m2025-11-24T21:20:21.673222Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221673_d81b494d
+[2m2025-11-24T21:20:21.712281Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
+[2m2025-11-24T21:20:21.712343Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221712_e1ce6273
+[2m2025-11-24T21:20:21.750805Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
+[2m2025-11-24T21:20:21.750859Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221750_1df35a60
+[2m2025-11-24T21:20:21.789687Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
+[2m2025-11-24T21:20:21.789753Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221789_828f6070
+[2m2025-11-24T21:20:21.827744Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
+[2m2025-11-24T21:20:21.827797Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221827_9dd5783b
+[2m2025-11-24T21:21:23.988533Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_list_documents
+[2m2025-11-24T21:21:23.988592Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019283988_842fadf2
+[2m2025-11-24T21:31:30.396044Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_get_document
+[2m2025-11-24T21:31:30.397560Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019890396_5a64ec88

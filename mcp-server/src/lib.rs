@@ -5,11 +5,13 @@ pub mod domain;
 pub mod host;
 
 // Re-export main types for convenience
-#[cfg(not(feature = "real-ironbase"))]
-pub use adapters::IronBaseAdapter;
-
-#[cfg(feature = "real-ironbase")]
+// Default: use RealIronBaseAdapter (persistent storage)
+#[cfg(not(feature = "mock-adapter"))]
 pub use adapters::RealIronBaseAdapter as IronBaseAdapter;
+
+// Only use mock adapter when explicitly enabled
+#[cfg(feature = "mock-adapter")]
+pub use adapters::IronBaseAdapter;
 
 pub use domain::{
     Block, BlockType, Document, DocumentOperations, DomainError, DomainResult,

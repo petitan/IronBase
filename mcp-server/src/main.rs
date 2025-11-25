@@ -234,7 +234,8 @@ async fn handle_mcp_request(
             &actual_params,
             request.jsonrpc,
             request.id,
-        );
+            &state,
+        ).await;
     }
 
     // Extract API key from Authorization header
@@ -438,11 +439,12 @@ fn is_mcp_protocol_method(method: &str) -> bool {
 }
 
 /// Handle MCP protocol methods (initialize, tools/list, resources/list, etc.)
-fn handle_mcp_protocol_method(
+async fn handle_mcp_protocol_method(
     method: &str,
-    _params: &serde_json::Value,
+    params: &serde_json::Value,
     jsonrpc: Option<String>,
     id: Option<serde_json::Value>,
+    state: &AppState,
 ) -> Response {
     info!("Handling MCP protocol method: {}", method);
 
@@ -480,14 +482,67 @@ fn handle_mcp_protocol_method(
             )
         }
         "resources/list" => {
-            // TODO: Implement resources/list
-            error_response_with_id(
-                StatusCode::NOT_IMPLEMENTED,
-                "NOT_IMPLEMENTED",
-                "resources/list not yet implemented",
-                jsonrpc,
-                id,
-            )
+            // List all documents as MCP resources
+            // Call mcp_docjl_list_documents to get document list
+            let list_params = serde_json::json!({});
+            let mut adapter = state.adapter.write();
+
+            match commands::dispatch_command(
+                "mcp_docjl_list_documents",
+                list_params,
+                &mut adapter,
+                state.audit_logger.path(),
+            ) {
+                Ok(result) => {
+                    // Extract documents from result
+                    let documents = result.get("documents")
+                        .and_then(|d| d.as_array())
+                        .unwrap_or(&vec![])
+                        .clone();
+
+                    // Convert documents to MCP resources
+                    let resources: Vec<serde_json::Value> = documents.iter()
+                        .filter_map(|doc| {
+                            let doc_id = doc.get("id")?.as_str()?;
+                            let title = doc.get("metadata")
+                                .and_then(|m| m.get("title"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or(doc_id);
+
+                            // Generate description from metadata
+                            let version = doc.get("metadata")
+                                .and_then(|m| m.get("version"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+                            let description = format!("DOCJL Document: {} (version {})", title, version);
+
+                            Some(serde_json::json!({
+                                "uri": format!("docjl://document/{}", doc_id),
+                                "name": title,
+                                "description": description,
+                                "mimeType": "application/json"
+                            }))
+                        })
+                        .collect();
+
+                    success_response_with_id(
+                        serde_json::json!({
+                            "resources": resources
+                        }),
+                        jsonrpc,
+                        id,
+                    )
+                }
+                Err(e) => {
+                    error_response_with_id(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "RESOURCE_LIST_ERROR",
+                        &format!("Failed to list resources: {}", e),
+                        jsonrpc,
+                        id,
+                    )
+                }
+            }
         }
         "resources/read" => {
             // TODO: Implement resources/read
