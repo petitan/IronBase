@@ -545,14 +545,81 @@ async fn handle_mcp_protocol_method(
             }
         }
         "resources/read" => {
-            // TODO: Implement resources/read
-            error_response_with_id(
-                StatusCode::NOT_IMPLEMENTED,
-                "NOT_IMPLEMENTED",
-                "resources/read not yet implemented",
-                jsonrpc,
-                id,
-            )
+            // Parse URI from params
+            let uri = match params.get("uri").and_then(|u| u.as_str()) {
+                Some(u) => u,
+                None => {
+                    return error_response_with_id(
+                        StatusCode::BAD_REQUEST,
+                        "INVALID_PARAMS",
+                        "Missing 'uri' parameter",
+                        jsonrpc,
+                        id,
+                    );
+                }
+            };
+
+            // Extract doc_id from URI: docjl://document/{doc_id}
+            let doc_id = if let Some(stripped) = uri.strip_prefix("docjl://document/") {
+                stripped
+            } else {
+                return error_response_with_id(
+                    StatusCode::BAD_REQUEST,
+                    "INVALID_URI",
+                    &format!("Invalid URI format: {}. Expected: docjl://document/{{id}}", uri),
+                    jsonrpc,
+                    id,
+                );
+            };
+
+            // Get document
+            let get_params = serde_json::json!({
+                "document_id": doc_id
+            });
+
+            let mut adapter = state.adapter.write();
+            match commands::dispatch_command(
+                "mcp_docjl_get_document",
+                get_params,
+                &mut adapter,
+                state.audit_logger.path(),
+            ) {
+                Ok(result) => {
+                    // Return resource with document as JSON text
+                    success_response_with_id(
+                        serde_json::json!({
+                            "contents": [{
+                                "uri": uri,
+                                "mimeType": "application/json",
+                                "text": serde_json::to_string_pretty(&result).unwrap_or_else(|_| "{}".to_string())
+                            }]
+                        }),
+                        jsonrpc,
+                        id,
+                    )
+                }
+                Err(e) => {
+                    // Check if document not found
+                    let error_msg = e.to_string();
+                    if error_msg.contains("not found") || error_msg.contains("does not exist") {
+                        error_response_with_id(
+                            StatusCode::NOT_FOUND,
+                            "RESOURCE_NOT_FOUND",
+                            &format!("Document '{}' not found", doc_id),
+                            jsonrpc,
+                            id,
+                        )
+                    } else {
+                        error_response_with_id(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "RESOURCE_READ_ERROR",
+                            &format!("Failed to read resource: {}", e),
+                            jsonrpc,
+                            id,
+                        )
+                    }
+                }
+            }
         }
         "prompts/list" => {
             // TODO: Implement prompts/list
