@@ -4,12 +4,21 @@ AI-assisted DOCJL document editing server implementing the Model Context Protoco
 
 ## Features
 
+### Core Features
 - **Secure API**: Authentication, authorization, and rate limiting
 - **Audit Logging**: Complete audit trail of all operations
 - **Schema Validation**: Enforce DOCJL document structure
 - **Label Management**: Automatic label generation and renumbering
 - **Cross-Reference Tracking**: Validate and update document references
 - **Transaction Support**: Rollback on validation failure
+
+### MCP Protocol Support (NEW!)
+- **Full MCP Implementation**: All MCP protocol logic in Rust server
+- **9 Tools**: Complete DOCJL document operations
+- **Resources**: Documents exposed as `docjl://document/{id}` resources
+- **15 Prompts**: 10 Balanced MVP + 5 ISO 17025 Calibration prompts
+- **Claude Desktop Integration**: STDIO bridge for seamless desktop integration
+- **HTTP API**: Full MCP functionality over HTTP for all clients
 
 ## Quick Start
 
