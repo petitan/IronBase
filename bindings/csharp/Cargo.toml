@@ -1,0 +1,25 @@
+[package]
+name = "ironbase-ffi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "C FFI bindings for IronBase - for C#/Unity integration"
+
+[lib]
+name = "ironbase_ffi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+# Core library
+ironbase-core = { path = "../../ironbase-core" }
+
+# Workspace dependencies
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+
+# FFI support
+libc = "0.2"
+
+[build-dependencies]
+csbindgen = "1.9"

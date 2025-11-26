@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "ironbase-core",
     "bindings/python",
+    "bindings/csharp",
 ]
 exclude = [
     "mcp-server",
