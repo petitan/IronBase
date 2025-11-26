@@ -15,6 +15,7 @@ MongoLite supports MongoDB-compatible aggregation pipelines for advanced data pr
   - [$skip](#skip---skip-documents)
 - [Accumulator Operators](#accumulator-operators)
 - [Real-World Examples](#real-world-examples)
+- [Nested Field Access (Dot Notation)](#nested-field-access-dot-notation)
 
 ---
 
@@ -532,11 +533,89 @@ results = users.aggregate([
 
 - **Expression operators**: Currently only field references (`"$field"`) are supported
   - Not yet supported: `$multiply`, `$add`, `$subtract`, etc.
-- **Nested field access**: `"$address.city"` not yet supported
 - **Array operators**: `$unwind`, `$push`, etc. not yet implemented
 - **Additional stages**: `$lookup`, `$facet`, `$bucket` not yet available
 
 These features are planned for future releases.
+
+---
+
+## Nested Field Access (Dot Notation)
+
+**NEW:** ironbase now supports MongoDB-compatible dot notation for nested fields in aggregation pipelines.
+
+### $group with nested _id
+
+```python
+# Group sales by city using nested field
+results = sales.aggregate([
+    {"$group": {
+        "_id": "$address.city",
+        "totalSales": {"$sum": "$amount"}
+    }}
+])
+```
+
+### Accumulators with nested fields
+
+```python
+# Use nested fields in all 6 accumulators
+results = users.aggregate([
+    {"$group": {
+        "_id": "$location.country",
+        "totalScore": {"$sum": "$stats.score"},
+        "avgRating": {"$avg": "$stats.rating"},
+        "minAge": {"$min": "$profile.age"},
+        "maxAge": {"$max": "$profile.age"},
+        "firstCity": {"$first": "$address.city"},
+        "lastCity": {"$last": "$address.city"}
+    }}
+])
+```
+
+### $project with nested fields
+
+```python
+# Project nested fields with rename
+results = users.aggregate([
+    {"$project": {
+        "city": "$address.city",
+        "rating": "$stats.rating",
+        "_id": 0
+    }}
+])
+```
+
+### $sort with nested fields
+
+```python
+# Sort by nested field
+results = users.aggregate([
+    {"$sort": {"address.zip": 1}}
+])
+```
+
+### Full pipeline example
+
+```python
+# Complete pipeline with nested field support
+results = sales.aggregate([
+    {"$match": {"status": "completed"}},
+    {"$group": {
+        "_id": "$store.location.city",
+        "totalRevenue": {"$sum": "$payment.amount"},
+        "avgOrderValue": {"$avg": "$payment.amount"}
+    }},
+    {"$project": {
+        "city": "$_id",
+        "revenue": "$totalRevenue",
+        "avgOrder": "$avgOrderValue",
+        "_id": 0
+    }},
+    {"$sort": {"revenue": -1}},
+    {"$limit": 10}
+])
+```
 
 ---
 

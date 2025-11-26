@@ -434,6 +434,10 @@ docs = collection.find({}, sort=[("age", 1)])  # Sort by age ascending
 docs = collection.find({}, sort=[("age", -1)])  # Sort by age descending
 docs = collection.find({}, sort=[("city", 1), ("age", -1)])  # Multi-field sort
 
+# Dot notation for nested fields (MongoDB-compatible)
+docs = collection.find({}, projection={"address.city": 1})  # Project nested field
+docs = collection.find({}, sort=[("address.zip", 1)])  # Sort by nested field
+
 # Find with limit and skip (pagination)
 docs = collection.find({}, limit=10)  # First 10 documents
 docs = collection.find({}, skip=5, limit=10)  # Documents 6-15
@@ -547,6 +551,13 @@ results = collection.aggregate([
     {"$group": {"_id": "$city", "count": {"$sum": 1}, "avgAge": {"$avg": "$age"}}},
     {"$sort": {"count": -1}},
     {"$limit": 10}
+])
+
+# Dot notation in aggregation (MongoDB-compatible)
+results = collection.aggregate([
+    {"$group": {"_id": "$address.city", "total": {"$sum": "$stats.score"}}},
+    {"$project": {"city": "$_id", "totalScore": "$total"}},
+    {"$sort": {"totalScore": -1}}
 ])
 
 # Available stages: $match, $group, $project, $sort, $limit, $skip
@@ -819,7 +830,7 @@ ironbase/
 - [x] Compound indexes (multi-field) ✅
 - [x] Cursor/streaming API for large result sets ✅
 - [x] In-memory storage for fast testing ✅
-- [ ] Nested field access in projection/sort (`"user.name"`)
+- [x] Nested field access in projection/sort (`"address.city"`) ✅
 
 **Medium-term:**
 - [x] **ACD Transactions** - Atomicity, Consistency, Durability with WAL ✅ **IMPLEMENTED**
