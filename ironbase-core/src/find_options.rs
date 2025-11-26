@@ -4,6 +4,24 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Get a value from a document using dot notation path
+/// e.g., "address.city" will traverse nested objects
+fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = doc;
+
+    for part in parts {
+        match current {
+            Value::Object(obj) => {
+                current = obj.get(part)?;
+            }
+            _ => return None,
+        }
+    }
+
+    Some(current)
+}
+
 /// Options for find queries
 #[derive(Debug, Clone, Default)]
 pub struct FindOptions {
@@ -48,6 +66,7 @@ impl FindOptions {
 }
 
 /// Apply projection to a document
+/// Supports dot notation for nested fields (e.g., "address.city")
 pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value {
     if projection.is_empty() {
         return doc.clone();
@@ -68,7 +87,8 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value
             // Include specified fields
             for (field, &action) in projection {
                 if action == 1 {
-                    if let Some(value) = obj.get(field) {
+                    // Use get_nested_value to support dot notation (e.g., "address.city")
+                    if let Some(value) = get_nested_value(doc, field) {
                         result.insert(field.clone(), value.clone());
                     }
                 }
@@ -82,6 +102,8 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value
             }
         } else {
             // Exclude mode: copy all except excluded
+            // Note: For exclude mode with dot notation, we only exclude top-level fields
+            // (dot notation exclusion is complex and rarely used in practice)
             for (key, value) in obj {
                 if projection.get(key) != Some(&0) {
                     result.insert(key.clone(), value.clone());
@@ -96,6 +118,7 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value
 }
 
 /// Apply sort to documents
+/// Supports dot notation for nested fields (e.g., "address.city")
 pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) {
     if sort.is_empty() {
         return;
@@ -103,8 +126,9 @@ pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) {
 
     docs.sort_by(|a, b| {
         for (field, direction) in sort {
-            let val_a = a.get(field);
-            let val_b = b.get(field);
+            // Use get_nested_value to support dot notation (e.g., "address.city")
+            let val_a = get_nested_value(a, field);
+            let val_b = get_nested_value(b, field);
 
             let cmp = compare_values(val_a, val_b);
 
@@ -335,5 +359,147 @@ mod tests {
         let result = apply_limit_skip(docs, None, Some(10));
 
         assert_eq!(result.len(), 0);
+    }
+
+    // ========== Dot notation tests ==========
+
+    #[test]
+    fn test_get_nested_value() {
+        let doc = json!({
+            "name": "Alice",
+            "address": {
+                "city": "NYC",
+                "zip": {
+                    "code": "10001"
+                }
+            }
+        });
+
+        assert_eq!(get_nested_value(&doc, "name"), Some(&json!("Alice")));
+        assert_eq!(get_nested_value(&doc, "address.city"), Some(&json!("NYC")));
+        assert_eq!(get_nested_value(&doc, "address.zip.code"), Some(&json!("10001")));
+        assert_eq!(get_nested_value(&doc, "nonexistent"), None);
+        assert_eq!(get_nested_value(&doc, "address.nonexistent"), None);
+    }
+
+    #[test]
+    fn test_projection_dot_notation() {
+        let doc = json!({
+            "_id": 1,
+            "name": "Alice",
+            "address": {
+                "city": "NYC",
+                "street": "123 Main St",
+                "zip": "10001"
+            }
+        });
+
+        // Include nested field with dot notation
+        let projection = HashMap::from([
+            ("address.city".to_string(), 1),
+            ("name".to_string(), 1),
+        ]);
+
+        let result = apply_projection(&doc, &projection);
+
+        assert!(result.get("_id").is_some()); // _id included by default
+        assert!(result.get("name").is_some());
+        assert_eq!(result.get("address.city"), Some(&json!("NYC")));
+        assert!(result.get("address").is_none()); // Full object not included
+    }
+
+    #[test]
+    fn test_projection_deeply_nested() {
+        let doc = json!({
+            "_id": 1,
+            "data": {
+                "level1": {
+                    "level2": {
+                        "value": 42
+                    }
+                }
+            }
+        });
+
+        let projection = HashMap::from([
+            ("data.level1.level2.value".to_string(), 1),
+        ]);
+
+        let result = apply_projection(&doc, &projection);
+        assert_eq!(result.get("data.level1.level2.value"), Some(&json!(42)));
+    }
+
+    #[test]
+    fn test_sort_dot_notation() {
+        let mut docs = vec![
+            json!({"name": "Charlie", "address": {"zip": 30000}}),
+            json!({"name": "Alice", "address": {"zip": 10000}}),
+            json!({"name": "Bob", "address": {"zip": 20000}}),
+        ];
+
+        let sort = vec![("address.zip".to_string(), 1)]; // Ascending by nested field
+
+        apply_sort(&mut docs, &sort);
+
+        assert_eq!(docs[0].get("name").unwrap(), "Alice");
+        assert_eq!(docs[1].get("name").unwrap(), "Bob");
+        assert_eq!(docs[2].get("name").unwrap(), "Charlie");
+    }
+
+    #[test]
+    fn test_sort_dot_notation_descending() {
+        let mut docs = vec![
+            json!({"name": "Alice", "stats": {"score": 85}}),
+            json!({"name": "Bob", "stats": {"score": 92}}),
+            json!({"name": "Charlie", "stats": {"score": 78}}),
+        ];
+
+        let sort = vec![("stats.score".to_string(), -1)]; // Descending by nested field
+
+        apply_sort(&mut docs, &sort);
+
+        assert_eq!(docs[0].get("name").unwrap(), "Bob");
+        assert_eq!(docs[1].get("name").unwrap(), "Alice");
+        assert_eq!(docs[2].get("name").unwrap(), "Charlie");
+    }
+
+    #[test]
+    fn test_sort_dot_notation_multi_field() {
+        let mut docs = vec![
+            json!({"name": "Alice", "location": {"city": "NYC"}, "stats": {"score": 80}}),
+            json!({"name": "Bob", "location": {"city": "LA"}, "stats": {"score": 90}}),
+            json!({"name": "Charlie", "location": {"city": "NYC"}, "stats": {"score": 70}}),
+        ];
+
+        // Sort by city ascending, then by score descending
+        let sort = vec![
+            ("location.city".to_string(), 1),
+            ("stats.score".to_string(), -1),
+        ];
+
+        apply_sort(&mut docs, &sort);
+
+        // LA comes first (alphabetically), then NYC
+        assert_eq!(docs[0].get("name").unwrap(), "Bob"); // LA
+        assert_eq!(docs[1].get("name").unwrap(), "Alice"); // NYC, score=80
+        assert_eq!(docs[2].get("name").unwrap(), "Charlie"); // NYC, score=70
+    }
+
+    #[test]
+    fn test_sort_dot_notation_with_missing_field() {
+        let mut docs = vec![
+            json!({"name": "Alice", "address": {"zip": 10000}}),
+            json!({"name": "Bob"}), // Missing address
+            json!({"name": "Charlie", "address": {"zip": 30000}}),
+        ];
+
+        let sort = vec![("address.zip".to_string(), 1)]; // Ascending
+
+        apply_sort(&mut docs, &sort);
+
+        // Missing field (null) should come first
+        assert_eq!(docs[0].get("name").unwrap(), "Bob");
+        assert_eq!(docs[1].get("name").unwrap(), "Alice");
+        assert_eq!(docs[2].get("name").unwrap(), "Charlie");
     }
 }

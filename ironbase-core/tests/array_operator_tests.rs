@@ -637,3 +637,75 @@ fn test_update_many_with_array_operators() {
 
     cleanup_test_db("update_many_array");
 }
+
+// ========== $size QUERY OPERATOR TESTS ==========
+
+#[test]
+fn test_size_query_operator() {
+    let db = setup_test_db("size_query");
+    let coll = db.collection("test").unwrap();
+
+    // Insert documents with arrays of various sizes
+    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]})))
+        .unwrap();
+    coll.insert_one(json_to_hashmap(json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]})))
+        .unwrap();
+    coll.insert_one(json_to_hashmap(json!({"_id": 3, "name": "Charlie", "tags": []})))
+        .unwrap();
+    coll.insert_one(json_to_hashmap(json!({"_id": 4, "name": "David", "tags": ["single"]})))
+        .unwrap();
+
+    // Test $size: 3
+    let docs = coll.find(&json!({"tags": {"$size": 3}})).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["name"], "Alice");
+
+    // Test $size: 2
+    let docs = coll.find(&json!({"tags": {"$size": 2}})).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["name"], "Bob");
+
+    // Test $size: 0 (empty array)
+    let docs = coll.find(&json!({"tags": {"$size": 0}})).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["name"], "Charlie");
+
+    // Test $size: 1
+    let docs = coll.find(&json!({"tags": {"$size": 1}})).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["name"], "David");
+
+    // Test $size with no matches
+    let docs = coll.find(&json!({"tags": {"$size": 10}})).unwrap();
+    assert_eq!(docs.len(), 0);
+
+    cleanup_test_db("size_query");
+}
+
+#[test]
+fn test_size_query_operator_with_options() {
+    use ironbase_core::find_options::FindOptions;
+
+    let db = setup_test_db("size_query_options");
+    let coll = db.collection("test").unwrap();
+
+    // Insert documents with arrays of various sizes
+    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]})))
+        .unwrap();
+    coll.insert_one(json_to_hashmap(json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]})))
+        .unwrap();
+
+    // Test $size: 3 with FindOptions (like Python does)
+    let options = FindOptions::new();
+    let docs = coll.find_with_options(&json!({"tags": {"$size": 3}}), options).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["name"], "Alice");
+
+    // Test $size: 2 with FindOptions
+    let options = FindOptions::new();
+    let docs = coll.find_with_options(&json!({"tags": {"$size": 2}}), options).unwrap();
+    assert_eq!(docs.len(), 1);
+    assert_eq!(docs[0]["name"], "Bob");
+
+    cleanup_test_db("size_query_options");
+}

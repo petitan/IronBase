@@ -571,6 +571,48 @@ impl OperatorMatcher for ElemMatchOperator {
     }
 }
 
+/// $size operator: Matches arrays with the specified number of elements
+///
+/// # MongoDB Spec
+///
+/// ```json
+/// { field: { $size: 3 } }
+/// ```
+///
+/// Matches documents where the array field has exactly 3 elements.
+///
+/// # Complexity: CC = 4
+pub struct SizeOperator;
+
+impl OperatorMatcher for SizeOperator {
+    fn name(&self) -> &'static str {
+        "$size"
+    }
+
+    fn matches(
+        &self,
+        doc_value: Option<&Value>,
+        filter_value: &Value,
+        _document: Option<&Document>,
+    ) -> Result<bool> {
+        match doc_value {
+            None => Ok(false),
+            Some(Value::Array(arr)) => {
+                if let Some(size) = filter_value.as_i64() {
+                    Ok(arr.len() as i64 == size)
+                } else if let Some(size) = filter_value.as_u64() {
+                    Ok(arr.len() as u64 == size)
+                } else {
+                    Err(MongoLiteError::InvalidQuery(
+                        "$size operator requires an integer".to_string(),
+                    ))
+                }
+            }
+            Some(_) => Ok(false), // Not an array
+        }
+    }
+}
+
 /// $regex operator: Provides regular expression capabilities for pattern matching strings
 ///
 /// # MongoDB Spec
@@ -902,6 +944,7 @@ lazy_static! {
         registry.insert("$nin", Box::new(NinOperator));
         registry.insert("$all", Box::new(AllOperator));
         registry.insert("$elemMatch", Box::new(ElemMatchOperator));
+        registry.insert("$size", Box::new(SizeOperator));
 
         // Element operators
         registry.insert("$exists", Box::new(ExistsOperator));
@@ -1599,7 +1642,7 @@ mod tests {
         assert!(OPERATOR_REGISTRY.contains_key("$elemMatch"));
         assert!(OPERATOR_REGISTRY.contains_key("$type"));
         assert!(OPERATOR_REGISTRY.contains_key("$regex"));
-        assert_eq!(OPERATOR_REGISTRY.len(), 17); // Total operators implemented
+        assert_eq!(OPERATOR_REGISTRY.len(), 18); // Total operators implemented
     }
 
     #[test]
@@ -1639,5 +1682,39 @@ mod tests {
         assert!(!op
             .matches(Some(&json!("hello world")), &json!("xyz"), None)
             .unwrap());
+    }
+
+    #[test]
+    fn test_size_operator() {
+        let op = SizeOperator;
+
+        // Array with 3 elements
+        let arr3 = json!(["a", "b", "c"]);
+        assert!(op.matches(Some(&arr3), &json!(3), None).unwrap());
+        assert!(!op.matches(Some(&arr3), &json!(2), None).unwrap());
+        assert!(!op.matches(Some(&arr3), &json!(4), None).unwrap());
+
+        // Empty array
+        let empty = json!([]);
+        assert!(op.matches(Some(&empty), &json!(0), None).unwrap());
+        assert!(!op.matches(Some(&empty), &json!(1), None).unwrap());
+
+        // Non-array value should not match
+        let str_val = json!("hello");
+        assert!(!op.matches(Some(&str_val), &json!(5), None).unwrap());
+
+        // Missing field should not match
+        assert!(!op.matches(None, &json!(0), None).unwrap());
+    }
+
+    #[test]
+    fn test_size_operator_in_query() {
+        // Test matches_filter with $size
+        let doc = create_test_document(1, vec![("tags", json!(["a", "b", "c"]))]);
+        let filter = json!({"tags": {"$size": 3}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+
+        let filter_fail = json!({"tags": {"$size": 2}});
+        assert!(!matches_filter(&doc, &filter_fail).unwrap());
     }
 }

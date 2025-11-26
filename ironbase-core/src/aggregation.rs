@@ -7,6 +7,24 @@ use crate::query::Query;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Get a value from a document using dot notation path
+/// e.g., "address.city" will traverse nested objects
+fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = doc;
+
+    for part in parts {
+        match current {
+            Value::Object(obj) => {
+                current = obj.get(part)?;
+            }
+            _ => return None,
+        }
+    }
+
+    Some(current)
+}
+
 /// Aggregation pipeline
 #[derive(Debug, Clone)]
 pub struct Pipeline {
@@ -285,13 +303,15 @@ impl ProjectStage {
                 for (field, action) in &self.fields {
                     match action {
                         ProjectField::Include => {
-                            if let Some(value) = obj.get(field) {
+                            // Use get_nested_value to support dot notation in include fields
+                            if let Some(value) = get_nested_value(doc, field) {
                                 result.insert(field.clone(), value.clone());
                             }
                         }
                         ProjectField::Rename(source) => {
                             let source_field = source.trim_start_matches('$');
-                            if let Some(value) = obj.get(source_field) {
+                            // Use get_nested_value to support dot notation (e.g., "$address.city")
+                            if let Some(value) = get_nested_value(doc, source_field) {
                                 result.insert(field.clone(), value.clone());
                             }
                         }
@@ -325,7 +345,8 @@ impl ProjectStage {
                 for (target_field, action) in &self.fields {
                     if let ProjectField::Rename(source) = action {
                         let source_field = source.trim_start_matches('$');
-                        if let Some(value) = obj.get(source_field) {
+                        // Use get_nested_value to support dot notation (e.g., "$address.city")
+                        if let Some(value) = get_nested_value(doc, source_field) {
                             result.insert(target_field.clone(), value.clone());
                         }
                     }
@@ -417,7 +438,8 @@ impl GroupStage {
             GroupId::Null => Ok("__all__".to_string()),
             GroupId::Field(field) => {
                 let field_name = field.trim_start_matches('$');
-                if let Some(value) = doc.get(field_name) {
+                // Use get_nested_value to support dot notation (e.g., "$address.city")
+                if let Some(value) = get_nested_value(doc, field_name) {
                     Ok(serde_json::to_string(value)?)
                 } else {
                     Ok("null".to_string())
@@ -565,7 +587,8 @@ impl Accumulator {
                     let mut has_float = false;
 
                     for doc in docs {
-                        if let Some(value) = doc.get(field) {
+                        // Use get_nested_value to support dot notation (e.g., "$order.total")
+                        if let Some(value) = get_nested_value(doc, field) {
                             if let Some(n) = value.as_i64() {
                                 sum_int = sum_int.saturating_add(n);
                             } else if let Some(f) = value.as_f64() {
@@ -588,7 +611,8 @@ impl Accumulator {
                 let mut count = 0;
 
                 for doc in docs {
-                    if let Some(value) = doc.get(field) {
+                    // Use get_nested_value to support dot notation
+                    if let Some(value) = get_nested_value(doc, field) {
                         if let Some(n) = value.as_f64() {
                             sum += n;
                             count += 1;
@@ -610,7 +634,8 @@ impl Accumulator {
                 let mut min: Option<f64> = None;
 
                 for doc in docs {
-                    if let Some(value) = doc.get(field) {
+                    // Use get_nested_value to support dot notation
+                    if let Some(value) = get_nested_value(doc, field) {
                         let num = if let Some(n) = value.as_f64() {
                             n
                         } else if let Some(n) = value.as_i64() {
@@ -630,7 +655,8 @@ impl Accumulator {
                 let mut max: Option<f64> = None;
 
                 for doc in docs {
-                    if let Some(value) = doc.get(field) {
+                    // Use get_nested_value to support dot notation
+                    if let Some(value) = get_nested_value(doc, field) {
                         let num = if let Some(n) = value.as_f64() {
                             n
                         } else if let Some(n) = value.as_i64() {
@@ -648,16 +674,16 @@ impl Accumulator {
 
             Accumulator::First(field) => docs
                 .first()
-                .and_then(|doc| doc.get(field))
-                .cloned()
+                // Use get_nested_value to support dot notation
+                .and_then(|doc| get_nested_value(doc, field).cloned())
                 .ok_or_else(|| {
                     MongoLiteError::AggregationError("No documents in group".to_string())
                 }),
 
             Accumulator::Last(field) => docs
                 .last()
-                .and_then(|doc| doc.get(field))
-                .cloned()
+                // Use get_nested_value to support dot notation
+                .and_then(|doc| get_nested_value(doc, field).cloned())
                 .ok_or_else(|| {
                     MongoLiteError::AggregationError("No documents in group".to_string())
                 }),
@@ -701,8 +727,9 @@ impl SortStage {
     fn execute(&self, mut docs: Vec<Value>) -> Result<Vec<Value>> {
         docs.sort_by(|a, b| {
             for (field, direction) in &self.fields {
-                let val_a = a.get(field);
-                let val_b = b.get(field);
+                // Use get_nested_value to support dot notation (e.g., "address.city")
+                let val_a = get_nested_value(a, field);
+                let val_b = get_nested_value(b, field);
 
                 let cmp = compare_values(val_a, val_b);
                 let cmp = match direction {
@@ -1380,5 +1407,179 @@ mod tests {
         // NYC should be first (2 people)
         assert_eq!(results[0]["_id"], "NYC");
         assert_eq!(results[0]["count"], 2);
+    }
+
+    // ========== Dot notation tests ==========
+
+    #[test]
+    fn test_get_nested_value() {
+        let doc = json!({
+            "name": "Alice",
+            "address": {
+                "city": "NYC",
+                "zip": {
+                    "code": "10001"
+                }
+            }
+        });
+
+        assert_eq!(get_nested_value(&doc, "name"), Some(&json!("Alice")));
+        assert_eq!(get_nested_value(&doc, "address.city"), Some(&json!("NYC")));
+        assert_eq!(get_nested_value(&doc, "address.zip.code"), Some(&json!("10001")));
+        assert_eq!(get_nested_value(&doc, "nonexistent"), None);
+        assert_eq!(get_nested_value(&doc, "address.nonexistent"), None);
+    }
+
+    #[test]
+    fn test_group_by_nested_field() {
+        let docs = vec![
+            json!({"name": "Alice", "address": {"city": "NYC"}, "value": 10}),
+            json!({"name": "Bob", "address": {"city": "LA"}, "value": 20}),
+            json!({"name": "Charlie", "address": {"city": "NYC"}, "value": 30}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": "$address.city",
+            "total": {"$sum": "$value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Find NYC group
+        let nyc_group = results.iter().find(|r| r["_id"] == "NYC").unwrap();
+        assert_eq!(nyc_group["total"], 40); // 10 + 30
+    }
+
+    #[test]
+    fn test_accumulator_nested_field() {
+        let docs = vec![
+            json!({"order": {"total": 100, "qty": 2}}),
+            json!({"order": {"total": 200, "qty": 3}}),
+            json!({"order": {"total": 150, "qty": 1}}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "sumTotal": {"$sum": "$order.total"},
+            "avgTotal": {"$avg": "$order.total"},
+            "minQty": {"$min": "$order.qty"},
+            "maxQty": {"$max": "$order.qty"},
+            "firstTotal": {"$first": "$order.total"},
+            "lastTotal": {"$last": "$order.total"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["sumTotal"], 450);
+        assert_eq!(results[0]["avgTotal"], 150.0);
+        assert_eq!(results[0]["minQty"], 1.0);
+        assert_eq!(results[0]["maxQty"], 3.0);
+        assert_eq!(results[0]["firstTotal"], 100);
+        assert_eq!(results[0]["lastTotal"], 150);
+    }
+
+    #[test]
+    fn test_project_rename_nested_field() {
+        let docs = vec![json!({
+            "name": "Alice",
+            "address": {
+                "city": "NYC",
+                "street": "123 Main St"
+            }
+        })];
+
+        let stage = ProjectStage::from_json(&json!({
+            "userName": "$name",
+            "city": "$address.city",
+            "street": "$address.street"
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["userName"], "Alice");
+        assert_eq!(results[0]["city"], "NYC");
+        assert_eq!(results[0]["street"], "123 Main St");
+    }
+
+    #[test]
+    fn test_sort_by_nested_field() {
+        let docs = vec![
+            json!({"name": "Charlie", "address": {"zip": 30000}}),
+            json!({"name": "Alice", "address": {"zip": 10000}}),
+            json!({"name": "Bob", "address": {"zip": 20000}}),
+        ];
+
+        let stage = SortStage::from_json(&json!({"address.zip": 1})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["name"], "Alice");
+        assert_eq!(results[1]["name"], "Bob");
+        assert_eq!(results[2]["name"], "Charlie");
+    }
+
+    #[test]
+    fn test_sort_by_nested_field_descending() {
+        let docs = vec![
+            json!({"name": "Alice", "stats": {"score": 85}}),
+            json!({"name": "Bob", "stats": {"score": 92}}),
+            json!({"name": "Charlie", "stats": {"score": 78}}),
+        ];
+
+        let stage = SortStage::from_json(&json!({"stats.score": -1})).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["name"], "Bob");
+        assert_eq!(results[1]["name"], "Alice");
+        assert_eq!(results[2]["name"], "Charlie");
+    }
+
+    #[test]
+    fn test_full_pipeline_with_nested_fields() {
+        let docs = vec![
+            json!({"name": "Alice", "location": {"city": "NYC"}, "order": {"total": 100}}),
+            json!({"name": "Bob", "location": {"city": "LA"}, "order": {"total": 200}}),
+            json!({"name": "Charlie", "location": {"city": "NYC"}, "order": {"total": 150}}),
+            json!({"name": "David", "location": {"city": "LA"}, "order": {"total": 300}}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {
+                "_id": "$location.city",
+                "totalSales": {"$sum": "$order.total"},
+                "avgSales": {"$avg": "$order.total"}
+            }},
+            {"$sort": {"totalSales": -1}}
+        ])).unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // LA should be first with 500 total (200 + 300)
+        assert_eq!(results[0]["_id"], "LA");
+        assert_eq!(results[0]["totalSales"], 500);
+        assert_eq!(results[0]["avgSales"], 250.0);
+
+        // NYC should be second with 250 total (100 + 150)
+        assert_eq!(results[1]["_id"], "NYC");
+        assert_eq!(results[1]["totalSales"], 250);
+        assert_eq!(results[1]["avgSales"], 125.0);
+    }
+
+    #[test]
+    fn test_deeply_nested_field() {
+        let docs = vec![
+            json!({"data": {"level1": {"level2": {"value": 10}}}}),
+            json!({"data": {"level1": {"level2": {"value": 20}}}}),
+            json!({"data": {"level1": {"level2": {"value": 30}}}}),
+        ];
+
+        let stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "sum": {"$sum": "$data.level1.level2.value"}
+        })).unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["sum"], 60);
     }
 }
