@@ -103,6 +103,12 @@ impl WALEntry {
         let data_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
+        // SECURITY: Prevent OOM from malformed WAL with huge data_len
+        const MAX_WAL_ENTRY_SIZE: usize = 64 * 1024 * 1024;
+        if data_len > MAX_WAL_ENTRY_SIZE {
+            return Err(MongoLiteError::WALCorruption);
+        }
+
         // Data
         if data.len() < offset + data_len + 4 {
             return Err(MongoLiteError::WALCorruption);
@@ -234,6 +240,13 @@ impl WriteAheadLog {
         let tx_id = u64::from_le_bytes(header[0..8].try_into().unwrap());
         let entry_type = WALEntryType::from_u8(header[8])?;
         let data_len = u32::from_le_bytes(header[9..13].try_into().unwrap()) as usize;
+
+        // SECURITY: Prevent OOM from malformed WAL with huge data_len
+        // Maximum reasonable WAL entry size: 64MB (larger than any document)
+        const MAX_WAL_ENTRY_SIZE: usize = 64 * 1024 * 1024;
+        if data_len > MAX_WAL_ENTRY_SIZE {
+            return Err(MongoLiteError::WALCorruption);
+        }
 
         // Read data
         let mut data = vec![0u8; data_len];
