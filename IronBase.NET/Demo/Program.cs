@@ -305,6 +305,78 @@ var seniorStats = users.Aggregate<CityStats>(@"[
 foreach (var stat in seniorStats)
     Console.WriteLine($"    {stat._id}: {stat.count} senior users, avg score: {stat.avgScore?.ToString("F1") ?? "N/A"}");
 
+// $project stage - Reshape documents
+Console.WriteLine("\n>>> $project: Rename fields and exclude _id");
+var projectedUsers = users.Aggregate<ProjectedUser>(@"[
+    { ""$project"": {
+        ""_id"": 0,
+        ""fullName"": ""$Name"",
+        ""years"": ""$Age"",
+        ""location"": ""$City""
+    }},
+    { ""$limit"": 3 }
+]");
+foreach (var pu in projectedUsers)
+    Console.WriteLine($"    {pu.fullName}: {pu.years} years old, from {pu.location}");
+
+// $skip stage - Pagination
+Console.WriteLine("\n>>> $skip + $limit: Skip first 2, get next 2 (pagination)");
+var skipped = users.Aggregate<CityStats>(@"[
+    { ""$sort"": { ""Age"": 1 } },
+    { ""$skip"": 2 },
+    { ""$limit"": 2 },
+    { ""$project"": { ""_id"": ""$Name"", ""count"": ""$Age"" } }
+]");
+foreach (var s in skipped)
+    Console.WriteLine($"    {s._id}: age {s.count}");
+
+// $min/$max accumulators
+Console.WriteLine("\n>>> $min/$max: Min and max age per city");
+var minMaxStats = users.Aggregate<MinMaxStats>(@"[
+    { ""$group"": {
+        ""_id"": ""$City"",
+        ""minAge"": { ""$min"": ""$Age"" },
+        ""maxAge"": { ""$max"": ""$Age"" },
+        ""avgAge"": { ""$avg"": ""$Age"" }
+    }},
+    { ""$sort"": { ""_id"": 1 } }
+]");
+foreach (var m in minMaxStats)
+    Console.WriteLine($"    {m._id}: min={m.minAge}, max={m.maxAge}, avg={m.avgAge?.ToString("F1") ?? "N/A"}");
+
+// $first/$last accumulators
+Console.WriteLine("\n>>> $first/$last: First and last user name per city (sorted by age)");
+var firstLastStats = users.Aggregate<FirstLastStats>(@"[
+    { ""$sort"": { ""Age"": 1 } },
+    { ""$group"": {
+        ""_id"": ""$City"",
+        ""youngest"": { ""$first"": ""$Name"" },
+        ""oldest"": { ""$last"": ""$Name"" },
+        ""count"": { ""$sum"": 1 }
+    }},
+    { ""$sort"": { ""count"": -1 } }
+]");
+foreach (var f in firstLastStats)
+    Console.WriteLine($"    {f._id}: youngest={f.youngest}, oldest={f.oldest} ({f.count} users)");
+
+// Complex multi-stage pipeline
+Console.WriteLine("\n>>> Complex pipeline: $match -> $group -> $sort -> $skip -> $limit");
+var complexPipeline = users.Aggregate<ComplexStats>(@"[
+    { ""$match"": { ""Profile.Score"": { ""$gte"": 75 } } },
+    { ""$group"": {
+        ""_id"": ""$Profile.Level"",
+        ""userCount"": { ""$sum"": 1 },
+        ""avgScore"": { ""$avg"": ""$Profile.Score"" },
+        ""minScore"": { ""$min"": ""$Profile.Score"" },
+        ""maxScore"": { ""$max"": ""$Profile.Score"" }
+    }},
+    { ""$sort"": { ""avgScore"": -1 } },
+    { ""$skip"": 0 },
+    { ""$limit"": 5 }
+]");
+foreach (var c in complexPipeline)
+    Console.WriteLine($"    {c._id}: {c.userCount} users, avg={c.avgScore?.ToString("F1") ?? "N/A"}, min={c.minScore?.ToString("F0") ?? "N/A"}, max={c.maxScore?.ToString("F0") ?? "N/A"}");
+
 // ============================================================
 // 7. NESTED DOCUMENTS (Dot Notation)
 // ============================================================
@@ -874,4 +946,37 @@ public class Product
     public decimal Price { get; set; }
     public string[]? Tags { get; set; }
     public int[]? Ratings { get; set; }
+}
+
+// Additional aggregation result models
+public class ProjectedUser
+{
+    public string? fullName { get; set; }
+    public double? years { get; set; }
+    public string? location { get; set; }
+}
+
+public class MinMaxStats
+{
+    public object? _id { get; set; }
+    public double? minAge { get; set; }
+    public double? maxAge { get; set; }
+    public double? avgAge { get; set; }
+}
+
+public class FirstLastStats
+{
+    public object? _id { get; set; }
+    public string? youngest { get; set; }
+    public string? oldest { get; set; }
+    public double? count { get; set; }
+}
+
+public class ComplexStats
+{
+    public object? _id { get; set; }
+    public double? userCount { get; set; }
+    public double? avgScore { get; set; }
+    public double? minScore { get; set; }
+    public double? maxScore { get; set; }
 }
