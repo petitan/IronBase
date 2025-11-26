@@ -695,25 +695,7 @@ namespace IronBase.Interop
 
     }
 
-    /// <summary>
-    ///  Opaque database handle
-    ///
-    ///  Wraps an Arc&lt;DatabaseCore&lt;StorageEngine&gt;&gt; for thread-safe sharing
-    /// </summary>
-    [StructLayout(LayoutKind.Sequential)]
-    internal unsafe partial struct DatabaseHandle
-    {
-    }
-
-    /// <summary>
-    ///  Opaque collection handle
-    ///
-    ///  Holds a reference to the collection and its parent database
-    /// </summary>
-    [StructLayout(LayoutKind.Sequential)]
-    internal unsafe partial struct CollectionHandle
-    {
-    }
+    // DatabaseHandle and CollectionHandle are defined in separate files as SafeHandle classes
 
 
 

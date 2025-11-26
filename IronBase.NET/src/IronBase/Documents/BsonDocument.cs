@@ -31,10 +31,30 @@ namespace IronBase
 
         /// <summary>
         /// Get or set a value by key.
+        /// Returns primitive types (string, int, double, bool) when the underlying value is a JsonElement.
         /// </summary>
         public object? this[string key]
         {
-            get => _data.TryGetValue(key, out var value) ? value : null;
+            get
+            {
+                if (!_data.TryGetValue(key, out var value))
+                    return null;
+
+                // Convert JsonElement to primitive types
+                if (value is JsonElement element)
+                {
+                    return element.ValueKind switch
+                    {
+                        JsonValueKind.String => element.GetString(),
+                        JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+                        JsonValueKind.True => true,
+                        JsonValueKind.False => false,
+                        JsonValueKind.Null => null,
+                        _ => element // Object or Array - return as-is
+                    };
+                }
+                return value;
+            }
             set => _data[key] = value;
         }
 

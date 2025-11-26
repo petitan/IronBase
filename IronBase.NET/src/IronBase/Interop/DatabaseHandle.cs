@@ -27,9 +27,9 @@ namespace IronBase.Interop
             return true;
         }
 
-        internal void SetHandle(IntPtr ptr)
+        internal new void SetHandle(IntPtr ptr)
         {
-            SetHandle(ptr);
+            base.SetHandle(ptr);
         }
     }
 }
