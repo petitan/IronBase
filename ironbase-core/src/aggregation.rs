@@ -558,7 +558,7 @@ impl Accumulator {
             Accumulator::Count => Ok(Value::from(docs.len() as i64)),
 
             Accumulator::Sum(expr) => match expr {
-                SumExpression::Constant(n) => Ok(Value::from((*n) * (docs.len() as i64))),
+                SumExpression::Constant(n) => Ok(Value::from((*n).saturating_mul(docs.len() as i64))),
                 SumExpression::Field(field) => {
                     let mut sum_int: i64 = 0;
                     let mut sum_float: f64 = 0.0;
@@ -567,7 +567,7 @@ impl Accumulator {
                     for doc in docs {
                         if let Some(value) = doc.get(field) {
                             if let Some(n) = value.as_i64() {
-                                sum_int += n;
+                                sum_int = sum_int.saturating_add(n);
                             } else if let Some(f) = value.as_f64() {
                                 sum_float += f;
                                 has_float = true;
