@@ -1,0 +1,31 @@
+name: Publish to Crates.io
+
+on:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to Crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify build
+        run: cargo build --release -p ironbase-core
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Publish ironbase-core
+        run: cargo publish -p ironbase-core --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        continue-on-error: false

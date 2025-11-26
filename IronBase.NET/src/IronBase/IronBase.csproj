@@ -10,11 +10,12 @@
     <!-- Package metadata -->
     <PackageId>IronBase</PackageId>
     <Version>0.3.0</Version>
-    <Authors>IronBase Contributors</Authors>
+    <Authors>Petitan</Authors>
     <Description>IronBase - Rust-powered embedded document database with MongoDB-like API</Description>
     <PackageTags>database;nosql;document;embedded;mongodb;rust</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/petitan/MongoLite</RepositoryUrl>
+    <RepositoryUrl>https://github.com/petitan/IronBase</RepositoryUrl>
+    <PackageProjectUrl>https://github.com/petitan/IronBase</PackageProjectUrl>
     <PackageReadmeFile>README.md</PackageReadmeFile>
 
     <!-- Platform detection for native library -->

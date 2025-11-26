@@ -1,0 +1,116 @@
+name: .NET CI
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - 'IronBase.NET/**'
+      - 'bindings/csharp/**'
+      - '.github/workflows/dotnet.yml'
+  pull_request:
+    branches: [master, main]
+    paths:
+      - 'IronBase.NET/**'
+      - 'bindings/csharp/**'
+      - '.github/workflows/dotnet.yml'
+
+jobs:
+  build-native:
+    name: Build Native Library (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            lib_name: libironbase_csharp.so
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            lib_name: ironbase_csharp.dll
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            lib_name: libironbase_csharp.dylib
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build native library
+        run: cargo build --release -p ironbase-csharp --target ${{ matrix.target }}
+
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.os }}
+          path: target/${{ matrix.target }}/release/${{ matrix.lib_name }}
+
+  test:
+    name: Test .NET
+    needs: build-native
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.os }}
+          path: IronBase.NET/src/IronBase/runtimes/
+
+      - name: Build .NET project
+        run: dotnet build IronBase.NET/IronBase.NET.sln --configuration Release
+
+      - name: Run tests
+        run: dotnet test IronBase.NET/IronBase.NET.sln --configuration Release --no-build --verbosity normal
+
+  pack:
+    name: Create NuGet Package
+    needs: [build-native, test]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download all native libraries
+        uses: actions/download-artifact@v4
+        with:
+          path: native-libs
+
+      - name: Organize native libraries
+        run: |
+          mkdir -p IronBase.NET/src/IronBase/runtimes/win-x64/native
+          mkdir -p IronBase.NET/src/IronBase/runtimes/linux-x64/native
+          mkdir -p IronBase.NET/src/IronBase/runtimes/osx-x64/native
+          cp native-libs/native-windows-latest/*.dll IronBase.NET/src/IronBase/runtimes/win-x64/native/ || true
+          cp native-libs/native-ubuntu-latest/*.so IronBase.NET/src/IronBase/runtimes/linux-x64/native/ || true
+          cp native-libs/native-macos-latest/*.dylib IronBase.NET/src/IronBase/runtimes/osx-x64/native/ || true
+
+      - name: Pack NuGet
+        run: dotnet pack IronBase.NET/src/IronBase/IronBase.csproj --configuration Release --output ./nupkg
+
+      - name: Upload NuGet package
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuget-package
+          path: ./nupkg/*.nupkg

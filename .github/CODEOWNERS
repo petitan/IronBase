@@ -1,0 +1,25 @@
+# CODEOWNERS file for IronBase
+# These owners will be requested for review when someone opens a pull request.
+
+# Default owner for everything
+* @petitan
+
+# Rust core library
+/ironbase-core/ @petitan
+
+# Python bindings
+/bindings/python/ @petitan
+
+# C# bindings
+/IronBase.NET/ @petitan
+/bindings/csharp/ @petitan
+
+# MCP Server
+/mcp-server/ @petitan
+
+# CI/CD configuration
+/.github/ @petitan
+
+# Documentation
+*.md @petitan
+/docs/ @petitan

@@ -12,7 +12,11 @@ exclude = [
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Petitan"]
+repository = "https://github.com/petitan/IronBase"
+homepage = "https://github.com/petitan/IronBase"
+keywords = ["database", "nosql", "document", "embedded", "mongodb"]
+categories = ["database", "data-structures"]
 license = "MIT"
 
 [workspace.dependencies]

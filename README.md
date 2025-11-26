@@ -4,10 +4,11 @@
 
 Written in Rust with Python and C# bindings. Single-file, zero-configuration, serverless.
 
-[![Tests](https://img.shields.io/badge/tests-554%2B%20passing-brightgreen)]()
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)]()
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue)]()
-[![.NET](https://img.shields.io/badge/.NET-8.0-purple)]()
+[![Crates.io](https://img.shields.io/crates/v/ironbase-core)](https://crates.io/crates/ironbase-core)
+[![PyPI](https://img.shields.io/pypi/v/ironbase)](https://pypi.org/project/ironbase/)
+[![NuGet](https://img.shields.io/nuget/v/IronBase)](https://www.nuget.org/packages/IronBase/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Rust CI](https://github.com/petitan/IronBase/actions/workflows/rust.yml/badge.svg)](https://github.com/petitan/IronBase/actions/workflows/rust.yml)
 
 ## Features
 
