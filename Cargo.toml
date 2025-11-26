@@ -27,7 +27,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 memmap2 = "0.9"
 parking_lot = "0.12"
 ahash = "0.8"
-dashmap = "5.5"
+dashmap = "6.1"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
 anyhow = "1.0"
