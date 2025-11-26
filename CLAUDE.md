@@ -167,6 +167,20 @@ MongoLite/
 - Python: Map to PyIOError, PyRuntimeError, PyValueError
 - C#: Map to appropriate .NET exceptions
 
+### C# / .NET Native Library Caching Issue
+When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
+
+**Solution**: Copy directly to the bin folder:
+```bash
+# After building the FFI library
+cargo build --release -p ironbase-ffi
+
+# Copy to .NET's actual load location
+cp target/release/libironbase_ffi.so IronBase.NET/Demo/bin/Debug/net8.0/libironbase_ffi.so
+```
+
+This is especially important when debugging FFI issues - if debug logging doesn't appear, check that the correct library version is being loaded.
+
 ## Testing Strategy
 
 - **Test first** approach always

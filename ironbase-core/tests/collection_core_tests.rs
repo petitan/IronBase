@@ -4,6 +4,7 @@
 
 use ironbase_core::storage::StorageEngine;
 use ironbase_core::CollectionCore;
+use ironbase_core::DatabaseCore;
 use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
@@ -1046,4 +1047,50 @@ mod memory_storage_tests {
         assert_eq!(batch.len(), 5);
         assert_eq!(cursor.remaining(), 15);
     }
+}
+
+#[test]
+fn test_aggregation_with_nested_fields_from_storage() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(db_path.to_str().unwrap()).unwrap();
+    let collection = db.collection("companies").unwrap();
+
+    // Insert documents with nested fields
+    let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
+    doc1.insert("Name".to_string(), json!("TechCorp"));
+    doc1.insert("Location".to_string(), json!({"Country": "USA", "City": "NYC"}));
+    doc1.insert("Stats".to_string(), json!({"Employees": 100}));
+    collection.insert_one(doc1).unwrap();
+
+    let mut doc2: HashMap<String, serde_json::Value> = HashMap::new();
+    doc2.insert("Name".to_string(), json!("DataSoft"));
+    doc2.insert("Location".to_string(), json!({"Country": "USA", "City": "LA"}));
+    doc2.insert("Stats".to_string(), json!({"Employees": 200}));
+    collection.insert_one(doc2).unwrap();
+
+    // Find to verify storage
+    let found = collection.find(&json!({})).unwrap();
+    println!("Found documents:");
+    for doc in &found {
+        println!("  {:?}", doc);
+    }
+
+    // Aggregate
+    let results = collection.aggregate(&json!([
+        {"$group": {
+            "_id": "$Location.Country",
+            "totalEmployees": {"$sum": "$Stats.Employees"},
+            "count": {"$sum": 1}
+        }}
+    ])).unwrap();
+
+    println!("Aggregation results: {:?}", results);
+
+    // Should have 1 group: USA
+    assert_eq!(results.len(), 1, "Expected 1 group, got {:?}", results);
+    assert_eq!(results[0]["_id"], "USA", "Expected _id=USA, got {:?}", results[0]["_id"]);
+    assert_eq!(results[0]["totalEmployees"], 300);
+    assert_eq!(results[0]["count"], 2);
 }

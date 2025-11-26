@@ -1582,4 +1582,38 @@ mod tests {
         let results = stage.execute(docs).unwrap();
         assert_eq!(results[0]["sum"], 60);
     }
+
+    #[test]
+    fn test_pascal_case_nested_fields() {
+        // Test with PascalCase keys like C# sends
+        let docs = vec![
+            json!({"Name": "TechCorp", "Location": {"Country": "USA", "City": "NYC"}, "Stats": {"Employees": 100}}),
+            json!({"Name": "DataSoft", "Location": {"Country": "USA", "City": "LA"}, "Stats": {"Employees": 200}}),
+            json!({"Name": "CloudNet", "Location": {"Country": "Germany", "City": "Berlin"}, "Stats": {"Employees": 150}}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {
+                "_id": "$Location.Country",
+                "totalEmployees": {"$sum": "$Stats.Employees"},
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"totalEmployees": -1}}
+        ])).unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        // Should have 2 groups: USA and Germany
+        assert_eq!(results.len(), 2, "Expected 2 groups, got {:?}", results);
+
+        // USA should be first with 300 total (100 + 200)
+        assert_eq!(results[0]["_id"], "USA");
+        assert_eq!(results[0]["totalEmployees"], 300);
+        assert_eq!(results[0]["count"], 2);
+
+        // Germany should be second with 150
+        assert_eq!(results[1]["_id"], "Germany");
+        assert_eq!(results[1]["totalEmployees"], 150);
+        assert_eq!(results[1]["count"], 1);
+    }
 }
