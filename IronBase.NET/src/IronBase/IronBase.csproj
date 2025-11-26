@@ -14,7 +14,8 @@
     <Description>IronBase - Rust-powered embedded document database with MongoDB-like API</Description>
     <PackageTags>database;nosql;document;embedded;mongodb;rust</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <RepositoryUrl>https://github.com/your-repo/ironbase</RepositoryUrl>
+    <RepositoryUrl>https://github.com/petitan/MongoLite</RepositoryUrl>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
 
     <!-- Platform detection for native library -->
     <DefineConstants Condition="$([MSBuild]::IsOSPlatform('Windows'))">$(DefineConstants);IRONBASE_WINDOWS</DefineConstants>
@@ -22,13 +23,23 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Text.Json" Version="6.0.0" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <!-- Include README in NuGet package -->
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
   <!-- Include native libraries in NuGet package -->
   <ItemGroup>
     <None Include="..\..\runtimes\win-x64\native\ironbase_ffi.dll" Pack="true" PackagePath="runtimes\win-x64\native\" Condition="Exists('..\..\runtimes\win-x64\native\ironbase_ffi.dll')" />
     <None Include="..\..\runtimes\linux-x64\native\libironbase_ffi.so" Pack="true" PackagePath="runtimes\linux-x64\native\" Condition="Exists('..\..\runtimes\linux-x64\native\libironbase_ffi.so')" />
+  </ItemGroup>
+
+  <!-- Include .targets file for copying native libraries at build time -->
+  <ItemGroup>
+    <None Include="build\IronBase.targets" Pack="true" PackagePath="build\" Condition="Exists('build\IronBase.targets')" />
   </ItemGroup>
 
 </Project>
