@@ -100,7 +100,22 @@ impl OperatorMatcher for EqOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
-        Ok(doc_value.map_or(false, |v| v == filter_value))
+        match doc_value {
+            None => Ok(false),
+            Some(v) => {
+                // Direct equality check
+                if v == filter_value {
+                    return Ok(true);
+                }
+                // MongoDB array element matching: if doc_value is an array,
+                // check if any element equals filter_value
+                if let Value::Array(arr) = v {
+                    Ok(arr.iter().any(|elem| elem == filter_value))
+                } else {
+                    Ok(false)
+                }
+            }
+        }
     }
 }
 
@@ -128,7 +143,22 @@ impl OperatorMatcher for NeOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
-        Ok(doc_value.map_or(true, |v| v != filter_value))
+        match doc_value {
+            None => Ok(true), // Field doesn't exist - not equal
+            Some(v) => {
+                // Direct inequality check
+                if v == filter_value {
+                    return Ok(false);
+                }
+                // MongoDB array element matching: if doc_value is an array,
+                // return false if ANY element equals filter_value
+                if let Value::Array(arr) = v {
+                    Ok(!arr.iter().any(|elem| elem == filter_value))
+                } else {
+                    Ok(true)
+                }
+            }
+        }
     }
 }
 
@@ -157,8 +187,19 @@ impl OperatorMatcher for GtOperator {
         match doc_value {
             None => Ok(false),
             Some(v) => {
+                // Direct comparison
                 let ordering = compare_values(v, filter_value);
-                Ok(ordering == Some(std::cmp::Ordering::Greater))
+                if ordering == Some(std::cmp::Ordering::Greater) {
+                    return Ok(true);
+                }
+                // MongoDB array element matching: check if any element > filter_value
+                if let Value::Array(arr) = v {
+                    Ok(arr.iter().any(|elem| {
+                        compare_values(elem, filter_value) == Some(std::cmp::Ordering::Greater)
+                    }))
+                } else {
+                    Ok(false)
+                }
             }
         }
     }
@@ -183,11 +224,22 @@ impl OperatorMatcher for GteOperator {
         match doc_value {
             None => Ok(false),
             Some(v) => {
+                // Direct comparison
                 let ordering = compare_values(v, filter_value);
-                Ok(matches!(
-                    ordering,
-                    Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
-                ))
+                if matches!(ordering, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)) {
+                    return Ok(true);
+                }
+                // MongoDB array element matching: check if any element >= filter_value
+                if let Value::Array(arr) = v {
+                    Ok(arr.iter().any(|elem| {
+                        matches!(
+                            compare_values(elem, filter_value),
+                            Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)
+                        )
+                    }))
+                } else {
+                    Ok(false)
+                }
             }
         }
     }
@@ -212,8 +264,19 @@ impl OperatorMatcher for LtOperator {
         match doc_value {
             None => Ok(false),
             Some(v) => {
+                // Direct comparison
                 let ordering = compare_values(v, filter_value);
-                Ok(ordering == Some(std::cmp::Ordering::Less))
+                if ordering == Some(std::cmp::Ordering::Less) {
+                    return Ok(true);
+                }
+                // MongoDB array element matching: check if any element < filter_value
+                if let Value::Array(arr) = v {
+                    Ok(arr.iter().any(|elem| {
+                        compare_values(elem, filter_value) == Some(std::cmp::Ordering::Less)
+                    }))
+                } else {
+                    Ok(false)
+                }
             }
         }
     }
@@ -238,11 +301,22 @@ impl OperatorMatcher for LteOperator {
         match doc_value {
             None => Ok(false),
             Some(v) => {
+                // Direct comparison
                 let ordering = compare_values(v, filter_value);
-                Ok(matches!(
-                    ordering,
-                    Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
-                ))
+                if matches!(ordering, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)) {
+                    return Ok(true);
+                }
+                // MongoDB array element matching: check if any element <= filter_value
+                if let Value::Array(arr) = v {
+                    Ok(arr.iter().any(|elem| {
+                        matches!(
+                            compare_values(elem, filter_value),
+                            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+                        )
+                    }))
+                } else {
+                    Ok(false)
+                }
             }
         }
     }
@@ -277,8 +351,18 @@ impl OperatorMatcher for InOperator {
         match doc_value {
             None => Ok(false),
             Some(v) => {
-                if let Value::Array(arr) = filter_value {
-                    Ok(arr.contains(v))
+                if let Value::Array(filter_arr) = filter_value {
+                    // Direct check: is doc_value in the filter array?
+                    if filter_arr.contains(v) {
+                        return Ok(true);
+                    }
+                    // MongoDB array element matching: if doc_value is an array,
+                    // check if ANY element of doc_value matches ANY value in filter_arr
+                    if let Value::Array(doc_arr) = v {
+                        Ok(doc_arr.iter().any(|elem| filter_arr.contains(elem)))
+                    } else {
+                        Ok(false)
+                    }
                 } else {
                     Err(MongoLiteError::InvalidQuery(
                         "$in operator requires an array".to_string(),
@@ -313,8 +397,23 @@ impl OperatorMatcher for NinOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
-        if let Value::Array(arr) = filter_value {
-            Ok(doc_value.map_or(true, |v| !arr.contains(v)))
+        if let Value::Array(filter_arr) = filter_value {
+            match doc_value {
+                None => Ok(true), // Field doesn't exist - not in
+                Some(v) => {
+                    // Direct check: is doc_value in the filter array?
+                    if filter_arr.contains(v) {
+                        return Ok(false);
+                    }
+                    // MongoDB array element matching: if doc_value is an array,
+                    // return false if ANY element of doc_value matches ANY value in filter_arr
+                    if let Value::Array(doc_arr) = v {
+                        Ok(!doc_arr.iter().any(|elem| filter_arr.contains(elem)))
+                    } else {
+                        Ok(true)
+                    }
+                }
+            }
         } else {
             Err(MongoLiteError::InvalidQuery(
                 "$nin operator requires an array".to_string(),
@@ -946,7 +1045,8 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                 }
             } else {
                 // Direct equality check like { name: "Alice" }
-                if doc_value != Some(value) {
+                // Use EqOperator for array element matching support
+                if !EqOperator.matches(doc_value, value, Some(document))? {
                     return Ok(false);
                 }
             }

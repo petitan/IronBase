@@ -100,8 +100,6 @@ namespace IronBase.Tests
         [Fact]
         public void Query_ArrayField_RetrievesCorrectly()
         {
-            // Note: Direct array element querying may not be supported
-            // This test verifies array data is stored and retrieved correctly
             _people.InsertOne(new Person { Name = "Eve", Tags = new List<string> { "admin", "user" } });
             _people.InsertOne(new Person { Name = "Frank", Tags = new List<string> { "user", "guest" } });
 
@@ -110,6 +108,37 @@ namespace IronBase.Tests
             results.Should().HaveCount(2);
             var eve = results.First(p => p.Name == "Eve");
             eve.Tags.Should().Contain("admin", "user");
+        }
+
+        [Fact]
+        public void Query_ArrayElementMatching_Eq()
+        {
+            // MongoDB-style array element matching: {Tags: "admin"} matches if array contains "admin"
+            _people.InsertOne(new Person { Name = "Eve", Tags = new List<string> { "admin", "user" } });
+            _people.InsertOne(new Person { Name = "Frank", Tags = new List<string> { "user", "guest" } });
+
+            // Query for documents where Tags array contains "admin"
+            var filter = Builders<Person>.Filter.Eq("Tags", "admin");
+            var results = _people.Find(filter);
+
+            results.Should().HaveCount(1);
+            results[0].Name.Should().Be("Eve");
+        }
+
+        [Fact]
+        public void Query_ArrayElementMatching_In()
+        {
+            // MongoDB-style $in with array: matches if any element in doc array matches any value in filter array
+            _people.InsertOne(new Person { Name = "Eve", Tags = new List<string> { "admin", "user" } });
+            _people.InsertOne(new Person { Name = "Frank", Tags = new List<string> { "user", "guest" } });
+            _people.InsertOne(new Person { Name = "Grace", Tags = new List<string> { "developer" } });
+
+            // Query for documents where Tags array has any element in ["admin", "guest"]
+            var filter = Builders<Person>.Filter.In("Tags", new[] { "admin", "guest" });
+            var results = _people.Find(filter);
+
+            results.Should().HaveCount(2);
+            results.Select(p => p.Name).Should().Contain("Eve", "Frank");
         }
 
         // ============== ARRAY OF OBJECTS ==============
