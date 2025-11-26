@@ -1065,21 +1065,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     "$inc" => {
                         if let Value::Object(ref field_values) = fields {
                             for (field, inc_value) in field_values {
-                                if let Some(current) = document.get(field) {
-                                    // Try int first to preserve integer types
-                                    if let (Some(curr_int), Some(inc_int)) =
-                                        (current.as_i64(), inc_value.as_i64())
-                                    {
-                                        document
-                                            .set_nested(field, Value::from(curr_int + inc_int));
-                                        was_modified = true;
-                                    } else if let (Some(curr_num), Some(inc_num)) =
-                                        (current.as_f64(), inc_value.as_f64())
-                                    {
-                                        document
-                                            .set_nested(field, Value::from(curr_num + inc_num));
-                                        was_modified = true;
-                                    }
+                                // MongoDB: if field doesn't exist, treat it as 0
+                                let current = document.get(field).cloned().unwrap_or(Value::from(0));
+                                // Try int first to preserve integer types
+                                if let (Some(curr_int), Some(inc_int)) =
+                                    (current.as_i64(), inc_value.as_i64())
+                                {
+                                    document
+                                        .set_nested(field, Value::from(curr_int + inc_int));
+                                    was_modified = true;
+                                } else if let (Some(curr_num), Some(inc_num)) =
+                                    (current.as_f64(), inc_value.as_f64())
+                                {
+                                    document
+                                        .set_nested(field, Value::from(curr_num + inc_num));
+                                    was_modified = true;
                                 }
                             }
                         }
