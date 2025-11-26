@@ -450,10 +450,198 @@ var byRevenue = companies.Find(
 foreach (var c in byRevenue)
     Console.WriteLine($"    - {c.Name}: ${c.Stats?.Revenue:N0}");
 
+// Create index on nested field
+Console.WriteLine("\n>>> Create index on nested field 'Stats.Rating'");
+var ratingIdx = companies.CreateIndex("Stats.Rating");
+Console.WriteLine($"    Created: {ratingIdx}");
+
+Console.WriteLine("\n>>> Create index on deeply nested 'Location.Address.Zip'");
+var zipIdx = companies.CreateIndex("Location.Address.Zip");
+Console.WriteLine($"    Created: {zipIdx}");
+
+// List indexes on companies
+Console.WriteLine("\n>>> List indexes on companies collection");
+var companyIndexes = companies.ListIndexes();
+foreach (var idx in companyIndexes)
+    Console.WriteLine($"    - {idx}");
+
+// Explain query with nested field index
+Console.WriteLine("\n>>> Explain query with nested field index: Stats.Rating > 4.5");
+var nestedExplain = companies.Explain("{\"Stats.Rating\": {\"$gt\": 4.5}}");
+Console.WriteLine($"    Plan: {nestedExplain}");
+
 // ============================================================
-// 8. TRANSACTIONS
+// 8. ADVANCED ARRAY OPERATORS
 // ============================================================
-PrintSection("8. TRANSACTIONS");
+PrintSection("8. ADVANCED ARRAY OPERATORS");
+
+var products = client.GetCollection<Product>("products");
+
+Console.WriteLine(">>> Insert products with tags array");
+products.InsertMany(new[]
+{
+    new Product { Name = "Laptop Pro", Price = 1299, Tags = new[] { "electronics", "computer", "portable" }, Ratings = new[] { 5, 4, 5, 5, 4 } },
+    new Product { Name = "Wireless Mouse", Price = 49, Tags = new[] { "electronics", "accessory", "wireless" }, Ratings = new[] { 4, 4, 3, 5 } },
+    new Product { Name = "USB Hub", Price = 29, Tags = new[] { "electronics", "accessory", "usb" }, Ratings = new[] { 3, 4, 4 } },
+    new Product { Name = "Desk Lamp", Price = 79, Tags = new[] { "furniture", "lighting", "office" }, Ratings = new[] { 5, 5, 5 } },
+    new Product { Name = "Gaming Chair", Price = 399, Tags = new[] { "furniture", "gaming", "ergonomic" }, Ratings = new[] { 4, 5, 4, 5 } },
+});
+Console.WriteLine("    Inserted 5 products");
+
+// $all - Match documents where array contains ALL specified values
+Console.WriteLine("\n>>> $all: Products with tags containing BOTH 'electronics' AND 'accessory'");
+var allMatch = products.Find("{\"Tags\": {\"$all\": [\"electronics\", \"accessory\"]}}");
+foreach (var p in allMatch)
+    Console.WriteLine($"    - {p.Name}: [{string.Join(", ", p.Tags ?? Array.Empty<string>())}]");
+
+// $size - Match documents where array has specific size
+Console.WriteLine("\n>>> $size: Products with exactly 3 tags");
+var size3 = products.Find("{\"Tags\": {\"$size\": 3}}");
+foreach (var p in size3)
+    Console.WriteLine($"    - {p.Name}: {p.Tags?.Length} tags");
+
+// $elemMatch - Match documents where array element matches multiple conditions
+Console.WriteLine("\n>>> $elemMatch: Products with a rating that equals 5");
+var has5Rating = products.Find("{\"Ratings\": {\"$elemMatch\": {\"$eq\": 5}}}");
+foreach (var p in has5Rating)
+    Console.WriteLine($"    - {p.Name}: ratings [{string.Join(", ", p.Ratings ?? Array.Empty<int>())}]");
+
+// $nin - Not in
+Console.WriteLine("\n>>> $nin: Products without 'furniture' or 'gaming' tags");
+var notFurniture = products.Find("{\"Tags\": {\"$nin\": [\"furniture\", \"gaming\"]}}");
+foreach (var p in notFurniture)
+    Console.WriteLine($"    - {p.Name}");
+
+// $pop - Remove last element from array
+Console.WriteLine("\n>>> $pop: Remove last rating from Laptop Pro");
+products.UpdateOne(
+    Builders<Product>.Filter.Eq("Name", "Laptop Pro"),
+    "{\"$pop\": {\"Ratings\": 1}}"
+);
+var laptop = products.FindOne(Builders<Product>.Filter.Eq("Name", "Laptop Pro"));
+Console.WriteLine($"    Laptop Pro ratings: [{string.Join(", ", laptop?.Ratings ?? Array.Empty<int>())}]");
+
+// ============================================================
+// 9. ADDITIONAL QUERY PATTERNS
+// ============================================================
+PrintSection("9. ADDITIONAL QUERY PATTERNS");
+
+// Combined nested field queries
+Console.WriteLine(">>> Complex nested query: USA companies with >200 employees and rating >4.0");
+var complexQuery = companies.Find(@"{
+    ""$and"": [
+        {""Location.Country"": ""USA""},
+        {""Stats.Employees"": {""$gt"": 200}},
+        {""Stats.Rating"": {""$gt"": 4.0}}
+    ]
+}");
+foreach (var c in complexQuery)
+    Console.WriteLine($"    - {c.Name}: {c.Stats?.Employees} employees, rating {c.Stats?.Rating}");
+
+// Range query on nested field
+Console.WriteLine("\n>>> Range query: Revenue between 20M and 40M");
+var revenueRange = companies.Find(@"{
+    ""$and"": [
+        {""Stats.Revenue"": {""$gte"": 20000000}},
+        {""Stats.Revenue"": {""$lte"": 40000000}}
+    ]
+}");
+foreach (var c in revenueRange)
+    Console.WriteLine($"    - {c.Name}: ${c.Stats?.Revenue:N0}");
+
+// Not operator with nested field
+Console.WriteLine("\n>>> $not: Companies NOT in Germany");
+var notGermany = companies.Find(@"{
+    ""Location.Country"": {""$not"": {""$eq"": ""Germany""}}
+}");
+foreach (var c in notGermany)
+    Console.WriteLine($"    - {c.Name} ({c.Location?.Country})");
+
+// Projection with nested fields
+Console.WriteLine("\n>>> Projection: Only Name and nested Stats.Rating");
+var projectedCompanies = companies.Find(
+    Builders<Company>.Filter.Empty,
+    new FindOptions
+    {
+        Projection = new Dictionary<string, int> { { "Name", 1 }, { "Stats.Rating", 1 }, { "_id", 0 } },
+        Limit = 3
+    }
+);
+Console.WriteLine($"    Returned {projectedCompanies.Count} documents with projected fields");
+
+// ============================================================
+// 10. PERSISTENCE DEMO
+// ============================================================
+PrintSection("10. PERSISTENCE DEMO");
+
+// Create a separate database to demonstrate persistence
+var persistPath = "persist_demo.mlite";
+if (File.Exists(persistPath)) File.Delete(persistPath);
+if (File.Exists(persistPath + ".wal")) File.Delete(persistPath + ".wal");
+
+Console.WriteLine(">>> Session 1: Create database and insert data");
+{
+    using var persistClient = new IronBaseClient(persistPath);
+    var persistUsers = persistClient.GetCollection<User>("demo_users");
+
+    // Create index on nested field
+    persistUsers.CreateIndex("Profile.Score");
+    Console.WriteLine("    Created index on Profile.Score");
+
+    // Insert users with nested profiles
+    persistUsers.InsertMany(new[]
+    {
+        new User { Name = "Alice", Age = 30, City = "NYC", Profile = new UserProfile { Score = 95, Level = "senior" } },
+        new User { Name = "Bob", Age = 25, City = "LA", Profile = new UserProfile { Score = 82, Level = "mid" } },
+        new User { Name = "Carol", Age = 35, City = "NYC", Profile = new UserProfile { Score = 91, Level = "senior" } },
+    });
+    Console.WriteLine("    Inserted 3 users with nested profiles");
+
+    // Verify data
+    var persistCount1 = persistUsers.CountDocuments();
+    Console.WriteLine($"    Total users: {persistCount1}");
+
+    // Flush to ensure data is written
+    persistClient.Flush();
+    Console.WriteLine("    Data flushed to disk");
+}
+
+Console.WriteLine("\n>>> Session 2: Reopen database and verify data persisted");
+{
+    using var persistClient = new IronBaseClient(persistPath);
+    var persistUsers = persistClient.GetCollection<User>("demo_users");
+
+    // Check document count
+    var persistCount2 = persistUsers.CountDocuments();
+    Console.WriteLine($"    Documents found after reopen: {persistCount2}");
+
+    // Verify indexes persisted
+    var persistIndexes = persistUsers.ListIndexes();
+    Console.WriteLine($"    Indexes: [{string.Join(", ", persistIndexes)}]");
+
+    // Query using nested field index
+    Console.WriteLine("\n    Query: Profile.Score >= 90 (using persisted index)");
+    var persistHighScorers = persistUsers.Find("{\"Profile.Score\": {\"$gte\": 90}}");
+    foreach (var u in persistHighScorers)
+        Console.WriteLine($"      - {u.Name}: score {u.Profile?.Score}");
+
+    // Verify explain shows index usage
+    var persistExplain = persistUsers.Explain("{\"Profile.Score\": {\"$gte\": 90}}");
+    Console.WriteLine($"\n    Explain: {persistExplain}");
+}
+
+// Cleanup persistence demo
+File.Delete(persistPath);
+if (File.Exists(persistPath + ".wal")) File.Delete(persistPath + ".wal");
+// Delete index files
+foreach (var f in Directory.GetFiles(".", "persist_demo*.idx"))
+    File.Delete(f);
+Console.WriteLine("\n    Persistence demo cleanup complete");
+
+// ============================================================
+// 11. TRANSACTIONS
+// ============================================================
+PrintSection("11. TRANSACTIONS");
 
 var accounts = client.GetCollection<Account>("accounts");
 
@@ -500,9 +688,9 @@ Console.WriteLine("\n>>> Final balances:");
 PrintAccounts(accounts);
 
 // ============================================================
-// 9. DATABASE OPERATIONS
+// 12. DATABASE OPERATIONS
 // ============================================================
-PrintSection("9. DATABASE OPERATIONS");
+PrintSection("12. DATABASE OPERATIONS");
 
 // List collections
 Console.WriteLine(">>> List collections");
@@ -521,9 +709,9 @@ var cities = users.Distinct<string>("City");
 Console.WriteLine($"    Cities: [{string.Join(", ", cities)}]");
 
 // ============================================================
-// 10. DELETE OPERATIONS
+// 13. DELETE OPERATIONS
 // ============================================================
-PrintSection("10. DELETE OPERATIONS");
+PrintSection("13. DELETE OPERATIONS");
 
 Console.WriteLine($">>> Users before delete: {users.CountDocuments()}");
 
@@ -540,9 +728,9 @@ Console.WriteLine($"    Deleted: {deleteManyResult.DeletedCount}");
 Console.WriteLine($"\n>>> Users after delete: {users.CountDocuments()}");
 
 // ============================================================
-// 11. CLEANUP & COMPACTION
+// 14. CLEANUP & COMPACTION
 // ============================================================
-PrintSection("11. CLEANUP & COMPACTION");
+PrintSection("14. CLEANUP & COMPACTION");
 
 Console.WriteLine(">>> Compact database (remove tombstones)");
 var compactResult = client.Compact();
@@ -674,4 +862,16 @@ public class CountryStats
     public double? totalEmployees { get; set; }
     public double? avgRating { get; set; }
     public double? companyCount { get; set; }
+}
+
+// Product model for array operators demo
+public class Product
+{
+    [JsonPropertyName("_id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public object? Id { get; set; }
+    public string Name { get; set; } = "";
+    public decimal Price { get; set; }
+    public string[]? Tags { get; set; }
+    public int[]? Ratings { get; set; }
 }
