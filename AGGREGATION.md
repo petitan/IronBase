@@ -1,641 +1,412 @@
-# Aggregation Pipeline Documentation
+# Aggregation Pipeline
 
-MongoLite supports MongoDB-compatible aggregation pipelines for advanced data processing and analysis.
+IronBase supports MongoDB-compatible aggregation pipelines for data transformation and analysis.
 
 ## Table of Contents
 
 - [Overview](#overview)
-- [Quick Start](#quick-start)
 - [Pipeline Stages](#pipeline-stages)
-  - [$match](#match---filter-documents)
-  - [$group](#group---group-documents)
-  - [$project](#project---reshape-documents)
-  - [$sort](#sort---sort-documents)
-  - [$limit](#limit---limit-results)
-  - [$skip](#skip---skip-documents)
-- [Accumulator Operators](#accumulator-operators)
-- [Real-World Examples](#real-world-examples)
-- [Nested Field Access (Dot Notation)](#nested-field-access-dot-notation)
-
----
+- [Accumulators](#accumulators)
+- [Dot Notation](#dot-notation)
+- [Examples](#examples)
+- [Performance Tips](#performance-tips)
+- [Limitations](#limitations)
 
 ## Overview
 
-An aggregation pipeline consists of one or more **stages** that process documents sequentially. Each stage transforms the documents and passes them to the next stage.
+An aggregation pipeline processes documents through a sequence of stages. Each stage transforms the data and passes results to the next stage.
 
 ```python
 results = collection.aggregate([
     {"$match": {...}},      # Stage 1: Filter
-    {"$group": {...}},      # Stage 2: Group
-    {"$sort": {...}},       # Stage 3: Sort
-    {"$limit": 10}          # Stage 4: Limit
+    {"$group": {...}},      # Stage 2: Group & aggregate
+    {"$project": {...}},    # Stage 3: Reshape
+    {"$sort": {...}},       # Stage 4: Sort
+    {"$limit": 10}          # Stage 5: Limit
 ])
 ```
-
----
-
-## Quick Start
-
-```python
-import ironbase
-
-# Open database
-db = ironbase.MongoLite("mydb.db")
-users = db.collection("users")
-
-# Insert sample data
-users.insert_one({"name": "Alice", "age": 30, "city": "NYC"})
-users.insert_one({"name": "Bob", "age": 25, "city": "LA"})
-users.insert_one({"name": "Carol", "age": 35, "city": "NYC"})
-
-# Simple aggregation: Count users by city
-results = users.aggregate([
-    {"$group": {"_id": "$city", "count": {"$sum": 1}}}
-])
-
-# Output: [{"_id": "NYC", "count": 2}, {"_id": "LA", "count": 1}]
-```
-
----
 
 ## Pipeline Stages
 
 ### $match - Filter Documents
 
-Filters documents based on query conditions. Similar to `find()`.
+Filters documents like `find()`. Use early in the pipeline to reduce processing.
 
-**Syntax:**
 ```python
-{"$match": {<query>}}
+# Filter by field value
+{"$match": {"status": "active"}}
+
+# Filter with operators
+{"$match": {"age": {"$gte": 18, "$lt": 65}}}
+
+# Multiple conditions (implicit AND)
+{"$match": {"city": "NYC", "status": "active"}}
+
+# Logical operators
+{"$match": {"$or": [{"city": "NYC"}, {"city": "LA"}]}}
 ```
 
-**Example 1: Filter by age**
-```python
-results = users.aggregate([
-    {"$match": {"age": {"$gte": 30}}}
-])
-# Returns users aged 30 or older
-```
+**Supported operators:** All query operators (`$eq`, `$gt`, `$in`, `$and`, `$or`, `$regex`, etc.)
 
-**Example 2: Multiple conditions**
-```python
-results = users.aggregate([
-    {"$match": {
-        "age": {"$gte": 25, "$lt": 40},
-        "city": "NYC"
-    }}
-])
-# Returns NYC users aged 25-39
-```
+### $group - Group & Aggregate
 
-**Query Operators Supported:**
-- `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
-- `$in`, `$nin`
-- `$and`, `$or`, `$not`
-- `$exists`, `$type`
-- `$regex`
+Groups documents by a key and computes aggregate values.
 
----
-
-### $group - Group Documents
-
-Groups documents by a specified field and computes aggregated values.
-
-**Syntax:**
 ```python
 {"$group": {
-    "_id": <expression>,        # Group by field
-    "<field>": {<accumulator>}  # Computed field
+    "_id": <expression>,           # Group key
+    "<field>": {<accumulator>}     # Computed fields
 }}
 ```
 
-**Example 1: Count by city**
+**Group key options:**
+
 ```python
-results = users.aggregate([
-    {"$group": {
-        "_id": "$city",
-        "count": {"$sum": 1}
-    }}
-])
-# Output: [{"_id": "NYC", "count": 2}, {"_id": "LA", "count": 1}]
+# Group by single field
+{"$group": {"_id": "$city", ...}}
+
+# Group all documents (no grouping)
+{"$group": {"_id": null, ...}}
+
+# Group by nested field (dot notation)
+{"$group": {"_id": "$address.city", ...}}
 ```
 
-**Example 2: Multiple accumulators**
-```python
-results = users.aggregate([
-    {"$group": {
-        "_id": "$city",
-        "totalUsers": {"$sum": 1},
-        "avgAge": {"$avg": "$age"},
-        "minAge": {"$min": "$age"},
-        "maxAge": {"$max": "$age"}
-    }}
-])
-# Output: [{"_id": "NYC", "totalUsers": 2, "avgAge": 32.5, "minAge": 30, "maxAge": 35}, ...]
-```
+**Example:**
 
-**Example 3: Group all documents (_id: null)**
 ```python
-results = users.aggregate([
-    {"$group": {
-        "_id": None,  # or null in JSON
-        "total": {"$sum": 1},
-        "avgAge": {"$avg": "$age"}
-    }}
-])
-# Output: [{"_id": null, "total": 3, "avgAge": 30.0}]
+# Count users per city with stats
+{"$group": {
+    "_id": "$city",
+    "count": {"$sum": 1},
+    "avgAge": {"$avg": "$age"},
+    "maxAge": {"$max": "$age"},
+    "youngest": {"$first": "$name"}
+}}
 ```
-
-**Example 4: $first and $last**
-```python
-# Get first and last user in each city (when sorted by age)
-results = users.aggregate([
-    {"$sort": {"age": 1}},
-    {"$group": {
-        "_id": "$city",
-        "youngest": {"$first": "$name"},
-        "oldest": {"$last": "$name"}
-    }}
-])
-```
-
----
 
 ### $project - Reshape Documents
 
-Includes, excludes, or renames fields in documents.
+Include, exclude, or rename fields.
 
-**Syntax:**
 ```python
+# Include specific fields
+{"$project": {"name": 1, "age": 1, "_id": 0}}
+
+# Exclude fields
+{"$project": {"password": 0, "ssn": 0}}
+
+# Rename fields (copy value)
 {"$project": {
-    "<field>": 1,     # Include field
-    "<field>": 0,     # Exclude field
-    "_id": 0          # Exclude _id (special case)
+    "userName": "$name",           # Rename name -> userName
+    "location": "$address.city",   # Nested field access
+    "score": 1                     # Keep original
 }}
 ```
 
-**Example 1: Include specific fields**
-```python
-results = users.aggregate([
-    {"$project": {
-        "name": 1,
-        "city": 1,
-        "_id": 0  # Exclude _id
-    }}
-])
-# Output: [{"name": "Alice", "city": "NYC"}, ...]
-```
-
-**Example 2: Exclude fields**
-```python
-results = users.aggregate([
-    {"$project": {
-        "password": 0,  # Exclude password field
-        "ssn": 0        # Exclude SSN field
-    }}
-])
-# Returns all fields except password and ssn
-```
-
-**Important Notes:**
-- **Include mode**: `{"field": 1}` - only specified fields are included
-- **Exclude mode**: `{"field": 0}` - all fields except specified are included
-- **Cannot mix** include and exclude (except for `_id`)
-- Excluding `_id` is allowed in include mode: `{"name": 1, "_id": 0}`
-
----
+**Rules:**
+- Include mode: `{"field": 1}` - only specified fields returned
+- Exclude mode: `{"field": 0}` - all except specified returned
+- Cannot mix include/exclude (except `_id: 0` in include mode)
 
 ### $sort - Sort Documents
 
-Sorts documents by one or more fields.
-
-**Syntax:**
 ```python
-{"$sort": {
-    "<field>": 1,   # Ascending
-    "<field>": -1   # Descending
-}}
-```
+# Ascending
+{"$sort": {"age": 1}}
 
-**Example 1: Sort by single field**
-```python
-results = users.aggregate([
-    {"$sort": {"age": -1}}  # Descending by age
-])
-# Oldest users first
-```
+# Descending
+{"$sort": {"score": -1}}
 
-**Example 2: Sort by multiple fields**
-```python
-results = users.aggregate([
-    {"$sort": {
-        "city": 1,   # City ascending
-        "age": -1    # Age descending within city
-    }}
-])
-```
+# Multi-field (priority order)
+{"$sort": {"city": 1, "age": -1}}
 
-**Example 3: Sort after grouping**
-```python
-results = users.aggregate([
-    {"$group": {"_id": "$city", "count": {"$sum": 1}}},
-    {"$sort": {"count": -1}}  # Cities with most users first
-])
+# Nested field
+{"$sort": {"address.zip": 1}}
 ```
-
----
 
 ### $limit - Limit Results
 
-Limits the number of documents returned.
-
-**Syntax:**
 ```python
-{"$limit": <number>}
+{"$limit": 10}
 ```
-
-**Example 1: Top 10 results**
-```python
-results = users.aggregate([
-    {"$sort": {"age": -1}},
-    {"$limit": 10}
-])
-# Top 10 oldest users
-```
-
-**Example 2: Top 3 cities**
-```python
-results = users.aggregate([
-    {"$group": {"_id": "$city", "count": {"$sum": 1}}},
-    {"$sort": {"count": -1}},
-    {"$limit": 3}
-])
-```
-
----
 
 ### $skip - Skip Documents
 
-Skips a specified number of documents.
-
-**Syntax:**
 ```python
-{"$skip": <number>}
+{"$skip": 20}
+
+# Pagination pattern: page 3 (20 skip, 10 per page)
+[{"$skip": 20}, {"$limit": 10}]
 ```
 
-**Example: Pagination**
-```python
-# Page 1 (results 1-10)
-page1 = users.aggregate([
-    {"$sort": {"name": 1}},
-    {"$limit": 10}
-])
+## Accumulators
 
-# Page 2 (results 11-20)
-page2 = users.aggregate([
-    {"$sort": {"name": 1}},
-    {"$skip": 10},
-    {"$limit": 10}
-])
+Used within `$group` to compute values across documents.
 
-# Page 3 (results 21-30)
-page3 = users.aggregate([
-    {"$sort": {"name": 1}},
-    {"$skip": 20},
-    {"$limit": 10}
-])
-```
+| Accumulator | Description | Example |
+|-------------|-------------|---------|
+| `$sum` | Sum values / count | `{"$sum": "$price"}` or `{"$sum": 1}` |
+| `$avg` | Average | `{"$avg": "$score"}` |
+| `$min` | Minimum | `{"$min": "$age"}` |
+| `$max` | Maximum | `{"$max": "$salary"}` |
+| `$first` | First in group | `{"$first": "$name"}` |
+| `$last` | Last in group | `{"$last": "$timestamp"}` |
 
----
-
-## Accumulator Operators
-
-Used within `$group` stage to compute aggregated values.
-
-### $sum
-
-**Count documents:**
-```python
-{"$sum": 1}  # Count each document as 1
-```
-
-**Sum field values:**
-```python
-{"$sum": "$salary"}  # Sum of all salaries
-```
-
-### $avg
-
-**Average of field values:**
-```python
-{"$avg": "$age"}  # Average age
-{"$avg": "$salary"}  # Average salary
-```
-
-### $min
-
-**Minimum value:**
-```python
-{"$min": "$age"}  # Youngest age
-{"$min": "$salary"}  # Lowest salary
-```
-
-### $max
-
-**Maximum value:**
-```python
-{"$max": "$age"}  # Oldest age
-{"$max": "$salary"}  # Highest salary
-```
-
-### $first
-
-**First value in group:**
-```python
-{"$first": "$name"}  # First name in group
-```
-
-Note: Order depends on document insertion or prior `$sort` stage.
-
-### $last
-
-**Last value in group:**
-```python
-{"$last": "$name"}  # Last name in group
-```
-
----
-
-## Real-World Examples
-
-### Example 1: Sales Analytics
+**All accumulators support dot notation:**
 
 ```python
-# Sample data
-sales = db.collection("sales")
-sales.insert_many([
-    {"product": "Laptop", "category": "Electronics", "quantity": 5, "price": 1000, "date": "2024-01"},
-    {"product": "Mouse", "category": "Electronics", "quantity": 20, "price": 25, "date": "2024-01"},
-    {"product": "Desk", "category": "Furniture", "quantity": 3, "price": 500, "date": "2024-01"},
-    # ... more sales
-])
-
-# Total revenue by category
-results = sales.aggregate([
-    {"$group": {
-        "_id": "$category",
-        "totalRevenue": {"$sum": {"$multiply": ["$quantity", "$price"]}},  # Note: currently not supported, use separate calculation
-        "itemsSold": {"$sum": "$quantity"},
-        "avgPrice": {"$avg": "$price"}
-    }},
-    {"$sort": {"totalRevenue": -1}}
-])
+{"$group": {
+    "_id": "$location.country",
+    "totalRevenue": {"$sum": "$payment.amount"},
+    "avgRating": {"$avg": "$stats.rating"},
+    "topCity": {"$first": "$address.city"}
+}}
 ```
 
-### Example 2: User Demographics
+## Dot Notation
 
-```python
-# Age distribution
-results = users.aggregate([
-    {"$group": {
-        "_id": None,
-        "totalUsers": {"$sum": 1},
-        "avgAge": {"$avg": "$age"},
-        "youngestAge": {"$min": "$age"},
-        "oldestAge": {"$max": "$age"}
-    }}
-])
-
-# Output:
-# [{"_id": null, "totalUsers": 1000, "avgAge": 32.5, "youngestAge": 18, "oldestAge": 75}]
-```
-
-### Example 3: Department Report
-
-```python
-employees = db.collection("employees")
-
-results = employees.aggregate([
-    {"$match": {"status": "active"}},  # Only active employees
-    {"$group": {
-        "_id": "$department",
-        "employees": {"$sum": 1},
-        "avgSalary": {"$avg": "$salary"},
-        "totalPayroll": {"$sum": "$salary"}
-    }},
-    {"$project": {
-        "department": "$_id",
-        "employees": 1,
-        "avgSalary": 1,
-        "totalPayroll": 1,
-        "_id": 0
-    }},
-    {"$sort": {"totalPayroll": -1}}
-])
-
-# Output:
-# [
-#   {"department": "Engineering", "employees": 50, "avgSalary": 95000, "totalPayroll": 4750000},
-#   {"department": "Sales", "employees": 30, "avgSalary": 75000, "totalPayroll": 2250000},
-#   ...
-# ]
-```
-
-### Example 4: Top N Analysis
-
-```python
-# Top 5 highest-paid employees per department
-results = employees.aggregate([
-    {"$sort": {"salary": -1}},
-    {"$group": {
-        "_id": "$department",
-        "topEarners": {"$first": "$name"},  # First (highest) after sort
-        "topSalary": {"$first": "$salary"}
-    }},
-    {"$limit": 5}
-])
-```
-
-### Example 5: Complex Multi-Stage Pipeline
-
-```python
-# Comprehensive user analysis
-results = users.aggregate([
-    # Stage 1: Filter active users aged 25-50
-    {"$match": {
-        "status": "active",
-        "age": {"$gte": 25, "$lte": 50}
-    }},
-
-    # Stage 2: Group by city and calculate stats
-    {"$group": {
-        "_id": "$city",
-        "userCount": {"$sum": 1},
-        "avgAge": {"$avg": "$age"},
-        "avgIncome": {"$avg": "$income"}
-    }},
-
-    # Stage 3: Filter cities with 10+ users
-    {"$match": {
-        "userCount": {"$gte": 10}
-    }},
-
-    # Stage 4: Sort by average income
-    {"$sort": {"avgIncome": -1}},
-
-    # Stage 5: Get top 10 cities
-    {"$limit": 10},
-
-    # Stage 6: Reshape output
-    {"$project": {
-        "city": "$_id",
-        "users": "$userCount",
-        "avgAge": 1,
-        "avgIncome": 1,
-        "_id": 0
-    }}
-])
-```
-
----
-
-## Performance Tips
-
-1. **Place $match early**: Filter documents as early as possible to reduce processing
-   ```python
-   # Good
-   [{"$match": ...}, {"$group": ...}]
-
-   # Bad (processes all docs before filtering)
-   [{"$group": ...}, {"$match": ...}]
-   ```
-
-2. **Use indexes**: Ensure fields used in `$match` are indexed
-   ```python
-   collection.create_index("age")
-   collection.aggregate([{"$match": {"age": {"$gte": 30}}}])
-   ```
-
-3. **Limit early**: Use `$limit` before expensive operations when possible
-
-4. **Project only needed fields**: Reduce memory usage by projecting early
-   ```python
-   [
-       {"$match": ...},
-       {"$project": {"name": 1, "age": 1}},  # Only keep needed fields
-       {"$group": ...}
-   ]
-   ```
-
----
-
-## Current Limitations
-
-- **Expression operators**: Currently only field references (`"$field"`) are supported
-  - Not yet supported: `$multiply`, `$add`, `$subtract`, etc.
-- **Array operators**: `$unwind`, `$push`, etc. not yet implemented
-- **Additional stages**: `$lookup`, `$facet`, `$bucket` not yet available
-
-These features are planned for future releases.
-
----
-
-## Nested Field Access (Dot Notation)
-
-**NEW:** ironbase now supports MongoDB-compatible dot notation for nested fields in aggregation pipelines.
+All aggregation features support MongoDB-style dot notation for nested fields.
 
 ### $group with nested _id
 
 ```python
-# Group sales by city using nested field
-results = sales.aggregate([
-    {"$group": {
-        "_id": "$address.city",
-        "totalSales": {"$sum": "$amount"}
-    }}
-])
+# Group by nested field
+{"$group": {
+    "_id": "$address.city",
+    "count": {"$sum": 1}
+}}
+
+# Deeply nested
+{"$group": {
+    "_id": "$store.location.region",
+    "sales": {"$sum": "$payment.amount"}
+}}
 ```
 
 ### Accumulators with nested fields
 
 ```python
-# Use nested fields in all 6 accumulators
-results = users.aggregate([
-    {"$group": {
-        "_id": "$location.country",
-        "totalScore": {"$sum": "$stats.score"},
-        "avgRating": {"$avg": "$stats.rating"},
-        "minAge": {"$min": "$profile.age"},
-        "maxAge": {"$max": "$profile.age"},
-        "firstCity": {"$first": "$address.city"},
-        "lastCity": {"$last": "$address.city"}
-    }}
-])
+{"$group": {
+    "_id": "$category",
+    "totalScore": {"$sum": "$stats.score"},
+    "avgRating": {"$avg": "$reviews.rating"},
+    "minPrice": {"$min": "$pricing.base"},
+    "maxPrice": {"$max": "$pricing.premium"},
+    "firstCity": {"$first": "$store.city"},
+    "lastUpdate": {"$last": "$metadata.timestamp"}
+}}
 ```
 
 ### $project with nested fields
 
 ```python
-# Project nested fields with rename
-results = users.aggregate([
-    {"$project": {
-        "city": "$address.city",
-        "rating": "$stats.rating",
-        "_id": 0
-    }}
-])
+{"$project": {
+    "city": "$address.city",
+    "score": "$stats.totalScore",
+    "_id": 0
+}}
 ```
 
 ### $sort with nested fields
 
 ```python
-# Sort by nested field
-results = users.aggregate([
-    {"$sort": {"address.zip": 1}}
-])
+{"$sort": {"address.zip": 1}}
+{"$sort": {"stats.score": -1, "profile.age": 1}}
 ```
 
-### Full pipeline example
+## Examples
+
+### Sales Analytics
 
 ```python
-# Complete pipeline with nested field support
+sales = db.collection("sales")
+
+# Revenue by product category
 results = sales.aggregate([
-    {"$match": {"status": "completed"}},
+    {"$match": {"status": "completed", "year": 2024}},
     {"$group": {
-        "_id": "$store.location.city",
-        "totalRevenue": {"$sum": "$payment.amount"},
-        "avgOrderValue": {"$avg": "$payment.amount"}
-    }},
-    {"$project": {
-        "city": "$_id",
-        "revenue": "$totalRevenue",
-        "avgOrder": "$avgOrderValue",
-        "_id": 0
+        "_id": "$product.category",
+        "revenue": {"$sum": "$amount"},
+        "orders": {"$sum": 1},
+        "avgOrder": {"$avg": "$amount"}
     }},
     {"$sort": {"revenue": -1}},
     {"$limit": 10}
 ])
 ```
 
----
+### User Demographics
+
+```python
+users = db.collection("users")
+
+# Age distribution by city
+results = users.aggregate([
+    {"$match": {"status": "active"}},
+    {"$group": {
+        "_id": "$address.city",
+        "userCount": {"$sum": 1},
+        "avgAge": {"$avg": "$age"},
+        "youngest": {"$min": "$age"},
+        "oldest": {"$max": "$age"}
+    }},
+    {"$match": {"userCount": {"$gte": 100}}},  # Cities with 100+ users
+    {"$sort": {"userCount": -1}},
+    {"$project": {
+        "city": "$_id",
+        "users": "$userCount",
+        "avgAge": 1,
+        "ageRange": {"min": "$youngest", "max": "$oldest"},
+        "_id": 0
+    }}
+])
+```
+
+### Time Series Analysis
+
+```python
+events = db.collection("events")
+
+# Events per day
+results = events.aggregate([
+    {"$match": {"type": "purchase"}},
+    {"$group": {
+        "_id": "$date",
+        "eventCount": {"$sum": 1},
+        "totalValue": {"$sum": "$value"},
+        "avgValue": {"$avg": "$value"}
+    }},
+    {"$sort": {"_id": 1}}
+])
+```
+
+### Multi-Stage Pipeline
+
+```python
+# Complete pipeline with all stages
+results = orders.aggregate([
+    # 1. Filter recent completed orders
+    {"$match": {
+        "status": "completed",
+        "date": {"$gte": "2024-01-01"}
+    }},
+
+    # 2. Group by store location
+    {"$group": {
+        "_id": "$store.location.city",
+        "totalRevenue": {"$sum": "$payment.total"},
+        "orderCount": {"$sum": 1},
+        "avgOrder": {"$avg": "$payment.total"},
+        "maxOrder": {"$max": "$payment.total"}
+    }},
+
+    # 3. Filter high-volume stores
+    {"$match": {"orderCount": {"$gte": 50}}},
+
+    # 4. Reshape output
+    {"$project": {
+        "city": "$_id",
+        "revenue": "$totalRevenue",
+        "orders": "$orderCount",
+        "avgOrder": 1,
+        "maxOrder": 1,
+        "_id": 0
+    }},
+
+    # 5. Sort by revenue
+    {"$sort": {"revenue": -1}},
+
+    # 6. Top 20
+    {"$limit": 20}
+])
+```
+
+## Performance Tips
+
+### 1. $match Early
+
+Filter documents early to reduce processing:
+
+```python
+# Good - filters first
+[{"$match": {"status": "active"}}, {"$group": ...}]
+
+# Bad - processes all documents
+[{"$group": ...}, {"$match": {"count": {"$gt": 10}}}]
+```
+
+### 2. Use Indexes
+
+Create indexes on fields used in `$match`:
+
+```python
+collection.create_index("status")
+collection.create_index("date")
+
+# This $match uses indexes
+{"$match": {"status": "active", "date": {"$gte": "2024-01-01"}}}
+```
+
+### 3. Project Early
+
+Remove unneeded fields to reduce memory:
+
+```python
+[
+    {"$match": {...}},
+    {"$project": {"name": 1, "amount": 1}},  # Keep only needed
+    {"$group": {...}}
+]
+```
+
+### 4. Limit Early When Possible
+
+If you need top N after sort:
+
+```python
+# Good
+[{"$sort": {"score": -1}}, {"$limit": 10}]
+
+# Also good - combined operation
+[{"$sort": {"score": -1}}, {"$limit": 10}, {"$project": {...}}]
+```
+
+## Limitations
+
+### Not Yet Supported
+
+| Feature | Status |
+|---------|--------|
+| Expression operators (`$add`, `$multiply`) | Planned |
+| `$unwind` (array expansion) | Planned |
+| `$lookup` (joins) | Planned |
+| `$facet` (parallel pipelines) | Planned |
+| `$bucket` / `$bucketAuto` | Planned |
+| Date operators | Planned |
+
+### Current Behavior
+
+- Field references only (`"$field"`) - no computed expressions
+- Nested dot notation works everywhere
+- All 6 stages and 6 accumulators fully implemented
+- Pipeline processes all documents in memory
 
 ## MongoDB Compatibility
 
-MongoLite's aggregation pipeline is designed to be compatible with MongoDB's aggregation framework. Most basic pipelines should work identically.
+IronBase aggregation is designed for MongoDB compatibility. Most pipelines work identically:
+
+```python
+# Same syntax works in both MongoDB and IronBase
+collection.aggregate([
+    {"$match": {"status": "active"}},
+    {"$group": {"_id": "$city", "count": {"$sum": 1}}},
+    {"$sort": {"count": -1}},
+    {"$limit": 10}
+])
+```
 
 **Differences:**
-- MongoLite currently supports a subset of operators and stages
-- Performance characteristics differ (MongoLite is optimized for embedded use)
-- Some advanced features are not yet implemented
-
----
-
-## Next Steps
-
-- See [test_aggregation.py](test_aggregation.py) for comprehensive examples
-- Check [IMPLEMENTATION_AGGREGATION.md](IMPLEMENTATION_AGGREGATION.md) for technical details
-- Explore the [MongoDB Aggregation documentation](https://docs.mongodb.com/manual/aggregation/) for more complex patterns
-
----
-
-**Questions or feature requests?** Open an issue on GitHub!
+- Subset of operators (see limitations)
+- In-memory processing (no server-side cursors)
+- Optimized for embedded use cases

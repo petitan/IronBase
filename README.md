@@ -1,911 +1,517 @@
-# ironbase
+# IronBase
 
-**Embedded NoSQL document database** with MongoDB-compatible API, written in Rust with Python bindings.
+**High-performance embedded NoSQL document database** with MongoDB-compatible API.
+
+Written in Rust with Python and C# bindings. Single-file, zero-configuration, serverless.
+
+[![Tests](https://img.shields.io/badge/tests-554%2B%20passing-brightgreen)]()
+[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange)]()
+[![Python](https://img.shields.io/badge/python-3.8%2B-blue)]()
+[![.NET](https://img.shields.io/badge/.NET-8.0-purple)]()
 
 ## Features
 
-- 🎯 **MongoDB-compatible API** - Familiar syntax and operations
-- 📦 **Embedded** - No separate server needed
-- 🚀 **Fast** - Rust-powered native performance with B+ tree indexes
-- 💾 **Single file** - Simple backup and version control
-- 🔧 **Zero-config** - No installation or setup required
-- 🐍 **Python API** - Easy to use from Python
-- 🧪 **In-memory mode** - 10-100x faster for testing, no file I/O
-- 🔍 **Full indexing support** - B+ tree indexes with automatic query optimization
-- 🔗 **Compound indexes** - Multi-field indexes for complex queries
-- 📊 **Query explanation** - See which indexes are used with `explain()`
-- 🔄 **Aggregation Pipeline** - MongoDB-compatible data processing with $match, $group, $project, $sort, $limit, $skip
-- 🔎 **Advanced find()** - Projection, sort, limit, skip for powerful queries
-- 📜 **Cursor/Streaming** - Memory-efficient iteration over large result sets
-- ⚡ **Performance** - 1.26M inserts/sec, 1.39µs index lookups, 1.4-1.6x query speedup
-- ✅ **400+ tests passing** - Comprehensive test coverage (85%+) including ACD transactions, crash recovery, property-based tests
-- 🌐 **Multi-language support** - Rust core with language-specific bindings (Python, C# planned)
-- 🔒 **ACD Transactions** - Atomicity, Consistency, Durability with Write-Ahead Log and crash recovery (Python API ✅)
-- 🛡️ **Auto-commit Durability Modes** - Safe (ZERO data loss), Batch (bounded loss), Unsafe (manual checkpoint) - configurable per database
+| Category | Features |
+|----------|----------|
+| **Core** | MongoDB-compatible API, Single-file storage, Zero-config, Embedded |
+| **Query** | 18 operators: comparison, logical, element, array, regex |
+| **Update** | 7 operators: `$set`, `$inc`, `$unset`, `$push`, `$pull`, `$addToSet`, `$pop` |
+| **Aggregation** | 6 stages + 6 accumulators with dot notation support |
+| **Indexing** | B+ tree indexes, compound indexes, explain(), hint() |
+| **Durability** | ACD transactions, WAL, crash recovery, 3 durability modes |
+| **Performance** | ~1M+ inserts/sec, O(log n) index lookups |
+| **Languages** | Rust, Python (PyO3), C# (.NET 8) |
+| **Testing** | 554+ tests, property-based testing, fuzz testing |
 
-## 🎯 Célközönség
+## Quick Start
 
-ironbase tökéletes választás:
-- Desktop alkalmazásokhoz
-- Mobil app backend-ekhez
-- Prototípusokhoz és MVP-khez
-- IoT eszközökhöz
-- Kis és közepes adatbázisokhoz
-- Amikor nem akarsz MongoDB szervert futtatni
-
-## 🔧 Telepítés
-
-### Előfeltételek
-- **Python 3.8+**
-- **Rust 1.70+** (build-hez)
-- **Windows**: Microsoft C++ Build Tools (lásd [BUILD.md](BUILD.md))
-
-### Pip-el (Ajánlott - PyPI-ról, minden platform)
-
+### Python
 ```bash
 pip install ironbase
 ```
 
-Támogatott platformok:
-- **Linux** (x86_64, aarch64) - manylinux
-- **Windows** (x64, x86) - win_amd64, win32
-- **macOS** (Intel, Apple Silicon) - universal2
-
-### Maturin-nal (Fejlesztőknek - build from source)
-
-#### Linux / macOS
-```bash
-# Rust és Python környezet előkészítése
-pip install maturin
-
-# Development build
-maturin develop
-
-# Release build
-maturin build --release
-```
-
-#### Windows
-```powershell
-# Előfeltételek: Rust + Microsoft C++ Build Tools (lásd BUILD.md)
-pip install maturin
-
-# Development build
-maturin develop
-
-# Release build
-maturin build --release
-```
-
-**Részletes build instrukciók:** [BUILD.md](BUILD.md)
-
-## 🚀 Gyors Kezdés
-
 ```python
-from ironbase import ironbase
+from ironbase import IronBase
 
-# Adatbázis megnyitása (létrehozza, ha nem létezik)
-# Default: Safe mode (ZERO data loss, auto-commit every operation)
-db = ironbase("myapp.mlite")
-
-# Vagy: Batch mode (high throughput, bounded data loss risk)
-# db = ironbase("myapp.mlite", durability="batch", batch_size=100)
-
-# Vagy: Unsafe mode (maximum performance, manual checkpoint required)
-# db = ironbase("myapp.mlite", durability="unsafe")
-
-# Collection lekérése
+# Open database (creates if not exists)
+db = IronBase("myapp.mlite")
 users = db.collection("users")
 
-# Dokumentum beszúrása
-result = users.insert_one({
-    "name": "Kovács János",
-    "email": "janos@example.com",
-    "age": 30,
-    "city": "Budapest"
-})
-print(f"Beszúrva: {result['inserted_id']}")
-
-# Több dokumentum beszúrása
+# Insert
+users.insert_one({"name": "Alice", "age": 30, "city": "NYC"})
 users.insert_many([
-    {"name": "Nagy Anna", "age": 25, "city": "Szeged"},
-    {"name": "Szabó Péter", "age": 35, "city": "Debrecen"}
+    {"name": "Bob", "age": 25, "city": "LA"},
+    {"name": "Carol", "age": 35, "city": "NYC"}
 ])
 
-# Dokumentumok számlálása
-count = users.count_documents()
-print(f"Összes felhasználó: {count}")
-
-# Index létrehozása (gyorsabb lekérdezésekhez)
-users.create_index("age")
-
-# Lekérdezés (automatikusan használja az indexet)
+# Query with operators
 adults = users.find({"age": {"$gte": 18}})
+nyc_users = users.find({"city": "NYC", "age": {"$lt": 40}})
 
-# Query terv megtekintése
-plan = users.explain({"age": {"$gte": 18}})
-print(f"Query plan: {plan['queryPlan']}")  # IndexRangeScan
+# Query with options
+results = users.find(
+    {"city": "NYC"},
+    projection={"name": 1, "age": 1, "_id": 0},
+    sort=[("age", -1)],
+    limit=10
+)
 
-# Bezárás
+# Aggregation
+stats = users.aggregate([
+    {"$match": {"age": {"$gte": 18}}},
+    {"$group": {"_id": "$city", "count": {"$sum": 1}, "avgAge": {"$avg": "$age"}}},
+    {"$sort": {"count": -1}}
+])
+
+# Indexing
+users.create_index("age")
+users.create_compound_index(["city", "age"])
+plan = users.explain({"age": 25})  # Shows IndexScan
+
 db.close()
 ```
 
-## 🧰 Fejlesztői workflow (lokális)
+### C# (.NET)
+```csharp
+using IronBase;
 
-Az ismétlődő build/test lépésekre felkerült egy **justfile** és egy egyszerű futtató script:
+var client = new IronBaseClient("myapp.mlite");
+var users = client.GetCollection<User>("users");
 
-| Parancs | Mit csinál |
-| --- | --- |
-| `just test-core` | `cargo test -p ironbase-core` |
-| `just test-mcp` | MCP szerver Rust tesztek (`cd mcp-server && cargo test`) |
-| `just seed-test-doc` | Aktiválja a `venv`-et és lefuttatja a `mcp-server/seed_test_doc.py`-t |
-| `just test-python-auto` | Python auto-commit smoke teszt (`test_python_auto_commit.py`) |
-| `just run-dev-checks` | A `scripts/run_dev_checks.sh` fut: fmt + clippy + Rust tesztek + Python smoke teszt |
+// Insert
+users.InsertOne(new User { Name = "Alice", Age = 30 });
 
-A `scripts/run_dev_checks.sh` Bash script egymás után lefuttatja:
+// Query
+var adults = users.Find(Builders<User>.Filter.Gte("Age", 18));
 
-1. `cargo fmt`, `cargo clippy`, `cargo test -p ironbase-core`
-2. `cd mcp-server && cargo fmt && cargo clippy && cargo test`
-3. ha van `venv`, akkor `python3 mcp-server/test_python_auto_commit.py`
+// Update
+users.UpdateOne(
+    Builders<User>.Filter.Eq("Name", "Alice"),
+    Builders<User>.Update.Set("Age", 31)
+);
 
-Használat:
-
-```bash
-# egyszerűen
-just run-dev-checks
-
-# vagy közvetlenül
-./scripts/run_dev_checks.sh
+client.Dispose();
 ```
 
-Ezekkel a parancsokkal helyben is gyorsan végigfuthat a fő Rust + Python ellenőrzés, mielőtt manuális E2E teszteket futtatnánk.
-
-## 📚 API Dokumentáció
-
-### Database (ironbase)
-
-```python
-# Adatbázis megnyitása
-db = ironbase("path/to/database.mlite")
-
-# Adatbázis megnyitása durability móddal
-db = ironbase("path/to/database.mlite", durability="safe")  # default
-db = ironbase("path/to/database.mlite", durability="batch", batch_size=100)
-db = ironbase("path/to/database.mlite", durability="unsafe")
-
-# Collection lekérése (létrehozza, ha nincs)
-collection = db.collection("collection_name")
-
-# Collection-ök listázása
-collections = db.list_collections()
-
-# Collection törlése
-db.drop_collection("collection_name")
-
-# Statisztikák
-stats = db.stats()
-
-# Manual checkpoint (csak Unsafe módban szükséges)
-db.checkpoint()
-
-# Bezárás
-db.close()
-```
-
-### 🧪 In-Memory Database (Testing)
-
-Az in-memory mód **10-100x gyorsabb** mint a fájl-alapú storage, tökéletes unit tesztekhez:
-
-```python
-from ironbase import ironbase
-
-# In-memory database (nincs fájl, nincs perzisztencia)
-db = ironbase(":memory:")
-
-# Használat pont ugyanaz mint a fájl-alapú
-users = db.collection("users")
-users.insert_one({"name": "Alice", "age": 30})
-
-# Tesztek után automatikusan törlődik
-```
-
-**Rust API:**
+### Rust
 ```rust
-use ironbase_core::{DatabaseCore, storage::MemoryStorage};
+use ironbase_core::{DatabaseCore, storage::StorageEngine};
+use serde_json::json;
 
-// In-memory database
-let db = DatabaseCore::<MemoryStorage>::open_memory()?;
+let db = DatabaseCore::<StorageEngine>::open("myapp.mlite")?;
 let users = db.collection("users")?;
 
-users.insert_one(HashMap::from([
-    ("name".to_string(), json!("Alice")),
-]))?;
+users.insert_one(&json!({"name": "Alice", "age": 30}))?;
+let results = users.find(&json!({"age": {"$gte": 18}}))?;
+
+db.close()?;
 ```
 
-**Mikor használd az in-memory módot:**
-- ✅ Unit tesztek (gyors, izolált)
-- ✅ Integration tesztek
-- ✅ Prototípusok
-- ✅ Benchmarkok
+## Installation
 
-**⚠️ Figyelem:** Az in-memory mód NEM perzisztál - a process végén minden adat elveszik! Production-ben használd a fájl-alapú módot (`ironbase("myapp.mlite")`), ami teljes WAL + crash recovery támogatással rendelkezik.
-
-### Durability Modes (Auto-Commit)
-
-ironbase három durability módot kínál, amelyek különböző kompromisszumokat kínálnak a teljesítmény és adatbiztonság között:
-
-#### 🛡️ Safe Mode (Default)
-
-**ZERO data loss guarantee** - Minden művelet azonnal commit-olva van WAL-lal + fsync.
-
-```python
-db = ironbase("myapp.mlite")  # Safe mode alapértelmezett
-# VAGY explicit:
-db = ironbase("myapp.mlite", durability="safe")
-
-users = db.collection("users")
-users.insert_one({"name": "Alice"})  # Azonnal perzisztálva
-# ⚡ Power failure → 0 adat veszteség
+### Python (PyPI)
+```bash
+pip install ironbase
 ```
 
-**Jellemzők:**
-- ✅ **ZERO data loss**: Minden művelet garantáltan megőrzött
-- ✅ **Auto-commit**: Minden insert/update/delete azonnal WAL-ba írva
-- ✅ **Crash recovery**: WAL replay automatikusan visszaállít minden műveletet
-- ⚠️ **Teljesítmény**: ~190 ops/sec (40% of unsafe, de BIZTONSÁGOS)
+Supported: Linux (x86_64, aarch64), Windows (x64), macOS (Intel, Apple Silicon)
 
-**Használati esetek:**
-- 💰 Pénzügyi tranzakciók
-- 👤 Felhasználói fiókok/profilok
-- 🛒 E-commerce rendelések
-- 📝 Kritikus üzleti adatok
-
-#### ⚡ Batch Mode
-
-**Bounded data loss** - Műveletek kötegekben commit-olva, maximum `batch_size` művelet veszhet el.
-
-```python
-db = ironbase("myapp.mlite", durability="batch", batch_size=100)
-
-logs = db.collection("logs")
-for i in range(1000):
-    logs.insert_one({"event": f"Event {i}"})
-    # Minden 100. műveletnél automatikus flush
-
-# Manual flush (optional):
-db.checkpoint()  # Azonnal commit-ol minden függőben levő műveletet
+### C# (NuGet)
+```bash
+dotnet add package IronBase
 ```
 
-**Jellemzők:**
-- ✅ **Bounded loss**: Maximum `batch_size` művelet veszhet el power failure esetén
-- ✅ **High throughput**: ~490 ops/sec (104% of unsafe! Batch gyorsabb!)
-- ✅ **Auto-flush**: Automatikus commit minden N. műveletnél
-- ⚠️ **Data loss risk**: Max `batch_size` műveletnél (pl. max 100 ops)
-
-**Használati esetek:**
-- 📊 Alkalmazás logok (batch_size=100-1000)
-- 📈 Analytics események (batch_size=1000-5000)
-- 🔍 Session tracking (batch_size=100-500)
-- 📡 Telemetria adatok
-
-#### 🚀 Unsafe Mode
-
-**Manual checkpoint required** - Nincs auto-commit, maximális teljesítmény, nagy adatvesztési kockázat.
-
-```python
-db = ironbase("myapp.mlite", durability="unsafe")
-
-temp = db.collection("staging")
-for i in range(10000):
-    temp.insert_one({"data": i})  # Gyors, de nem perzisztálva
-
-# KÖTELEZŐ: Manual checkpoint
-db.checkpoint()  # Most történik a WAL write + fsync
-
-# ⚡ Power failure checkpoint() előtt → MINDEN adat elveszhet
+### Rust (From Source)
+```bash
+git clone https://github.com/petitan/MongoLite.git
+cd MongoLite
+cargo build --release -p ironbase-core
 ```
 
-**Jellemzők:**
-- ❌ **HIGH data loss risk**: Minden adat elveszhet checkpoint() nélkül
-- ✅ **Maximum speed**: ~472 ops/sec baseline (de batch modes gyorsabbak!)
-- ⚠️ **Manual control**: Fejlesztő felelőssége a checkpoint() hívás
-- ✅ **Use case**: Temporary/staging data, ahol újrafuttatható az import
+## Query Operators
 
-**Használati esetek:**
-- 🔄 Temporary staging data (újrafuttatható import)
-- 🧪 Teszt/fejlesztési környezet
-- 📦 Bulk import (retry safe, újra lehet futtatni hiba esetén)
-- 🎯 Performance benchmarks
+### Comparison
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$eq` | Equal | `{"age": {"$eq": 25}}` or `{"age": 25}` |
+| `$ne` | Not equal | `{"status": {"$ne": "inactive"}}` |
+| `$gt` | Greater than | `{"age": {"$gt": 18}}` |
+| `$gte` | Greater or equal | `{"score": {"$gte": 90}}` |
+| `$lt` | Less than | `{"price": {"$lt": 100}}` |
+| `$lte` | Less or equal | `{"count": {"$lte": 10}}` |
+| `$in` | In array | `{"city": {"$in": ["NYC", "LA"]}}` |
+| `$nin` | Not in array | `{"status": {"$nin": ["deleted", "banned"]}}` |
 
-#### 📊 Performance Comparison
+### Logical
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$and` | Logical AND | `{"$and": [{"age": {"$gte": 18}}, {"city": "NYC"}]}` |
+| `$or` | Logical OR | `{"$or": [{"city": "NYC"}, {"city": "LA"}]}` |
+| `$not` | Logical NOT | `{"age": {"$not": {"$gt": 30}}}` |
+| `$nor` | Logical NOR | `{"$nor": [{"deleted": true}, {"banned": true}]}` |
 
-Benchmark eredmények (1000 dokumentum insert):
+### Element
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$exists` | Field exists | `{"email": {"$exists": true}}` |
+| `$type` | Type check | `{"age": {"$type": "number"}}` |
 
-| Mode        | Throughput (ops/sec) | Relative | Safety                   | Use Case                |
-|-------------|----------------------|----------|--------------------------|-------------------------|
-| **Safe**    | 190                  | 40%      | ✅ ZERO loss             | Production (critical)   |
-| **Batch-10**| 402                  | 85%      | ⚠️ Max 10 ops            | High-frequency logs     |
-| **Batch-100**| 489                 | 104%     | ⚠️ Max 100 ops           | **RECOMMENDED** (balance)|
-| **Batch-500**| 498                 | 105%     | ⚠️ Max 500 ops           | Analytics events        |
-| **Unsafe**  | 472                  | 100%     | ❌ HIGH risk             | Temp/staging only       |
+### Array
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$all` | Contains all | `{"tags": {"$all": ["a", "b"]}}` |
+| `$elemMatch` | Element matches | `{"scores": {"$elemMatch": {"$gt": 80}}}` |
+| `$size` | Array length | `{"tags": {"$size": 3}}` |
 
-**Meglepő eredmény:** Batch modes (100, 500) GYORSABBAK mint az Unsafe mode! Ez a batch flushing optimalizációjának köszönhető.
+### String
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$regex` | Regex match | `{"name": {"$regex": "^A"}}` |
 
-#### 🎯 Recommendations
-
-**Financial/Critical Data:**
+### Dot Notation (Nested Fields)
 ```python
-db = ironbase("production.mlite", durability="safe")  # ZERO data loss
+# Query nested fields
+users.find({"address.city": "NYC"})
+users.find({"stats.score": {"$gte": 90}})
+
+# Update nested fields
+users.update_one(
+    {"name": "Alice"},
+    {"$set": {"address.city": "Boston"}}
+)
+
+# Sort by nested fields
+users.find({}, sort=[("address.zip", 1)])
+
+# Project nested fields
+users.find({}, projection={"address.city": 1})
+
+# Aggregation with nested fields
+users.aggregate([
+    {"$group": {"_id": "$address.city", "total": {"$sum": "$stats.score"}}}
+])
 ```
 
-**High-Throughput Logs:**
+## Update Operators
+
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$set` | Set field value | `{"$set": {"name": "Bob", "age": 30}}` |
+| `$inc` | Increment number | `{"$inc": {"score": 10, "attempts": 1}}` |
+| `$unset` | Remove field | `{"$unset": {"temp_field": ""}}` |
+| `$push` | Add to array | `{"$push": {"tags": "new_tag"}}` |
+| `$pull` | Remove from array | `{"$pull": {"tags": "old_tag"}}` |
+| `$addToSet` | Add unique to array | `{"$addToSet": {"tags": "unique_tag"}}` |
+| `$pop` | Remove first/last | `{"$pop": {"queue": 1}}` (last) or `{"$pop": {"queue": -1}}` (first) |
+
+## Find Options
+
 ```python
-db = ironbase("logs.mlite", durability="batch", batch_size=100)  # Best balance
+# Projection (field selection)
+users.find({}, projection={"name": 1, "age": 1, "_id": 0})  # Include mode
+users.find({}, projection={"password": 0})  # Exclude mode
+
+# Sorting
+users.find({}, sort=[("age", 1)])  # Ascending
+users.find({}, sort=[("age", -1)])  # Descending
+users.find({}, sort=[("city", 1), ("age", -1)])  # Multi-field
+
+# Pagination
+users.find({}, skip=20, limit=10)  # Page 3 (20 skip, 10 per page)
+
+# Combined
+users.find(
+    {"status": "active"},
+    projection={"name": 1, "score": 1},
+    sort=[("score", -1)],
+    limit=100
+)
 ```
 
-**Temporary Staging:**
+## Aggregation Pipeline
+
+### Stages
+
+| Stage | Description |
+|-------|-------------|
+| `$match` | Filter documents (like find) |
+| `$group` | Group by field, compute aggregates |
+| `$project` | Reshape documents (include/exclude/rename) |
+| `$sort` | Sort documents |
+| `$limit` | Limit result count |
+| `$skip` | Skip documents |
+
+### Accumulators (in $group)
+
+| Accumulator | Description |
+|-------------|-------------|
+| `$sum` | Sum values or count (`{"$sum": 1}`) |
+| `$avg` | Average value |
+| `$min` | Minimum value |
+| `$max` | Maximum value |
+| `$first` | First value in group |
+| `$last` | Last value in group |
+
+### Example Pipeline
+
 ```python
-db = ironbase("staging.mlite", durability="unsafe")
-# ... bulk operations ...
-db.checkpoint()  # Manual commit at the end
+# Sales analytics with nested field support
+results = sales.aggregate([
+    # Filter completed sales
+    {"$match": {"status": "completed"}},
+
+    # Group by store city (nested field)
+    {"$group": {
+        "_id": "$store.location.city",
+        "totalRevenue": {"$sum": "$payment.amount"},
+        "orderCount": {"$sum": 1},
+        "avgOrder": {"$avg": "$payment.amount"},
+        "maxOrder": {"$max": "$payment.amount"}
+    }},
+
+    # Reshape output
+    {"$project": {
+        "city": "$_id",
+        "revenue": "$totalRevenue",
+        "orders": "$orderCount",
+        "avgOrder": 1,
+        "_id": 0
+    }},
+
+    # Sort by revenue
+    {"$sort": {"revenue": -1}},
+
+    # Top 10
+    {"$limit": 10}
+])
 ```
 
-**Default Recommendation:** Use **Safe mode** for production data (like SQL databases). Only use Batch/Unsafe if you understand the trade-offs.
+See [AGGREGATION.md](AGGREGATION.md) for detailed documentation.
 
-**Részletes dokumentáció:** Lásd [DESIGN_AUTO_COMMIT.md](DESIGN_AUTO_COMMIT.md) a teljes tervezési döntésekért, algoritmusokért és benchmark eredményekért.
-
-### Transactions (ACD)
-
-ironbase támogat **ACD tranzakciókat** (Atomicity, Consistency, Durability) Write-Ahead Log (WAL) alapú crash recovery-vel.
+## Indexing
 
 ```python
-# Transaction indítása
+# Create indexes
+users.create_index("email", unique=True)
+users.create_index("age")
+users.create_compound_index(["country", "city"])
+
+# List indexes
+print(users.list_indexes())  # ['users_id', 'users_email', 'users_age', ...]
+
+# Query plan analysis
+plan = users.explain({"age": {"$gte": 25}})
+print(plan["queryPlan"])   # "IndexRangeScan"
+print(plan["indexUsed"])   # "users_age"
+
+# Force index usage
+results = users.find_with_hint({"age": 25}, "users_age")
+
+# Drop index
+users.drop_index("users_age")
+```
+
+See [INDEXES.md](INDEXES.md) for detailed documentation.
+
+## Durability Modes
+
+IronBase offers three durability modes for different use cases:
+
+### Safe Mode (Default)
+```python
+db = IronBase("app.mlite")  # or durability="safe"
+```
+- **ZERO data loss** - Every operation immediately persisted
+- ~200 ops/sec (with fsync)
+- Use for: Financial data, user accounts, critical business data
+
+### Batch Mode
+```python
+db = IronBase("app.mlite", durability="batch", batch_size=100)
+```
+- **Bounded loss** - Max `batch_size` operations can be lost
+- ~500 ops/sec (batched fsync)
+- Use for: Logs, analytics, session tracking
+
+### Unsafe Mode
+```python
+db = IronBase("app.mlite", durability="unsafe")
+db.checkpoint()  # Manual commit required!
+```
+- **Manual control** - High data loss risk without checkpoint()
+- ~500 ops/sec
+- Use for: Temporary data, bulk imports, benchmarks
+
+## Transactions (ACD)
+
+```python
+# Begin transaction
 tx_id = db.begin_transaction()
 
-# Műveletek hozzáadása (jelenleg még csak core szinten)
-# TODO: Collection-level transaction methods (jövőbeli feature)
-
-# Commit (atomi alkalmazás + WAL)
-db.commit_transaction(tx_id)
-
-# VAGY: Rollback (minden művelet eldobása)
-db.rollback_transaction(tx_id)
-```
-
-**Error Handling:**
-
-```python
-tx_id = db.begin_transaction()
 try:
-    # ... operations ...
+    db.insert_one_tx("accounts", {"id": 1, "balance": 1000}, tx_id)
+    db.update_one_tx("accounts", {"id": 2}, {"balance": 500}, tx_id)
+
+    # Atomic commit
     db.commit_transaction(tx_id)
-except Exception as e:
+except:
+    # Rollback on error
     db.rollback_transaction(tx_id)
     raise
 ```
 
-**Jellemzők:**
-- ✅ **Atomicity**: Minden művelet együtt végrehajtva vagy egyáltalán nem
-- ✅ **Consistency**: Adatintegritás fenntartása
-- ✅ **Durability**: WAL + dual fsync biztosítja az adatok megőrzését crash után
-- ✅ **9-lépéses commit protokoll** CRC32 checksumokkal
-- 📖 Részletek: `IMPLEMENTATION_ACD.md`, `INDEX_CONSISTENCY.md`
+Features:
+- Atomicity: All-or-nothing execution
+- Consistency: Maintains data integrity
+- Durability: WAL + crash recovery
 
-### Collection
+## In-Memory Mode
 
-#### INSERT műveletek
+For testing (10-100x faster than file-based):
 
 ```python
-# Egy dokumentum
-result = collection.insert_one({
-    "field1": "value1",
-    "field2": 123
-})
-# Eredmény: {"acknowledged": True, "inserted_id": 1}
-
-# Több dokumentum
-result = collection.insert_many([
-    {"name": "Item 1"},
-    {"name": "Item 2"}
-])
-# Eredmény: {"acknowledged": True, "inserted_ids": [1, 2]}
+db = IronBase(":memory:")
+users = db.collection("users")
+users.insert_one({"name": "test"})
+# Data discarded when process ends
 ```
 
-#### READ operations
+## Cursor/Streaming
+
+For large result sets:
 
 ```python
-# Find one document
-doc = collection.find_one({"name": "János"})
+cursor = collection.find_cursor({"status": "active"}, batch_size=500)
 
-# Find all documents
-all_docs = collection.find({})
+print(f"Total: {cursor.total()}")
 
-# Find with filters
-filtered = collection.find({"age": {"$gt": 25}})
+# Process in batches
+while not cursor.is_finished():
+    batch = cursor.next_batch()
+    for doc in batch:
+        process(doc)
 
-# Find with projection (field filtering)
-docs = collection.find(
-    {},
-    projection={"name": 1, "age": 1, "_id": 0}  # Include name, age; exclude _id
-)
-
-# Find with sort
-docs = collection.find({}, sort=[("age", 1)])  # Sort by age ascending
-docs = collection.find({}, sort=[("age", -1)])  # Sort by age descending
-docs = collection.find({}, sort=[("city", 1), ("age", -1)])  # Multi-field sort
-
-# Dot notation for nested fields (MongoDB-compatible)
-docs = collection.find({}, projection={"address.city": 1})  # Project nested field
-docs = collection.find({}, sort=[("address.zip", 1)])  # Sort by nested field
-
-# Find with limit and skip (pagination)
-docs = collection.find({}, limit=10)  # First 10 documents
-docs = collection.find({}, skip=5, limit=10)  # Documents 6-15
-
-# Combined: query + projection + sort + limit
-results = collection.find(
-    {"age": {"$gte": 18}},              # Query
-    projection={"name": 1, "age": 1},   # Projection
-    sort=[("age", -1)],                 # Sort
-    limit=10                            # Limit
-)
-
-# Count documents
-count = collection.count_documents()
-count_filtered = collection.count_documents({"city": "Budapest"})
-
-# Get distinct values
-ages = collection.distinct("age")
-cities = collection.distinct("city", {"active": True})
-```
-
-#### UPDATE operations
-
-```python
-# Update one document
-result = collection.update_one(
-    {"name": "János"},
-    {"$set": {"age": 31, "updated": True}}
-)
-
-# Update many documents
-result = collection.update_many(
-    {"city": "Budapest"},
-    {"$set": {"country": "Hungary"}}
-)
-
-# Increment/decrement
-collection.update_one(
-    {"name": "János"},
-    {"$inc": {"score": 10, "attempts": 1}}
-)
-
-# Remove fields
-collection.update_one(
-    {"name": "János"},
-    {"$unset": {"temp_field": ""}}
-)
-```
-
-#### DELETE operations
-
-```python
-# Delete one document
-result = collection.delete_one({"name": "János"})
-
-# Delete many documents
-result = collection.delete_many({"age": {"$lt": 18}})
-```
-
-#### INDEX operations
-
-```python
-# Create non-unique index
-collection.create_index("age")
-
-# Create unique index
-collection.create_index("email", unique=True)
-
-# Create compound index (multi-field)
-collection.create_compound_index(["country", "city"])
-collection.create_compound_index(["category", "price"], unique=True)
-
-# List all indexes
-indexes = collection.list_indexes()
-# Returns: ['users_id', 'users_age', 'users_country_city']
-
-# Explain query execution plan
-plan = collection.explain({"age": {"$gte": 18}})
-print(plan["queryPlan"])      # "IndexRangeScan"
-print(plan["indexUsed"])      # "users_age"
-print(plan["estimatedCost"])  # "O(log n + k)"
-
-# Manual index selection (hint)
-results = collection.find_with_hint(
-    {"age": 25},
-    "users_age"  # Force use of this index
-)
-
-# Drop an index
-collection.drop_index("users_age")
-```
-
-**Compound Index példa:**
-```python
-# E-commerce: termékek country + city szerinti gyors keresése
-products = db.collection("products")
-products.create_compound_index(["country", "city"])
-
-# Ez a query használja a compound indexet
-results = products.find({"country": "HU", "city": "Budapest"})
-```
-
-**For detailed index documentation, see [INDEXES.md](INDEXES.md)**
-
-#### AGGREGATION operations
-
-```python
-# Aggregation pipeline
-results = collection.aggregate([
-    {"$match": {"age": {"$gte": 18}}},
-    {"$group": {"_id": "$city", "count": {"$sum": 1}, "avgAge": {"$avg": "$age"}}},
-    {"$sort": {"count": -1}},
-    {"$limit": 10}
-])
-
-# Dot notation in aggregation (MongoDB-compatible)
-results = collection.aggregate([
-    {"$group": {"_id": "$address.city", "total": {"$sum": "$stats.score"}}},
-    {"$project": {"city": "$_id", "totalScore": "$total"}},
-    {"$sort": {"totalScore": -1}}
-])
-
-# Available stages: $match, $group, $project, $sort, $limit, $skip
-# Available accumulators: $sum, $avg, $min, $max, $first, $last
-```
-
-**For detailed aggregation documentation, see [AGGREGATION.md](AGGREGATION.md)**
-
-#### CURSOR / STREAMING operations
-
-Nagy eredményhalmazok memória-hatékony feldolgozásához:
-
-```python
-# Cursor létrehozása (nem tölti be az összes dokumentumot egyszerre)
-cursor = collection.find_streaming({"status": "active"})
-
-print(f"Total: {cursor.total()}")        # Összes találat
-print(f"Remaining: {cursor.remaining()}") # Hátralévő
-
-# Iterálás egyenként
-doc = cursor.next()
-
-# Batch-ekben feldolgozás (hatékonyabb)
-batch = cursor.next_batch(100)  # Következő 100 dokumentum
-
-# Skip (átugrás)
-cursor.skip(50)
-
-# Visszaugrás az elejére
+# Or one at a time
 cursor.rewind()
-
-# Első N dokumentum
-first_10 = cursor.take(10)
-
-# Összes begyűjtése (ha elfér memóriában)
-all_docs = cursor.collect_all()
-
-# For-each feldolgozás
-cursor.for_each(lambda doc: print(doc["name"]))
+while (doc := cursor.next()) is not None:
+    process(doc)
 ```
 
-**Rust API:**
-```rust
-let mut cursor = collection.find_streaming(&json!({}))?;
-
-// Batch feldolgozás
-while cursor.remaining() > 0 {
-    let batch = cursor.next_chunk(100)?;
-    process_batch(batch);
-}
-```
-
-**Mikor használd:**
-- 📊 Nagy adathalmazok (>10,000 dokumentum)
-- 💾 Memória-korlátozott környezet
-- 🔄 Streaming feldolgozás
-- 📄 Lapozás (pagination)
-
-#### Complex Queries
-
-```python
-# Logical AND
-results = collection.find({
-    "$and": [
-        {"age": {"$gte": 25}},
-        {"city": "NYC"}
-    ]
-})
-
-# Logical OR
-results = collection.find({
-    "$or": [
-        {"age": {"$lt": 25}},
-        {"city": "LA"}
-    ]
-})
-
-# NOT operator
-results = collection.find({
-    "age": {"$not": {"$gt": 30}}
-})
-
-# Complex nested query
-results = collection.find({
-    "$and": [
-        {
-            "$or": [
-                {"city": "NYC"},
-                {"city": "LA"}
-            ]
-        },
-        {"age": {"$gte": 25}},
-        {"active": True}
-    ]
-})
-```
-
-## Supported Query Operators
-
-### Comparison Operators ✅
-- `$eq` - Equal to
-- `$ne` - Not equal to
-- `$gt` - Greater than
-- `$gte` - Greater than or equal
-- `$lt` - Less than
-- `$lte` - Less than or equal
-- `$in` - Value in array
-- `$nin` - Value not in array
-
-### Logical Operators ✅
-- `$and` - Logical AND
-- `$or` - Logical OR
-- `$not` - Logical NOT
-- `$nor` - Logical NOR
-
-### Update Operators ✅
-- `$set` - Set field value
-- `$inc` - Increment/decrement numeric field
-- `$unset` - Remove field
-- `$push` - Add to array
-- `$pull` - Remove from array
-- `$addToSet` - Add unique to array
-- `$pop` - Remove first/last from array
-
-### Element Operators ✅
-- `$exists` - Field exists check
-- `$type` - Type check (string, number, boolean, object, array)
-
-### Array Operators ✅
-- `$all` - Array contains all values
-- `$elemMatch` - Array element matches condition
-- `$size` - Array size check
-
-### String Operators ✅
-- `$regex` - Regular expression match
-
-### Planned Operators
-- `$expr` - Aggregation expressions in queries
-- `$text` - Full-text search
-
-## 🏗️ Architektúra
-
-### Cargo Workspace Structure
+## Architecture
 
 ```
-ironbase/
-├── Cargo.toml                    # Workspace root
-├── ironbase-core/               # 🦀 Pure Rust Core Library
-│   ├── Cargo.toml
+┌─────────────────────────────────────────────────────────────┐
+│                    Language Bindings                         │
+│         Python (PyO3)  │  C# (.NET)  │  (future: JS/Go)     │
+└──────────────┬──────────────┬───────────────────────────────┘
+               │              │
+┌──────────────▼──────────────▼───────────────────────────────┐
+│                    ironbase-core (Rust)                      │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │   Query     │  │ Aggregation │  │      Indexing       │  │
+│  │   Engine    │  │   Pipeline  │  │   (B+ Tree)         │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
+│  │ Transaction │  │     WAL     │  │   Query Planner     │  │
+│  │   Manager   │  │   Manager   │  │   & Cache           │  │
+│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│                    Storage Engine                            │
+│     Append-only storage  │  Compaction  │  Crash recovery   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### File Format (.mlite)
+```
+┌───────────────────────────────┐
+│  Header (128 bytes)           │
+│  - Magic: "MONGOLTE"          │
+│  - Version, page_size         │
+├───────────────────────────────┤
+│  Collection Metadata (JSON)   │
+│  - Document catalog           │
+│  - Indexes, schema            │
+├───────────────────────────────┤
+│  Document Data (append-only)  │
+│  [len][JSON bytes]...         │
+└───────────────────────────────┘
+```
+
+## Project Structure
+
+```
+MongoLite/
+├── ironbase-core/           # Rust core library
 │   └── src/
-│       ├── lib.rs                # Clean API exports
-│       ├── database.rs           # DatabaseCore (language-independent)
-│       ├── collection_core.rs    # CollectionCore (pure logic)
-│       ├── storage.rs            # Storage engine
-│       ├── query.rs              # Query engine
-│       ├── document.rs           # Document model
-│       ├── error.rs              # Error handling
-│       └── index.rs              # Indexing (future)
-└── bindings/
-    ├── python/                   # 🐍 Python Bindings (PyO3)
-    │   ├── Cargo.toml
-    │   └── src/
-    │       └── lib.rs            # ironbase, Collection wrappers
-    └── csharp/                   # (Planned) C# Bindings
-        └── ...
+│       ├── database.rs      # DatabaseCore
+│       ├── collection_core/ # CRUD operations
+│       ├── query/           # Query operators
+│       ├── aggregation.rs   # Pipeline stages
+│       ├── index.rs         # B+ tree indexes
+│       ├── storage/         # Storage engine
+│       ├── transaction.rs   # ACD transactions
+│       └── wal.rs           # Write-ahead log
+├── bindings/python/         # Python bindings (PyO3)
+├── IronBase.NET/            # C# bindings
+└── mcp-server/              # MCP server for AI assistants
 ```
 
-### Architecture Layers
-
-```
-┌─────────────────────────────────────────────────────┐
-│     Language Bindings (Python, C#, etc.)            │
-│  - ironbase, Collection wrappers                   │
-│  - Language-specific type conversions               │
-└──────────────┬──────────────────────────────────────┘
-               │ (Foreign Function Interface)
-┌──────────────▼──────────────────────────────────────┐
-│       ironbase-core (Pure Rust)                    │
-│  - DatabaseCore, CollectionCore                     │
-│  - CRUD operations                                  │
-│  - Query engine with MongoDB operators             │
-│  - Document model & serialization                  │
-└──────────────┬──────────────────────────────────────┘
-               │
-┌──────────────▼──────────────────────────────────────┐
-│     Storage Engine                                  │
-│  - Append-only file storage                        │
-│  - Tombstone pattern for deletes                   │
-│  - HashMap-based version tracking                  │
-│  - Metadata persistence                            │
-└─────────────────────────────────────────────────────┘
-```
-
-## Implementation Status
-
-### ✅ Completed Features (137 tests passing)
-
-**CRUD Operations:**
-- [x] `insert_one()` - Insert single document
-- [x] `insert_many()` - Insert multiple documents
-- [x] `find()` - Query documents with options
-- [x] `find_one()` - Find single document
-- [x] `update_one()` - Update single document
-- [x] `update_many()` - Update multiple documents
-- [x] `delete_one()` - Delete single document
-- [x] `delete_many()` - Delete multiple documents
-
-**Query Operations:**
-- [x] `count_documents()` - Count with filters
-- [x] `distinct()` - Get unique values from field
-
-**Find Options:**
-- [x] `projection` - Field filtering (include/exclude mode)
-- [x] `sort` - Single and multi-field sorting
-- [x] `limit` - Maximum results count
-- [x] `skip` - Skip documents (pagination support)
-
-**Aggregation Pipeline:**
-- [x] `aggregate()` - Execute aggregation pipelines
-- [x] Pipeline stages: `$match`, `$group`, `$project`, `$sort`, `$limit`, `$skip`
-- [x] Accumulators: `$sum`, `$avg`, `$min`, `$max`, `$first`, `$last`
-- [x] Group by field or null (all documents)
-- [x] Multi-stage pipelines with automatic data flow
-
-**Indexing:**
-- [x] `create_index()` - Create B+ tree indexes (unique/non-unique)
-- [x] `list_indexes()` - List all indexes
-- [x] `drop_index()` - Remove index
-- [x] `explain()` - Query execution plan analysis
-- [x] `find_with_hint()` - Manual index selection
-- [x] Automatic query optimization with index selection
-- [x] Range scans with B+ tree traversal
-- [x] Equality lookups with O(log n) performance
-
-**Query Operators:**
-- [x] Comparison: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$nin`
-- [x] Logical: `$and`, `$or`, `$not`, `$nor`
-- [x] Update: `$set`, `$inc`, `$unset`
-
-**Architecture:**
-- [x] Cargo workspace with clean separation
-- [x] Pure Rust core library (ironbase-core)
-- [x] Python bindings via PyO3 (bindings/python)
-- [x] Append-only storage with compaction
-- [x] Tombstone pattern for deletes
-- [x] HashMap-based version tracking
-- [x] Auto-generated IDs
-- [x] Metadata persistence with iterative convergence
-- [x] B+ tree implementation for indexing
-
-**Testing:**
-- [x] 111 passing tests (0 failures)
-- [x] Storage tests (creation, persistence, compaction)
-- [x] Query tests (comparison, logical operators)
-- [x] Document tests (serialization, field operations)
-- [x] Aggregation tests (pipeline stages, accumulators)
-- [x] Find options tests (projection, sort, limit, skip)
-- [x] Index tests (B+ tree, explain, hint, performance)
-- [x] **ACD Transaction tests** (commit, rollback, crash recovery, WAL)
-- [x] Property-based tests (proptest)
-- [x] Integration tests (multi-collection scenarios)
-
-### 🚧 Planned Features
-
-**Near-term:**
-- [ ] C# bindings (bindings/csharp)
-- [ ] JavaScript/Node.js bindings (napi-rs)
-- [ ] More aggregation operators (expression operators, array operators)
-- [x] More update operators (`$push`, `$pull`, `$addToSet`, `$pop`) ✅
-- [x] Compound indexes (multi-field) ✅
-- [x] Cursor/streaming API for large result sets ✅
-- [x] In-memory storage for fast testing ✅
-- [x] Nested field access in projection/sort (`"address.city"`) ✅
-
-**Medium-term:**
-- [x] **ACD Transactions** - Atomicity, Consistency, Durability with WAL ✅ **IMPLEMENTED**
-  - Multi-operation atomic commits via begin/commit/rollback API
-  - Write-Ahead Log (WAL) for crash recovery with automatic replay
-  - JSON-based WAL serialization for compatibility
-  - 9-step atomic commit protocol with fsync guarantees
-  - Crash recovery tests with automatic WAL cleanup
-  - Transaction state machine (Active/Committed/Aborted)
-  - ~1,500 LOC implementation (transaction.rs, wal.rs, storage integration, database API, tests)
-  - See [IMPLEMENTATION_ACD.md](IMPLEMENTATION_ACD.md) and [INDEX_CONSISTENCY.md](INDEX_CONSISTENCY.md)
-- [ ] Text search indexes (full-text search)
-- [ ] Geospatial indexes and queries
-- [ ] Advanced query optimizer (cost-based)
-- [ ] Bulk operations API
-- [ ] Benchmark suite (criterion)
-
-**Long-term:**
-- [ ] Full ACID (add Isolation to ACD) - MVCC, snapshot isolation
-- [ ] MVCC
-- [ ] Network protocol (optional)
-
-## 🔍 Példák
-
-Lásd az `example.py` fájlt részletes példákért.
-
-## 🧪 Tesztelés
+## Testing
 
 ```bash
-# Core library tests (56 unit + 11 integration tests)
-cargo test --manifest-path ironbase-core/Cargo.toml
+# Rust tests (554+ tests)
+cargo test -p ironbase-core
 
-# Python bindings smoke test
-cd bindings/python && maturin develop && python -c "import ironbase; print('OK')"
+# Python tests
+python run_all_tests.py
 
-# Run all workspace tests
-cargo test --workspace
+# C# tests
+cd IronBase.NET && dotnet test
 
-# Benchmark (when criterion is re-enabled)
-cargo bench
+# Development checks
+just run-dev-checks  # fmt + clippy + tests
 ```
 
-## 🚀 Teljesítmény
+## Performance
 
-Célok az MVP-hez:
-- **1 MB adatbázis**: <10ms olvasás
-- **10,000 dokumentum**: <100ms keresés
-- **Index nélkül**: Lineáris keresés O(n)
-- **Index-szel**: 2-5x gyorsítás
+| Operation | Performance |
+|-----------|-------------|
+| Insert (Safe mode) | ~200 ops/sec |
+| Insert (Batch mode) | ~500 ops/sec |
+| Insert (bulk, unsafe) | ~1M+ ops/sec |
+| Index lookup | O(log n) |
+| Range scan | O(log n + k) |
+| Full scan | O(n) |
 
-## 🤝 Hozzájárulás
+## Limitations
 
-A projekt nyílt forráskódú és várja a hozzájárulásokat!
+- No ACID isolation (ACD only - no MVCC)
+- No cursors with server-side state (client-side only)
+- No replication or sharding
+- Single-writer model
+- No geospatial or full-text indexes (planned)
 
-1. Fork-old a projektet
-2. Hozz létre egy feature branch-et (`git checkout -b feature/amazing`)
-3. Commit-old a változásokat (`git commit -m 'Add amazing feature'`)
-4. Push-old a branch-et (`git push origin feature/amazing`)
-5. Nyiss egy Pull Request-et
+## Documentation
 
-## 📝 Licensz
+- [AGGREGATION.md](AGGREGATION.md) - Aggregation pipeline guide
+- [INDEXES.md](INDEXES.md) - Indexing guide
+- [DESIGN_AUTO_COMMIT.md](DESIGN_AUTO_COMMIT.md) - Durability design
+- [INDEX_CONSISTENCY.md](INDEX_CONSISTENCY.md) - Index consistency guarantees
+- [IronBase.NET/README.md](IronBase.NET/README.md) - C# documentation
 
-MIT License - lásd a LICENSE fájlt
+## License
 
-## 🙏 Köszönet
+MIT License
 
-- SQLite inspiráció az egyszerűségért
-- MongoDB inspiráció az API-ért
-- Rust közösség a fantasztikus eszközökért
+## Contributing
 
-## 📧 Kapcsolat
-
-- GitHub Issues: [github.com/yourusername/ironbase/issues](https://github.com/yourusername/ironbase/issues)
-- Email: your.email@example.com
+1. Fork the repository
+2. Create a feature branch
+3. Run `just run-dev-checks` before committing
+4. Submit a pull request
 
 ---
 
-**ironbase** - When you need MongoDB simplicity with SQLite's elegance ⚡
+**IronBase** - MongoDB's simplicity with SQLite's elegance

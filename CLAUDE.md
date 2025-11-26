@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**IronBase** is a lightweight embedded NoSQL document database written in Rust with Python bindings via PyO3. It provides a MongoDB-like API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
+**IronBase** is a high-performance embedded NoSQL document database written in Rust with Python and C# bindings. It provides a MongoDB-compatible API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
+
+**Key Stats:**
+- 554+ tests passing
+- Python (PyO3), C# (.NET 8), Rust APIs
+- 18 query operators, 7 update operators
+- Full aggregation pipeline with dot notation
+- B+ tree indexing with compound index support
 
 ## Build and Development Commands
 
@@ -14,30 +21,39 @@ pip install maturin
 maturin develop              # Development build with Python bindings
 
 # Testing
-cargo test -p ironbase-core                    # All Rust unit tests
+cargo test -p ironbase-core                    # All Rust tests (554+)
 cargo test -p ironbase-core -- test_name       # Single test by name
 cargo test -p ironbase-core -- --nocapture     # Tests with stdout
-just run-dev-checks                            # Full CI check: fmt + clippy + tests
+just run-dev-checks                            # Full CI: fmt + clippy + tests
+
+# .NET
+cd IronBase.NET && dotnet test                 # C# tests
 
 # MCP Server (separate workspace)
 cd mcp-server && cargo build --release
 cd mcp-server && cargo test
-
-# Python integration tests
-source venv/bin/activate && python test_python_auto_commit.py
 ```
 
 ## Architecture
 
 ### Workspace Structure
 
-The project is a Cargo workspace with the MCP server excluded (separate build):
-
 ```
 MongoLite/
 ├── ironbase-core/           # Pure Rust core library
+│   └── src/
+│       ├── database.rs      # DatabaseCore, durability modes
+│       ├── collection_core/ # CRUD, aggregation, indexes
+│       ├── query/           # Query operators (strategy pattern)
+│       ├── aggregation.rs   # Pipeline stages + accumulators
+│       ├── find_options.rs  # Projection, sort, limit, skip
+│       ├── index.rs         # B+ tree indexes
+│       ├── storage/         # Append-only storage engine
+│       ├── transaction.rs   # ACD transactions
+│       └── wal.rs           # Write-Ahead Log
 ├── bindings/python/         # PyO3 Python bindings
-└── mcp-server/              # MCP protocol server (excluded from workspace)
+├── IronBase.NET/            # C# .NET 8 bindings
+└── mcp-server/              # MCP protocol server (DOCJL editing)
 ```
 
 ### Core Module Responsibilities
@@ -45,52 +61,48 @@ MongoLite/
 **database.rs** - Database lifecycle and durability:
 - `DatabaseCore<S: Storage + RawStorage>` - generic over storage backend
 - `DatabaseCore::open(path)` - File-based storage (production)
-- `DatabaseCore::<MemoryStorage>::open_memory()` - In-memory storage (testing, 10-100x faster)
+- `DatabaseCore::<MemoryStorage>::open_memory()` - In-memory (testing, 10-100x faster)
 - Durability modes: Safe (auto-commit), Batch, Unsafe
-- Transaction management and WAL recovery
 
 **collection_core/mod.rs** - All CRUD and query operations:
-- insert_one/many, find/find_one, update_one/many, delete_one/many
-- Aggregation pipeline ($match, $group, $project, $sort, $limit, $skip)
-- Index management (create_index, create_compound_index, drop_index, explain, hint)
-- Cursor/streaming: find_streaming() returns FindCursor for memory-efficient iteration
+- insert_one/many, find/find_one/find_with_options, update_one/many, delete_one/many
+- Aggregation pipeline: $match, $group, $project, $sort, $limit, $skip
+- Index management: create_index, create_compound_index, drop_index, explain, hint
+- Cursor/streaming: find_streaming() for memory-efficient iteration
 
-**query.rs + query/operators.rs** - Query engine with strategy pattern:
+**query/operators.rs** - Query engine (strategy pattern):
 - Comparison: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
 - Logical: $and, $or, $not, $nor
-- Element: $exists, $type | Array: $all, $elemMatch, $size | Regex: $regex
+- Element: $exists, $type
+- Array: $all, $elemMatch, $size
+- String: $regex
+
+**aggregation.rs** - Pipeline stages and accumulators:
+- Stages: MatchStage, GroupStage, ProjectStage, SortStage, LimitStage, SkipStage
+- Accumulators: $sum, $avg, $min, $max, $first, $last
+- Full dot notation support for nested fields
+
+**find_options.rs** - Query options:
+- Projection (include/exclude mode)
+- Sort (single and multi-field, dot notation)
+- Limit, Skip (pagination)
+- All support dot notation for nested fields
 
 **storage/** - Append-only storage engine:
-- **traits.rs** - Storage trait hierarchy:
-  - `Storage` - High-level document operations (read/write Document)
-  - `RawStorage: Storage` - Low-level byte operations (offsets, catalog)
 - **file_storage.rs** - File-based persistence (.mlite files)
-- **memory_storage.rs** - In-memory backend (implements both Storage + RawStorage)
-- **compaction.rs** - Garbage collection for tombstoned documents
+- **memory_storage.rs** - In-memory backend for testing
+- **compaction.rs** - Garbage collection for tombstones
 
 **index.rs + btree.rs** - B+ tree indexing:
 - Single-field indexes: `create_index("field", unique)`
 - Compound indexes: `create_compound_index(["field1", "field2"], unique)`
 - Automatic query optimization with index selection
+- explain() and find_with_hint() for query planning
 
 **transaction.rs + wal.rs** - ACD transactions:
 - Write-Ahead Log with CRC32 checksums
 - Crash recovery with automatic replay
-
-### MCP Server Architecture
-
-The MCP server (`mcp-server/`) implements Model Context Protocol for DOCJL document editing:
-
-```
-mcp-server/src/
-├── main.rs              # HTTP server + JSON-RPC handler
-├── commands.rs          # MCP command implementations
-├── domain/              # DOCJL business logic (block, document, label, validation)
-├── host/                # Security (auth, rate-limit) and audit logging
-└── adapters/            # Storage adapters (ironbase integration)
-```
-
-**Key MCP tools**: list_documents, get_document, search_blocks, insert_block, update_block, delete_block, get_section, estimate_tokens
+- begin_transaction/commit_transaction/rollback_transaction
 
 ### Storage File Format (.mlite)
 
@@ -107,13 +119,43 @@ mcp-server/src/
 └─────────────────────────────────────┘
 ```
 
+## Implemented Features
+
+### Query Operators (18)
+- **Comparison**: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
+- **Logical**: $and, $or, $not, $nor
+- **Element**: $exists, $type
+- **Array**: $all, $elemMatch, $size
+- **String**: $regex
+
+### Update Operators (7)
+- $set, $inc, $unset, $push, $pull, $addToSet, $pop
+- All support dot notation for nested fields
+
+### Aggregation
+- **Stages**: $match, $group, $project, $sort, $limit, $skip
+- **Accumulators**: $sum, $avg, $min, $max, $first, $last
+- **Dot notation**: Full support everywhere
+
+### Other Features
+- FindOptions: projection, sort, limit, skip (all with dot notation)
+- B+ tree indexes: single-field, compound, unique
+- Query planning: explain(), find_with_hint()
+- ACD transactions with WAL
+- Durability modes: Safe/Batch/Unsafe
+- In-memory mode for testing
+- Cursor/streaming for large results
+- JSON schema validation
+- Storage compaction
+
 ## Development Guidelines
 
 ### When Adding Features
 1. Implement in Rust first (ironbase-core)
 2. Add PyO3 bindings (bindings/python/src/lib.rs)
-3. Update tests (cargo test + Python tests)
-4. Use `just run-dev-checks` before committing
+3. Add C# bindings if needed (IronBase.NET)
+4. Update tests
+5. Use `just run-dev-checks` before committing
 
 ### Thread Safety
 - `Arc<RwLock<StorageEngine>>` for shared storage (parking_lot::RwLock)
@@ -123,22 +165,17 @@ mcp-server/src/
 ### Error Handling
 - Rust: `Result<T>` with `MongoLiteError` (thiserror)
 - Python: Map to PyIOError, PyRuntimeError, PyValueError
+- C#: Map to appropriate .NET exceptions
 
 ## Testing Strategy
 
-- **Test first** approach
-- Rust unit tests: `cargo test -p ironbase-core`
+- **Test first** approach always
+- Rust unit tests: `cargo test -p ironbase-core` (554+ tests)
 - Property tests: proptest in `ironbase-core/tests/property_tests.rs`
-- Python integration: `test_*.py` files in project root
+- Integration tests: `ironbase-core/tests/`
+- Python tests: `test_*.py`, `run_all_tests.py`
+- C# tests: `IronBase.NET/src/IronBase.Tests/`
 - MCP tests: `cd mcp-server && cargo test`
-
-## Key Dependencies
-
-- **serde/serde_json**: Serialization
-- **parking_lot**: Fast RwLock
-- **pyo3**: Python bindings
-- **maturin**: Build Python wheels from Rust
-- **ahash/dashmap**: Fast hashing
 
 ## Quick Reference
 
@@ -151,13 +188,25 @@ let coll = db.collection("test").unwrap();
 // ... test code - no cleanup needed
 ```
 
-### Using Cursors for Large Results
+### Dot Notation for Nested Fields
 ```rust
-let mut cursor = collection.find_streaming(&json!({}))?;
-while cursor.remaining() > 0 {
-    let batch = cursor.next_chunk(100)?;
-    // process batch
-}
+// Query
+coll.find(&json!({"address.city": "NYC"}))?;
+
+// Update
+coll.update_one(
+    &json!({"name": "Alice"}),
+    &json!({"$set": {"address.city": "Boston"}})
+)?;
+
+// Aggregation
+coll.aggregate(&json!([
+    {"$group": {"_id": "$address.city", "count": {"$sum": 1}}}
+]))?;
+
+// Sort
+let options = FindOptions::new().with_sort(vec![("address.zip".to_string(), 1)]);
+coll.find_with_options(&json!({}), options)?;
 ```
 
 ### Creating Compound Indexes
@@ -168,12 +217,11 @@ collection.create_compound_index(
 )?;
 ```
 
-## Current Test Coverage
+## Key Dependencies
 
-- **Total**: 85%+ coverage
-- **schema.rs**: 99%
-- **aggregation.rs**: 96%
-- **operators.rs**: 93%
-- **collection_core/mod.rs**: 70%
-
-Run coverage: `cargo llvm-cov -p ironbase-core`
+- **serde/serde_json**: Serialization
+- **parking_lot**: Fast RwLock
+- **pyo3**: Python bindings
+- **maturin**: Build Python wheels
+- **ahash/dashmap**: Fast hashing
+- **thiserror**: Error handling
