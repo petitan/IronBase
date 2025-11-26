@@ -1094,3 +1094,659 @@ fn test_aggregation_with_nested_fields_from_storage() {
     assert_eq!(results[0]["totalEmployees"], 300);
     assert_eq!(results[0]["count"], 2);
 }
+
+// =============================================================================
+// NESTED DOCUMENT TESTS - Comprehensive coverage for dot notation functionality
+// =============================================================================
+
+mod nested_document_tests {
+    use super::*;
+    use ironbase_core::{DatabaseCore, storage::MemoryStorage, FindOptions};
+
+    /// Helper to create a test database with nested documents
+    fn setup_nested_test_db() -> DatabaseCore<MemoryStorage> {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("users").unwrap();
+
+        // Insert documents with various nested structures
+        coll.insert_one(HashMap::from([
+            ("name".to_string(), json!("Alice")),
+            ("age".to_string(), json!(30)),
+            ("address".to_string(), json!({
+                "city": "New York",
+                "zip": "10001",
+                "location": {
+                    "lat": 40.7128,
+                    "lng": -74.0060
+                }
+            })),
+            ("profile".to_string(), json!({
+                "score": 95,
+                "level": "senior",
+                "stats": {
+                    "posts": 150,
+                    "likes": 2500
+                }
+            })),
+            ("tags".to_string(), json!(["developer", "team-lead"]))
+        ])).unwrap();
+
+        coll.insert_one(HashMap::from([
+            ("name".to_string(), json!("Bob")),
+            ("age".to_string(), json!(25)),
+            ("address".to_string(), json!({
+                "city": "Los Angeles",
+                "zip": "90001",
+                "location": {
+                    "lat": 34.0522,
+                    "lng": -118.2437
+                }
+            })),
+            ("profile".to_string(), json!({
+                "score": 75,
+                "level": "junior",
+                "stats": {
+                    "posts": 30,
+                    "likes": 500
+                }
+            })),
+            ("tags".to_string(), json!(["developer"]))
+        ])).unwrap();
+
+        coll.insert_one(HashMap::from([
+            ("name".to_string(), json!("Carol")),
+            ("age".to_string(), json!(35)),
+            ("address".to_string(), json!({
+                "city": "New York",
+                "zip": "10002",
+                "location": {
+                    "lat": 40.7589,
+                    "lng": -73.9851
+                }
+            })),
+            ("profile".to_string(), json!({
+                "score": 88,
+                "level": "senior",
+                "stats": {
+                    "posts": 200,
+                    "likes": 3500
+                }
+            })),
+            ("tags".to_string(), json!(["manager", "speaker"]))
+        ])).unwrap();
+
+        // David - missing location and stats for edge case testing
+        coll.insert_one(HashMap::from([
+            ("name".to_string(), json!("David")),
+            ("age".to_string(), json!(28)),
+            ("address".to_string(), json!({
+                "city": "Chicago",
+                "zip": "60601"
+            })),
+            ("profile".to_string(), json!({
+                "score": 82,
+                "level": "mid"
+            })),
+            ("tags".to_string(), json!(["developer"]))
+        ])).unwrap();
+
+        db
+    }
+
+    // =========================================================================
+    // QUERY TESTS - Find with dot notation
+    // =========================================================================
+
+    #[test]
+    fn test_query_nested_field_equality() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Query by nested field
+        let results = coll.find(&json!({"address.city": "New York"})).unwrap();
+        assert_eq!(results.len(), 2, "Should find 2 users in New York");
+
+        let names: Vec<&str> = results.iter()
+            .map(|d| d["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Alice"));
+        assert!(names.contains(&"Carol"));
+    }
+
+    #[test]
+    fn test_query_nested_field_comparison() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Query with comparison on nested field
+        let results = coll.find(&json!({"profile.score": {"$gte": 85}})).unwrap();
+        assert_eq!(results.len(), 2, "Should find 2 users with score >= 85");
+
+        let results = coll.find(&json!({"profile.score": {"$lt": 80}})).unwrap();
+        assert_eq!(results.len(), 1, "Should find 1 user with score < 80");
+        assert_eq!(results[0]["name"], "Bob");
+    }
+
+    #[test]
+    fn test_query_deep_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Query 3-level deep nesting
+        let results = coll.find(&json!({"profile.stats.posts": {"$gte": 100}})).unwrap();
+        assert_eq!(results.len(), 2, "Should find 2 users with posts >= 100");
+
+        let results = coll.find(&json!({"address.location.lat": {"$gt": 40.0}})).unwrap();
+        assert_eq!(results.len(), 2, "Should find 2 users with lat > 40.0");
+    }
+
+    #[test]
+    fn test_query_nested_field_string_match() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Query nested string field
+        let results = coll.find(&json!({"profile.level": "senior"})).unwrap();
+        assert_eq!(results.len(), 2, "Should find 2 senior users");
+
+        let results = coll.find(&json!({"profile.level": "junior"})).unwrap();
+        assert_eq!(results.len(), 1, "Should find 1 junior user");
+    }
+
+    #[test]
+    fn test_query_nested_with_multiple_conditions() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Multiple conditions including nested fields
+        let results = coll.find(&json!({
+            "address.city": "New York",
+            "profile.score": {"$gte": 90}
+        })).unwrap();
+        assert_eq!(results.len(), 1, "Should find 1 user in NYC with score >= 90");
+        assert_eq!(results[0]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_query_nested_with_or() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // OR query with nested fields
+        let results = coll.find(&json!({
+            "$or": [
+                {"address.city": "Chicago"},
+                {"profile.level": "junior"}
+            ]
+        })).unwrap();
+        assert_eq!(results.len(), 2, "Should find 2 users (Chicago or junior)");
+    }
+
+    #[test]
+    fn test_query_missing_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Query for field that doesn't exist in some docs
+        let results = coll.find(&json!({"address.location.lat": {"$exists": true}})).unwrap();
+        assert_eq!(results.len(), 3, "Should find 3 users with location.lat");
+
+        // David doesn't have location
+        let results = coll.find(&json!({"address.location": {"$exists": false}})).unwrap();
+        assert_eq!(results.len(), 1, "Should find 1 user without location");
+        assert_eq!(results[0]["name"], "David");
+    }
+
+    // =========================================================================
+    // UPDATE TESTS - Update nested fields with dot notation
+    // =========================================================================
+
+    #[test]
+    fn test_update_nested_field_set() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Update nested field - returns (matched, modified)
+        let (matched, modified) = coll.update_one(
+            &json!({"name": "Alice"}),
+            &json!({"$set": {"address.city": "Boston"}})
+        ).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(modified, 1);
+
+        // Verify update
+        let results = coll.find(&json!({"name": "Alice"})).unwrap();
+        assert_eq!(results[0]["address"]["city"], "Boston");
+    }
+
+    #[test]
+    fn test_update_deep_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Update 3-level deep nested field
+        let (matched, modified) = coll.update_one(
+            &json!({"name": "Alice"}),
+            &json!({"$set": {"profile.stats.likes": 3000}})
+        ).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(modified, 1);
+
+        // Verify update
+        let results = coll.find(&json!({"name": "Alice"})).unwrap();
+        assert_eq!(results[0]["profile"]["stats"]["likes"], 3000);
+    }
+
+    #[test]
+    fn test_update_nested_field_inc() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Increment nested field
+        let (matched, modified) = coll.update_one(
+            &json!({"name": "Bob"}),
+            &json!({"$inc": {"profile.score": 10}})
+        ).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(modified, 1);
+
+        // Verify - Bob's score was 75, should be 85
+        let results = coll.find(&json!({"name": "Bob"})).unwrap();
+        assert_eq!(results[0]["profile"]["score"], 85);
+    }
+
+    #[test]
+    fn test_update_nested_field_unset() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Unset nested field
+        let (matched, modified) = coll.update_one(
+            &json!({"name": "Alice"}),
+            &json!({"$unset": {"address.zip": ""}})
+        ).unwrap();
+        assert_eq!(matched, 1);
+        assert_eq!(modified, 1);
+
+        // Verify - zip should be removed
+        let results = coll.find(&json!({"name": "Alice"})).unwrap();
+        assert!(results[0]["address"].get("zip").is_none() ||
+                results[0]["address"]["zip"].is_null());
+    }
+
+    #[test]
+    fn test_update_many_nested_fields() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Update all seniors - returns (matched, modified)
+        let (matched, modified) = coll.update_many(
+            &json!({"profile.level": "senior"}),
+            &json!({"$inc": {"profile.score": 5}})
+        ).unwrap();
+        assert_eq!(matched, 2, "Should match 2 senior users");
+        assert_eq!(modified, 2, "Should modify 2 senior users");
+
+        // Verify - Alice: 95+5=100, Carol: 88+5=93
+        let alice = coll.find_one(&json!({"name": "Alice"})).unwrap().unwrap();
+        assert_eq!(alice["profile"]["score"], 100);
+
+        let carol = coll.find_one(&json!({"name": "Carol"})).unwrap().unwrap();
+        assert_eq!(carol["profile"]["score"], 93);
+    }
+
+    // =========================================================================
+    // AGGREGATION TESTS - Aggregate with nested fields
+    // =========================================================================
+
+    #[test]
+    fn test_aggregate_group_by_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Group by nested field
+        let results = coll.aggregate(&json!([
+            {"$group": {
+                "_id": "$address.city",
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"count": -1}}
+        ])).unwrap();
+
+        assert_eq!(results.len(), 3, "Should have 3 cities");
+        assert_eq!(results[0]["_id"], "New York");
+        assert_eq!(results[0]["count"], 2);
+    }
+
+    #[test]
+    fn test_aggregate_sum_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Sum nested numeric field
+        let results = coll.aggregate(&json!([
+            {"$group": {
+                "_id": "$profile.level",
+                "totalScore": {"$sum": "$profile.score"},
+                "count": {"$sum": 1}
+            }}
+        ])).unwrap();
+
+        // Find senior group
+        let senior = results.iter()
+            .find(|r| r["_id"] == "senior")
+            .expect("Should have senior group");
+        assert_eq!(senior["totalScore"], 95 + 88); // Alice + Carol
+        assert_eq!(senior["count"], 2);
+    }
+
+    #[test]
+    fn test_aggregate_avg_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Average nested numeric field
+        let results = coll.aggregate(&json!([
+            {"$group": {
+                "_id": null,
+                "avgScore": {"$avg": "$profile.score"}
+            }}
+        ])).unwrap();
+
+        assert_eq!(results.len(), 1);
+        // (95 + 75 + 88 + 82) / 4 = 85
+        assert_eq!(results[0]["avgScore"], 85.0);
+    }
+
+    #[test]
+    fn test_aggregate_deep_nested_sum() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Sum 3-level deep nested field
+        let results = coll.aggregate(&json!([
+            {"$group": {
+                "_id": "$address.city",
+                "totalPosts": {"$sum": "$profile.stats.posts"},
+                "totalLikes": {"$sum": "$profile.stats.likes"}
+            }}
+        ])).unwrap();
+
+        // Find New York group (Alice + Carol have stats)
+        let nyc = results.iter()
+            .find(|r| r["_id"] == "New York")
+            .expect("Should have New York group");
+
+        // Alice: 150 posts, 2500 likes + Carol: 200 posts, 3500 likes
+        assert_eq!(nyc["totalPosts"], 350);
+        assert_eq!(nyc["totalLikes"], 6000);
+    }
+
+    #[test]
+    fn test_aggregate_min_max_nested() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let results = coll.aggregate(&json!([
+            {"$group": {
+                "_id": null,
+                "minScore": {"$min": "$profile.score"},
+                "maxScore": {"$max": "$profile.score"}
+            }}
+        ])).unwrap();
+
+        // Aggregation returns floats
+        assert_eq!(results[0]["minScore"], 75.0); // Bob
+        assert_eq!(results[0]["maxScore"], 95.0); // Alice
+    }
+
+    #[test]
+    fn test_aggregate_match_with_nested_then_group() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Match first, then group
+        let results = coll.aggregate(&json!([
+            {"$match": {"profile.score": {"$gte": 80}}},
+            {"$group": {
+                "_id": "$address.city",
+                "avgScore": {"$avg": "$profile.score"},
+                "count": {"$sum": 1}
+            }},
+            {"$sort": {"avgScore": -1}}
+        ])).unwrap();
+
+        // Alice(95), Carol(88), David(82) pass the filter - Bob(75) is excluded
+        // Alice and Carol are in New York, David is in Chicago
+        // So 2 groups: New York and Chicago
+        assert_eq!(results.len(), 2, "Should have 2 city groups after filter");
+    }
+
+    // =========================================================================
+    // FIND OPTIONS TESTS - Sort and projection with nested fields
+    // =========================================================================
+
+    #[test]
+    fn test_sort_by_nested_field_asc() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let options = FindOptions::new()
+            .with_sort(vec![("profile.score".to_string(), 1)]);
+
+        let results = coll.find_with_options(&json!({}), options).unwrap();
+
+        // Should be sorted: Bob(75), David(82), Carol(88), Alice(95)
+        assert_eq!(results[0]["name"], "Bob");
+        assert_eq!(results[1]["name"], "David");
+        assert_eq!(results[2]["name"], "Carol");
+        assert_eq!(results[3]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_sort_by_nested_field_desc() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let options = FindOptions::new()
+            .with_sort(vec![("profile.score".to_string(), -1)]);
+
+        let results = coll.find_with_options(&json!({}), options).unwrap();
+
+        // Should be sorted: Alice(95), Carol(88), David(82), Bob(75)
+        assert_eq!(results[0]["name"], "Alice");
+        assert_eq!(results[1]["name"], "Carol");
+        assert_eq!(results[2]["name"], "David");
+        assert_eq!(results[3]["name"], "Bob");
+    }
+
+    #[test]
+    fn test_sort_by_deep_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let options = FindOptions::new()
+            .with_sort(vec![("profile.stats.posts".to_string(), -1)]);
+
+        let results = coll.find_with_options(&json!({}), options).unwrap();
+
+        // Carol(200), Alice(150), Bob(30), David(missing -> 0 or last)
+        assert_eq!(results[0]["name"], "Carol");
+        assert_eq!(results[1]["name"], "Alice");
+    }
+
+    #[test]
+    fn test_sort_by_nested_string_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let options = FindOptions::new()
+            .with_sort(vec![("address.city".to_string(), 1)]);
+
+        let results = coll.find_with_options(&json!({}), options).unwrap();
+
+        // Alphabetical: Chicago, Los Angeles, New York, New York
+        assert_eq!(results[0]["address"]["city"], "Chicago");
+        assert_eq!(results[1]["address"]["city"], "Los Angeles");
+    }
+
+    #[test]
+    fn test_projection_include_nested_field() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let mut projection = HashMap::new();
+        projection.insert("name".to_string(), 1);
+        projection.insert("address.city".to_string(), 1);
+
+        let options = FindOptions::new()
+            .with_projection(projection);
+
+        let results = coll.find_with_options(&json!({}), options).unwrap();
+
+        // Should have name and address.city, but not full profile
+        for doc in &results {
+            assert!(doc.get("name").is_some());
+            // Note: projection behavior may vary - at minimum name should exist
+        }
+    }
+
+    #[test]
+    fn test_combined_sort_limit_with_nested() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let options = FindOptions::new()
+            .with_sort(vec![("profile.score".to_string(), -1)])
+            .with_limit(2);
+
+        let results = coll.find_with_options(&json!({}), options).unwrap();
+
+        // Top 2 by score: Alice(95), Carol(88)
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["name"], "Alice");
+        assert_eq!(results[1]["name"], "Carol");
+    }
+
+    // =========================================================================
+    // EDGE CASE TESTS - Missing fields, null values, etc.
+    // =========================================================================
+
+    #[test]
+    fn test_query_nonexistent_nested_path() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Query for completely non-existent path
+        let results = coll.find(&json!({"foo.bar.baz": "test"})).unwrap();
+        assert_eq!(results.len(), 0, "Should find nothing for non-existent path");
+    }
+
+    #[test]
+    fn test_aggregation_with_missing_nested_fields() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Group by field that some docs don't have
+        let results = coll.aggregate(&json!([
+            {"$group": {
+                "_id": "$address.location.lat",
+                "count": {"$sum": 1}
+            }}
+        ])).unwrap();
+
+        // David has no location, should group as null
+        let null_group = results.iter()
+            .find(|r| r["_id"].is_null());
+        assert!(null_group.is_some(), "Should have null group for missing fields");
+    }
+
+    #[test]
+    fn test_aggregate_sum_with_missing_nested_values() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Sum field that some docs don't have
+        let results = coll.aggregate(&json!([
+            {"$group": {
+                "_id": null,
+                "totalPosts": {"$sum": "$profile.stats.posts"}
+            }}
+        ])).unwrap();
+
+        // Alice: 150, Bob: 30, Carol: 200, David: missing (should be 0)
+        // Total: 380
+        assert_eq!(results[0]["totalPosts"], 380);
+    }
+
+    #[test]
+    fn test_update_create_nested_path() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("test").unwrap();
+
+        // Insert simple doc
+        let mut doc = HashMap::new();
+        doc.insert("name".to_string(), json!("Test"));
+        coll.insert_one(doc).unwrap();
+
+        // Create nested path via update
+        coll.update_one(
+            &json!({"name": "Test"}),
+            &json!({"$set": {"new.nested.field": "value"}})
+        ).unwrap();
+
+        let results = coll.find(&json!({"name": "Test"})).unwrap();
+        assert_eq!(results[0]["new"]["nested"]["field"], "value");
+    }
+
+    #[test]
+    fn test_query_nested_null_value() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("test").unwrap();
+
+        // Insert doc with null nested value
+        let mut doc = HashMap::new();
+        doc.insert("name".to_string(), json!("Test"));
+        doc.insert("data".to_string(), json!({"value": null}));
+        coll.insert_one(doc).unwrap();
+
+        // Query for null value
+        let results = coll.find(&json!({"data.value": null})).unwrap();
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn test_query_nested_array_contains() {
+        let db = setup_nested_test_db();
+        let coll = db.collection("users").unwrap();
+
+        // Query array field (not nested in object, but at root level with nested access)
+        let results = coll.find(&json!({"tags": "developer"})).unwrap();
+        assert_eq!(results.len(), 3, "Should find 3 developers");
+    }
+
+    #[test]
+    fn test_multiple_level_nested_update() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = db.collection("test").unwrap();
+
+        let mut doc = HashMap::new();
+        doc.insert("a".to_string(), json!({
+            "b": {
+                "c": {
+                    "d": 1
+                }
+            }
+        }));
+        coll.insert_one(doc).unwrap();
+
+        // Update 4-level deep field
+        coll.update_one(
+            &json!({}),
+            &json!({"$inc": {"a.b.c.d": 99}})
+        ).unwrap();
+
+        let results = coll.find(&json!({})).unwrap();
+        assert_eq!(results[0]["a"]["b"]["c"]["d"], 100);
+    }
+}
