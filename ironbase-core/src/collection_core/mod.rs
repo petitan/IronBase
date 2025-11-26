@@ -22,6 +22,32 @@ mod schema;
 use self::index_persistence::persist_index_to_disk;
 use self::schema::CompiledSchema;
 
+/// Get nested field value from serde_json::Value using dot notation
+/// e.g., "profile.score" gets doc["profile"]["score"]
+fn get_nested_value<'a>(doc: &'a Value, field: &str) -> Option<&'a Value> {
+    if !field.contains('.') {
+        return doc.get(field);
+    }
+
+    let mut value = doc;
+    for part in field.split('.') {
+        match value {
+            Value::Object(map) => {
+                value = map.get(part)?;
+            }
+            Value::Array(arr) => {
+                if let Ok(index) = part.parse::<usize>() {
+                    value = arr.get(index)?;
+                } else {
+                    return None;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(value)
+}
+
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
 pub struct InsertManyResult {
@@ -160,7 +186,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                                 continue;
                                             }
 
-                                            if let Some(field_value) = doc.get(&index_meta.field) {
+                                            // Use get_nested_value for dot notation support
+                                            if let Some(field_value) =
+                                                get_nested_value(&doc, &index_meta.field)
+                                            {
                                                 let key = IndexKey::from(field_value);
                                                 if let Some(index) = index_manager
                                                     .get_btree_index_mut(&index_meta.name)
