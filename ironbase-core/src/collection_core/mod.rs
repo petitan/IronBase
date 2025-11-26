@@ -1057,7 +1057,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     "$set" => {
                         if let Value::Object(ref field_values) = fields {
                             for (field, value) in field_values {
-                                document.set(field.clone(), value.clone());
+                                document.set_nested(field, value.clone());
                                 was_modified = true;
                             }
                         }
@@ -1071,13 +1071,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         (current.as_i64(), inc_value.as_i64())
                                     {
                                         document
-                                            .set(field.clone(), Value::from(curr_int + inc_int));
+                                            .set_nested(field, Value::from(curr_int + inc_int));
                                         was_modified = true;
                                     } else if let (Some(curr_num), Some(inc_num)) =
                                         (current.as_f64(), inc_value.as_f64())
                                     {
                                         document
-                                            .set(field.clone(), Value::from(curr_num + inc_num));
+                                            .set_nested(field, Value::from(curr_num + inc_num));
                                         was_modified = true;
                                     }
                                 }
@@ -1087,7 +1087,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     "$unset" => {
                         if let Value::Object(ref field_values) = fields {
                             for (field, _) in field_values {
-                                document.remove(field);
+                                document.remove_nested(field);
                                 was_modified = true;
                             }
                         }
@@ -1161,7 +1161,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                     }
                                 }
 
-                                document.set(field.clone(), Value::Array(array));
+                                document.set_nested(field, Value::Array(array));
                                 was_modified = true;
                             }
                         }
@@ -1180,7 +1180,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         .collect();
 
                                     if filtered.len() != arr.len() {
-                                        document.set(field.clone(), Value::Array(filtered));
+                                        document.set_nested(field, Value::Array(filtered));
                                         was_modified = true;
                                     }
                                 } else if document.get(field).is_some() {
@@ -1230,7 +1230,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                     }
                                 }
 
-                                document.set(field.clone(), Value::Array(array));
+                                document.set_nested(field, Value::Array(array));
                             }
                         }
                     }
@@ -1262,7 +1262,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         }
                                     }
 
-                                    document.set(field.clone(), Value::Array(new_array));
+                                    document.set_nested(field, Value::Array(new_array));
                                 } else if document.get(field).is_some() {
                                     return Err(MongoLiteError::InvalidQuery(format!(
                                         "$pop: field '{}' is not an array",

@@ -96,14 +96,194 @@ impl Document {
         serde_json::to_value(&self.id).unwrap()
     }
 
-    /// Mező beállítása
+    /// Mező beállítása (top-level only, use set_nested for dot notation)
     pub fn set(&mut self, field: String, value: Value) {
         self.fields.insert(field, value);
     }
 
-    /// Mező törlése
+    /// Mező beállítása dot notation támogatással (MongoDB-style)
+    /// Pl: "address.city" -> address object-ben a city mezőt állítja be
+    pub fn set_nested(&mut self, field: &str, value: Value) {
+        if !field.contains('.') {
+            self.fields.insert(field.to_string(), value);
+            return;
+        }
+
+        let parts: Vec<&str> = field.split('.').collect();
+        let first = parts[0];
+
+        // Ha nincs még ilyen top-level mező, létrehozzuk a teljes útvonalat
+        if !self.fields.contains_key(first) {
+            let nested = Self::create_nested_value(&parts[1..], value);
+            self.fields.insert(first.to_string(), nested);
+            return;
+        }
+
+        // Meglévő struktúra módosítása
+        let root = self.fields.get_mut(first).unwrap();
+        Self::set_value_at_path(root, &parts[1..], value);
+    }
+
+    /// Helper: Beágyazott struktúra létrehozása
+    fn create_nested_value(parts: &[&str], value: Value) -> Value {
+        if parts.is_empty() {
+            return value;
+        }
+
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            parts[0].to_string(),
+            Self::create_nested_value(&parts[1..], value),
+        );
+        Value::Object(obj)
+    }
+
+    /// Helper: Érték beállítása az útvonal mentén
+    fn set_value_at_path(current: &mut Value, parts: &[&str], value: Value) {
+        if parts.is_empty() {
+            return;
+        }
+
+        if parts.len() == 1 {
+            // Utolsó rész - itt kell beállítani az értéket
+            match current {
+                Value::Object(map) => {
+                    map.insert(parts[0].to_string(), value);
+                }
+                Value::Array(arr) => {
+                    if let Ok(index) = parts[0].parse::<usize>() {
+                        if index < arr.len() {
+                            arr[index] = value;
+                        }
+                    }
+                }
+                _ => {
+                    // Ha nem object/array, cseréljük le object-re
+                    let mut obj = serde_json::Map::new();
+                    obj.insert(parts[0].to_string(), value);
+                    *current = Value::Object(obj);
+                }
+            }
+            return;
+        }
+
+        // Köztes rész - navigálunk vagy létrehozunk
+        match current {
+            Value::Object(map) => {
+                if !map.contains_key(parts[0]) {
+                    // Nem létezik - létrehozzuk a maradék útvonalat
+                    map.insert(
+                        parts[0].to_string(),
+                        Self::create_nested_value(&parts[1..], value),
+                    );
+                } else {
+                    // Létezik - rekurzívan folytatjuk
+                    let next = map.get_mut(parts[0]).unwrap();
+                    Self::set_value_at_path(next, &parts[1..], value);
+                }
+            }
+            Value::Array(arr) => {
+                if let Ok(index) = parts[0].parse::<usize>() {
+                    if index < arr.len() {
+                        Self::set_value_at_path(&mut arr[index], &parts[1..], value);
+                    }
+                }
+            }
+            _ => {
+                // Nem navigálható - cseréljük le object-re
+                let nested = Self::create_nested_value(parts, value);
+                *current = nested;
+            }
+        }
+    }
+
+    /// Mező törlése (top-level only)
     pub fn remove(&mut self, field: &str) -> Option<Value> {
         self.fields.remove(field)
+    }
+
+    /// Mező törlése dot notation támogatással (MongoDB-style)
+    pub fn remove_nested(&mut self, field: &str) -> Option<Value> {
+        if !field.contains('.') {
+            return self.fields.remove(field);
+        }
+
+        let parts: Vec<&str> = field.split('.').collect();
+        let first = parts[0];
+
+        if !self.fields.contains_key(first) {
+            return None;
+        }
+
+        let root = self.fields.get_mut(first)?;
+        Self::remove_value_at_path(root, &parts[1..])
+    }
+
+    /// Helper: Érték törlése az útvonal mentén
+    fn remove_value_at_path(current: &mut Value, parts: &[&str]) -> Option<Value> {
+        if parts.is_empty() {
+            return None;
+        }
+
+        if parts.len() == 1 {
+            match current {
+                Value::Object(map) => map.remove(parts[0]),
+                Value::Array(arr) => {
+                    if let Ok(index) = parts[0].parse::<usize>() {
+                        if index < arr.len() {
+                            return Some(arr.remove(index));
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        } else {
+            match current {
+                Value::Object(map) => {
+                    let next = map.get_mut(parts[0])?;
+                    Self::remove_value_at_path(next, &parts[1..])
+                }
+                Value::Array(arr) => {
+                    if let Ok(index) = parts[0].parse::<usize>() {
+                        if index < arr.len() {
+                            return Self::remove_value_at_path(&mut arr[index], &parts[1..]);
+                        }
+                    }
+                    None
+                }
+                _ => None,
+            }
+        }
+    }
+
+    /// Módosítható referencia egy beágyazott értékhez (dot notation)
+    pub fn get_mut_nested(&mut self, field: &str) -> Option<&mut Value> {
+        if field.is_empty() {
+            return None;
+        }
+        if !field.contains('.') {
+            return self.fields.get_mut(field);
+        }
+
+        let parts: Vec<&str> = field.split('.').collect();
+        let first = parts[0];
+
+        let mut current = self.fields.get_mut(first)?;
+        for part in &parts[1..] {
+            current = match current {
+                Value::Object(map) => map.get_mut(*part)?,
+                Value::Array(arr) => {
+                    if let Ok(index) = part.parse::<usize>() {
+                        arr.get_mut(index)?
+                    } else {
+                        return None;
+                    }
+                }
+                _ => return None,
+            };
+        }
+        Some(current)
     }
 
     /// Tartalmazza-e a mezőt

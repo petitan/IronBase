@@ -167,13 +167,12 @@ namespace IronBase.Tests
             found.Address.Coordinates.Longitude.Should().BeApproximately(-71.0589, 0.0001);
         }
 
-        // ============== UPDATE TOP-LEVEL FIELDS ==============
+        // ============== UPDATE NESTED FIELDS WITH DOT NOTATION ==============
 
         [Fact]
-        public void Update_TopLevelField_PreservesNestedObjects()
+        public void Update_NestedField_WithDotNotation()
         {
-            // Note: Nested field updates with dot notation may not be supported
-            // This test verifies that updating top-level fields preserves nested objects
+            // Test that dot notation works for nested field updates (MongoDB-style)
             _people.InsertOne(new Person
             {
                 Name = "Jack",
@@ -182,6 +181,27 @@ namespace IronBase.Tests
             });
 
             var filter = Builders<Person>.Filter.Eq("Name", "Jack");
+
+            // Update nested field using dot notation
+            var update = Builders<Person>.Update.Set("Address.City", "Portland");
+            _people.UpdateOne(filter, update);
+
+            var found = _people.FindOne(filter);
+            found!.Address!.City.Should().Be("Portland"); // City updated via dot notation
+            found.Address.ZipCode.Should().Be("98101"); // ZipCode preserved
+        }
+
+        [Fact]
+        public void Update_TopLevelField_PreservesNestedObjects()
+        {
+            _people.InsertOne(new Person
+            {
+                Name = "Kate",
+                Age = 30,
+                Address = new Address { City = "Seattle", ZipCode = "98101" }
+            });
+
+            var filter = Builders<Person>.Filter.Eq("Name", "Kate");
             var update = Builders<Person>.Update.Set("Age", 31);
             _people.UpdateOne(filter, update);
 
