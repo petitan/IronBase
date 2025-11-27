@@ -552,6 +552,63 @@ namespace IronBase
             var pipelineJson = JsonSerializer.Serialize(pipeline);
             return Aggregate<TResult>(pipelineJson);
         }
+
+        // ============== CURSOR ==============
+
+        /// <summary>
+        /// Create a cursor for streaming through large result sets.
+        /// More memory efficient than Find() for large collections.
+        /// </summary>
+        /// <param name="filter">Query filter (null for all documents)</param>
+        /// <param name="batchSize">Number of documents per batch</param>
+        /// <returns>Cursor for iterating through results</returns>
+        /// <example>
+        /// // Process 1 million documents without loading all into memory
+        /// using var cursor = collection.FindCursor(null, 500);
+        ///
+        /// // Iterate one at a time
+        /// foreach (var doc in cursor)
+        /// {
+        ///     Process(doc);
+        /// }
+        ///
+        /// // Or process in batches
+        /// cursor.Rewind();
+        /// while (!cursor.IsFinished)
+        /// {
+        ///     var batch = cursor.NextBatch();
+        ///     foreach (var doc in batch)
+        ///         Process(doc);
+        /// }
+        /// </example>
+        public IronBaseCursor<T> FindCursor(FilterDefinition<T>? filter = null, uint batchSize = 100)
+        {
+            var filterJson = filter?.ToJson() ?? "{}";
+
+            unsafe
+            {
+                fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
+                {
+                    CursorHandle* cursorPtr;
+                    int result = NativeMethods.ironbase_create_cursor(
+                        (CollectionHandle*)_handle,
+                        filterPtr,
+                        batchSize,
+                        &cursorPtr
+                    );
+                    NativeHelper.ThrowIfError(result);
+                    return new IronBaseCursor<T>((IntPtr)cursorPtr);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Create a cursor with JSON filter string.
+        /// </summary>
+        public IronBaseCursor<T> FindCursor(string filterJson, uint batchSize = 100)
+        {
+            return FindCursor(new FilterDefinition<T>(filterJson), batchSize);
+        }
     }
 
     /// <summary>

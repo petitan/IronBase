@@ -13,6 +13,9 @@ mod index;
 mod aggregation;
 mod transaction;
 mod memory;
+mod cursor;
+mod schema;
+mod logging;
 
 // Re-export all public FFI functions
 pub use handles::*;
@@ -24,3 +27,6 @@ pub use index::*;
 pub use aggregation::*;
 pub use transaction::*;
 pub use memory::*;
+pub use cursor::*;
+pub use schema::*;
+pub use logging::*;

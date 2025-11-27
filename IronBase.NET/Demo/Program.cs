@@ -377,6 +377,80 @@ var complexPipeline = users.Aggregate<ComplexStats>(@"[
 foreach (var c in complexPipeline)
     Console.WriteLine($"    {c._id}: {c.userCount} users, avg={c.avgScore?.ToString("F1") ?? "N/A"}, min={c.minScore?.ToString("F0") ?? "N/A"}, max={c.maxScore?.ToString("F0") ?? "N/A"}");
 
+// ===== NEW: Expression Operators in $project =====
+Console.WriteLine("\n--- Expression Operators (NEW!) ---");
+
+// $subtract - Calculate score range per level
+Console.WriteLine("\n>>> $subtract: Calculate score range (maxScore - minScore)");
+var scoreRange = users.Aggregate<ScoreRangeStats>(@"[
+    { ""$group"": {
+        ""_id"": ""$Profile.Level"",
+        ""minScore"": { ""$min"": ""$Profile.Score"" },
+        ""maxScore"": { ""$max"": ""$Profile.Score"" }
+    }},
+    { ""$project"": {
+        ""_id"": 1,
+        ""minScore"": 1,
+        ""maxScore"": 1,
+        ""scoreRange"": { ""$subtract"": [""$maxScore"", ""$minScore""] }
+    }},
+    { ""$sort"": { ""scoreRange"": -1 } }
+]");
+foreach (var sr in scoreRange)
+    Console.WriteLine($"    {sr._id}: range={sr.scoreRange} (min={sr.minScore}, max={sr.maxScore})");
+
+// $add - Calculate total value (age + score)
+Console.WriteLine("\n>>> $add: Calculate age + score = total value");
+var totalValues = users.Aggregate<TotalValueStats>(@"[
+    { ""$project"": {
+        ""name"": ""$Name"",
+        ""totalValue"": { ""$add"": [""$Age"", ""$Profile.Score""] }
+    }},
+    { ""$sort"": { ""totalValue"": -1 } },
+    { ""$limit"": 3 }
+]");
+foreach (var tv in totalValues)
+    Console.WriteLine($"    {tv.name}: totalValue={tv.totalValue}");
+
+// $multiply and $divide - Calculate weighted score
+Console.WriteLine("\n>>> $multiply & $divide: Calculate weighted score = (score * 10) / age");
+var weightedScores = users.Aggregate<WeightedScoreStats>(@"[
+    { ""$project"": {
+        ""name"": ""$Name"",
+        ""age"": ""$Age"",
+        ""score"": ""$Profile.Score"",
+        ""weightedScore"": { ""$divide"": [{ ""$multiply"": [""$Profile.Score"", 10] }, ""$Age""] }
+    }},
+    { ""$sort"": { ""weightedScore"": -1 } },
+    { ""$limit"": 3 }
+]");
+foreach (var ws in weightedScores)
+    Console.WriteLine($"    {ws.name}: weighted={ws.weightedScore:F2} (age={ws.age}, score={ws.score})");
+
+// $concat - Build full description string
+Console.WriteLine("\n>>> $concat: Build user description string");
+var descriptions = users.Aggregate<DescriptionStats>(@"[
+    { ""$project"": {
+        ""description"": { ""$concat"": [""$Name"", "" from "", ""$City"", "" (Level: "", ""$Profile.Level"", "")""] }
+    }},
+    { ""$limit"": 3 }
+]");
+foreach (var d in descriptions)
+    Console.WriteLine($"    {d.description}");
+
+// Nested expressions - Complex calculation
+Console.WriteLine("\n>>> Nested expressions: (score - 50) * 2 + age");
+var nestedCalc = users.Aggregate<NestedCalcStats>(@"[
+    { ""$project"": {
+        ""name"": ""$Name"",
+        ""complexValue"": { ""$add"": [{ ""$multiply"": [{ ""$subtract"": [""$Profile.Score"", 50] }, 2] }, ""$Age""] }
+    }},
+    { ""$sort"": { ""complexValue"": -1 } },
+    { ""$limit"": 3 }
+]");
+foreach (var nc in nestedCalc)
+    Console.WriteLine($"    {nc.name}: complexValue={nc.complexValue}");
+
 // ============================================================
 // 7. NESTED DOCUMENTS (Dot Notation)
 // ============================================================
@@ -820,6 +894,156 @@ client.DropCollection("accounts");
 Console.WriteLine($"    Collections remaining: [{string.Join(", ", client.ListCollections())}]");
 
 // ============================================================
+// 15. CURSOR/STREAMING API (NEW!)
+// ============================================================
+PrintSection("15. CURSOR/STREAMING API (NEW!)");
+
+Console.WriteLine(">>> Create cursor for streaming large result sets");
+using (var cursor = users.FindCursor(null, batchSize: 2))
+{
+    Console.WriteLine($"    Total documents: {cursor.Total}");
+    Console.WriteLine($"    Position: {cursor.Position}");
+    Console.WriteLine($"    Remaining: {cursor.Remaining}");
+    Console.WriteLine($"    IsFinished: {cursor.IsFinished}");
+
+    Console.WriteLine("\n>>> Iterate with Next()");
+    var doc1 = cursor.Next();
+    Console.WriteLine($"    First: {doc1?.Name}");
+
+    Console.WriteLine("\n>>> Get next batch (batchSize=2)");
+    var batch = cursor.NextBatch();
+    Console.WriteLine($"    Batch size: {batch.Count}");
+    foreach (var u in batch)
+        Console.WriteLine($"    - {u.Name}");
+
+    Console.WriteLine("\n>>> Rewind and iterate with foreach");
+    cursor.Rewind();
+    var count2 = 0;
+    foreach (var u in cursor)
+    {
+        Console.WriteLine($"    [{count2++}] {u.Name}");
+        if (count2 >= 3) break; // Only show first 3
+    }
+
+    Console.WriteLine("\n>>> Skip 1 and collect remaining");
+    cursor.Rewind();
+    cursor.Skip(1);
+    Console.WriteLine($"    Position after skip: {cursor.Position}");
+}
+Console.WriteLine("    Cursor disposed");
+
+// ============================================================
+// 16. COLLECTION-LEVEL TRANSACTIONS (NEW!)
+// ============================================================
+PrintSection("16. COLLECTION-LEVEL TRANSACTIONS (NEW!)");
+
+Console.WriteLine(">>> Insert users within a transaction");
+
+var txId2 = client.BeginTransaction();
+Console.WriteLine($"    Transaction ID: {txId2}");
+
+try
+{
+    // Insert multiple documents in transaction
+    var result1 = client.InsertOneTx("tx_users", new User { Name = "TxAlice", Age = 25, City = "NYC" }, txId2);
+    Console.WriteLine($"    Inserted TxAlice: {result1.InsertedId}");
+
+    var result2 = client.InsertOneTx("tx_users", new User { Name = "TxBob", Age = 30, City = "LA" }, txId2);
+    Console.WriteLine($"    Inserted TxBob: {result2.InsertedId}");
+
+    // Update within transaction
+    var updateTx = client.UpdateOneTx("tx_users", "{\"Name\": \"TxAlice\"}", "{\"Name\": \"TxAlice\", \"Age\": 26, \"City\": \"NYC\"}", txId2);
+    Console.WriteLine($"    Updated TxAlice: matched={updateTx.MatchedCount}, modified={updateTx.ModifiedCount}");
+
+    // Commit
+    client.CommitTransaction(txId2);
+    Console.WriteLine("    Transaction committed!");
+}
+catch (Exception ex)
+{
+    client.RollbackTransaction(txId2);
+    Console.WriteLine($"    Transaction rolled back: {ex.Message}");
+}
+
+// Verify
+var txUsers = client.GetCollection<User>("tx_users");
+var txCount = txUsers.CountDocuments();
+Console.WriteLine($"\n>>> Verify: {txCount} users in tx_users collection");
+
+// Delete within transaction
+Console.WriteLine("\n>>> Delete within transaction");
+var txId3 = client.BeginTransaction();
+var deleteTx = client.DeleteOneTx("tx_users", "{\"Name\": \"TxBob\"}", txId3);
+Console.WriteLine($"    Deleted: {deleteTx.DeletedCount}");
+client.CommitTransaction(txId3);
+Console.WriteLine($"    After delete: {txUsers.CountDocuments()} users");
+
+// ============================================================
+// 17. SCHEMA VALIDATION (NEW!)
+// ============================================================
+PrintSection("17. SCHEMA VALIDATION (NEW!)");
+
+Console.WriteLine(">>> Set JSON schema for 'validated_users' collection");
+client.SetCollectionSchema("validated_users", @"{
+    ""type"": ""object"",
+    ""properties"": {
+        ""name"": {""type"": ""string""},
+        ""age"": {""type"": ""integer"", ""minimum"": 0, ""maximum"": 150}
+    },
+    ""required"": [""name""]
+}");
+Console.WriteLine("    Schema set successfully!");
+
+var validatedUsers = client.GetCollection<User>("validated_users");
+
+// Insert valid document
+Console.WriteLine("\n>>> Insert valid document (name='ValidUser', age=25)");
+try
+{
+    validatedUsers.InsertOne(new User { Name = "ValidUser", Age = 25, City = "NYC" });
+    Console.WriteLine("    Inserted successfully!");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"    Error: {ex.Message}");
+}
+
+// Insert invalid document (missing name - should fail if schema validation is strict)
+Console.WriteLine("\n>>> Attempt to insert document without required 'name' field");
+try
+{
+    // This creates a document with empty name - may or may not fail depending on schema strictness
+    validatedUsers.InsertOne(new User { Age = 30, City = "LA" });
+    Console.WriteLine("    Inserted (schema may allow empty string)");
+}
+catch (Exception ex)
+{
+    Console.WriteLine($"    Schema validation error: {ex.Message}");
+}
+
+// Clear schema
+Console.WriteLine("\n>>> Clear schema validation");
+client.SetCollectionSchema("validated_users", null);
+Console.WriteLine("    Schema cleared!");
+
+// ============================================================
+// 18. LOGGING API (NEW!)
+// ============================================================
+PrintSection("18. LOGGING API (NEW!)");
+
+Console.WriteLine(">>> Get current log level");
+var currentLevel = IronBaseClient.GetLogLevel();
+Console.WriteLine($"    Current level: {currentLevel}");
+
+Console.WriteLine("\n>>> Set log level to DEBUG");
+IronBaseClient.SetLogLevel("DEBUG");
+Console.WriteLine($"    New level: {IronBaseClient.GetLogLevel()}");
+
+Console.WriteLine("\n>>> Set log level back to WARN");
+IronBaseClient.SetLogLevel("WARN");
+Console.WriteLine($"    Level: {IronBaseClient.GetLogLevel()}");
+
+// ============================================================
 // DONE
 // ============================================================
 Console.WriteLine();
@@ -979,4 +1203,38 @@ public class ComplexStats
     public double? avgScore { get; set; }
     public double? minScore { get; set; }
     public double? maxScore { get; set; }
+}
+
+// NEW: Expression operator result classes
+public class ScoreRangeStats
+{
+    public object? _id { get; set; }
+    public double? minScore { get; set; }
+    public double? maxScore { get; set; }
+    public double? scoreRange { get; set; }
+}
+
+public class TotalValueStats
+{
+    public string? name { get; set; }
+    public double? totalValue { get; set; }
+}
+
+public class WeightedScoreStats
+{
+    public string? name { get; set; }
+    public double? age { get; set; }
+    public double? score { get; set; }
+    public double? weightedScore { get; set; }
+}
+
+public class DescriptionStats
+{
+    public string? description { get; set; }
+}
+
+public class NestedCalcStats
+{
+    public string? name { get; set; }
+    public double? complexValue { get; set; }
 }

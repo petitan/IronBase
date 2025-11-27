@@ -237,6 +237,222 @@ namespace IronBase
             }
         }
 
+        // ============== COLLECTION-LEVEL TRANSACTION OPERATIONS ==============
+
+        /// <summary>
+        /// Insert one document within a transaction.
+        /// </summary>
+        /// <param name="collectionName">Collection name</param>
+        /// <param name="document">Document to insert</param>
+        /// <param name="txId">Transaction ID from BeginTransaction()</param>
+        /// <returns>Insert result with the inserted ID</returns>
+        /// <example>
+        /// var txId = client.BeginTransaction();
+        /// try
+        /// {
+        ///     client.InsertOneTx("users", new User { Name = "Alice" }, txId);
+        ///     client.InsertOneTx("logs", new Log { Action = "created user" }, txId);
+        ///     client.CommitTransaction(txId);
+        /// }
+        /// catch
+        /// {
+        ///     client.RollbackTransaction(txId);
+        ///     throw;
+        /// }
+        /// </example>
+        public InsertOneResult InsertOneTx<T>(string collectionName, T document, ulong txId) where T : class
+        {
+            ThrowIfDisposed();
+
+            var json = JsonSerializer.Serialize(document);
+
+            unsafe
+            {
+                fixed (byte* collPtr = NativeHelper.ToUtf8(collectionName))
+                fixed (byte* docPtr = NativeHelper.ToUtf8(json))
+                {
+                    byte* idPtr;
+                    int result = NativeMethods.ironbase_insert_one_tx(
+                        (DatabaseHandle*)_handle,
+                        collPtr,
+                        docPtr,
+                        txId,
+                        &idPtr
+                    );
+                    NativeHelper.ThrowIfError(result);
+
+                    return new InsertOneResult
+                    {
+                        Acknowledged = true,
+                        InsertedId = NativeHelper.PtrToStringUtf8AndFree(idPtr)
+                    };
+                }
+            }
+        }
+
+        /// <summary>
+        /// Update one document within a transaction.
+        /// </summary>
+        /// <param name="collectionName">Collection name</param>
+        /// <param name="filterJson">Query filter as JSON</param>
+        /// <param name="newDocJson">New document content (full replacement)</param>
+        /// <param name="txId">Transaction ID</param>
+        public UpdateResult UpdateOneTx(string collectionName, string filterJson, string newDocJson, ulong txId)
+        {
+            ThrowIfDisposed();
+
+            unsafe
+            {
+                fixed (byte* collPtr = NativeHelper.ToUtf8(collectionName))
+                fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
+                fixed (byte* newDocPtr = NativeHelper.ToUtf8(newDocJson))
+                {
+                    ulong matched, modified;
+                    int result = NativeMethods.ironbase_update_one_tx(
+                        (DatabaseHandle*)_handle,
+                        collPtr,
+                        filterPtr,
+                        newDocPtr,
+                        txId,
+                        &matched,
+                        &modified
+                    );
+                    NativeHelper.ThrowIfError(result);
+
+                    return new UpdateResult
+                    {
+                        Acknowledged = true,
+                        MatchedCount = (long)matched,
+                        ModifiedCount = (long)modified
+                    };
+                }
+            }
+        }
+
+        /// <summary>
+        /// Delete one document within a transaction.
+        /// </summary>
+        /// <param name="collectionName">Collection name</param>
+        /// <param name="filterJson">Query filter as JSON</param>
+        /// <param name="txId">Transaction ID</param>
+        public DeleteResult DeleteOneTx(string collectionName, string filterJson, ulong txId)
+        {
+            ThrowIfDisposed();
+
+            unsafe
+            {
+                fixed (byte* collPtr = NativeHelper.ToUtf8(collectionName))
+                fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
+                {
+                    ulong deleted;
+                    int result = NativeMethods.ironbase_delete_one_tx(
+                        (DatabaseHandle*)_handle,
+                        collPtr,
+                        filterPtr,
+                        txId,
+                        &deleted
+                    );
+                    NativeHelper.ThrowIfError(result);
+
+                    return new DeleteResult
+                    {
+                        Acknowledged = true,
+                        DeletedCount = (long)deleted
+                    };
+                }
+            }
+        }
+
+        // ============== SCHEMA VALIDATION ==============
+
+        /// <summary>
+        /// Set or clear JSON schema for a collection.
+        /// Documents that don't match the schema will be rejected on insert/update.
+        /// </summary>
+        /// <param name="collectionName">Collection name</param>
+        /// <param name="schemaJson">JSON schema definition (null to clear)</param>
+        /// <example>
+        /// // Set schema for users collection
+        /// client.SetCollectionSchema("users", @"{
+        ///     ""type"": ""object"",
+        ///     ""properties"": {
+        ///         ""name"": {""type"": ""string""},
+        ///         ""age"": {""type"": ""integer"", ""minimum"": 0}
+        ///     },
+        ///     ""required"": [""name""]
+        /// }");
+        ///
+        /// // Clear schema
+        /// client.SetCollectionSchema("users", null);
+        /// </example>
+        public void SetCollectionSchema(string collectionName, string? schemaJson)
+        {
+            ThrowIfDisposed();
+
+            unsafe
+            {
+                fixed (byte* collPtr = NativeHelper.ToUtf8(collectionName))
+                {
+                    if (schemaJson == null)
+                    {
+                        int result = NativeMethods.ironbase_set_collection_schema(
+                            (DatabaseHandle*)_handle,
+                            collPtr,
+                            null
+                        );
+                        NativeHelper.ThrowIfError(result);
+                    }
+                    else
+                    {
+                        fixed (byte* schemaPtr = NativeHelper.ToUtf8(schemaJson))
+                        {
+                            int result = NativeMethods.ironbase_set_collection_schema(
+                                (DatabaseHandle*)_handle,
+                                collPtr,
+                                schemaPtr
+                            );
+                            NativeHelper.ThrowIfError(result);
+                        }
+                    }
+                }
+            }
+        }
+
+        // ============== LOGGING ==============
+
+        /// <summary>
+        /// Set the global log level.
+        /// </summary>
+        /// <param name="level">One of: ERROR, WARN, INFO, DEBUG, TRACE</param>
+        /// <example>
+        /// IronBaseClient.SetLogLevel("DEBUG");  // Enable debug logging
+        /// IronBaseClient.SetLogLevel("WARN");   // Default level
+        /// </example>
+        public static void SetLogLevel(string level)
+        {
+            unsafe
+            {
+                fixed (byte* levelPtr = NativeHelper.ToUtf8(level))
+                {
+                    int result = NativeMethods.ironbase_set_log_level(levelPtr);
+                    NativeHelper.ThrowIfError(result);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Get the current global log level.
+        /// </summary>
+        /// <returns>Current log level (ERROR, WARN, INFO, DEBUG, or TRACE)</returns>
+        public static string GetLogLevel()
+        {
+            unsafe
+            {
+                var levelPtr = NativeMethods.ironbase_get_log_level();
+                return NativeHelper.PtrToStringUtf8AndFree(levelPtr) ?? "WARN";
+            }
+        }
+
         /// <summary>
         /// Get the native library version.
         /// </summary>

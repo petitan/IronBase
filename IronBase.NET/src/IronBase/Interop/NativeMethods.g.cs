@@ -692,8 +692,108 @@ namespace IronBase.Interop
         [DllImport(__DllName, EntryPoint = "ironbase_version", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern byte* ironbase_version();
 
+        // ============== CURSOR API ==============
+
+        /// <summary>
+        /// Create a cursor for streaming through query results.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_create_cursor", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_create_cursor(CollectionHandle* handle, byte* query_json, uint batch_size, CursorHandle** out_cursor);
+
+        /// <summary>
+        /// Get the next document from cursor.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_next", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_next(CursorHandle* cursor);
+
+        /// <summary>
+        /// Get the next batch of documents from cursor.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_next_batch", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_next_batch(CursorHandle* cursor);
+
+        /// <summary>
+        /// Get a specific chunk of documents from cursor.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_next_chunk", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_next_chunk(CursorHandle* cursor, uint chunk_size);
+
+        /// <summary>
+        /// Get remaining document count.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_remaining", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern ulong ironbase_cursor_remaining(CursorHandle* cursor);
+
+        /// <summary>
+        /// Get total document count.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_total", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern ulong ironbase_cursor_total(CursorHandle* cursor);
+
+        /// <summary>
+        /// Get current position.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_position", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern ulong ironbase_cursor_position(CursorHandle* cursor);
+
+        /// <summary>
+        /// Check if cursor is exhausted.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_is_finished", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_cursor_is_finished(CursorHandle* cursor);
+
+        /// <summary>
+        /// Reset cursor to the beginning.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_rewind", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void ironbase_cursor_rewind(CursorHandle* cursor);
+
+        /// <summary>
+        /// Skip the next N documents.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_skip", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void ironbase_cursor_skip(CursorHandle* cursor, ulong n);
+
+        /// <summary>
+        /// Collect all remaining documents.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_collect_all", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_collect_all(CursorHandle* cursor);
+
+        /// <summary>
+        /// Release a cursor handle.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_release", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void ironbase_cursor_release(CursorHandle* cursor);
+
+        // ============== SCHEMA VALIDATION API ==============
+
+        /// <summary>
+        /// Set or clear JSON schema for a collection.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_set_collection_schema", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_set_collection_schema(DatabaseHandle* handle, byte* collection_name, byte* schema_json);
+
+        // ============== LOGGING API ==============
+
+        /// <summary>
+        /// Set the global log level.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_set_log_level", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_set_log_level(byte* level);
+
+        /// <summary>
+        /// Get the current global log level.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_get_log_level", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_get_log_level();
+
 
     }
+
+    // Opaque handle for cursor
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct CursorHandle { }
 
     // DatabaseHandle and CollectionHandle are defined in separate files as SafeHandle classes
 
