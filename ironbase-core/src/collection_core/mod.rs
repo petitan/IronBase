@@ -281,6 +281,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(())
     }
 
+    /// Get the JSON schema for this collection (if any)
+    pub fn get_schema(&self) -> Option<Value> {
+        let storage = self.storage.read();
+        storage
+            .get_collection_meta(&self.name)
+            .and_then(|meta| meta.schema.clone())
+    }
+
     // ========== CRUD OPERATIONS ==========
 
     /// Insert one document - returns inserted DocumentId

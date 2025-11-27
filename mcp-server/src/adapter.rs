@@ -317,4 +317,23 @@ impl IronBaseAdapter {
         let plan = coll.explain(&query)?;
         Ok(plan)
     }
+
+    // ============================================================
+    // Schema Management
+    // ============================================================
+
+    /// Set schema for a collection
+    pub fn set_schema(&self, collection: &str, schema: Option<Value>) -> Result<()> {
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        coll.set_schema(schema)?;
+        Ok(())
+    }
+
+    /// Get schema for a collection
+    pub fn get_schema(&self, collection: &str) -> Result<Option<Value>> {
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        Ok(coll.get_schema())
+    }
 }

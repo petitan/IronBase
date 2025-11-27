@@ -345,6 +345,39 @@ pub fn get_tools_list() -> Value {
                     },
                     "required": ["collection"]
                 }
+            },
+            // Schema Management
+            {
+                "name": "schema_set",
+                "description": "Set or clear a JSON schema for a collection. Schema is used to validate documents on insert/update.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "schema": {
+                            "type": "object",
+                            "description": "JSON Schema object. Must have type: 'object'. Supports 'required' array and 'properties' with types: string, number, integer, boolean, object, array. Pass null to clear schema."
+                        }
+                    },
+                    "required": ["collection"]
+                }
+            },
+            {
+                "name": "schema_get",
+                "description": "Get the JSON schema for a collection",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        }
+                    },
+                    "required": ["collection"]
+                }
             }
         ]
     })
@@ -494,6 +527,19 @@ pub fn dispatch_tool(
             let collection = get_string(&params, "collection")?;
             let indexes = adapter.list_indexes(&collection)?;
             Ok(json!({"indexes": indexes}))
+        }
+
+        // Schema Management
+        "schema_set" => {
+            let collection = get_string(&params, "collection")?;
+            let schema = params.get("schema").cloned().filter(|v| !v.is_null());
+            adapter.set_schema(&collection, schema.clone())?;
+            Ok(json!({"success": true, "schema_set": schema.is_some()}))
+        }
+        "schema_get" => {
+            let collection = get_string(&params, "collection")?;
+            let schema = adapter.get_schema(&collection)?;
+            Ok(json!({"schema": schema}))
         }
 
         _ => Err(McpError::InvalidParams(format!("Unknown tool: {}", name))),
