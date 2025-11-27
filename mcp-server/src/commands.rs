@@ -317,14 +317,10 @@ pub fn handle_search_content(
             break;
         }
 
-        let mut block_text = String::new();
-        let mut block_label = None;
-        let mut block_type = String::new();
-
         // Serialize block to JSON for searching
-        block_text = extract_text_from_block(block);
-        block_label = block.label().map(|s| s.to_string());
-        block_type = format!("{:?}", block.block_type());
+        let block_text = extract_text_from_block(block);
+        let block_label = block.label().map(|s| s.to_string());
+        let block_type = format!("{:?}", block.block_type());
 
         // Perform search
         let search_text = if params.case_sensitive {

@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🌱 Seeding database with test documents...");
 
     // Create adapter
-    let mut adapter = IronBaseAdapter::new(
+    let adapter = IronBaseAdapter::new(
         "./docjl_storage.mlite".into(),
         "documents".to_string()
     )?;
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
     };
 
-    adapter.insert_document_for_test(doc1);
+    adapter.create_document(doc1)?;
     println!("✅ Created: test_doc_1");
 
     // Create test document 2
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ],
     };
 
-    adapter.insert_document_for_test(doc2);
+    adapter.create_document(doc2)?;
     println!("✅ Created: test_doc_2");
 
     println!("\n🎉 Database seeded successfully!");

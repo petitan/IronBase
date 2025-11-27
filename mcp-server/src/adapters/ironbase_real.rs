@@ -46,14 +46,6 @@ impl RealIronBaseAdapter {
     }
     /// Create a new adapter with real IronBase
     pub fn new(path: PathBuf, collection_name: String) -> DomainResult<Self> {
-        // Debug: print the absolute path being opened
-        let abs_path = std::fs::canonicalize(&path)
-            .unwrap_or_else(|_| path.clone());
-        eprintln!("🔍 DEBUG: Opening database at: {:?}", abs_path);
-        eprintln!("🔍 DEBUG: File exists: {}", abs_path.exists());
-        eprintln!("🔍 DEBUG: File size: {} bytes", std::fs::metadata(&abs_path).map(|m| m.len()).unwrap_or(0));
-        eprintln!("🔍 DEBUG: Collection name: {}", collection_name);
-
         // Open IronBase database
         let db = DatabaseCore::open(&path)
             .map_err(|e| DomainError::StorageError {
@@ -81,21 +73,12 @@ impl RealIronBaseAdapter {
 
     /// Load all documents and build indexes
     fn initialize(&self) -> DomainResult<()> {
-        eprintln!("🔍 DEBUG: Starting initialization...");
         let db = self.db.read();
-
-        // List all collections
-        let collections = db.list_collections();
-        eprintln!("🔍 DEBUG: Found {} collections: {:?}", collections.len(), collections);
 
         // Try to get collection - it might not exist yet (created on first insert)
         let collection = match db.collection(&self.collection_name) {
-            Ok(coll) => {
-                eprintln!("🔍 DEBUG: Successfully got '{}' collection", self.collection_name);
-                coll
-            }
-            Err(e) => {
-                eprintln!("🔍 DEBUG: Collection '{}' doesn't exist yet: {}", self.collection_name, e);
+            Ok(coll) => coll,
+            Err(_) => {
                 // Collection doesn't exist yet, skip initialization
                 return Ok(());
             }
@@ -106,20 +89,11 @@ impl RealIronBaseAdapter {
         // Ignore errors if index already exists
         let _ = collection.create_index("id".to_string(), true);
 
-        // Count documents first
-        let count = collection.count_documents(&serde_json::json!({}))
-            .map_err(|e| DomainError::StorageError {
-                message: format!("Failed to count documents: {}", e),
-            })?;
-        eprintln!("🔍 DEBUG: Collection has {} documents", count);
-
-        // Find all documents
-        eprintln!("🔍 DEBUG: Calling find({{}})...");
+        // Find all documents to build indexes
         let docs_json = collection.find(&serde_json::json!({}))
             .map_err(|e| DomainError::StorageError {
                 message: format!("Failed to find documents: {}", e),
             })?;
-        eprintln!("🔍 DEBUG: find() returned {} documents", docs_json.len());
 
         let mut label_gen = self.label_generator.write();
         let mut cross_ref = self.cross_ref.write();

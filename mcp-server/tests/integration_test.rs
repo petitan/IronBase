@@ -57,7 +57,7 @@ fn test_adapter_initialization() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
 
-    let mut adapter = IronBaseAdapter::new(db_path, "documents".to_string());
+    let adapter = IronBaseAdapter::new(db_path, "documents".to_string());
     assert!(adapter.is_ok());
 }
 
@@ -72,7 +72,7 @@ fn test_insert_block() {
 
     // Create and save test document
     let doc = create_test_document("test_doc_1");
-    adapter.insert_document_for_test(doc);
+    adapter.create_document(doc).unwrap();
 
     // Insert a new paragraph
     let new_block = Block::Paragraph(Paragraph {
@@ -110,11 +110,11 @@ fn test_get_outline() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
 
-    let mut adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
+    let adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
 
     // Create and save test document
     let doc = create_test_document("test_doc_2");
-    adapter.insert_document_for_test(doc);
+    adapter.create_document(doc).unwrap();
 
     // Get outline
     let outline = adapter.get_outline("test_doc_2", None).unwrap();
@@ -131,11 +131,11 @@ fn test_search_blocks() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
 
-    let mut adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
+    let adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
 
     // Create and save test document
     let doc = create_test_document("test_doc_3");
-    adapter.insert_document_for_test(doc);
+    adapter.create_document(doc).unwrap();
 
     // Search for headings
     let query = SearchQuery {
@@ -145,6 +145,7 @@ fn test_search_blocks() {
         has_compliance_note: None,
         label: None,
         label_prefix: None,
+        level: None,
     };
 
     let results = adapter.search_blocks("test_doc_3", query).unwrap();
@@ -159,6 +160,7 @@ fn test_search_blocks() {
         has_compliance_note: None,
         label: Some("sec:1".to_string()),
         label_prefix: None,
+        level: None,
     };
     let filtered = adapter.search_blocks("test_doc_3", label_query).unwrap();
     assert_eq!(filtered.len(), 1);
@@ -170,11 +172,11 @@ fn test_validate_schema() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
 
-    let mut adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
+    let adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
 
     // Create and save test document
     let doc = create_test_document("test_doc_4");
-    adapter.insert_document_for_test(doc);
+    adapter.create_document(doc).unwrap();
 
     // Validate schema
     let result = adapter.validate_schema("test_doc_4").unwrap();
@@ -190,7 +192,7 @@ fn test_validate_references() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
 
-    let mut adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
+    let adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
 
     // Create document with cross-reference
     let mut doc = create_test_document("test_doc_5");
@@ -209,7 +211,7 @@ fn test_validate_references() {
         compliance_note: None,
     }));
 
-    adapter.insert_document_for_test(doc);
+    adapter.create_document(doc).unwrap();
 
     // Validate references
     let result = adapter.validate_references("test_doc_5").unwrap();
@@ -226,7 +228,7 @@ fn test_broken_reference_detection() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
 
-    let mut adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
+    let adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
 
     // Create document with broken reference
     let mut doc = create_test_document("test_doc_6");
@@ -245,7 +247,7 @@ fn test_broken_reference_detection() {
         compliance_note: None,
     }));
 
-    adapter.insert_document_for_test(doc);
+    adapter.create_document(doc).unwrap();
 
     // Validate references
     let result = adapter.validate_references("test_doc_6").unwrap();
@@ -265,7 +267,7 @@ fn test_update_block() {
 
     // Create and save test document
     let doc = create_test_document("test_doc_7");
-    adapter.insert_document_for_test(doc);
+    adapter.create_document(doc).unwrap();
 
     // Update a block
     let mut updates = HashMap::new();
@@ -305,14 +307,14 @@ fn test_list_documents() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
 
-    let mut adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
+    let adapter = IronBaseAdapter::new(db_path, "documents".to_string()).unwrap();
 
     // Create multiple documents
     let doc1 = create_test_document("doc_1");
     let doc2 = create_test_document("doc_2");
 
-    adapter.insert_document_for_test(doc1);
-    adapter.insert_document_for_test(doc2);
+    adapter.create_document(doc1).unwrap();
+    adapter.create_document(doc2).unwrap();
 
     // List all documents
     let documents = adapter.list_documents().unwrap();
@@ -355,7 +357,7 @@ fn test_concurrent_inserts() {
 
     // Create test document
     let doc = create_test_document("concurrent_doc");
-    adapter.write().insert_document_for_test(doc);
+    adapter.write().create_document(doc).unwrap();
 
     let mut handles = vec![];
 
