@@ -91,6 +91,7 @@ MongoLite/
 **storage/** - Append-only storage engine:
 - **file_storage.rs** - File-based persistence (.mlite files)
 - **memory_storage.rs** - In-memory backend for testing
+- **metadata.rs** - Metadata flush/load with dynamic offset (v2+ format)
 - **compaction.rs** - Garbage collection for tombstones
 
 **index.rs + btree.rs** - B+ tree indexing:
@@ -106,18 +107,25 @@ MongoLite/
 
 ### Storage File Format (.mlite)
 
+**Version 2+ (dynamic metadata at end of file):**
 ```
 ┌─────────────────────────────────────┐
-│  Header (128 bytes)                 │
-│  - magic: "MONGOLTE", version       │
-├─────────────────────────────────────┤
-│  Collection Metadata (JSON)         │
-│  - document_catalog, indexes        │
+│  Header (256 bytes)                 │
+│  - magic: "MONGOLTE", version=2     │
+│  - metadata_offset, metadata_size   │
 ├─────────────────────────────────────┤
 │  Document Data (append-only)        │
 │  [u32 len][JSON bytes]...           │
+├─────────────────────────────────────┤
+│  Collection Metadata (JSON)         │  ← Dynamic offset (end of file)
+│  - document_catalog, indexes        │
 └─────────────────────────────────────┘
 ```
+
+**Design notes:**
+- Metadata at END of file prevents race conditions during concurrent reads
+- No file truncation - append-only design for safety
+- `flush_metadata()` uses idempotent offset calculation
 
 ## Implemented Features
 
