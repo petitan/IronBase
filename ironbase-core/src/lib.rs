@@ -17,6 +17,7 @@ pub mod query_cache;
 pub mod query_planner;
 pub mod storage;
 pub mod transaction;
+pub mod value_utils;
 pub mod wal;
 
 #[cfg(test)]

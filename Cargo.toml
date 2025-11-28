@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "ironbase-core",
+    "ironbase-cli",
     "bindings/python",
     "bindings/csharp",
 ]

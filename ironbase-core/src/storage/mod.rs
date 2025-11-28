@@ -256,10 +256,16 @@ impl StorageEngine {
         &mut self.file
     }
 
-    /// Checkpoint - explicit WAL cleanup without metadata flush
-    /// Use this in long-running processes to prevent WAL growth
+    /// Checkpoint - flush metadata and clear WAL for durability
+    /// Use this in long-running processes to ensure data survives restarts
+    ///
+    /// CRITICAL FIX: Must call flush_metadata() before clearing WAL!
+    /// Without this, document_catalog only exists in memory and is lost on restart.
     pub fn checkpoint(&mut self) -> Result<()> {
-        // Simply clear the WAL (all operations already in main file)
+        // First flush metadata to ensure document_catalog is persisted
+        self.flush_metadata()?;
+
+        // Then clear the WAL (all operations already in main file)
         self.wal.clear()?;
         Ok(())
     }

@@ -378,6 +378,23 @@ impl Collection {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
+    /// Get the current JSON schema for this collection
+    ///
+    /// Returns:
+    ///     dict or None: The JSON schema if set, None otherwise
+    ///
+    /// Example:
+    ///     schema = collection.get_schema()
+    ///     if schema:
+    ///         print(schema["properties"])
+    fn get_schema(&self) -> PyResult<PyObject> {
+        let schema = self.core.get_schema();
+        Python::with_gil(|py| match schema {
+            Some(v) => Ok(json_value_to_python(py, &v)?),
+            None => Ok(py.None()),
+        })
+    }
+
     /// Insert one document (respects database durability mode)
     ///
     /// This method automatically uses the database's durability mode:

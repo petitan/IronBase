@@ -418,6 +418,41 @@ namespace IronBase
             }
         }
 
+        /// <summary>
+        /// Get the JSON schema for a collection.
+        /// </summary>
+        /// <param name="collectionName">Collection name</param>
+        /// <returns>JSON schema string if set, null otherwise</returns>
+        /// <example>
+        /// var schema = client.GetCollectionSchema("users");
+        /// if (schema != null)
+        /// {
+        ///     Console.WriteLine($"Schema: {schema}");
+        /// }
+        /// </example>
+        public string? GetCollectionSchema(string collectionName)
+        {
+            ThrowIfDisposed();
+
+            unsafe
+            {
+                fixed (byte* collPtr = NativeHelper.ToUtf8(collectionName))
+                {
+                    byte* schemaPtr = NativeMethods.ironbase_get_collection_schema(
+                        (DatabaseHandle*)_handle,
+                        collPtr
+                    );
+
+                    if (schemaPtr == null)
+                    {
+                        return null;
+                    }
+
+                    return NativeHelper.PtrToStringUtf8AndFree(schemaPtr);
+                }
+            }
+        }
+
         // ============== LOGGING ==============
 
         /// <summary>

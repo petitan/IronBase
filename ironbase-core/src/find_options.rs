@@ -1,26 +1,9 @@
 // ironbase-core/src/find_options.rs
 // Find query options: projection, sort, limit, skip
 
+use crate::value_utils::get_nested_value;
 use serde_json::Value;
 use std::collections::HashMap;
-
-/// Get a value from a document using dot notation path
-/// e.g., "address.city" will traverse nested objects
-fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut current = doc;
-
-    for part in parts {
-        match current {
-            Value::Object(obj) => {
-                current = obj.get(part)?;
-            }
-            _ => return None,
-        }
-    }
-
-    Some(current)
-}
 
 /// Options for find queries
 #[derive(Debug, Clone, Default)]

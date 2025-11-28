@@ -254,7 +254,7 @@ async fn run_http_server() {
         routing::{get, post},
         Router,
     };
-    use tracing::{info, warn};
+    use tracing::info;
 
     // Initialize tracing
     tracing_subscriber::fmt()
@@ -355,6 +355,7 @@ fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
 #[derive(Debug, Deserialize)]
 struct McpRequest {
     #[serde(default)]
+    #[allow(dead_code)] // Required for JSON-RPC 2.0 deserialization
     jsonrpc: Option<String>,
     #[serde(default)]
     id: Option<serde_json::Value>,

@@ -56,6 +56,18 @@ impl Document {
         Ok(doc)
     }
 
+    /// 🚀 OPTIMIZED: Create Document directly from serde_json::Value
+    /// Avoids Value → String → Document round-trip serialization
+    pub fn from_value(value: &Value) -> serde_json::Result<Self> {
+        let mut doc: Self = serde_json::from_value(value.clone())?;
+
+        // WORKAROUND: same as from_json - _id needs to be in fields for query matching
+        doc.fields
+            .insert("_id".to_string(), serde_json::to_value(&doc.id)?);
+
+        Ok(doc)
+    }
+
     /// Dokumentum JSON-be
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string(self)

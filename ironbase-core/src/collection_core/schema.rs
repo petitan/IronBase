@@ -1,13 +1,36 @@
 use std::collections::HashMap;
 
+use regex::Regex;
 use serde_json::Value;
 
 use crate::error::{MongoLiteError, Result};
 
+/// Compiled property schema with extended validation constraints
+#[derive(Clone, Debug)]
+pub struct PropertySchema {
+    pub schema_type: SchemaType,
+    pub enum_values: Option<Vec<Value>>,  // enum validation
+    pub pattern: Option<Regex>,            // regex pattern validation
+    pub min_items: Option<usize>,          // array minimum length
+    pub max_items: Option<usize>,          // array maximum length
+}
+
+impl PropertySchema {
+    pub fn new(schema_type: SchemaType) -> Self {
+        Self {
+            schema_type,
+            enum_values: None,
+            pattern: None,
+            min_items: None,
+            max_items: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct CompiledSchema {
     pub(super) required: Vec<String>,
-    pub(super) properties: HashMap<String, SchemaType>,
+    pub(super) properties: HashMap<String, PropertySchema>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -101,7 +124,60 @@ impl CompiledSchema {
                             type_str, field
                         ))
                     })?;
-                    properties.insert(field.clone(), parsed_type);
+
+                    let mut prop_schema = PropertySchema::new(parsed_type);
+
+                    // Parse enum values
+                    if let Some(enum_value) = spec.get("enum") {
+                        let enum_arr = enum_value.as_array().ok_or_else(|| {
+                            MongoLiteError::SchemaError(format!(
+                                "Property '{}' enum must be an array",
+                                field
+                            ))
+                        })?;
+                        prop_schema.enum_values = Some(enum_arr.clone());
+                    }
+
+                    // Parse pattern (regex)
+                    if let Some(pattern_value) = spec.get("pattern") {
+                        let pattern_str = pattern_value.as_str().ok_or_else(|| {
+                            MongoLiteError::SchemaError(format!(
+                                "Property '{}' pattern must be a string",
+                                field
+                            ))
+                        })?;
+                        let regex = Regex::new(pattern_str).map_err(|e| {
+                            MongoLiteError::SchemaError(format!(
+                                "Property '{}' has invalid regex pattern: {}",
+                                field, e
+                            ))
+                        })?;
+                        prop_schema.pattern = Some(regex);
+                    }
+
+                    // Parse minItems (array constraint)
+                    if let Some(min_value) = spec.get("minItems") {
+                        let min = min_value.as_u64().ok_or_else(|| {
+                            MongoLiteError::SchemaError(format!(
+                                "Property '{}' minItems must be a non-negative integer",
+                                field
+                            ))
+                        })?;
+                        prop_schema.min_items = Some(min as usize);
+                    }
+
+                    // Parse maxItems (array constraint)
+                    if let Some(max_value) = spec.get("maxItems") {
+                        let max = max_value.as_u64().ok_or_else(|| {
+                            MongoLiteError::SchemaError(format!(
+                                "Property '{}' maxItems must be a non-negative integer",
+                                field
+                            ))
+                        })?;
+                        prop_schema.max_items = Some(max as usize);
+                    }
+
+                    properties.insert(field.clone(), prop_schema);
                 }
             }
         }
@@ -117,6 +193,7 @@ impl CompiledSchema {
             MongoLiteError::SchemaError("Document must be a JSON object".to_string())
         })?;
 
+        // Check required fields
         for field in &self.required {
             if !obj.contains_key(field) {
                 return Err(MongoLiteError::SchemaError(format!(
@@ -126,14 +203,61 @@ impl CompiledSchema {
             }
         }
 
-        for (field, schema_type) in &self.properties {
+        // Validate each property
+        for (field, prop_schema) in &self.properties {
             if let Some(field_value) = obj.get(field) {
-                if !schema_type.matches(field_value) {
+                // Type validation
+                if !prop_schema.schema_type.matches(field_value) {
                     return Err(MongoLiteError::SchemaError(format!(
                         "Field '{}' expected type {}",
                         field,
-                        schema_type.as_str()
+                        prop_schema.schema_type.as_str()
                     )));
+                }
+
+                // Enum validation
+                if let Some(enum_values) = &prop_schema.enum_values {
+                    if !enum_values.contains(field_value) {
+                        return Err(MongoLiteError::SchemaError(format!(
+                            "Field '{}' value not in allowed enum values: {:?}",
+                            field, enum_values
+                        )));
+                    }
+                }
+
+                // Pattern (regex) validation - only for strings
+                if let Some(pattern) = &prop_schema.pattern {
+                    if let Some(s) = field_value.as_str() {
+                        if !pattern.is_match(s) {
+                            return Err(MongoLiteError::SchemaError(format!(
+                                "Field '{}' does not match required pattern",
+                                field
+                            )));
+                        }
+                    }
+                }
+
+                // Array constraints validation
+                if let Some(arr) = field_value.as_array() {
+                    // minItems validation
+                    if let Some(min) = prop_schema.min_items {
+                        if arr.len() < min {
+                            return Err(MongoLiteError::SchemaError(format!(
+                                "Field '{}' has {} items, minimum required is {}",
+                                field, arr.len(), min
+                            )));
+                        }
+                    }
+
+                    // maxItems validation
+                    if let Some(max) = prop_schema.max_items {
+                        if arr.len() > max {
+                            return Err(MongoLiteError::SchemaError(format!(
+                                "Field '{}' has {} items, maximum allowed is {}",
+                                field, arr.len(), max
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -479,6 +603,398 @@ mod tests {
             "bool": true,
             "obj": {"nested": 1},
             "arr": [1, 2, 3]
+        });
+        assert!(compiled.validate(&doc).is_ok());
+    }
+
+    // ========== Enum validation tests ==========
+
+    #[test]
+    fn test_enum_valid_value() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "inactive", "pending"]
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"status": "active"});
+        assert!(compiled.validate(&doc).is_ok());
+
+        let doc2 = json!({"status": "pending"});
+        assert!(compiled.validate(&doc2).is_ok());
+    }
+
+    #[test]
+    fn test_enum_invalid_value() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "inactive", "pending"]
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"status": "deleted"});
+        let result = compiled.validate(&doc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not in allowed enum values"));
+    }
+
+    #[test]
+    fn test_enum_with_numbers() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "priority": {
+                    "type": "number",
+                    "enum": [1, 2, 3]
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // Valid
+        let doc = json!({"priority": 2});
+        assert!(compiled.validate(&doc).is_ok());
+
+        // Invalid
+        let doc2 = json!({"priority": 5});
+        let result = compiled.validate(&doc2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_enum_not_array_error() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": "not_an_array"
+                }
+            }
+        });
+        let result = CompiledSchema::from_value(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("enum must be an array"));
+    }
+
+    // ========== Pattern validation tests ==========
+
+    #[test]
+    fn test_pattern_match() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "version": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"version": "1.2.3"});
+        assert!(compiled.validate(&doc).is_ok());
+
+        let doc2 = json!({"version": "10.20.30"});
+        assert!(compiled.validate(&doc2).is_ok());
+    }
+
+    #[test]
+    fn test_pattern_no_match() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "version": {
+                    "type": "string",
+                    "pattern": "^\\d+\\.\\d+\\.\\d+$"
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"version": "invalid-version"});
+        let result = compiled.validate(&doc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("does not match required pattern"));
+    }
+
+    #[test]
+    fn test_pattern_email_format() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "email": {
+                    "type": "string",
+                    "pattern": "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // Valid email
+        let doc = json!({"email": "test@example.com"});
+        assert!(compiled.validate(&doc).is_ok());
+
+        // Invalid email
+        let doc2 = json!({"email": "not-an-email"});
+        let result = compiled.validate(&doc2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_pattern_invalid_regex() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "pattern": "[invalid(regex"
+                }
+            }
+        });
+        let result = CompiledSchema::from_value(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("invalid regex pattern"));
+    }
+
+    #[test]
+    fn test_pattern_not_string_error() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "field": {
+                    "type": "string",
+                    "pattern": 123
+                }
+            }
+        });
+        let result = CompiledSchema::from_value(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("pattern must be a string"));
+    }
+
+    // ========== Array constraints (minItems/maxItems) tests ==========
+
+    #[test]
+    fn test_array_min_items_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "minItems": 1
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"tags": ["one"]});
+        assert!(compiled.validate(&doc).is_ok());
+
+        let doc2 = json!({"tags": ["one", "two", "three"]});
+        assert!(compiled.validate(&doc2).is_ok());
+    }
+
+    #[test]
+    fn test_array_min_items_invalid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "minItems": 2
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"tags": ["only_one"]});
+        let result = compiled.validate(&doc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("minimum required is 2"));
+    }
+
+    #[test]
+    fn test_array_min_items_empty_array() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "minItems": 1
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"tags": []});
+        let result = compiled.validate(&doc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("has 0 items"));
+    }
+
+    #[test]
+    fn test_array_max_items_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "maxItems": 3
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"tags": ["one", "two"]});
+        assert!(compiled.validate(&doc).is_ok());
+
+        let doc2 = json!({"tags": ["one", "two", "three"]});
+        assert!(compiled.validate(&doc2).is_ok());
+    }
+
+    #[test]
+    fn test_array_max_items_invalid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "maxItems": 2
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"tags": ["one", "two", "three"]});
+        let result = compiled.validate(&doc);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maximum allowed is 2"));
+    }
+
+    #[test]
+    fn test_array_min_max_items_combined() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 5
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // Valid - within range
+        let doc = json!({"tags": ["one", "two", "three"]});
+        assert!(compiled.validate(&doc).is_ok());
+
+        // Invalid - too few
+        let doc2 = json!({"tags": []});
+        assert!(compiled.validate(&doc2).is_err());
+
+        // Invalid - too many
+        let doc3 = json!({"tags": ["1", "2", "3", "4", "5", "6"]});
+        assert!(compiled.validate(&doc3).is_err());
+    }
+
+    #[test]
+    fn test_min_items_not_integer_error() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "minItems": "two"
+                }
+            }
+        });
+        let result = CompiledSchema::from_value(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("minItems must be a non-negative integer"));
+    }
+
+    #[test]
+    fn test_max_items_not_integer_error() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "maxItems": "five"
+                }
+            }
+        });
+        let result = CompiledSchema::from_value(&schema);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("maxItems must be a non-negative integer"));
+    }
+
+    // ========== Combined constraints tests ==========
+
+    #[test]
+    fn test_combined_enum_and_pattern() {
+        // Both enum and pattern on same field
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "enum": ["A1", "A2", "B1", "B2"],
+                    "pattern": "^[A-B][1-2]$"
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // Valid
+        let doc = json!({"code": "A1"});
+        assert!(compiled.validate(&doc).is_ok());
+
+        // Invalid - not in enum
+        let doc2 = json!({"code": "C1"});
+        assert!(compiled.validate(&doc2).is_err());
+    }
+
+    #[test]
+    fn test_schema_with_all_new_constraints() {
+        let schema = json!({
+            "type": "object",
+            "required": ["status", "tags"],
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "inactive"]
+                },
+                "version": {
+                    "type": "string",
+                    "pattern": "^v\\d+$"
+                },
+                "tags": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 10
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // All valid
+        let doc = json!({
+            "status": "active",
+            "version": "v2",
+            "tags": ["important", "urgent"]
         });
         assert!(compiled.validate(&doc).is_ok());
     }

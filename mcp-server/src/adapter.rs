@@ -24,14 +24,6 @@ pub struct UpdateResult {
     pub modified_count: u64,
 }
 
-/// Index info
-#[derive(Debug, serde::Serialize)]
-pub struct IndexInfo {
-    pub name: String,
-    pub fields: Vec<String>,
-    pub unique: bool,
-}
-
 /// IronBase Adapter
 pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,

@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use crate::index::{BPlusTree, IndexMetadata};
 
 fn sanitize_component(name: &str) -> String {
     let sanitized: String = name
@@ -61,4 +62,20 @@ where
         save_fn(&mut file)?;
     }
     Ok(())
+}
+
+/// Try to load an index from .idx file (graceful degradation)
+/// Returns None if file doesn't exist or is corrupted (fallback to rebuild)
+pub fn try_load_index_from_file(
+    db_file_path: &str,
+    index_meta: &IndexMetadata,
+) -> Option<BPlusTree> {
+    let idx_path = build_index_file_path(db_file_path, &index_meta.name)?;
+
+    if !idx_path.exists() {
+        return None;
+    }
+
+    let mut file = File::open(&idx_path).ok()?;
+    BPlusTree::load_from_file(&mut file, index_meta.clone()).ok()
 }

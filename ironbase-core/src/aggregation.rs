@@ -4,25 +4,59 @@
 use crate::document::Document;
 use crate::error::{MongoLiteError, Result};
 use crate::query::Query;
+use crate::value_utils::get_nested_value;
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Get a value from a document using dot notation path
-/// e.g., "address.city" will traverse nested objects
-fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut current = doc;
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
 
-    for part in parts {
-        match current {
-            Value::Object(obj) => {
-                current = obj.get(part)?;
-            }
-            _ => return None,
+/// Parse a field reference from JSON value (e.g., "$fieldName" -> "fieldName")
+///
+/// Used by accumulators like $avg, $min, $max, $first, $last
+fn parse_field_reference(value: &Value, op_name: &str) -> Result<String> {
+    if let Some(s) = value.as_str() {
+        if s.starts_with('$') {
+            Ok(s.trim_start_matches('$').to_string())
+        } else {
+            Err(MongoLiteError::AggregationError(format!(
+                "{} field reference must start with $",
+                op_name
+            )))
+        }
+    } else {
+        Err(MongoLiteError::AggregationError(format!(
+            "{} must be a field reference",
+            op_name
+        )))
+    }
+}
+
+/// Compute min or max over documents using a comparison function
+///
+/// Used by $min and $max accumulators
+fn compute_extremum<F>(docs: &[Value], field: &str, compare: F) -> Result<Value>
+where
+    F: Fn(f64, f64) -> f64,
+{
+    let mut result: Option<f64> = None;
+
+    for doc in docs {
+        if let Some(value) = get_nested_value(doc, field) {
+            let num = if let Some(n) = value.as_f64() {
+                n
+            } else if let Some(n) = value.as_i64() {
+                n as f64
+            } else {
+                continue;
+            };
+
+            result = Some(result.map_or(num, |r| compare(r, num)));
         }
     }
 
-    Some(current)
+    Ok(result.map(Value::from).unwrap_or(Value::Null))
 }
 
 /// Aggregation pipeline
@@ -488,81 +522,11 @@ impl Accumulator {
                         ))
                     }
                 }
-                "$avg" => {
-                    if let Some(s) = value.as_str() {
-                        if s.starts_with('$') {
-                            Ok(Accumulator::Avg(s.trim_start_matches('$').to_string()))
-                        } else {
-                            Err(MongoLiteError::AggregationError(
-                                "$avg field reference must start with $".to_string(),
-                            ))
-                        }
-                    } else {
-                        Err(MongoLiteError::AggregationError(
-                            "$avg must be a field reference".to_string(),
-                        ))
-                    }
-                }
-                "$min" => {
-                    if let Some(s) = value.as_str() {
-                        if s.starts_with('$') {
-                            Ok(Accumulator::Min(s.trim_start_matches('$').to_string()))
-                        } else {
-                            Err(MongoLiteError::AggregationError(
-                                "$min field reference must start with $".to_string(),
-                            ))
-                        }
-                    } else {
-                        Err(MongoLiteError::AggregationError(
-                            "$min must be a field reference".to_string(),
-                        ))
-                    }
-                }
-                "$max" => {
-                    if let Some(s) = value.as_str() {
-                        if s.starts_with('$') {
-                            Ok(Accumulator::Max(s.trim_start_matches('$').to_string()))
-                        } else {
-                            Err(MongoLiteError::AggregationError(
-                                "$max field reference must start with $".to_string(),
-                            ))
-                        }
-                    } else {
-                        Err(MongoLiteError::AggregationError(
-                            "$max must be a field reference".to_string(),
-                        ))
-                    }
-                }
-                "$first" => {
-                    if let Some(s) = value.as_str() {
-                        if s.starts_with('$') {
-                            Ok(Accumulator::First(s.trim_start_matches('$').to_string()))
-                        } else {
-                            Err(MongoLiteError::AggregationError(
-                                "$first field reference must start with $".to_string(),
-                            ))
-                        }
-                    } else {
-                        Err(MongoLiteError::AggregationError(
-                            "$first must be a field reference".to_string(),
-                        ))
-                    }
-                }
-                "$last" => {
-                    if let Some(s) = value.as_str() {
-                        if s.starts_with('$') {
-                            Ok(Accumulator::Last(s.trim_start_matches('$').to_string()))
-                        } else {
-                            Err(MongoLiteError::AggregationError(
-                                "$last field reference must start with $".to_string(),
-                            ))
-                        }
-                    } else {
-                        Err(MongoLiteError::AggregationError(
-                            "$last must be a field reference".to_string(),
-                        ))
-                    }
-                }
+                "$avg" => Ok(Accumulator::Avg(parse_field_reference(value, "$avg")?)),
+                "$min" => Ok(Accumulator::Min(parse_field_reference(value, "$min")?)),
+                "$max" => Ok(Accumulator::Max(parse_field_reference(value, "$max")?)),
+                "$first" => Ok(Accumulator::First(parse_field_reference(value, "$first")?)),
+                "$last" => Ok(Accumulator::Last(parse_field_reference(value, "$last")?)),
                 _ => Err(MongoLiteError::AggregationError(format!(
                     "Unknown accumulator: {}",
                     op
@@ -630,47 +594,9 @@ impl Accumulator {
                 }
             }
 
-            Accumulator::Min(field) => {
-                let mut min: Option<f64> = None;
+            Accumulator::Min(field) => compute_extremum(docs, field, f64::min),
 
-                for doc in docs {
-                    // Use get_nested_value to support dot notation
-                    if let Some(value) = get_nested_value(doc, field) {
-                        let num = if let Some(n) = value.as_f64() {
-                            n
-                        } else if let Some(n) = value.as_i64() {
-                            n as f64
-                        } else {
-                            continue;
-                        };
-
-                        min = Some(min.map_or(num, |m| m.min(num)));
-                    }
-                }
-
-                Ok(min.map(Value::from).unwrap_or(Value::Null))
-            }
-
-            Accumulator::Max(field) => {
-                let mut max: Option<f64> = None;
-
-                for doc in docs {
-                    // Use get_nested_value to support dot notation
-                    if let Some(value) = get_nested_value(doc, field) {
-                        let num = if let Some(n) = value.as_f64() {
-                            n
-                        } else if let Some(n) = value.as_i64() {
-                            n as f64
-                        } else {
-                            continue;
-                        };
-
-                        max = Some(max.map_or(num, |m| m.max(num)));
-                    }
-                }
-
-                Ok(max.map(Value::from).unwrap_or(Value::Null))
-            }
+            Accumulator::Max(field) => compute_extremum(docs, field, f64::max),
 
             Accumulator::First(field) => docs
                 .first()

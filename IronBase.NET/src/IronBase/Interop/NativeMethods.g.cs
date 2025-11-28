@@ -774,6 +774,13 @@ namespace IronBase.Interop
         [DllImport(__DllName, EntryPoint = "ironbase_set_collection_schema", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern int ironbase_set_collection_schema(DatabaseHandle* handle, byte* collection_name, byte* schema_json);
 
+        /// <summary>
+        /// Get JSON schema for a collection. Returns null if no schema is set.
+        /// Caller must free the returned pointer with ironbase_free_string.
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_get_collection_schema", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_get_collection_schema(DatabaseHandle* handle, byte* collection_name);
+
         // ============== LOGGING API ==============
 
         /// <summary>
