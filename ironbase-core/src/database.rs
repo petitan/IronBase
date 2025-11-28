@@ -82,9 +82,9 @@ impl DatabaseCore<StorageEngine> {
         // Recover from WAL (includes both data and index changes)
         let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
 
-        // Rebuild document catalog from file after WAL recovery
-        // This ensures all documents are properly indexed in memory
-        storage.rebuild_catalog_from_file()?;
+        // NOTE: WAL recovery now uses write_document() which updates the catalog.
+        // The document_catalog is loaded from metadata by StorageEngine::open(),
+        // and recover_from_wal() properly updates it for any recovered operations.
 
         // Create DatabaseCore instance with default Safe mode
         let db = DatabaseCore {
@@ -180,9 +180,9 @@ impl DatabaseCore<StorageEngine> {
         // Recover from WAL (includes both data and index changes)
         let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
 
-        // Rebuild document catalog from file after WAL recovery
-        // This ensures all documents are properly indexed in memory
-        storage.rebuild_catalog_from_file()?;
+        // NOTE: WAL recovery now uses write_document() which updates the catalog.
+        // The document_catalog is loaded from metadata by StorageEngine::open(),
+        // and recover_from_wal() properly updates it for any recovered operations.
 
         // Create DatabaseCore instance with specified mode
         let db = DatabaseCore {

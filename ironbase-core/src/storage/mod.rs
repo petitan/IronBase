@@ -526,32 +526,53 @@ impl StorageEngine {
                         let operation: crate::transaction::Operation =
                             serde_json::from_str(op_str)?;
 
-                        // Apply operation to storage
+                        // Apply operation to storage AND update catalog
+                        // CRITICAL: We use write_document() instead of write_data()
+                        // to ensure the document_catalog is updated during recovery.
+                        // Without this, recovered documents would be in the file but
+                        // not findable via the catalog.
                         match operation {
                             crate::transaction::Operation::Insert {
-                                collection: _,
-                                doc_id: _,
+                                collection,
+                                doc_id,
                                 doc,
                             } => {
+                                // Ensure collection exists in metadata (ignore if already exists)
+                                let _ = self.create_collection(&collection);
                                 let doc_json = serde_json::to_string(&doc)
                                     .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                                self.write_data(doc_json.as_bytes())?;
+                                // Use write_document which updates the catalog
+                                StorageEngine::write_document(
+                                    self,
+                                    &collection,
+                                    &doc_id,
+                                    doc_json.as_bytes(),
+                                )?;
                             }
                             crate::transaction::Operation::Update {
-                                collection: _,
-                                doc_id: _,
+                                collection,
+                                doc_id,
                                 old_doc: _,
                                 new_doc,
                             } => {
+                                // Ensure collection exists in metadata (ignore if already exists)
+                                let _ = self.create_collection(&collection);
                                 let doc_json = serde_json::to_string(&new_doc)
                                     .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                                self.write_data(doc_json.as_bytes())?;
+                                // Use write_document which updates the catalog
+                                StorageEngine::write_document(
+                                    self,
+                                    &collection,
+                                    &doc_id,
+                                    doc_json.as_bytes(),
+                                )?;
                             }
                             crate::transaction::Operation::Delete {
                                 collection,
                                 doc_id,
                                 old_doc: _,
                             } => {
+                                // Write tombstone to file for consistency
                                 let tombstone = serde_json::json!({
                                     "_id": doc_id,
                                     "_collection": collection,
@@ -560,6 +581,12 @@ impl StorageEngine {
                                 let tombstone_json = serde_json::to_string(&tombstone)
                                     .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                                 self.write_data(tombstone_json.as_bytes())?;
+
+                                // Also remove from catalog so document is not found
+                                if let Some(meta) = self.get_collection_meta_mut(&collection) {
+                                    meta.document_catalog.remove(&doc_id);
+                                    self.metadata_dirty = true;
+                                }
                             }
                         }
                     }
@@ -639,6 +666,16 @@ impl StorageEngine {
             return Ok(());
         }
 
+        // CRITICAL FIX: Determine document region end boundary
+        // Documents are stored between HEADER_SIZE and metadata_offset.
+        // If metadata_offset is valid (> HEADER_SIZE), use it as the boundary.
+        // Otherwise, scan to file_len (for legacy files or first-time setup).
+        let scan_end = if self.header.metadata_offset > HEADER_SIZE {
+            self.header.metadata_offset
+        } else {
+            file_len
+        };
+
         // Clear existing catalogs and reset counts
         for meta in self.collections.values_mut() {
             meta.document_catalog.clear();
@@ -646,12 +683,12 @@ impl StorageEngine {
             meta.live_document_count = 0;
         }
 
-        // Scan all documents from HEADER_SIZE (256 bytes) to end of file
-        // CRITICAL: Documents start at HEADER_SIZE, not DATA_START_OFFSET!
+        // Scan all documents from HEADER_SIZE (256 bytes) to metadata_offset (or file_len)
+        // CRITICAL: Documents are ONLY valid in the range [HEADER_SIZE, metadata_offset)
         let mut offset = HEADER_SIZE;
         let mut max_ids_by_collection: HashMap<String, u64> = HashMap::new();
 
-        while offset + 4 < file_len {
+        while offset + 4 < scan_end {
             // Read document length (4 bytes)
             self.file.seek(SeekFrom::Start(offset))?;
             let mut len_bytes = [0u8; 4];
@@ -660,9 +697,9 @@ impl StorageEngine {
             }
             let len = u32::from_le_bytes(len_bytes) as usize;
 
-            // Validate length
-            if len == 0 || offset + 4 + (len as u64) > file_len {
-                break; // Corrupted or truncated document
+            // Validate length - must not exceed document region boundary
+            if len == 0 || offset + 4 + (len as u64) > scan_end {
+                break; // Corrupted or truncated document, or reached metadata
             }
 
             // Read document data
@@ -737,6 +774,15 @@ impl StorageEngine {
                     meta.last_id = max_id;
                 }
             }
+        }
+
+        // Fix document counts based on actual catalog state
+        // This is necessary because:
+        // 1. Updates/replacements counted each version separately
+        // 2. Tombstones removed from catalog but didn't decrement counts
+        for meta in self.collections.values_mut() {
+            meta.live_document_count = meta.document_catalog.len() as u64;
+            meta.document_count = meta.document_catalog.len() as u64;
         }
 
         // Mark metadata as dirty so it gets flushed

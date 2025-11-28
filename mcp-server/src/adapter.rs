@@ -164,15 +164,13 @@ impl IronBaseAdapter {
                             })
                             .collect(),
                     )
-                } else if let Some(obj) = s.as_object() {
+                } else {
                     // Object format: {"field": 1, "field2": -1}
-                    Some(
+                    s.as_object().map(|obj| {
                         obj.iter()
                             .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(1) as i32))
-                            .collect(),
-                    )
-                } else {
-                    None
+                            .collect()
+                    })
                 }
             }),
             limit: options.limit,
@@ -228,7 +226,7 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let count = coll.delete_one(&filter)?;
-        Ok(count as u64)
+        Ok(count)
     }
 
     /// Delete multiple documents
@@ -236,7 +234,7 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let count = coll.delete_many(&filter)?;
-        Ok(count as u64)
+        Ok(count)
     }
 
     /// Count documents matching query
@@ -244,7 +242,7 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let count = coll.count_documents(&query)?;
-        Ok(count as u64)
+        Ok(count)
     }
 
     /// Get distinct values for a field
