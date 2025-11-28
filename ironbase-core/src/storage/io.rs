@@ -120,4 +120,107 @@ impl StorageEngine {
     pub fn read_document_at(&mut self, _collection: &str, absolute_offset: u64) -> Result<Vec<u8>> {
         self.read_data(absolute_offset)
     }
+
+    /// Write document with FULL metadata update - the unified path for both runtime and recovery
+    ///
+    /// This function updates ALL metadata fields:
+    /// - document_catalog: doc_id → offset mapping
+    /// - document_count: total document writes
+    /// - live_document_count: count of live (non-tombstone) documents
+    /// - last_id: tracks highest auto-increment ID (prevents _id collisions after recovery)
+    ///
+    /// This is the ONLY function that should be used for writing documents during:
+    /// - Normal runtime inserts/updates
+    /// - WAL recovery
+    /// - Transaction commit
+    pub fn write_document_full(
+        &mut self,
+        collection: &str,
+        doc_id: &crate::document::DocumentId,
+        data: &[u8],
+    ) -> Result<u64> {
+        use crate::error::MongoLiteError;
+
+        // Append document after existing data
+        let absolute_offset = self.file.seek(SeekFrom::End(0))?;
+
+        // Write length + data (same format as write_data)
+        let len = (data.len() as u32).to_le_bytes();
+        self.file.write_all(&len)?;
+        self.file.write_all(data)?;
+
+        self.metadata_dirty = true;
+
+        // Update ALL metadata fields in collection
+        let meta = self
+            .get_collection_meta_mut(collection)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+
+        // Check if this is an update (doc already exists in catalog)
+        let is_update = meta.document_catalog.contains_key(doc_id);
+
+        // Update catalog with new offset
+        meta.document_catalog
+            .insert(doc_id.clone(), absolute_offset);
+
+        // Update document_count (total writes)
+        meta.document_count += 1;
+
+        // Update live_document_count (only increment for new inserts, not updates)
+        if !is_update {
+            meta.live_document_count += 1;
+        }
+
+        // Update last_id to prevent _id collisions after recovery
+        if let crate::document::DocumentId::Int(id_num) = doc_id {
+            if (*id_num as u64) > meta.last_id {
+                meta.last_id = *id_num as u64;
+            }
+        }
+
+        Ok(absolute_offset)
+    }
+
+    /// Write tombstone with full metadata update
+    ///
+    /// Used for deletes - writes a tombstone marker and updates all metadata
+    pub fn write_tombstone_full(
+        &mut self,
+        collection: &str,
+        doc_id: &crate::document::DocumentId,
+    ) -> Result<()> {
+        use crate::error::MongoLiteError;
+
+        // Create tombstone document
+        let tombstone = serde_json::json!({
+            "_id": doc_id,
+            "_collection": collection,
+            "_tombstone": true
+        });
+        let tombstone_json = serde_json::to_string(&tombstone)
+            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+
+        // Write tombstone to file
+        let _offset = self.file.seek(SeekFrom::End(0))?;
+        let len = (tombstone_json.len() as u32).to_le_bytes();
+        self.file.write_all(&len)?;
+        self.file.write_all(tombstone_json.as_bytes())?;
+
+        self.metadata_dirty = true;
+
+        // Update metadata
+        let meta = self
+            .get_collection_meta_mut(collection)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+
+        // Remove from catalog
+        if meta.document_catalog.remove(doc_id).is_some() {
+            // Decrement live count only if document existed
+            if meta.live_document_count > 0 {
+                meta.live_document_count -= 1;
+            }
+        }
+
+        Ok(())
+    }
 }

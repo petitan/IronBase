@@ -601,3 +601,228 @@ fn test_checkpoint_clears_wal() {
     let recovered = wal.recover().unwrap();
     assert_eq!(recovered.len(), 0, "WAL should be cleared after flush");
 }
+
+// =============================================================================
+// METADATA CONVERGENCE TESTS
+// =============================================================================
+
+/// Test: WAL recovery updates ALL metadata fields correctly
+///
+/// This test verifies that after WAL recovery:
+/// 1. document_catalog has correct entries
+/// 2. live_document_count is correct
+/// 3. last_id is updated (CRITICAL: prevents _id collisions after recovery!)
+/// 4. New inserts after recovery get correct _ids (not starting from 1)
+///
+/// This was a critical bug where WAL recovery only updated document_catalog
+/// but NOT live_document_count or last_id, causing duplicate _id issues.
+#[test]
+fn test_wal_recovery_metadata_convergence() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+    let wal_path = temp_dir.path().join("test.wal");
+
+    // Phase 1: Create storage and collection
+    {
+        let mut storage = StorageEngine::open(&db_path).unwrap();
+        storage.create_collection("users").unwrap();
+        storage.flush().unwrap();
+    }
+
+    // Phase 2: Write 5 committed inserts directly to WAL (simulating crash after commit)
+    {
+        let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+
+        wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+            .unwrap();
+
+        for i in 1..=5 {
+            let operation = ironbase_core::transaction::Operation::Insert {
+                collection: "users".to_string(),
+                doc_id: ironbase_core::document::DocumentId::Int(i),
+                doc: json!({
+                    "_id": i,
+                    "_collection": "users",
+                    "name": format!("User {}", i),
+                    "data": format!("data_{}", i)
+                }),
+            };
+            let op_json = serde_json::to_string(&operation).unwrap();
+            wal.append(&WALEntry::new(
+                1,
+                WALEntryType::Operation,
+                op_json.as_bytes().to_vec(),
+            ))
+            .unwrap();
+        }
+
+        wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
+            .unwrap();
+        wal.flush().unwrap();
+    }
+
+    // Phase 3: Reopen and recover
+    {
+        let mut storage = StorageEngine::open(&db_path).unwrap();
+        let (recovered, _) = storage.recover_from_wal().unwrap();
+
+        // Should have recovered 1 transaction
+        assert_eq!(recovered.len(), 1, "Should recover 1 transaction");
+
+        // Verify metadata convergence
+        let meta = storage.get_collection_meta("users").unwrap();
+
+        // Check document_catalog has 5 entries
+        assert_eq!(
+            meta.document_catalog.len(),
+            5,
+            "document_catalog should have 5 entries"
+        );
+
+        // Check live_document_count is 5
+        assert_eq!(
+            meta.live_document_count, 5,
+            "live_document_count should be 5 after recovery"
+        );
+
+        // Check last_id is 5 (CRITICAL: prevents _id collisions!)
+        assert_eq!(
+            meta.last_id, 5,
+            "last_id should be 5 after recovery (prevents _id collisions)"
+        );
+
+        // Verify all documents are in catalog with correct IDs
+        for i in 1..=5 {
+            let doc_id = ironbase_core::document::DocumentId::Int(i);
+            assert!(
+                meta.document_catalog.contains_key(&doc_id),
+                "Document {} should be in catalog",
+                i
+            );
+        }
+    }
+}
+
+/// Test: WAL recovery with mixed operations (insert, update, delete)
+/// Verifies metadata convergence with all operation types
+#[test]
+fn test_wal_recovery_mixed_operations_metadata() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+    let wal_path = temp_dir.path().join("test.wal");
+
+    // Create storage and collection
+    {
+        let mut storage = StorageEngine::open(&db_path).unwrap();
+        storage.create_collection("mixed").unwrap();
+        storage.flush().unwrap();
+    }
+
+    // Write mixed operations to WAL
+    {
+        let mut wal = WriteAheadLog::open(&wal_path).unwrap();
+
+        wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
+            .unwrap();
+
+        // Insert 3 documents
+        for i in 1..=3 {
+            let operation = ironbase_core::transaction::Operation::Insert {
+                collection: "mixed".to_string(),
+                doc_id: ironbase_core::document::DocumentId::Int(i),
+                doc: json!({
+                    "_id": i,
+                    "_collection": "mixed",
+                    "value": i * 10
+                }),
+            };
+            let op_json = serde_json::to_string(&operation).unwrap();
+            wal.append(&WALEntry::new(
+                1,
+                WALEntryType::Operation,
+                op_json.as_bytes().to_vec(),
+            ))
+            .unwrap();
+        }
+
+        // Update document 2
+        let update_op = ironbase_core::transaction::Operation::Update {
+            collection: "mixed".to_string(),
+            doc_id: ironbase_core::document::DocumentId::Int(2),
+            old_doc: json!({"_id": 2, "value": 20}),
+            new_doc: json!({
+                "_id": 2,
+                "_collection": "mixed",
+                "value": 200,
+                "updated": true
+            }),
+        };
+        let update_json = serde_json::to_string(&update_op).unwrap();
+        wal.append(&WALEntry::new(
+            1,
+            WALEntryType::Operation,
+            update_json.as_bytes().to_vec(),
+        ))
+        .unwrap();
+
+        // Delete document 1
+        let delete_op = ironbase_core::transaction::Operation::Delete {
+            collection: "mixed".to_string(),
+            doc_id: ironbase_core::document::DocumentId::Int(1),
+            old_doc: json!({"_id": 1, "value": 10}),
+        };
+        let delete_json = serde_json::to_string(&delete_op).unwrap();
+        wal.append(&WALEntry::new(
+            1,
+            WALEntryType::Operation,
+            delete_json.as_bytes().to_vec(),
+        ))
+        .unwrap();
+
+        wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
+            .unwrap();
+        wal.flush().unwrap();
+    }
+
+    // Recover and verify
+    {
+        let mut storage = StorageEngine::open(&db_path).unwrap();
+        let (recovered, _) = storage.recover_from_wal().unwrap();
+
+        assert_eq!(recovered.len(), 1);
+
+        let meta = storage.get_collection_meta("mixed").unwrap();
+
+        // After: 3 inserts, 1 update, 1 delete = 2 live documents
+        assert_eq!(
+            meta.live_document_count, 2,
+            "Should have 2 live documents (3 inserts - 1 delete)"
+        );
+
+        // Catalog should have 2 entries (doc 1 was deleted)
+        assert_eq!(
+            meta.document_catalog.len(),
+            2,
+            "Catalog should have 2 entries"
+        );
+
+        // last_id should still be 3 (highest ID ever used)
+        assert_eq!(meta.last_id, 3, "last_id should be 3");
+
+        // Doc 1 should NOT be in catalog (deleted)
+        assert!(
+            !meta
+                .document_catalog
+                .contains_key(&ironbase_core::document::DocumentId::Int(1)),
+            "Document 1 should be removed from catalog"
+        );
+
+        // Doc 2 and 3 should be in catalog
+        assert!(meta
+            .document_catalog
+            .contains_key(&ironbase_core::document::DocumentId::Int(2)));
+        assert!(meta
+            .document_catalog
+            .contains_key(&ironbase_core::document::DocumentId::Int(3)));
+    }
+}

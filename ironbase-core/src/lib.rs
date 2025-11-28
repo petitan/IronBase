@@ -39,6 +39,7 @@ pub mod logging;
 pub mod query;
 pub mod query_cache;
 pub mod query_planner;
+pub mod recovery;
 pub mod storage;
 pub mod transaction;
 pub mod value_utils;
@@ -63,6 +64,13 @@ pub use find_options::FindOptions;
 pub use logging::{get_log_level, set_log_level, LogLevel};
 pub use query::Query;
 pub use query_cache::{CacheStats, QueryCache, QueryHash};
+pub use recovery::{
+    IndexOperation, IndexReplay, IndexReplayStats, OperationReplay, RecoveredIndexChange,
+    RecoveryCoordinator, RecoveryStats, ReplayStats,
+};
 pub use storage::{CompactionStats, StorageEngine};
 pub use transaction::{Operation, Transaction, TransactionId, TransactionState};
-pub use wal::{WALEntry, WALEntryType, WriteAheadLog};
+pub use wal::{
+    CommittedTransaction, TransactionGrouper, WALEntry, WALEntryIterator, WALEntryType,
+    WriteAheadLog,
+};

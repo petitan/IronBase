@@ -500,6 +500,60 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Apply a single WAL operation - UNIFIED path for both recovery and runtime
+    ///
+    /// This function uses `write_document_full()` which updates ALL metadata:
+    /// - document_catalog: doc_id → offset mapping
+    /// - document_count: total document writes
+    /// - live_document_count: count of live (non-tombstone) documents
+    /// - last_id: tracks highest auto-increment ID (prevents _id collisions after recovery!)
+    ///
+    /// This is the ONLY function that should be used for WAL recovery to ensure
+    /// metadata consistency between runtime and recovery paths.
+    pub fn apply_wal_operation(&mut self, operation: &crate::transaction::Operation) -> Result<()> {
+        use crate::transaction::Operation;
+
+        match operation {
+            Operation::Insert {
+                collection,
+                doc_id,
+                doc,
+            } => {
+                // Ensure collection exists (it may not after a crash)
+                let _ = self.create_collection(collection);
+
+                // Serialize and write document with FULL metadata update
+                let doc_json = serde_json::to_string(doc)
+                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                self.write_document_full(collection, doc_id, doc_json.as_bytes())?;
+            }
+            Operation::Update {
+                collection,
+                doc_id,
+                old_doc: _,
+                new_doc,
+            } => {
+                // Ensure collection exists
+                let _ = self.create_collection(collection);
+
+                // Write new version with FULL metadata update
+                let doc_json = serde_json::to_string(new_doc)
+                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                self.write_document_full(collection, doc_id, doc_json.as_bytes())?;
+            }
+            Operation::Delete {
+                collection,
+                doc_id,
+                old_doc: _,
+            } => {
+                // Write tombstone with FULL metadata update
+                self.write_tombstone_full(collection, doc_id)?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Recover from WAL after crash
     ///
     /// Returns (committed_transactions, index_changes) for higher-level recovery
@@ -526,69 +580,13 @@ impl StorageEngine {
                         let operation: crate::transaction::Operation =
                             serde_json::from_str(op_str)?;
 
-                        // Apply operation to storage AND update catalog
-                        // CRITICAL: We use write_document() instead of write_data()
-                        // to ensure the document_catalog is updated during recovery.
-                        // Without this, recovered documents would be in the file but
-                        // not findable via the catalog.
-                        match operation {
-                            crate::transaction::Operation::Insert {
-                                collection,
-                                doc_id,
-                                doc,
-                            } => {
-                                // Ensure collection exists in metadata (ignore if already exists)
-                                let _ = self.create_collection(&collection);
-                                let doc_json = serde_json::to_string(&doc)
-                                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                                // Use write_document which updates the catalog
-                                StorageEngine::write_document(
-                                    self,
-                                    &collection,
-                                    &doc_id,
-                                    doc_json.as_bytes(),
-                                )?;
-                            }
-                            crate::transaction::Operation::Update {
-                                collection,
-                                doc_id,
-                                old_doc: _,
-                                new_doc,
-                            } => {
-                                // Ensure collection exists in metadata (ignore if already exists)
-                                let _ = self.create_collection(&collection);
-                                let doc_json = serde_json::to_string(&new_doc)
-                                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                                // Use write_document which updates the catalog
-                                StorageEngine::write_document(
-                                    self,
-                                    &collection,
-                                    &doc_id,
-                                    doc_json.as_bytes(),
-                                )?;
-                            }
-                            crate::transaction::Operation::Delete {
-                                collection,
-                                doc_id,
-                                old_doc: _,
-                            } => {
-                                // Write tombstone to file for consistency
-                                let tombstone = serde_json::json!({
-                                    "_id": doc_id,
-                                    "_collection": collection,
-                                    "_tombstone": true
-                                });
-                                let tombstone_json = serde_json::to_string(&tombstone)
-                                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                                self.write_data(tombstone_json.as_bytes())?;
-
-                                // Also remove from catalog so document is not found
-                                if let Some(meta) = self.get_collection_meta_mut(&collection) {
-                                    meta.document_catalog.remove(&doc_id);
-                                    self.metadata_dirty = true;
-                                }
-                            }
-                        }
+                        // Apply operation using the UNIFIED path (write_document_full)
+                        // This ensures ALL metadata is updated:
+                        // - document_catalog
+                        // - document_count
+                        // - live_document_count
+                        // - last_id (critical for preventing _id collisions!)
+                        self.apply_wal_operation(&operation)?;
                     }
                     crate::wal::WALEntryType::IndexChange => {
                         // Parse index change from JSON
