@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 ironbase-core = { path = "../../ironbase-core" }
 
 # Python binding
-pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"] }
+pyo3 = { version = "=0.20.3", features = ["extension-module", "abi3-py38"] }
 
 # Workspace dependencies
 serde_json = { workspace = true }
