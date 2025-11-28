@@ -20,7 +20,7 @@ use crate::{log_debug, log_trace, log_warn};
 mod index_persistence;
 mod schema;
 
-use self::index_persistence::persist_index_to_disk;
+use self::index_persistence::{persist_index_to_disk, try_load_index_from_file};
 use self::schema::CompiledSchema;
 
 /// Result of insert_many operation
@@ -97,6 +97,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 persisted_indexes.len()
             );
 
+            // Get db_path for .idx file loading (before releasing lock)
+            let db_path = storage_guard.get_file_path().to_string();
+
             drop(storage_guard); // Release write lock before rebuilding
 
             // Load persisted custom indexes (if any)
@@ -106,21 +109,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     continue;
                 }
 
-                log_debug!(
-                    "Creating index '{}' on field '{}'",
-                    index_meta.name,
-                    index_meta.field
-                );
+                // Try to load from .idx file first (for index structure/metadata)
+                // NOTE: We still rebuild from documents below to ensure consistency
+                if let Some(loaded_tree) = try_load_index_from_file(&db_path, index_meta) {
+                    log_debug!(
+                        "Loaded index '{}' from .idx file (will rebuild from documents)",
+                        index_meta.name
+                    );
+                    index_manager.add_loaded_index(loaded_tree);
+                    // Index loaded, but we still rebuild from documents below
+                } else {
+                    // Fallback: create empty index (will be rebuilt from documents)
+                    log_debug!(
+                        "Creating index '{}' on field '{}' (will rebuild from documents)",
+                        index_meta.name,
+                        index_meta.field
+                    );
 
-                // Create index
-                index_manager.create_btree_index(
-                    index_meta.name.clone(),
-                    index_meta.field.clone(),
-                    index_meta.unique,
-                )?;
+                    // Create index
+                    index_manager.create_btree_index(
+                        index_meta.name.clone(),
+                        index_meta.field.clone(),
+                        index_meta.unique,
+                    )?;
+                }
             }
 
-            // Rebuild all indexes from document catalog
+            // Rebuild all indexes from document catalog (always rebuild to ensure consistency)
             log_debug!(
                 "Starting index rebuild from {} catalog entries",
                 catalog.len()
@@ -155,11 +170,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                             let _ = id_index.insert(index_key, doc_id.clone());
                                         }
 
-                                        // Rebuild custom indexes
+                                        // Rebuild ALL custom indexes (always rebuild to ensure correctness)
                                         for index_meta in &persisted_indexes {
                                             if index_meta.name == id_index_name {
                                                 continue;
                                             }
+                                            // NOTE: We always rebuild from documents to ensure index consistency
+                                            // The .idx file is only used as a fast path for initial loading,
+                                            // but we still rebuild to catch any entries added after initial creation
 
                                             // Use get_nested_value for dot notation support
                                             if let Some(field_value) =
@@ -320,6 +338,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                 if let Some(index) = indexes.get_btree_index_mut(&index_name) {
                     let field = &index.metadata.field;
+                    // Document::get() already supports dot notation for nested fields
                     if let Some(field_value) = doc.get(field) {
                         let index_key = IndexKey::from(field_value);
                         index.insert(index_key, doc_id.clone())?;
@@ -412,6 +431,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     if let Some(index) = indexes.get_btree_index_mut(&index_name) {
                         let field = &index.metadata.field;
+                        // Document::get() already supports dot notation for nested fields
                         if let Some(field_value) = doc.get(field) {
                             let index_key = IndexKey::from(field_value);
                             index.insert(index_key, doc_id.clone())?;
@@ -1764,8 +1784,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut indexes = self.indexes.write();
 
         for (doc_id, doc) in &docs_by_id {
-            // Extract field value and add to index (no DocumentId parsing needed!)
-            if let Some(field_value) = doc.get(&field) {
+            // Extract field value and add to index (use get_nested_value for dot notation support)
+            if let Some(field_value) = get_nested_value(doc, &field) {
                 let key = IndexKey::from(field_value);
 
                 if let Some(index) = indexes.get_btree_index_mut(&index_name) {
