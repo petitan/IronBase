@@ -4,8 +4,10 @@
 
 use std::os::raw::c_char;
 
-use crate::handles::{DbHandle, validate_db_handle};
-use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_error, c_str_to_string};
+use crate::error::{
+    c_str_to_string, clear_last_error, set_error, set_last_error, IronBaseErrorCode,
+};
+use crate::handles::{validate_db_handle, DbHandle};
 
 /// Set or clear JSON schema for a collection
 ///
@@ -62,15 +64,13 @@ pub extern "C" fn ironbase_set_collection_schema(
         None
     } else {
         match c_str_to_string(schema_json) {
-            Some(s) => {
-                match serde_json::from_str(&s) {
-                    Ok(v) => Some(v),
-                    Err(e) => {
-                        set_last_error(&format!("Invalid schema JSON: {}", e));
-                        return IronBaseErrorCode::SerializationError as i32;
-                    }
+            Some(s) => match serde_json::from_str(&s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    set_last_error(&format!("Invalid schema JSON: {}", e));
+                    return IronBaseErrorCode::SerializationError as i32;
                 }
-            }
+            },
             None => {
                 set_last_error("Schema JSON is invalid UTF-8");
                 return IronBaseErrorCode::NullPointer as i32;
@@ -140,15 +140,13 @@ pub extern "C" fn ironbase_get_collection_schema(
         Some(schema) => {
             // Convert schema to JSON string
             match serde_json::to_string(&schema) {
-                Ok(json_str) => {
-                    match std::ffi::CString::new(json_str) {
-                        Ok(c_str) => c_str.into_raw(),
-                        Err(e) => {
-                            set_last_error(&format!("Failed to create C string: {}", e));
-                            std::ptr::null_mut()
-                        }
+                Ok(json_str) => match std::ffi::CString::new(json_str) {
+                    Ok(c_str) => c_str.into_raw(),
+                    Err(e) => {
+                        set_last_error(&format!("Failed to create C string: {}", e));
+                        std::ptr::null_mut()
                     }
-                }
+                },
                 Err(e) => {
                     set_last_error(&format!("Failed to serialize schema: {}", e));
                     std::ptr::null_mut()

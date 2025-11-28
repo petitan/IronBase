@@ -149,8 +149,8 @@ impl StorageEngine {
         // Memory-mapped fájl (ha elég kicsi a fájl)
         let mmap = if file.metadata()?.len() < 1_000_000_000 {
             // 1GB alatt használjuk az mmap-et
-            let mmap = unsafe { MmapOptions::new().map_mut(&file).ok() };
-            mmap
+
+            unsafe { MmapOptions::new().map_mut(&file).ok() }
         } else {
             None
         };
@@ -680,15 +680,14 @@ impl StorageEngine {
                     .unwrap_or(false);
 
                 // Extract collection name
-                if let Some(collection_name) = doc_value
-                    .get("_collection")
-                    .and_then(|v| v.as_str())
+                if let Some(collection_name) = doc_value.get("_collection").and_then(|v| v.as_str())
                 {
                     // Extract _id
                     if let Some(id_val) = doc_value.get("_id") {
                         if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
                             // Get or create collection meta
-                            let meta = self.collections
+                            let meta = self
+                                .collections
                                 .entry(collection_name.to_string())
                                 .or_insert_with(|| CollectionMeta {
                                     name: collection_name.to_string(),
@@ -808,7 +807,7 @@ impl Storage for StorageEngine {
 
         let mut documents = Vec::new();
 
-        for (_doc_id, &offset) in &catalog {
+        for &offset in catalog.values() {
             let data = StorageEngine::read_document_at(self, collection, offset)?;
             let doc_value: serde_json::Value = serde_json::from_slice(&data)?;
 

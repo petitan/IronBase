@@ -427,37 +427,51 @@ fn test_nested_crud_workflow_with_persistence() {
 
         coll.insert_one(HashMap::from([
             ("name".to_string(), json!("TechCorp")),
-            ("location".to_string(), json!({
-                "country": "USA",
-                "city": "San Francisco",
-                "address": {
-                    "street": "123 Tech Blvd",
-                    "zip": "94105"
-                }
-            })),
-            ("stats".to_string(), json!({
-                "employees": 500,
-                "revenue": 50000000,
-                "rating": 4.8
-            }))
-        ])).unwrap();
+            (
+                "location".to_string(),
+                json!({
+                    "country": "USA",
+                    "city": "San Francisco",
+                    "address": {
+                        "street": "123 Tech Blvd",
+                        "zip": "94105"
+                    }
+                }),
+            ),
+            (
+                "stats".to_string(),
+                json!({
+                    "employees": 500,
+                    "revenue": 50000000,
+                    "rating": 4.8
+                }),
+            ),
+        ]))
+        .unwrap();
 
         coll.insert_one(HashMap::from([
             ("name".to_string(), json!("DataSoft")),
-            ("location".to_string(), json!({
-                "country": "USA",
-                "city": "New York",
-                "address": {
-                    "street": "456 Data Ave",
-                    "zip": "10001"
-                }
-            })),
-            ("stats".to_string(), json!({
-                "employees": 200,
-                "revenue": 20000000,
-                "rating": 4.2
-            }))
-        ])).unwrap();
+            (
+                "location".to_string(),
+                json!({
+                    "country": "USA",
+                    "city": "New York",
+                    "address": {
+                        "street": "456 Data Ave",
+                        "zip": "10001"
+                    }
+                }),
+            ),
+            (
+                "stats".to_string(),
+                json!({
+                    "employees": 200,
+                    "revenue": 20000000,
+                    "rating": 4.2
+                }),
+            ),
+        ]))
+        .unwrap();
     }
 
     // Session 2: Reopen and verify, then update
@@ -470,21 +484,25 @@ fn test_nested_crud_workflow_with_persistence() {
         assert_eq!(results.len(), 2, "Should find 2 USA companies");
 
         // Query nested field
-        let sf_company = coll.find_one(&json!({"location.city": "San Francisco"})).unwrap();
+        let sf_company = coll
+            .find_one(&json!({"location.city": "San Francisco"}))
+            .unwrap();
         assert!(sf_company.is_some());
         assert_eq!(sf_company.unwrap()["name"], "TechCorp");
 
         // Update nested field
         coll.update_one(
             &json!({"name": "TechCorp"}),
-            &json!({"$set": {"stats.employees": 550}})
-        ).unwrap();
+            &json!({"$set": {"stats.employees": 550}}),
+        )
+        .unwrap();
 
         // Update deep nested field
         coll.update_one(
             &json!({"name": "DataSoft"}),
-            &json!({"$set": {"location.address.zip": "10002"}})
-        ).unwrap();
+            &json!({"$set": {"location.address.zip": "10002"}}),
+        )
+        .unwrap();
     }
 
     // Session 3: Verify updates persisted
@@ -492,10 +510,16 @@ fn test_nested_crud_workflow_with_persistence() {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
         let coll = db.collection("companies").unwrap();
 
-        let tech = coll.find_one(&json!({"name": "TechCorp"})).unwrap().unwrap();
+        let tech = coll
+            .find_one(&json!({"name": "TechCorp"}))
+            .unwrap()
+            .unwrap();
         assert_eq!(tech["stats"]["employees"], 550);
 
-        let data = coll.find_one(&json!({"name": "DataSoft"})).unwrap().unwrap();
+        let data = coll
+            .find_one(&json!({"name": "DataSoft"}))
+            .unwrap()
+            .unwrap();
         assert_eq!(data["location"]["address"]["zip"], "10002");
     }
 }
@@ -520,17 +544,24 @@ fn test_nested_aggregation_with_persistence() {
 
         for (region, category, amount) in regions {
             coll.insert_one(HashMap::from([
-                ("region".to_string(), json!({
-                    "name": region,
-                    "active": true
-                })),
-                ("product".to_string(), json!({
-                    "category": category,
-                    "details": {
-                        "amount": amount
-                    }
-                }))
-            ])).unwrap();
+                (
+                    "region".to_string(),
+                    json!({
+                        "name": region,
+                        "active": true
+                    }),
+                ),
+                (
+                    "product".to_string(),
+                    json!({
+                        "category": category,
+                        "details": {
+                            "amount": amount
+                        }
+                    }),
+                ),
+            ]))
+            .unwrap();
         }
     }
 
@@ -540,14 +571,16 @@ fn test_nested_aggregation_with_persistence() {
         let coll = db.collection("sales").unwrap();
 
         // Aggregate by nested region.name
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": "$region.name",
-                "totalAmount": {"$sum": "$product.details.amount"},
-                "count": {"$sum": 1}
-            }},
-            {"$sort": {"totalAmount": -1}}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": "$region.name",
+                    "totalAmount": {"$sum": "$product.details.amount"},
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"totalAmount": -1}}
+            ]))
+            .unwrap();
 
         assert_eq!(results.len(), 2);
 
@@ -574,16 +607,21 @@ fn test_nested_index_with_persistence() {
         let coll = db.collection("users").unwrap();
 
         // Create index on nested field
-        coll.create_index("profile.score".to_string(), false).unwrap();
+        coll.create_index("profile.score".to_string(), false)
+            .unwrap();
 
         for i in 0..100 {
             coll.insert_one(HashMap::from([
                 ("name".to_string(), json!(format!("User{}", i))),
-                ("profile".to_string(), json!({
-                    "score": i * 10,
-                    "level": if i < 50 { "junior" } else { "senior" }
-                }))
-            ])).unwrap();
+                (
+                    "profile".to_string(),
+                    json!({
+                        "score": i * 10,
+                        "level": if i < 50 { "junior" } else { "senior" }
+                    }),
+                ),
+            ]))
+            .unwrap();
         }
     }
 
@@ -605,7 +643,9 @@ fn test_nested_index_with_persistence() {
         assert_eq!(results.len(), 10, "Should find users with score >= 900");
 
         // Verify query explain works
-        let explain = coll.explain(&json!({"profile.score": {"$gte": 500}})).unwrap();
+        let explain = coll
+            .explain(&json!({"profile.score": {"$gte": 500}}))
+            .unwrap();
         assert!(!explain.is_null(), "Explain should return valid result");
     }
 }
@@ -623,12 +663,16 @@ fn test_nested_delete_with_persistence() {
         for i in 0..10 {
             coll.insert_one(HashMap::from([
                 ("order_id".to_string(), json!(i)),
-                ("customer".to_string(), json!({
-                    "name": format!("Customer{}", i % 3),
-                    "tier": if i < 5 { "bronze" } else { "gold" }
-                })),
-                ("amount".to_string(), json!(100 * (i + 1)))
-            ])).unwrap();
+                (
+                    "customer".to_string(),
+                    json!({
+                        "name": format!("Customer{}", i % 3),
+                        "tier": if i < 5 { "bronze" } else { "gold" }
+                    }),
+                ),
+                ("amount".to_string(), json!(100 * (i + 1))),
+            ]))
+            .unwrap();
         }
     }
 
@@ -642,7 +686,9 @@ fn test_nested_delete_with_persistence() {
         assert_eq!(before, 10);
 
         // Delete bronze tier orders
-        let deleted = coll.delete_many(&json!({"customer.tier": "bronze"})).unwrap();
+        let deleted = coll
+            .delete_many(&json!({"customer.tier": "bronze"}))
+            .unwrap();
         assert_eq!(deleted, 5);
 
         // Verify remaining
@@ -691,14 +737,18 @@ fn test_nested_find_options_with_persistence() {
         for (name, category, price) in products {
             coll.insert_one(HashMap::from([
                 ("name".to_string(), json!(name)),
-                ("info".to_string(), json!({
-                    "category": category,
-                    "pricing": {
-                        "price": price,
-                        "currency": "USD"
-                    }
-                }))
-            ])).unwrap();
+                (
+                    "info".to_string(),
+                    json!({
+                        "category": category,
+                        "pricing": {
+                            "price": price,
+                            "currency": "USD"
+                        }
+                    }),
+                ),
+            ]))
+            .unwrap();
         }
     }
 
@@ -721,18 +771,16 @@ fn test_nested_find_options_with_persistence() {
         assert_eq!(results[2]["name"], "Tablet");
 
         // Query only electronics, sorted by price ascending
-        let options = FindOptions::new()
-            .with_sort(vec![("info.pricing.price".to_string(), 1)]);
+        let options = FindOptions::new().with_sort(vec![("info.pricing.price".to_string(), 1)]);
 
-        let electronics = coll.find_with_options(
-            &json!({"info.category": "Electronics"}),
-            options
-        ).unwrap();
+        let electronics = coll
+            .find_with_options(&json!({"info.category": "Electronics"}), options)
+            .unwrap();
 
         assert_eq!(electronics.len(), 3);
-        assert_eq!(electronics[0]["name"], "Tablet");  // 449.99
-        assert_eq!(electronics[1]["name"], "Phone");   // 599.99
-        assert_eq!(electronics[2]["name"], "Laptop");  // 999.99
+        assert_eq!(electronics[0]["name"], "Tablet"); // 449.99
+        assert_eq!(electronics[1]["name"], "Phone"); // 599.99
+        assert_eq!(electronics[2]["name"], "Laptop"); // 999.99
     }
 }
 
@@ -748,8 +796,9 @@ fn test_deeply_nested_update_create_path() {
 
         coll.insert_one(HashMap::from([
             ("name".to_string(), json!("app_config")),
-            ("version".to_string(), json!(1))
-        ])).unwrap();
+            ("version".to_string(), json!(1)),
+        ]))
+        .unwrap();
 
         // Create deep nested path via update
         coll.update_one(
@@ -758,8 +807,9 @@ fn test_deeply_nested_update_create_path() {
                 "settings.database.connection.timeout": 30,
                 "settings.database.connection.retries": 3,
                 "settings.cache.enabled": true
-            }})
-        ).unwrap();
+            }}),
+        )
+        .unwrap();
     }
 
     // Session 2: Verify deep nested structure persisted
@@ -767,16 +817,21 @@ fn test_deeply_nested_update_create_path() {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
         let coll = db.collection("config").unwrap();
 
-        let config = coll.find_one(&json!({"name": "app_config"})).unwrap().unwrap();
+        let config = coll
+            .find_one(&json!({"name": "app_config"}))
+            .unwrap()
+            .unwrap();
 
         assert_eq!(config["settings"]["database"]["connection"]["timeout"], 30);
         assert_eq!(config["settings"]["database"]["connection"]["retries"], 3);
         assert_eq!(config["settings"]["cache"]["enabled"], true);
 
         // Query by deep nested field
-        let found = coll.find(&json!({
-            "settings.database.connection.timeout": {"$gte": 20}
-        })).unwrap();
+        let found = coll
+            .find(&json!({
+                "settings.database.connection.timeout": {"$gte": 20}
+            }))
+            .unwrap();
         assert_eq!(found.len(), 1);
     }
 }
@@ -793,33 +848,47 @@ fn test_mixed_nested_and_flat_fields() {
         coll.insert_one(HashMap::from([
             ("event_type".to_string(), json!("purchase")),
             ("timestamp".to_string(), json!("2024-01-15T10:30:00Z")),
-            ("user".to_string(), json!({
-                "id": 123,
-                "profile": {
-                    "name": "Alice",
-                    "premium": true
-                }
-            })),
-            ("data".to_string(), json!({
-                "product_id": "P001",
-                "amount": 99.99
-            }))
-        ])).unwrap();
+            (
+                "user".to_string(),
+                json!({
+                    "id": 123,
+                    "profile": {
+                        "name": "Alice",
+                        "premium": true
+                    }
+                }),
+            ),
+            (
+                "data".to_string(),
+                json!({
+                    "product_id": "P001",
+                    "amount": 99.99
+                }),
+            ),
+        ]))
+        .unwrap();
 
         coll.insert_one(HashMap::from([
             ("event_type".to_string(), json!("view")),
             ("timestamp".to_string(), json!("2024-01-15T11:00:00Z")),
-            ("user".to_string(), json!({
-                "id": 456,
-                "profile": {
-                    "name": "Bob",
-                    "premium": false
-                }
-            })),
-            ("data".to_string(), json!({
-                "page": "/products"
-            }))
-        ])).unwrap();
+            (
+                "user".to_string(),
+                json!({
+                    "id": 456,
+                    "profile": {
+                        "name": "Bob",
+                        "premium": false
+                    }
+                }),
+            ),
+            (
+                "data".to_string(),
+                json!({
+                    "page": "/products"
+                }),
+            ),
+        ]))
+        .unwrap();
     }
 
     {
@@ -827,21 +896,25 @@ fn test_mixed_nested_and_flat_fields() {
         let coll = db.collection("events").unwrap();
 
         // Query combining flat and nested conditions
-        let results = coll.find(&json!({
-            "event_type": "purchase",
-            "user.profile.premium": true
-        })).unwrap();
+        let results = coll
+            .find(&json!({
+                "event_type": "purchase",
+                "user.profile.premium": true
+            }))
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["user"]["profile"]["name"], "Alice");
 
         // Aggregation mixing flat and nested
-        let agg = coll.aggregate(&json!([
-            {"$group": {
-                "_id": "$user.profile.premium",
-                "event_count": {"$sum": 1}
-            }}
-        ])).unwrap();
+        let agg = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": "$user.profile.premium",
+                    "event_count": {"$sum": 1}
+                }}
+            ]))
+            .unwrap();
 
         assert_eq!(agg.len(), 2);
     }

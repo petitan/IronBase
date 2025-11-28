@@ -45,7 +45,7 @@ fn main() -> anyhow::Result<()> {
         collection.insert_many(docs)?;
         inserted += batch_size;
 
-        if inserted % 5_000 == 0 || inserted >= target_docs {
+        if inserted.is_multiple_of(5_000) || inserted >= target_docs {
             println!(
                 "Inserted {:>6} / {:>6} documents in {:.2?}",
                 inserted.min(target_docs),
@@ -139,7 +139,7 @@ fn build_nested_doc(id: u64) -> HashMap<String, Value> {
                 "last_login": format!("2025-{:02}-{:02}", 1 + (id % 12), 1 + (id % 28))
             },
             "orders": {
-                "total_value": (id as f64 * 3.14) % 20_000.0,
+                "total_value": (id as f64 * std::f64::consts::PI) % 20_000.0,
                 "last_order_value": (id as f64 * 1.1) % 1000.0
             }
         }),
@@ -148,12 +148,12 @@ fn build_nested_doc(id: u64) -> HashMap<String, Value> {
         "preferences".to_string(),
         json!({
             "notifications": {
-                "email": id % 2 == 0,
-                "sms": id % 3 == 0,
+                "email": id.is_multiple_of(2),
+                "sms": id.is_multiple_of(3),
                 "in_app": true
             },
             "theme": {
-                "mode": if id % 2 == 0 { "dark" } else { "light" },
+                "mode": if id.is_multiple_of(2) { "dark" } else { "light" },
                 "color": theme_color
             }
         }),
@@ -187,10 +187,8 @@ fn current_rss_kb() -> io::Result<u64> {
     File::open("/proc/self/status")?.read_to_string(&mut status)?;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
-            let value = rest.trim().split_whitespace().next().unwrap_or("0");
-            return value
-                .parse::<u64>()
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e));
+            let value = rest.split_whitespace().next().unwrap_or("0");
+            return value.parse::<u64>().map_err(io::Error::other);
         }
     }
     Err(io::Error::new(

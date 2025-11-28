@@ -7,8 +7,11 @@ use std::os::raw::c_char;
 
 use serde_json::Value;
 
-use crate::handles::{DbHandle, validate_db_handle};
-use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_error, c_str_to_string, string_to_c_str};
+use crate::error::{
+    c_str_to_string, clear_last_error, set_error, set_last_error, string_to_c_str,
+    IronBaseErrorCode,
+};
+use crate::handles::{validate_db_handle, DbHandle};
 
 /// Begin a new transaction
 ///
@@ -29,10 +32,7 @@ use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_erro
 /// // or ironbase_rollback(db, tx_id);
 /// ```
 #[no_mangle]
-pub extern "C" fn ironbase_begin_transaction(
-    handle: DbHandle,
-    out_tx_id: *mut u64,
-) -> i32 {
+pub extern "C" fn ironbase_begin_transaction(handle: DbHandle, out_tx_id: *mut u64) -> i32 {
     clear_last_error();
 
     if out_tx_id.is_null() {
@@ -68,10 +68,7 @@ pub extern "C" fn ironbase_begin_transaction(
 /// - `IronBaseErrorCode::Success` (0) on success
 /// - Error code on failure
 #[no_mangle]
-pub extern "C" fn ironbase_commit(
-    handle: DbHandle,
-    tx_id: u64,
-) -> i32 {
+pub extern "C" fn ironbase_commit(handle: DbHandle, tx_id: u64) -> i32 {
     clear_last_error();
 
     let db = match validate_db_handle(handle) {
@@ -100,10 +97,7 @@ pub extern "C" fn ironbase_commit(
 /// - `IronBaseErrorCode::Success` (0) on success
 /// - Error code on failure
 #[no_mangle]
-pub extern "C" fn ironbase_rollback(
-    handle: DbHandle,
-    tx_id: u64,
-) -> i32 {
+pub extern "C" fn ironbase_rollback(handle: DbHandle, tx_id: u64) -> i32 {
     clear_last_error();
 
     let db = match validate_db_handle(handle) {
@@ -273,10 +267,14 @@ pub extern "C" fn ironbase_update_one_tx(
     match db.inner.update_one_tx(&coll_name, &query, new_doc, tx_id) {
         Ok((matched, modified)) => {
             if !out_matched.is_null() {
-                unsafe { *out_matched = matched; }
+                unsafe {
+                    *out_matched = matched;
+                }
             }
             if !out_modified.is_null() {
-                unsafe { *out_modified = modified; }
+                unsafe {
+                    *out_modified = modified;
+                }
             }
             IronBaseErrorCode::Success as i32
         }
@@ -341,7 +339,9 @@ pub extern "C" fn ironbase_delete_one_tx(
     match db.inner.delete_one_tx(&coll_name, &query, tx_id) {
         Ok(count) => {
             if !out_deleted.is_null() {
-                unsafe { *out_deleted = count; }
+                unsafe {
+                    *out_deleted = count;
+                }
             }
             IronBaseErrorCode::Success as i32
         }

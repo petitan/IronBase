@@ -360,7 +360,10 @@ mod tests {
 
         assert_eq!(get_nested_value(&doc, "name"), Some(&json!("Alice")));
         assert_eq!(get_nested_value(&doc, "address.city"), Some(&json!("NYC")));
-        assert_eq!(get_nested_value(&doc, "address.zip.code"), Some(&json!("10001")));
+        assert_eq!(
+            get_nested_value(&doc, "address.zip.code"),
+            Some(&json!("10001"))
+        );
         assert_eq!(get_nested_value(&doc, "nonexistent"), None);
         assert_eq!(get_nested_value(&doc, "address.nonexistent"), None);
     }
@@ -378,10 +381,7 @@ mod tests {
         });
 
         // Include nested field with dot notation
-        let projection = HashMap::from([
-            ("address.city".to_string(), 1),
-            ("name".to_string(), 1),
-        ]);
+        let projection = HashMap::from([("address.city".to_string(), 1), ("name".to_string(), 1)]);
 
         let result = apply_projection(&doc, &projection);
 
@@ -404,9 +404,7 @@ mod tests {
             }
         });
 
-        let projection = HashMap::from([
-            ("data.level1.level2.value".to_string(), 1),
-        ]);
+        let projection = HashMap::from([("data.level1.level2.value".to_string(), 1)]);
 
         let result = apply_projection(&doc, &projection);
         assert_eq!(result.get("data.level1.level2.value"), Some(&json!(42)));

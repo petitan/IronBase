@@ -212,7 +212,10 @@ impl BPlusTree {
     /// );
     /// ```
     pub fn new_compound(name: String, fields: Vec<String>, unique: bool) -> Self {
-        assert!(!fields.is_empty(), "Compound index must have at least one field");
+        assert!(
+            !fields.is_empty(),
+            "Compound index must have at least one field"
+        );
 
         let root = Box::new(BTreeNode::Leaf(LeafNode {
             keys: Vec::new(),
@@ -243,7 +246,9 @@ impl BPlusTree {
     /// For single-field indexes, returns a simple IndexKey
     pub fn extract_key(&self, doc: &serde_json::Value) -> IndexKey {
         if self.metadata.is_compound() {
-            let keys: Vec<IndexKey> = self.metadata.fields
+            let keys: Vec<IndexKey> = self
+                .metadata
+                .fields
                 .iter()
                 .map(|field| {
                     get_nested_value(doc, field)
@@ -422,7 +427,11 @@ impl BPlusTree {
 
     /// Recursively collect all entries from a B+ tree node
     /// Traverses Internal nodes and collects from all Leaf nodes
-    fn collect_entries_recursive(&self, node: &BTreeNode, results: &mut Vec<(IndexKey, DocumentId)>) {
+    fn collect_entries_recursive(
+        &self,
+        node: &BTreeNode,
+        results: &mut Vec<(IndexKey, DocumentId)>,
+    ) {
         match node {
             BTreeNode::Leaf(leaf) => {
                 // Collect all entries from this leaf
@@ -446,7 +455,10 @@ impl BPlusTree {
     /// Get all entries with file handle support for multi-level persistent trees
     ///
     /// This method can traverse Internal nodes by loading children from disk.
-    pub fn get_all_entries_with_file(&self, file: &mut File) -> Result<Vec<(IndexKey, DocumentId)>> {
+    pub fn get_all_entries_with_file(
+        &self,
+        file: &mut File,
+    ) -> Result<Vec<(IndexKey, DocumentId)>> {
         let mut results = Vec::new();
         self.collect_entries_recursive_with_file(&self.root, file, &mut results)?;
         Ok(results)
@@ -508,10 +520,7 @@ impl BPlusTree {
         use std::collections::BTreeMap;
         let mut entries_map: BTreeMap<IndexKey, Vec<DocumentId>> = BTreeMap::new();
         for (key, doc_id) in self.get_all_entries() {
-            entries_map
-                .entry(key)
-                .or_insert_with(Vec::new)
-                .push(doc_id);
+            entries_map.entry(key).or_default().push(doc_id);
         }
 
         // Step 2: Apply all updates to the HashMap
@@ -525,16 +534,12 @@ impl BPlusTree {
             }
 
             // Add new entry
-            entries_map
-                .entry(new_key)
-                .or_insert_with(Vec::new)
-                .push(new_doc_id);
+            entries_map.entry(new_key).or_default().push(new_doc_id);
         }
 
         // Step 3: Convert back to sorted Vec for rebuild
-        let mut entries: Vec<(IndexKey, DocumentId)> = Vec::with_capacity(
-            entries_map.values().map(|v| v.len()).sum(),
-        );
+        let mut entries: Vec<(IndexKey, DocumentId)> =
+            Vec::with_capacity(entries_map.values().map(|v| v.len()).sum());
         for (key, doc_ids) in entries_map {
             for doc_id in doc_ids {
                 entries.push((key.clone(), doc_id));
@@ -657,7 +662,7 @@ impl BPlusTree {
         page[1..5].copy_from_slice(&len_bytes);
 
         // Write node data
-        page[5..(5 + node_bytes.len())].copy_from_slice(&node_bytes);
+        page[5..(5 + node_bytes.len())].copy_from_slice(node_bytes);
 
         // Write page to file
         file.write_all(&page)?;
@@ -772,13 +777,13 @@ impl BPlusTree {
             .write(true)
             .truncate(true)
             .open(&temp_path)
-            .map_err(|e| MongoLiteError::Io(e))?;
+            .map_err(MongoLiteError::Io)?;
 
         // Save current tree state to temp file
         self.save_to_file(&mut temp_file)?;
 
         // Ensure data is written to disk
-        temp_file.sync_all().map_err(|e| MongoLiteError::Io(e))?;
+        temp_file.sync_all().map_err(MongoLiteError::Io)?;
 
         Ok(temp_path)
     }
@@ -791,11 +796,11 @@ impl BPlusTree {
 
         // Ensure parent directory exists
         if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| MongoLiteError::Io(e))?;
+            fs::create_dir_all(parent).map_err(MongoLiteError::Io)?;
         }
 
         // Atomic rename: temp → final
-        fs::rename(temp_path, final_path).map_err(|e| MongoLiteError::Io(e))?;
+        fs::rename(temp_path, final_path).map_err(MongoLiteError::Io)?;
 
         Ok(())
     }
@@ -805,7 +810,7 @@ impl BPlusTree {
         use std::fs;
 
         if temp_path.exists() {
-            fs::remove_file(temp_path).map_err(|e| MongoLiteError::Io(e))?;
+            fs::remove_file(temp_path).map_err(MongoLiteError::Io)?;
         }
 
         Ok(())
@@ -854,10 +859,7 @@ impl Index {
             )));
         }
 
-        self.entries
-            .entry(key)
-            .or_insert_with(Vec::new)
-            .push(doc_id);
+        self.entries.entry(key).or_default().push(doc_id);
 
         Ok(())
     }
@@ -1163,7 +1165,7 @@ mod tests {
             .unwrap();
 
         let root_offset = tree.save_to_file(&mut file).unwrap();
-        assert!(root_offset > 0 || root_offset == 0); // Valid offset
+        // root_offset is u64, always >= 0, just verify it was set correctly
         assert_eq!(tree.metadata.root_offset, root_offset);
 
         // Load tree from file

@@ -646,14 +646,22 @@ fn test_size_query_operator() {
     let coll = db.collection("test").unwrap();
 
     // Insert documents with arrays of various sizes
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]})))
-        .unwrap();
-    coll.insert_one(json_to_hashmap(json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]})))
-        .unwrap();
-    coll.insert_one(json_to_hashmap(json!({"_id": 3, "name": "Charlie", "tags": []})))
-        .unwrap();
-    coll.insert_one(json_to_hashmap(json!({"_id": 4, "name": "David", "tags": ["single"]})))
-        .unwrap();
+    coll.insert_one(json_to_hashmap(
+        json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]}),
+    ))
+    .unwrap();
+    coll.insert_one(json_to_hashmap(
+        json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]}),
+    ))
+    .unwrap();
+    coll.insert_one(json_to_hashmap(
+        json!({"_id": 3, "name": "Charlie", "tags": []}),
+    ))
+    .unwrap();
+    coll.insert_one(json_to_hashmap(
+        json!({"_id": 4, "name": "David", "tags": ["single"]}),
+    ))
+    .unwrap();
 
     // Test $size: 3
     let docs = coll.find(&json!({"tags": {"$size": 3}})).unwrap();
@@ -690,20 +698,28 @@ fn test_size_query_operator_with_options() {
     let coll = db.collection("test").unwrap();
 
     // Insert documents with arrays of various sizes
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]})))
-        .unwrap();
-    coll.insert_one(json_to_hashmap(json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]})))
-        .unwrap();
+    coll.insert_one(json_to_hashmap(
+        json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]}),
+    ))
+    .unwrap();
+    coll.insert_one(json_to_hashmap(
+        json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]}),
+    ))
+    .unwrap();
 
     // Test $size: 3 with FindOptions (like Python does)
     let options = FindOptions::new();
-    let docs = coll.find_with_options(&json!({"tags": {"$size": 3}}), options).unwrap();
+    let docs = coll
+        .find_with_options(&json!({"tags": {"$size": 3}}), options)
+        .unwrap();
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0]["name"], "Alice");
 
     // Test $size: 2 with FindOptions
     let options = FindOptions::new();
-    let docs = coll.find_with_options(&json!({"tags": {"$size": 2}}), options).unwrap();
+    let docs = coll
+        .find_with_options(&json!({"tags": {"$size": 2}}), options)
+        .unwrap();
     assert_eq!(docs.len(), 1);
     assert_eq!(docs[0]["name"], "Bob");
 

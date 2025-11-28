@@ -3,8 +3,11 @@
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::handles::{CollHandle, validate_coll_handle};
-use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_error, c_str_to_string, string_to_c_str};
+use crate::error::{
+    c_str_to_string, clear_last_error, set_error, set_last_error, string_to_c_str,
+    IronBaseErrorCode,
+};
+use crate::handles::{validate_coll_handle, CollHandle};
 
 /// Create an index on a field
 ///
@@ -127,10 +130,7 @@ pub extern "C" fn ironbase_create_compound_index(
 /// - `IronBaseErrorCode::Success` (0) on success
 /// - Error code on failure
 #[no_mangle]
-pub extern "C" fn ironbase_drop_index(
-    handle: CollHandle,
-    index_name: *const c_char,
-) -> i32 {
+pub extern "C" fn ironbase_drop_index(handle: CollHandle, index_name: *const c_char) -> i32 {
     clear_last_error();
 
     let coll = match validate_coll_handle(handle) {
@@ -195,10 +195,7 @@ pub extern "C" fn ironbase_list_indexes(handle: CollHandle) -> *mut c_char {
 /// - JSON query plan (caller must free with `ironbase_free_string()`)
 /// - Null on error
 #[no_mangle]
-pub extern "C" fn ironbase_explain(
-    handle: CollHandle,
-    query_json: *const c_char,
-) -> *mut c_char {
+pub extern "C" fn ironbase_explain(handle: CollHandle, query_json: *const c_char) -> *mut c_char {
     clear_last_error();
 
     let coll = match validate_coll_handle(handle) {
@@ -226,15 +223,13 @@ pub extern "C" fn ironbase_explain(
     };
 
     match coll.inner.explain(&query) {
-        Ok(plan) => {
-            match serde_json::to_string_pretty(&plan) {
-                Ok(json) => string_to_c_str(&json),
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize plan: {}", e));
-                    ptr::null_mut()
-                }
+        Ok(plan) => match serde_json::to_string_pretty(&plan) {
+            Ok(json) => string_to_c_str(&json),
+            Err(e) => {
+                set_last_error(&format!("Failed to serialize plan: {}", e));
+                ptr::null_mut()
             }
-        }
+        },
         Err(e) => {
             set_error(&e);
             ptr::null_mut()
@@ -293,15 +288,13 @@ pub extern "C" fn ironbase_find_with_hint(
     };
 
     match coll.inner.find_with_hint(&query, &hint_str) {
-        Ok(docs) => {
-            match serde_json::to_string(&docs) {
-                Ok(json) => string_to_c_str(&json),
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize results: {}", e));
-                    ptr::null_mut()
-                }
+        Ok(docs) => match serde_json::to_string(&docs) {
+            Ok(json) => string_to_c_str(&json),
+            Err(e) => {
+                set_last_error(&format!("Failed to serialize results: {}", e));
+                ptr::null_mut()
             }
-        }
+        },
         Err(e) => {
             set_error(&e);
             ptr::null_mut()

@@ -90,9 +90,9 @@ pub struct ProjectStage {
 
 #[derive(Debug, Clone)]
 pub enum ProjectField {
-    Include,                      // 1
-    Exclude,                      // 0
-    Rename(String),               // "$fieldName"
+    Include,                       // 1
+    Exclude,                       // 0
+    Rename(String),                // "$fieldName"
     Expression(ProjectExpression), // {"$size": "$field"}, etc.
 }
 
@@ -526,7 +526,7 @@ impl GroupStage {
 
         for doc in docs {
             let group_key = self.extract_group_key(&doc)?;
-            groups.entry(group_key).or_insert_with(Vec::new).push(doc);
+            groups.entry(group_key).or_default().push(doc);
         }
 
         // Step 2: Compute accumulators for each group
@@ -627,7 +627,9 @@ impl Accumulator {
             Accumulator::Count => Ok(Value::from(docs.len() as i64)),
 
             Accumulator::Sum(expr) => match expr {
-                SumExpression::Constant(n) => Ok(Value::from((*n).saturating_mul(docs.len() as i64))),
+                SumExpression::Constant(n) => {
+                    Ok(Value::from((*n).saturating_mul(docs.len() as i64)))
+                }
                 SumExpression::Field(field) => {
                     let mut sum_int: i64 = 0;
                     let mut sum_float: f64 = 0.0;
@@ -842,21 +844,30 @@ mod tests {
     fn test_stage_not_object() {
         let result = Stage::from_json(&json!("invalid"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an object"));
     }
 
     #[test]
     fn test_stage_multiple_operators() {
         let result = Stage::from_json(&json!({"$match": {}, "$sort": {"a": 1}}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exactly one operator"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one operator"));
     }
 
     #[test]
     fn test_stage_unknown_operator() {
         let result = Stage::from_json(&json!({"$unknown": {}}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown pipeline stage"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown pipeline stage"));
     }
 
     // ========== ProjectStage tests ==========
@@ -893,7 +904,8 @@ mod tests {
         let stage = ProjectStage::from_json(&json!({
             "name": 1,
             "tagCount": {"$size": "$tags"}
-        })).unwrap();
+        }))
+        .unwrap();
         let results = stage.execute(docs).unwrap();
 
         assert_eq!(results.len(), 4);
@@ -913,7 +925,8 @@ mod tests {
         let stage = ProjectStage::from_json(&json!({
             "name": 1,
             "countSize": {"$size": "$count"}
-        })).unwrap();
+        }))
+        .unwrap();
         let results = stage.execute(docs).unwrap();
 
         // Non-array field returns null
@@ -927,7 +940,10 @@ mod tests {
             "tagCount": {"$size": "tags"}  // Missing $ prefix
         }));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a field reference starting with $"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a field reference starting with $"));
     }
 
     #[test]
@@ -935,7 +951,8 @@ mod tests {
         let docs = vec![json!({"user": {"skills": ["a", "b", "c"]}})];
         let stage = ProjectStage::from_json(&json!({
             "skillCount": {"$size": "$user.skills"}
-        })).unwrap();
+        }))
+        .unwrap();
         let results = stage.execute(docs).unwrap();
 
         assert_eq!(results[0]["skillCount"], 3);
@@ -945,28 +962,40 @@ mod tests {
     fn test_project_invalid_value() {
         let result = ProjectStage::from_json(&json!({"field": 5}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid project value"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid project value"));
     }
 
     #[test]
     fn test_project_invalid_expression() {
         let result = ProjectStage::from_json(&json!({"field": "not_a_ref"}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid project expression"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid project expression"));
     }
 
     #[test]
     fn test_project_invalid_type() {
         let result = ProjectStage::from_json(&json!({"field": [1, 2]}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be 0, 1, field reference, or expression object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be 0, 1, field reference, or expression object"));
     }
 
     #[test]
     fn test_project_not_object() {
         let result = ProjectStage::from_json(&json!("invalid"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an object"));
     }
 
     // ========== GroupStage tests ==========
@@ -982,7 +1011,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": null,
             "total": {"$sum": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results.len(), 1);
@@ -994,28 +1024,40 @@ mod tests {
     fn test_group_missing_id() {
         let result = GroupStage::from_json(&json!({"count": {"$sum": 1}}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must have _id field"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must have _id field"));
     }
 
     #[test]
     fn test_group_id_not_field_ref() {
         let result = GroupStage::from_json(&json!({"_id": "notARef"}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with $"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must start with $"));
     }
 
     #[test]
     fn test_group_id_invalid_type() {
         let result = GroupStage::from_json(&json!({"_id": 123}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be null or field reference"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be null or field reference"));
     }
 
     #[test]
     fn test_group_not_object() {
         let result = GroupStage::from_json(&json!("invalid"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an object"));
     }
 
     #[test]
@@ -1028,7 +1070,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": "$city",
             "count": {"$sum": 1}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         // Should have NYC group and null group
@@ -1048,7 +1091,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": null,
             "avg": {"$avg": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results[0]["avg"], 20.0);
@@ -1061,7 +1105,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": null,
             "avg": {"$avg": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert!(results[0]["avg"].is_null());
@@ -1078,7 +1123,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": null,
             "min": {"$min": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results[0]["min"], 10.0);
@@ -1095,7 +1141,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": null,
             "max": {"$max": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results[0]["max"], 30.0);
@@ -1113,7 +1160,8 @@ mod tests {
             "_id": null,
             "first": {"$first": "$value"},
             "last": {"$last": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results[0]["first"], "first");
@@ -1122,15 +1170,13 @@ mod tests {
 
     #[test]
     fn test_accumulator_sum_float() {
-        let docs = vec![
-            json!({"value": 1.5}),
-            json!({"value": 2.5}),
-        ];
+        let docs = vec![json!({"value": 1.5}), json!({"value": 2.5})];
 
         let stage = GroupStage::from_json(&json!({
             "_id": null,
             "sum": {"$sum": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results[0]["sum"], 4.0);
@@ -1144,7 +1190,8 @@ mod tests {
             "_id": null,
             "min": {"$min": "$value"},
             "max": {"$max": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert!(results[0]["min"].is_null());
@@ -1155,14 +1202,20 @@ mod tests {
     fn test_accumulator_invalid_sum_ref() {
         let result = Accumulator::from_json(&json!({"$sum": "notARef"}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with $"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must start with $"));
     }
 
     #[test]
     fn test_accumulator_invalid_sum_type() {
         let result = Accumulator::from_json(&json!({"$sum": [1, 2]}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a number or field reference"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a number or field reference"));
     }
 
     #[test]
@@ -1229,21 +1282,30 @@ mod tests {
     fn test_accumulator_unknown() {
         let result = Accumulator::from_json(&json!({"$unknown": "$field"}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown accumulator"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown accumulator"));
     }
 
     #[test]
     fn test_accumulator_not_object() {
         let result = Accumulator::from_json(&json!("invalid"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an object"));
     }
 
     #[test]
     fn test_accumulator_multiple_operators() {
         let result = Accumulator::from_json(&json!({"$sum": 1, "$avg": "$x"}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exactly one operator"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("exactly one operator"));
     }
 
     // ========== SortStage tests ==========
@@ -1282,7 +1344,10 @@ mod tests {
     fn test_sort_not_object() {
         let result = SortStage::from_json(&json!("invalid"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be an object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be an object"));
     }
 
     #[test]
@@ -1355,7 +1420,10 @@ mod tests {
     fn test_limit_invalid() {
         let result = LimitStage::from_json(&json!("invalid"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a positive number"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a positive number"));
     }
 
     // ========== SkipStage tests ==========
@@ -1364,7 +1432,10 @@ mod tests {
     fn test_skip_invalid() {
         let result = SkipStage::from_json(&json!("invalid"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a positive number"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a positive number"));
     }
 
     // ========== Existing tests ==========
@@ -1493,7 +1564,10 @@ mod tests {
 
         assert_eq!(get_nested_value(&doc, "name"), Some(&json!("Alice")));
         assert_eq!(get_nested_value(&doc, "address.city"), Some(&json!("NYC")));
-        assert_eq!(get_nested_value(&doc, "address.zip.code"), Some(&json!("10001")));
+        assert_eq!(
+            get_nested_value(&doc, "address.zip.code"),
+            Some(&json!("10001"))
+        );
         assert_eq!(get_nested_value(&doc, "nonexistent"), None);
         assert_eq!(get_nested_value(&doc, "address.nonexistent"), None);
     }
@@ -1509,7 +1583,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": "$address.city",
             "total": {"$sum": "$value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results.len(), 2);
@@ -1535,7 +1610,8 @@ mod tests {
             "maxQty": {"$max": "$order.qty"},
             "firstTotal": {"$first": "$order.total"},
             "lastTotal": {"$last": "$order.total"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results.len(), 1);
@@ -1561,7 +1637,8 @@ mod tests {
             "userName": "$name",
             "city": "$address.city",
             "street": "$address.street"
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results.len(), 1);
@@ -1618,7 +1695,8 @@ mod tests {
                 "avgSales": {"$avg": "$order.total"}
             }},
             {"$sort": {"totalSales": -1}}
-        ])).unwrap();
+        ]))
+        .unwrap();
 
         let results = pipeline.execute(docs).unwrap();
         assert_eq!(results.len(), 2);
@@ -1645,7 +1723,8 @@ mod tests {
         let stage = GroupStage::from_json(&json!({
             "_id": null,
             "sum": {"$sum": "$data.level1.level2.value"}
-        })).unwrap();
+        }))
+        .unwrap();
 
         let results = stage.execute(docs).unwrap();
         assert_eq!(results[0]["sum"], 60);
@@ -1667,7 +1746,8 @@ mod tests {
                 "count": {"$sum": 1}
             }},
             {"$sort": {"totalEmployees": -1}}
-        ])).unwrap();
+        ]))
+        .unwrap();
 
         let results = pipeline.execute(docs).unwrap();
 

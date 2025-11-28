@@ -6,11 +6,14 @@ use std::collections::HashMap;
 use std::os::raw::c_char;
 use std::ptr;
 
-use serde_json::Value;
 use ironbase_core::DocumentId;
+use serde_json::Value;
 
-use crate::handles::{CollHandle, validate_coll_handle};
-use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_error, c_str_to_string, string_to_c_str};
+use crate::error::{
+    c_str_to_string, clear_last_error, set_error, set_last_error, string_to_c_str,
+    IronBaseErrorCode,
+};
+use crate::handles::{validate_coll_handle, CollHandle};
 
 // ============== INSERT ==============
 
@@ -144,7 +147,9 @@ pub extern "C" fn ironbase_insert_many(
     match coll.inner.insert_many(doc_maps) {
         Ok(result) => {
             if !out_result.is_null() {
-                let ids: Vec<Value> = result.inserted_ids.iter()
+                let ids: Vec<Value> = result
+                    .inserted_ids
+                    .iter()
                     .map(|id| serde_json::from_str(&document_id_to_json(id)).unwrap_or(Value::Null))
                     .collect();
 
@@ -178,10 +183,7 @@ pub extern "C" fn ironbase_insert_many(
 /// - JSON array of documents (caller must free with `ironbase_free_string()`)
 /// - Null on error
 #[no_mangle]
-pub extern "C" fn ironbase_find(
-    handle: CollHandle,
-    query_json: *const c_char,
-) -> *mut c_char {
+pub extern "C" fn ironbase_find(handle: CollHandle, query_json: *const c_char) -> *mut c_char {
     clear_last_error();
 
     let coll = match validate_coll_handle(handle) {
@@ -209,15 +211,13 @@ pub extern "C" fn ironbase_find(
     };
 
     match coll.inner.find(&query) {
-        Ok(docs) => {
-            match serde_json::to_string(&docs) {
-                Ok(json) => string_to_c_str(&json),
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize results: {}", e));
-                    ptr::null_mut()
-                }
+        Ok(docs) => match serde_json::to_string(&docs) {
+            Ok(json) => string_to_c_str(&json),
+            Err(e) => {
+                set_last_error(&format!("Failed to serialize results: {}", e));
+                ptr::null_mut()
             }
-        }
+        },
         Err(e) => {
             set_error(&e);
             ptr::null_mut()
@@ -235,10 +235,7 @@ pub extern "C" fn ironbase_find(
 /// - JSON document (caller must free with `ironbase_free_string()`)
 /// - Null if not found or on error
 #[no_mangle]
-pub extern "C" fn ironbase_find_one(
-    handle: CollHandle,
-    query_json: *const c_char,
-) -> *mut c_char {
+pub extern "C" fn ironbase_find_one(handle: CollHandle, query_json: *const c_char) -> *mut c_char {
     clear_last_error();
 
     let coll = match validate_coll_handle(handle) {
@@ -266,15 +263,13 @@ pub extern "C" fn ironbase_find_one(
     };
 
     match coll.inner.find_one(&query) {
-        Ok(Some(doc)) => {
-            match serde_json::to_string(&doc) {
-                Ok(json) => string_to_c_str(&json),
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize document: {}", e));
-                    ptr::null_mut()
-                }
+        Ok(Some(doc)) => match serde_json::to_string(&doc) {
+            Ok(json) => string_to_c_str(&json),
+            Err(e) => {
+                set_last_error(&format!("Failed to serialize document: {}", e));
+                ptr::null_mut()
             }
-        }
+        },
         Ok(None) => ptr::null_mut(),
         Err(e) => {
             set_error(&e);
@@ -368,19 +363,23 @@ pub extern "C" fn ironbase_find_with_options(
         }
     }
 
-    find_options.limit = options.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
-    find_options.skip = options.get("skip").and_then(|v| v.as_u64()).map(|n| n as usize);
+    find_options.limit = options
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    find_options.skip = options
+        .get("skip")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
 
     match coll.inner.find_with_options(&query, find_options) {
-        Ok(docs) => {
-            match serde_json::to_string(&docs) {
-                Ok(json) => string_to_c_str(&json),
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize results: {}", e));
-                    ptr::null_mut()
-                }
+        Ok(docs) => match serde_json::to_string(&docs) {
+            Ok(json) => string_to_c_str(&json),
+            Err(e) => {
+                set_last_error(&format!("Failed to serialize results: {}", e));
+                ptr::null_mut()
             }
-        }
+        },
         Err(e) => {
             set_error(&e);
             ptr::null_mut()
@@ -455,10 +454,14 @@ pub extern "C" fn ironbase_update_one(
     match coll.inner.update_one(&query, &update) {
         Ok((matched, modified)) => {
             if !out_matched.is_null() {
-                unsafe { *out_matched = matched; }
+                unsafe {
+                    *out_matched = matched;
+                }
             }
             if !out_modified.is_null() {
-                unsafe { *out_modified = modified; }
+                unsafe {
+                    *out_modified = modified;
+                }
             }
             IronBaseErrorCode::Success as i32
         }
@@ -531,10 +534,14 @@ pub extern "C" fn ironbase_update_many(
     match coll.inner.update_many(&query, &update) {
         Ok((matched, modified)) => {
             if !out_matched.is_null() {
-                unsafe { *out_matched = matched; }
+                unsafe {
+                    *out_matched = matched;
+                }
             }
             if !out_modified.is_null() {
-                unsafe { *out_modified = modified; }
+                unsafe {
+                    *out_modified = modified;
+                }
             }
             IronBaseErrorCode::Success as i32
         }
@@ -589,7 +596,9 @@ pub extern "C" fn ironbase_delete_one(
     match coll.inner.delete_one(&query) {
         Ok(count) => {
             if !out_deleted.is_null() {
-                unsafe { *out_deleted = count; }
+                unsafe {
+                    *out_deleted = count;
+                }
             }
             IronBaseErrorCode::Success as i32
         }
@@ -642,7 +651,9 @@ pub extern "C" fn ironbase_delete_many(
     match coll.inner.delete_many(&query) {
         Ok(count) => {
             if !out_deleted.is_null() {
-                unsafe { *out_deleted = count; }
+                unsafe {
+                    *out_deleted = count;
+                }
             }
             IronBaseErrorCode::Success as i32
         }

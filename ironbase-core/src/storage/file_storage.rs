@@ -152,7 +152,7 @@ impl Storage for FileStorage {
         let mut documents = Vec::new();
 
         // Iterate over all documents in catalog
-        for (_doc_id, &offset) in &catalog {
+        for &offset in catalog.values() {
             // Read document data
             let data = self.inner.read_document_at(collection, offset)?;
 

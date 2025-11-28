@@ -3,8 +3,8 @@
 //! These opaque handles are used to pass Rust objects across the FFI boundary.
 //! C# consumers see these as IntPtr and wrap them in SafeHandle.
 
-use std::sync::Arc;
 use ironbase_core::{CollectionCore, DatabaseCore, StorageEngine};
+use std::sync::Arc;
 
 /// Opaque database handle
 ///
@@ -15,7 +15,9 @@ pub struct DatabaseHandle {
 
 impl DatabaseHandle {
     pub fn new(db: DatabaseCore<StorageEngine>) -> Self {
-        Self { inner: Arc::new(db) }
+        Self {
+            inner: Arc::new(db),
+        }
     }
 
     pub fn from_arc(db: Arc<DatabaseCore<StorageEngine>>) -> Self {

@@ -7,6 +7,9 @@
 // 3. Recovery works correctly after partial writes
 // 4. No panics occur - always Result::Err for corruption
 
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 mod chaos_helpers;
 
 use chaos_helpers::*;
@@ -33,12 +36,8 @@ fn test_wal_partial_entry_crash() {
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
         wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
             .unwrap();
-        wal.append(&WALEntry::new(
-            1,
-            WALEntryType::Operation,
-            b"op1".to_vec(),
-        ))
-        .unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Operation, b"op1".to_vec()))
+            .unwrap();
         wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
             .unwrap();
         wal.flush().unwrap();
@@ -47,10 +46,10 @@ fn test_wal_partial_entry_crash() {
     // Phase 2: Simulate crash mid-write - write partial entry
     write_partial_wal_entry(
         &wal_path,
-        2,                  // tx_id
-        format::WAL_BEGIN,  // entry type
-        &[],                // data
-        5,                  // truncate at 5 bytes (mid-header)
+        2,                 // tx_id
+        format::WAL_BEGIN, // entry type
+        &[],               // data
+        5,                 // truncate at 5 bytes (mid-header)
     )
     .unwrap();
 
@@ -63,10 +62,7 @@ fn test_wal_partial_entry_crash() {
     match result {
         Ok(recovered) => {
             // If recovery succeeds, should only have tx1
-            assert!(
-                recovered.len() <= 1,
-                "Should recover at most 1 transaction"
-            );
+            assert!(recovered.len() <= 1, "Should recover at most 1 transaction");
             if !recovered.is_empty() {
                 assert_eq!(recovered[0][0].transaction_id, 1);
             }
@@ -135,12 +131,8 @@ fn test_wal_corrupted_crc_middle() {
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
         wal.append(&WALEntry::new(1, WALEntryType::Begin, vec![]))
             .unwrap();
-        wal.append(&WALEntry::new(
-            1,
-            WALEntryType::Operation,
-            b"data".to_vec(),
-        ))
-        .unwrap();
+        wal.append(&WALEntry::new(1, WALEntryType::Operation, b"data".to_vec()))
+            .unwrap();
         wal.append(&WALEntry::new(1, WALEntryType::Commit, vec![]))
             .unwrap();
         wal.flush().unwrap();
@@ -270,7 +262,11 @@ fn test_storage_partial_document_length_only() {
         let doc = json!({"name": "Alice", "_id": 1});
         let doc_bytes = serde_json::to_vec(&doc).unwrap();
         storage
-            .write_document("test", &ironbase_core::document::DocumentId::Int(1), &doc_bytes)
+            .write_document(
+                "test",
+                &ironbase_core::document::DocumentId::Int(1),
+                &doc_bytes,
+            )
             .unwrap();
 
         storage.flush().unwrap();

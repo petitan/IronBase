@@ -153,7 +153,7 @@ impl StorageEngine {
         let mut has_documents = false;
 
         for coll_meta in self.collections.values() {
-            for (_, &doc_offset) in &coll_meta.document_catalog {
+            for &doc_offset in coll_meta.document_catalog.values() {
                 has_documents = true;
                 if doc_offset > max_doc_offset {
                     max_doc_offset = doc_offset;

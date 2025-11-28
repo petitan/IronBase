@@ -1,9 +1,8 @@
 // bindings/python/src/lib.rs
-// PyO3 wrapper for ironbase-core
+// PyO3 0.24 wrapper for ironbase-core
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
-// Arc and RwLock are used internally by DatabaseCore/CollectionCore
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,38 +17,15 @@ pub struct IronBase {
 
 #[pymethods]
 impl IronBase {
-    /// Új adatbázis megnyitása vagy létrehozása
-    ///
-    /// Args:
-    ///     path (str): Database file path (.mlite)
-    ///     durability (str, optional): Durability mode - "safe" (default), "batch", or "unsafe"
-    ///     batch_size (int, optional): Batch size for "batch" mode (default: 100)
-    ///     auto_checkpoint (int, optional): For "unsafe" mode - auto checkpoint every N ops (default: None = manual)
-    ///
-    /// Durability modes:
-    ///     - "safe": Every operation auto-committed (like SQL) - ZERO data loss, ~1-5K inserts/sec
-    ///     - "batch": Operations batched, periodic commit - Bounded loss (max batch_size ops), ~20-50K inserts/sec
-    ///     - "unsafe": No auto-commit - High data loss risk, ~50-100K inserts/sec
-    ///       - auto_checkpoint=None: Manual checkpoint() required
-    ///       - auto_checkpoint=N: Auto checkpoint every N operations
-    ///
-    /// Examples:
-    ///     # Safe mode (default)
-    ///     db = IronBase("app.mlite")
-    ///     db = IronBase("app.mlite", durability="safe")
-    ///
-    ///     # Batch mode (good balance)
-    ///     db = IronBase("app.mlite", durability="batch", batch_size=100)
-    ///
-    ///     # Unsafe mode - manual checkpoint
-    ///     db = IronBase("app.mlite", durability="unsafe")
-    ///
-    ///     # Unsafe mode - auto checkpoint every 10000 ops
-    ///     db = IronBase("app.mlite", durability="unsafe", auto_checkpoint=10000)
+    /// Create or open a database
     #[new]
     #[pyo3(signature = (path, durability="safe", batch_size=100, auto_checkpoint=None))]
-    fn new(path: String, durability: &str, batch_size: usize, auto_checkpoint: Option<usize>) -> PyResult<Self> {
-        // Parse durability mode
+    fn new(
+        path: String,
+        durability: &str,
+        batch_size: usize,
+        auto_checkpoint: Option<usize>,
+    ) -> PyResult<Self> {
         let mode = match durability {
             "safe" => DurabilityMode::Safe,
             "batch" => DurabilityMode::Batch { batch_size },
@@ -74,7 +50,7 @@ impl IronBase {
         Ok(IronBase { db: Arc::new(db) })
     }
 
-    /// Collection lekérése (ha nem létezik, létrehozza)
+    /// Get or create a collection
     fn collection(&self, name: String) -> PyResult<Collection> {
         let coll_core = self
             .db
@@ -88,19 +64,20 @@ impl IronBase {
         })
     }
 
-    /// Collection-ök listája
+    /// List all collections
     fn list_collections(&self) -> PyResult<Vec<String>> {
         Ok(self.db.list_collections())
     }
 
-    /// Set or clear JSON schema for a collection (optional)
-    ///
-    /// Args:
-    ///     name (str): Collection name
-    ///     schema (dict or None): JSON schema definition
-    fn set_collection_schema(&self, name: String, schema: Option<&PyDict>) -> PyResult<()> {
+    /// Set or clear JSON schema for a collection
+    fn set_collection_schema(
+        &self,
+        py: Python<'_>,
+        name: String,
+        schema: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
         let schema_json = match schema {
-            Some(dict) => Some(python_dict_to_json_value(dict)?),
+            Some(dict) => Some(python_dict_to_json_value(py, &dict)?),
             None => None,
         };
 
@@ -109,49 +86,33 @@ impl IronBase {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    /// Collection törlése
+    /// Drop a collection
     fn drop_collection(&self, name: String) -> PyResult<()> {
         self.db
             .drop_collection(&name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    /// Adatbázis bezárása és flush
+    /// Close and flush database
     fn close(&self) -> PyResult<()> {
         self.db
             .flush()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 
-    /// Checkpoint - Clear WAL without flushing metadata
-    /// Use this in long-running processes to prevent WAL file growth
-    ///
-    /// Example:
-    ///     db = IronBase("server.mlite")
-    ///     for i in range(100000):
-    ///         db["logs"].insert_one({"log": f"Entry {i}"})
-    ///         if i % 1000 == 0:
-    ///             db.checkpoint()  # Prevent WAL from growing indefinitely
+    /// Checkpoint - Clear WAL
     fn checkpoint(&self) -> PyResult<()> {
         self.db
             .checkpoint()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 
-    /// Adatbázis statisztikák
+    /// Get database statistics
     fn stats(&self) -> PyResult<String> {
         Ok(serde_json::to_string_pretty(&self.db.stats()).unwrap())
     }
 
-    /// Set the global log level
-    ///
-    /// Args:
-    ///     level (str): One of "ERROR", "WARN", "INFO", "DEBUG", "TRACE"
-    ///
-    /// Example:
-    ///     db.set_log_level("DEBUG")  # Show debug messages
-    ///     db.set_log_level("WARN")   # Only warnings and errors (default)
-    ///     db.set_log_level("TRACE")  # Show everything (very verbose)
+    /// Set global log level
     #[staticmethod]
     fn set_log_level(level: String) -> PyResult<()> {
         let log_level = ironbase_core::LogLevel::from_str(&level).ok_or_else(|| {
@@ -165,36 +126,30 @@ impl IronBase {
         Ok(())
     }
 
-    /// Get the current global log level
-    ///
-    /// Returns:
-    ///     str: Current log level ("ERROR", "WARN", "INFO", "DEBUG", or "TRACE")
+    /// Get current log level
     #[staticmethod]
     fn get_log_level() -> PyResult<String> {
         let level = ironbase_core::get_log_level();
         Ok(level.as_str().to_string())
     }
 
-    /// Storage compaction - removes tombstones and old document versions
-    /// Returns compaction statistics as a dict
-    fn compact(&self) -> PyResult<PyObject> {
+    /// Storage compaction
+    fn compact<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let stats = self
             .db
             .compact()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        Python::with_gil(|py| {
-            let dict = PyDict::new(py);
-            dict.set_item("size_before", stats.size_before)?;
-            dict.set_item("size_after", stats.size_after)?;
-            dict.set_item("space_saved", stats.space_saved())?;
-            dict.set_item("documents_scanned", stats.documents_scanned)?;
-            dict.set_item("documents_kept", stats.documents_kept)?;
-            dict.set_item("tombstones_removed", stats.tombstones_removed)?;
-            dict.set_item("peak_memory_mb", stats.peak_memory_mb)?;
-            dict.set_item("compression_ratio", stats.compression_ratio())?;
-            Ok(dict.into())
-        })
+        let dict = PyDict::new(py);
+        dict.set_item("size_before", stats.size_before)?;
+        dict.set_item("size_after", stats.size_after)?;
+        dict.set_item("space_saved", stats.space_saved())?;
+        dict.set_item("documents_scanned", stats.documents_scanned)?;
+        dict.set_item("documents_kept", stats.documents_kept)?;
+        dict.set_item("tombstones_removed", stats.tombstones_removed)?;
+        dict.set_item("peak_memory_mb", stats.peak_memory_mb)?;
+        dict.set_item("compression_ratio", stats.compression_ratio())?;
+        Ok(dict)
     }
 
     fn __repr__(&self) -> String {
@@ -204,159 +159,98 @@ impl IronBase {
     // ========== ACD TRANSACTION API ==========
 
     /// Begin a new transaction
-    /// Returns the transaction ID
     fn begin_transaction(&self) -> PyResult<u64> {
         Ok(self.db.begin_transaction())
     }
 
-    /// Commit a transaction (applies all buffered operations atomically)
+    /// Commit a transaction
     fn commit_transaction(&self, tx_id: u64) -> PyResult<()> {
         self.db
             .commit_transaction(tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    /// Rollback a transaction (discard all buffered operations)
+    /// Rollback a transaction
     fn rollback_transaction(&self, tx_id: u64) -> PyResult<()> {
         self.db
             .rollback_transaction(tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    // ========== COLLECTION TRANSACTION METHODS ==========
-
     /// Insert one document within a transaction
-    ///
-    /// Args:
-    ///     collection_name: str - Name of the collection
-    ///     document: dict - Document to insert
-    ///     tx_id: int - Transaction ID from begin_transaction()
-    ///
-    /// Returns:
-    ///     dict - {"acknowledged": True, "inserted_id": <id>}
-    ///
-    /// Example:
-    ///     tx_id = db.begin_transaction()
-    ///     db.insert_one_tx("users", {"name": "Alice"}, tx_id)
-    ///     db.commit_transaction(tx_id)
-    fn insert_one_tx(
+    fn insert_one_tx<'py>(
         &self,
+        py: Python<'py>,
         collection_name: String,
-        document: &PyDict,
+        document: Bound<'_, PyDict>,
         tx_id: u64,
-    ) -> PyResult<PyObject> {
-        // Convert Python dict to HashMap
+    ) -> PyResult<Bound<'py, PyDict>> {
         let mut doc_map: HashMap<String, Value> = HashMap::new();
         for (key, value) in document.iter() {
             let key_str: String = key.extract()?;
-            let json_value = python_to_json(value)?;
+            let json_value = python_to_json(py, &value)?;
             doc_map.insert(key_str, json_value);
         }
 
-        // Call Rust core (ALL logic in core)
         let inserted_id = self
             .db
             .insert_one_tx(&collection_name, doc_map, tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Return result
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-
-            let id_value = match inserted_id {
-                DocumentId::Int(i) => i.into_py(py),
-                DocumentId::String(s) => s.into_py(py),
-                DocumentId::ObjectId(s) => s.into_py(py),
-            };
-            result.set_item("inserted_id", id_value)?;
-
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        let id_value = doc_id_to_py(py, &inserted_id)?;
+        result.set_item("inserted_id", id_value)?;
+        Ok(result)
     }
 
     /// Update one document within a transaction
-    ///
-    /// Args:
-    ///     collection_name: str - Name of the collection
-    ///     query: dict - Query to match document
-    ///     new_doc: dict - New document content (not update operators)
-    ///     tx_id: int - Transaction ID from begin_transaction()
-    ///
-    /// Returns:
-    ///     dict - {"acknowledged": True, "matched_count": <n>, "modified_count": <n>}
-    ///
-    /// Example:
-    ///     tx_id = db.begin_transaction()
-    ///     db.update_one_tx("users", {"name": "Alice"}, {"name": "Alice", "age": 30}, tx_id)
-    ///     db.commit_transaction(tx_id)
-    fn update_one_tx(
+    fn update_one_tx<'py>(
         &self,
+        py: Python<'py>,
         collection_name: String,
-        query: &PyDict,
-        new_doc: &PyDict,
+        query: Bound<'_, PyDict>,
+        new_doc: Bound<'_, PyDict>,
         tx_id: u64,
-    ) -> PyResult<PyObject> {
-        // Convert Python dicts to JSON
-        let query_json = python_dict_to_json_value(query)?;
-        let new_doc_json = python_dict_to_json_value(new_doc)?;
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
+        let new_doc_json = python_dict_to_json_value(py, &new_doc)?;
 
-        // Call Rust core (ALL logic in core)
         let (matched_count, modified_count) = self
             .db
             .update_one_tx(&collection_name, &query_json, new_doc_json, tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Return result
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-            result.set_item("matched_count", matched_count)?;
-            result.set_item("modified_count", modified_count)?;
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("matched_count", matched_count)?;
+        result.set_item("modified_count", modified_count)?;
+        Ok(result)
     }
 
     /// Delete one document within a transaction
-    ///
-    /// Args:
-    ///     collection_name: str - Name of the collection
-    ///     query: dict - Query to match document
-    ///     tx_id: int - Transaction ID from begin_transaction()
-    ///
-    /// Returns:
-    ///     dict - {"acknowledged": True, "deleted_count": <n>}
-    ///
-    /// Example:
-    ///     tx_id = db.begin_transaction()
-    ///     db.delete_one_tx("users", {"name": "Alice"}, tx_id)
-    ///     db.commit_transaction(tx_id)
-    fn delete_one_tx(
+    fn delete_one_tx<'py>(
         &self,
+        py: Python<'py>,
         collection_name: String,
-        query: &PyDict,
+        query: Bound<'_, PyDict>,
         tx_id: u64,
-    ) -> PyResult<PyObject> {
-        // Convert Python dict to JSON
-        let query_json = python_dict_to_json_value(query)?;
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
 
-        // Call Rust core (ALL logic in core)
         let deleted_count = self
             .db
             .delete_one_tx(&collection_name, &query_json, tx_id)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Return result
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-            result.set_item("deleted_count", deleted_count)?;
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("deleted_count", deleted_count)?;
+        Ok(result)
     }
 }
 
-/// Collection - Python wrapper for CollectionCore
+/// Collection wrapper
 #[pyclass]
 pub struct Collection {
     core: CollectionCore<StorageEngine>,
@@ -366,10 +260,10 @@ pub struct Collection {
 
 #[pymethods]
 impl Collection {
-    /// Set or clear JSON schema for this collection
-    fn set_schema(&self, schema: Option<&PyDict>) -> PyResult<()> {
+    /// Set or clear JSON schema
+    fn set_schema(&self, py: Python<'_>, schema: Option<Bound<'_, PyDict>>) -> PyResult<()> {
         let schema_json = match schema {
-            Some(dict) => Some(python_dict_to_json_value(dict)?),
+            Some(dict) => Some(python_dict_to_json_value(py, &dict)?),
             None => None,
         };
 
@@ -378,128 +272,100 @@ impl Collection {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    /// Get the current JSON schema for this collection
-    ///
-    /// Returns:
-    ///     dict or None: The JSON schema if set, None otherwise
-    ///
-    /// Example:
-    ///     schema = collection.get_schema()
-    ///     if schema:
-    ///         print(schema["properties"])
-    fn get_schema(&self) -> PyResult<PyObject> {
+    /// Get current JSON schema
+    fn get_schema<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
         let schema = self.core.get_schema();
-        Python::with_gil(|py| match schema {
-            Some(v) => Ok(json_value_to_python(py, &v)?),
+        match schema {
+            Some(v) => json_value_to_python(py, &v),
             None => Ok(py.None()),
-        })
+        }
     }
 
-    /// Insert one document (respects database durability mode)
-    ///
-    /// This method automatically uses the database's durability mode:
-    /// - Safe mode: Auto-commits immediately (WAL + fsync)
-    /// - Batch mode: Batches and commits periodically
-    /// - Unsafe mode: No auto-commit (fast path)
-    fn insert_one(&self, document: &PyDict) -> PyResult<PyObject> {
+    /// Insert one document
+    fn insert_one<'py>(
+        &self,
+        py: Python<'py>,
+        document: Bound<'_, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
         let mut doc_map: HashMap<String, Value> = HashMap::new();
 
-        // Python dict -> HashMap konverzió
         for (key, value) in document.iter() {
             let key_str: String = key.extract()?;
-            let json_value = python_to_json(value)?;
+            let json_value = python_to_json(py, &value)?;
             doc_map.insert(key_str, json_value);
         }
 
-        // Call database-level insert_one_safe (respects durability mode)
         let inserted_id = self
             .db
             .insert_one_safe(&self.name, doc_map)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Eredmény visszaadása
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-
-            let id_value = match inserted_id {
-                DocumentId::Int(i) => i.into_py(py),
-                DocumentId::String(s) => s.into_py(py),
-                DocumentId::ObjectId(s) => s.into_py(py),
-            };
-            result.set_item("inserted_id", id_value)?;
-
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        let id_value = doc_id_to_py(py, &inserted_id)?;
+        result.set_item("inserted_id", id_value)?;
+        Ok(result)
     }
 
-    /// Insert many documents - optimized batch insert
-    fn insert_many(&self, documents: &PyList) -> PyResult<PyObject> {
-        // Convert Python list to Vec<HashMap>
+    /// Insert many documents
+    fn insert_many<'py>(
+        &self,
+        py: Python<'py>,
+        documents: Bound<'_, PyList>,
+    ) -> PyResult<Bound<'py, PyDict>> {
         let mut docs = Vec::with_capacity(documents.len());
         for doc in documents.iter() {
-            let doc_dict: &PyDict = doc.downcast()?;
+            let doc_dict = doc.downcast::<PyDict>()?;
             let mut fields = HashMap::new();
 
             for (key, value) in doc_dict.iter() {
                 let key_str: String = key.extract()?;
-                let value_json = python_to_json(value)?;
+                let value_json = python_to_json(py, &value)?;
                 fields.insert(key_str, value_json);
             }
 
             docs.push(fields);
         }
 
-        // Call Rust core insert_many (ALL logic in core)
         let result = self
             .core
             .insert_many(docs)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert result back to Python
-        Python::with_gil(|py| {
-            let result_dict = PyDict::new(py);
-            result_dict.set_item("acknowledged", true)?;
-            result_dict.set_item("inserted_count", result.inserted_count)?;
+        let result_dict = PyDict::new(py);
+        result_dict.set_item("acknowledged", true)?;
+        result_dict.set_item("inserted_count", result.inserted_count)?;
 
-            // Convert inserted_ids to Python list
-            let ids_list = PyList::empty(py);
-            for doc_id in result.inserted_ids {
-                match doc_id {
-                    DocumentId::Int(i) => ids_list.append(i)?,
-                    DocumentId::String(s) => ids_list.append(s)?,
-                    DocumentId::ObjectId(oid) => ids_list.append(oid)?,
-                }
-            }
-            result_dict.set_item("inserted_ids", ids_list)?;
+        let ids_list = PyList::empty(py);
+        for doc_id in result.inserted_ids {
+            let id_value = doc_id_to_py(py, &doc_id)?;
+            ids_list.append(id_value)?;
+        }
+        result_dict.set_item("inserted_ids", ids_list)?;
 
-            Ok(result_dict.into())
-        })
+        Ok(result_dict)
     }
 
-    /// Find documents with optional projection, sort, limit, skip
+    /// Find documents with options
     #[pyo3(signature = (query=None, projection=None, sort=None, limit=None, skip=None))]
-    fn find(
+    fn find<'py>(
         &self,
-        query: Option<&PyDict>,
-        projection: Option<&PyDict>,
-        sort: Option<&PyList>,
+        py: Python<'py>,
+        query: Option<Bound<'_, PyDict>>,
+        projection: Option<Bound<'_, PyDict>>,
+        sort: Option<Bound<'_, PyList>>,
         limit: Option<usize>,
         skip: Option<usize>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Bound<'py, PyList>> {
         use ironbase_core::find_options::FindOptions;
-        use std::collections::HashMap;
 
-        // Parse query (empty query = all documents)
         let query_json = match query {
-            Some(q) => python_dict_to_json_value(q)?,
+            Some(q) => python_dict_to_json_value(py, &q)?,
             None => serde_json::json!({}),
         };
 
-        // Build FindOptions
         let mut options = FindOptions::new();
 
-        // Convert projection
         if let Some(proj) = projection {
             let mut projection_map = HashMap::new();
             for (key, value) in proj.iter() {
@@ -510,11 +376,10 @@ impl Collection {
             options.projection = Some(projection_map);
         }
 
-        // Convert sort
         if let Some(sort_list) = sort {
             let mut sort_vec = Vec::new();
             for item in sort_list.iter() {
-                let tuple: &PyTuple = item.downcast()?;
+                let tuple = item.downcast::<PyTuple>()?;
                 let field: String = tuple.get_item(0)?.extract()?;
                 let direction: i32 = tuple.get_item(1)?.extract()?;
                 sort_vec.push((field, direction));
@@ -522,56 +387,52 @@ impl Collection {
             options.sort = Some(sort_vec);
         }
 
-        // Set limit and skip
         options.limit = limit;
         options.skip = skip;
 
-        // Call core method
         let results = self
             .core
             .find_with_options(&query_json, options)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert to Python list
-        Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
+        let py_list = PyList::empty(py);
+        for doc in results {
+            let py_dict = json_to_python_dict(py, &doc)?;
+            py_list.append(py_dict)?;
+        }
 
-            for doc in results {
-                let py_dict = json_to_python_dict(py, &doc)?;
-                py_list.append(py_dict)?;
-            }
-
-            Ok(py_list.into())
-        })
+        Ok(py_list)
     }
 
     /// Find one document
-    fn find_one(&self, query: Option<&PyDict>) -> PyResult<PyObject> {
+    fn find_one<'py>(
+        &self,
+        py: Python<'py>,
+        query: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<PyObject> {
         let query_json = match query {
-            Some(q) => python_dict_to_json_value(q)?,
+            Some(q) => python_dict_to_json_value(py, &q)?,
             None => serde_json::json!({}),
         };
 
-        // Call core method
         let result = self
             .core
             .find_one(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert to Python
-        Python::with_gil(|py| match result {
+        match result {
             Some(doc) => {
                 let py_dict = json_to_python_dict(py, &doc)?;
-                Ok(py_dict.into())
+                Ok(py_dict.into_any().unbind())
             }
             None => Ok(py.None()),
-        })
+        }
     }
 
     /// Count documents
-    fn count_documents(&self, query: Option<&PyDict>) -> PyResult<u64> {
+    fn count_documents(&self, py: Python<'_>, query: Option<Bound<'_, PyDict>>) -> PyResult<u64> {
         let query_json = match query {
-            Some(q) => python_dict_to_json_value(q)?,
+            Some(q) => python_dict_to_json_value(py, &q)?,
             None => serde_json::json!({}),
         };
 
@@ -581,9 +442,14 @@ impl Collection {
     }
 
     /// Distinct values
-    fn distinct(&self, field: &str, query: Option<&PyDict>) -> PyResult<PyObject> {
+    fn distinct<'py>(
+        &self,
+        py: Python<'py>,
+        field: &str,
+        query: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyList>> {
         let query_json = match query {
-            Some(q) => python_dict_to_json_value(q)?,
+            Some(q) => python_dict_to_json_value(py, &q)?,
             None => serde_json::json!({}),
         };
 
@@ -592,101 +458,97 @@ impl Collection {
             .distinct(field, &query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert to Python list
-        Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
-            for value in distinct_values {
-                let py_value = json_value_to_python(py, &value)?;
-                py_list.append(py_value)?;
-            }
-            Ok(py_list.into())
-        })
+        let py_list = PyList::empty(py);
+        for value in distinct_values {
+            let py_value = json_value_to_python(py, &value)?;
+            py_list.append(py_value)?;
+        }
+        Ok(py_list)
     }
 
     /// Update one document
-    fn update_one(&self, query: &PyDict, update: &PyDict) -> PyResult<PyObject> {
-        let query_json = python_dict_to_json_value(query)?;
-        let update_json = python_dict_to_json_value(update)?;
+    fn update_one<'py>(
+        &self,
+        py: Python<'py>,
+        query: Bound<'_, PyDict>,
+        update: Bound<'_, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
+        let update_json = python_dict_to_json_value(py, &update)?;
 
         let (matched_count, modified_count) = self
             .core
             .update_one(&query_json, &update_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-            result.set_item("matched_count", matched_count)?;
-            result.set_item("modified_count", modified_count)?;
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("matched_count", matched_count)?;
+        result.set_item("modified_count", modified_count)?;
+        Ok(result)
     }
 
     /// Update many documents
-    fn update_many(&self, query: &PyDict, update: &PyDict) -> PyResult<PyObject> {
-        let query_json = python_dict_to_json_value(query)?;
-        let update_json = python_dict_to_json_value(update)?;
+    fn update_many<'py>(
+        &self,
+        py: Python<'py>,
+        query: Bound<'_, PyDict>,
+        update: Bound<'_, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
+        let update_json = python_dict_to_json_value(py, &update)?;
 
         let (matched_count, modified_count) = self
             .core
             .update_many(&query_json, &update_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-            result.set_item("matched_count", matched_count)?;
-            result.set_item("modified_count", modified_count)?;
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("matched_count", matched_count)?;
+        result.set_item("modified_count", modified_count)?;
+        Ok(result)
     }
 
     /// Delete one document
-    fn delete_one(&self, query: &PyDict) -> PyResult<PyObject> {
-        let query_json = python_dict_to_json_value(query)?;
+    fn delete_one<'py>(
+        &self,
+        py: Python<'py>,
+        query: Bound<'_, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
 
         let deleted_count = self
             .core
             .delete_one(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-            result.set_item("deleted_count", deleted_count)?;
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("deleted_count", deleted_count)?;
+        Ok(result)
     }
 
     /// Delete many documents
-    fn delete_many(&self, query: &PyDict) -> PyResult<PyObject> {
-        let query_json = python_dict_to_json_value(query)?;
+    fn delete_many<'py>(
+        &self,
+        py: Python<'py>,
+        query: Bound<'_, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
 
         let deleted_count = self
             .core
             .delete_many(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        Python::with_gil(|py| {
-            let result = PyDict::new(py);
-            result.set_item("acknowledged", true)?;
-            result.set_item("deleted_count", deleted_count)?;
-            Ok(result.into())
-        })
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("deleted_count", deleted_count)?;
+        Ok(result)
     }
 
-    /// Create an index on a field
-    ///
-    /// Args:
-    ///     field: str - Field name to index
-    ///     unique: bool - Whether the index should enforce uniqueness (default: False)
-    ///
-    /// Returns:
-    ///     str - Index name
-    ///
-    /// Example:
-    ///     collection.create_index("email", unique=True)
-    ///     collection.create_index("age")
+    /// Create an index
     #[pyo3(signature = (field, unique=false))]
     fn create_index(&self, field: String, unique: bool) -> PyResult<String> {
         self.core
@@ -694,32 +556,7 @@ impl Collection {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    /// Create a compound index on multiple fields
-    ///
-    /// Compound indexes allow efficient queries on multiple fields in order.
-    /// The field order matters - queries can use the index if they query
-    /// the first N fields in order (prefix matching).
-    ///
-    /// Args:
-    ///     fields: list[str] - Ordered list of field names to index
-    ///     unique: bool - Whether the compound key should be unique (default: False)
-    ///
-    /// Returns:
-    ///     str - Index name (format: "collection_field1_field2_...")
-    ///
-    /// Examples:
-    ///     # Create compound index on (country, city)
-    ///     collection.create_compound_index(["country", "city"])
-    ///
-    ///     # Create unique compound index
-    ///     collection.create_compound_index(["user_id", "product_id"], unique=True)
-    ///
-    ///     # These queries can use the (country, city) index:
-    ///     collection.find({"country": "US"})                    # prefix match
-    ///     collection.find({"country": "US", "city": "NYC"})     # full match
-    ///
-    ///     # This query CANNOT use the index efficiently:
-    ///     collection.find({"city": "NYC"})                      # not a prefix
+    /// Create a compound index
     #[pyo3(signature = (fields, unique=false))]
     fn create_compound_index(&self, fields: Vec<String>, unique: bool) -> PyResult<String> {
         if fields.is_empty() {
@@ -734,175 +571,103 @@ impl Collection {
     }
 
     /// Drop an index
-    ///
-    /// Args:
-    ///     index_name: str - Name of the index to drop
-    ///
-    /// Example:
-    ///     collection.drop_index("users_email")
     fn drop_index(&self, index_name: String) -> PyResult<()> {
         self.core
             .drop_index(&index_name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    /// List all indexes in this collection
-    ///
-    /// Returns:
-    ///     list - List of index names
-    ///
-    /// Example:
-    ///     indexes = collection.list_indexes()
-    ///     print(indexes)  # ['users_id', 'users_email', 'users_age']
+    /// List all indexes
     fn list_indexes(&self) -> PyResult<Vec<String>> {
         Ok(self.core.list_indexes())
     }
 
-    /// Explain the query execution plan without executing the query
-    ///
-    /// Args:
-    ///     query: dict - MongoDB-style query
-    ///
-    /// Returns:
-    ///     dict - Query plan with information about index usage
-    ///
-    /// Example:
-    ///     plan = collection.explain({"age": 25})
-    ///     print(plan["queryPlan"])  # "IndexScan" or "CollectionScan"
-    ///     print(plan["indexUsed"])  # "users_age" or null
-    fn explain(&self, query: &PyDict) -> PyResult<PyObject> {
-        let query_json = python_dict_to_json_value(query)?;
+    /// Explain query
+    fn explain<'py>(
+        &self,
+        py: Python<'py>,
+        query: Bound<'_, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
 
         let plan = self
             .core
             .explain(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert JSON Value to Python dict
-        Python::with_gil(|py| {
-            let py_dict = json_to_python_dict(py, &plan)?;
-            Ok(py_dict.into())
-        })
+        json_to_python_dict(py, &plan)
     }
 
-    /// Execute a query with manual index selection (hint)
-    ///
-    /// Args:
-    ///     query: dict - MongoDB-style query
-    ///     hint: str - Index name to use
-    ///
-    /// Returns:
-    ///     list - Matching documents
-    ///
-    /// Example:
-    ///     # Force use of age index even if planner would choose differently
-    ///     results = collection.find_with_hint({"age": 25}, "users_age")
-    fn find_with_hint(&self, query: &PyDict, hint: String) -> PyResult<PyObject> {
-        let query_json = python_dict_to_json_value(query)?;
+    /// Find with hint
+    fn find_with_hint<'py>(
+        &self,
+        py: Python<'py>,
+        query: Bound<'_, PyDict>,
+        hint: String,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
 
         let results = self
             .core
             .find_with_hint(&query_json, &hint)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert to Python list
-        Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
+        let py_list = PyList::empty(py);
+        for doc in results {
+            let py_dict = json_to_python_dict(py, &doc)?;
+            py_list.append(py_dict)?;
+        }
 
-            for doc in results {
-                let py_dict = json_to_python_dict(py, &doc)?;
-                py_list.append(py_dict)?;
-            }
-
-            Ok(py_list.into())
-        })
+        Ok(py_list)
     }
 
     /// Execute aggregation pipeline
-    ///
-    /// Args:
-    ///     pipeline: list - List of aggregation stage dictionaries
-    ///
-    /// Returns:
-    ///     list - Aggregation results
-    ///
-    /// Example:
-    ///     # Group users by city and count
-    ///     results = collection.aggregate([
-    ///         {"$match": {"age": {"$gte": 18}}},
-    ///         {"$group": {"_id": "$city", "count": {"$sum": 1}}},
-    ///         {"$sort": {"count": -1}}
-    ///     ])
-    fn aggregate(&self, pipeline: &PyList) -> PyResult<PyObject> {
-        // Convert Python list to JSON array
+    fn aggregate<'py>(
+        &self,
+        py: Python<'py>,
+        pipeline: Bound<'_, PyList>,
+    ) -> PyResult<Bound<'py, PyList>> {
         let mut stages = Vec::new();
         for stage in pipeline.iter() {
-            let stage_dict: &PyDict = stage.downcast()?;
-            let stage_json = python_dict_to_json_value(stage_dict)?;
+            let stage_dict = stage.downcast::<PyDict>()?;
+            let stage_json = python_dict_to_json_value(py, stage_dict)?;
             stages.push(stage_json);
         }
 
         let pipeline_json = serde_json::Value::Array(stages);
 
-        // Execute aggregation
         let results = self
             .core
             .aggregate(&pipeline_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert to Python list
-        Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
+        let py_list = PyList::empty(py);
+        for doc in results {
+            let py_dict = json_to_python_dict(py, &doc)?;
+            py_list.append(py_dict)?;
+        }
 
-            for doc in results {
-                let py_dict = json_to_python_dict(py, &doc)?;
-                py_list.append(py_dict)?;
-            }
-
-            Ok(py_list.into())
-        })
+        Ok(py_list)
     }
 
-    /// Create a cursor for streaming through large result sets
-    ///
-    /// This is more memory efficient than find() for large collections
-    /// as it processes documents in batches rather than loading all at once.
-    ///
-    /// Args:
-    ///     query: dict - Query filter (default: match all)
-    ///     batch_size: int - Number of documents per batch (default: 100)
-    ///
-    /// Returns:
-    ///     Cursor - A cursor object for iterating through results
-    ///
-    /// Example:
-    ///     # Process 1 million documents without loading all into memory
-    ///     cursor = collection.find_cursor({}, batch_size=500)
-    ///
-    ///     # Iterate one at a time
-    ///     while (doc := cursor.next()) is not None:
-    ///         process(doc)
-    ///
-    ///     # Or process in batches
-    ///     cursor.rewind()
-    ///     while not cursor.is_finished():
-    ///         batch = cursor.next_batch()
-    ///         for doc in batch:
-    ///             process(doc)
+    /// Create a cursor for streaming
     #[pyo3(signature = (query=None, batch_size=100))]
-    fn find_cursor(&self, query: Option<&PyDict>, batch_size: usize) -> PyResult<Cursor> {
+    fn find_cursor(
+        &self,
+        py: Python<'_>,
+        query: Option<Bound<'_, PyDict>>,
+        batch_size: usize,
+    ) -> PyResult<Cursor> {
         let query_json = match query {
-            Some(q) => python_dict_to_json_value(q)?,
+            Some(q) => python_dict_to_json_value(py, &q)?,
             None => serde_json::json!({}),
         };
 
-        // Get all matching document IDs (not the documents themselves)
         let results = self
             .core
             .find(&query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
-        // Convert documents to owned values for the cursor
         Ok(Cursor {
             documents: results,
             position: 0,
@@ -916,8 +681,6 @@ impl Collection {
 }
 
 /// Cursor for iterating through query results
-///
-/// Provides memory-efficient iteration over large result sets.
 #[pyclass]
 pub struct Cursor {
     documents: Vec<Value>,
@@ -927,51 +690,51 @@ pub struct Cursor {
 
 #[pymethods]
 impl Cursor {
-    /// Get the next document, or None if exhausted
-    fn next(&mut self) -> PyResult<PyObject> {
+    /// Get the next document
+    fn next<'py>(&mut self, py: Python<'py>) -> PyResult<PyObject> {
         if self.position >= self.documents.len() {
-            return Python::with_gil(|py| Ok(py.None()));
+            return Ok(py.None());
         }
 
         let doc = &self.documents[self.position];
         self.position += 1;
 
-        Python::with_gil(|py| {
-            let py_dict = json_to_python_dict(py, doc)?;
-            Ok(py_dict.into())
-        })
+        let py_dict = json_to_python_dict(py, doc)?;
+        Ok(py_dict.into_any().unbind())
     }
 
-    /// Get the next batch of documents
-    fn next_batch(&mut self) -> PyResult<PyObject> {
-        self.next_chunk(self.batch_size)
+    /// Get the next batch
+    fn next_batch<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        self.next_chunk(py, self.batch_size)
     }
 
-    /// Get the next chunk of documents (up to chunk_size)
-    fn next_chunk(&mut self, chunk_size: usize) -> PyResult<PyObject> {
+    /// Get next chunk
+    fn next_chunk<'py>(
+        &mut self,
+        py: Python<'py>,
+        chunk_size: usize,
+    ) -> PyResult<Bound<'py, PyList>> {
         if self.position >= self.documents.len() {
-            return Python::with_gil(|py| Ok(PyList::empty(py).into()));
+            return Ok(PyList::empty(py));
         }
 
         let end = (self.position + chunk_size).min(self.documents.len());
 
-        Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
-            for doc in &self.documents[self.position..end] {
-                let py_dict = json_to_python_dict(py, doc)?;
-                py_list.append(py_dict)?;
-            }
-            self.position = end;
-            Ok(py_list.into())
-        })
+        let py_list = PyList::empty(py);
+        for doc in &self.documents[self.position..end] {
+            let py_dict = json_to_python_dict(py, doc)?;
+            py_list.append(py_dict)?;
+        }
+        self.position = end;
+        Ok(py_list)
     }
 
-    /// Get remaining document count
+    /// Get remaining count
     fn remaining(&self) -> usize {
         self.documents.len().saturating_sub(self.position)
     }
 
-    /// Get total document count
+    /// Get total count
     fn total(&self) -> usize {
         self.documents.len()
     }
@@ -981,59 +744,55 @@ impl Cursor {
         self.position
     }
 
-    /// Check if cursor is exhausted
+    /// Check if exhausted
     fn is_finished(&self) -> bool {
         self.position >= self.documents.len()
     }
 
-    /// Reset cursor to the beginning
+    /// Reset cursor
     fn rewind(&mut self) {
         self.position = 0;
     }
 
-    /// Skip the next N documents
+    /// Skip N documents
     fn skip(&mut self, n: usize) {
         self.position = (self.position + n).min(self.documents.len());
     }
 
-    /// Take the next N documents
-    fn take(&mut self, n: usize) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
-            for _ in 0..n {
-                if self.position >= self.documents.len() {
-                    break;
-                }
-                let doc = &self.documents[self.position];
-                self.position += 1;
-                let py_dict = json_to_python_dict(py, doc)?;
-                py_list.append(py_dict)?;
+    /// Take N documents
+    fn take<'py>(&mut self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
+        let py_list = PyList::empty(py);
+        for _ in 0..n {
+            if self.position >= self.documents.len() {
+                break;
             }
-            Ok(py_list.into())
-        })
+            let doc = &self.documents[self.position];
+            self.position += 1;
+            let py_dict = json_to_python_dict(py, doc)?;
+            py_list.append(py_dict)?;
+        }
+        Ok(py_list)
     }
 
-    /// Collect all remaining documents into a list
-    fn collect_all(&mut self) -> PyResult<PyObject> {
-        Python::with_gil(|py| {
-            let py_list = PyList::empty(py);
-            while self.position < self.documents.len() {
-                let doc = &self.documents[self.position];
-                self.position += 1;
-                let py_dict = json_to_python_dict(py, doc)?;
-                py_list.append(py_dict)?;
-            }
-            Ok(py_list.into())
-        })
+    /// Collect all remaining
+    fn collect_all<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let py_list = PyList::empty(py);
+        while self.position < self.documents.len() {
+            let doc = &self.documents[self.position];
+            self.position += 1;
+            let py_dict = json_to_python_dict(py, doc)?;
+            py_list.append(py_dict)?;
+        }
+        Ok(py_list)
     }
 
-    /// Support Python iteration protocol
+    /// Python iterator protocol
     fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
         slf
     }
 
-    /// Get next item for Python iteration
-    fn __next__(&mut self) -> PyResult<Option<PyObject>> {
+    /// Get next for Python iteration
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<PyObject>> {
         if self.position >= self.documents.len() {
             return Ok(None);
         }
@@ -1041,10 +800,8 @@ impl Cursor {
         let doc = &self.documents[self.position];
         self.position += 1;
 
-        Python::with_gil(|py| {
-            let py_dict = json_to_python_dict(py, doc)?;
-            Ok(Some(py_dict.into()))
-        })
+        let py_dict = json_to_python_dict(py, doc)?;
+        Ok(Some(py_dict.into_any().unbind()))
     }
 
     fn __repr__(&self) -> String {
@@ -1057,10 +814,20 @@ impl Cursor {
     }
 }
 
-// ========== PYTHON <-> JSON CONVERSION HELPERS ==========
+// ========== HELPER FUNCTIONS ==========
 
-/// Python érték -> JSON konverzió
-fn python_to_json(value: &PyAny) -> PyResult<Value> {
+/// Convert DocumentId to Python value
+fn doc_id_to_py(py: Python<'_>, id: &DocumentId) -> PyResult<PyObject> {
+    match id {
+        DocumentId::Int(i) => Ok(i.into_pyobject(py)?.into_any().unbind()),
+        DocumentId::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+        DocumentId::ObjectId(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
+    }
+}
+
+/// Python value -> JSON
+#[allow(clippy::only_used_in_recursion)]
+fn python_to_json(py: Python<'_>, value: &Bound<'_, pyo3::PyAny>) -> PyResult<Value> {
     if value.is_none() {
         Ok(Value::Null)
     } else if let Ok(b) = value.extract::<bool>() {
@@ -1076,14 +843,14 @@ fn python_to_json(value: &PyAny) -> PyResult<Value> {
     } else if let Ok(list) = value.downcast::<PyList>() {
         let mut arr = Vec::new();
         for item in list.iter() {
-            arr.push(python_to_json(item)?);
+            arr.push(python_to_json(py, &item)?);
         }
         Ok(Value::Array(arr))
     } else if let Ok(dict) = value.downcast::<PyDict>() {
         let mut map = serde_json::Map::new();
         for (k, v) in dict.iter() {
             let key: String = k.extract()?;
-            map.insert(key, python_to_json(v)?);
+            map.insert(key, python_to_json(py, &v)?);
         }
         Ok(Value::Object(map))
     } else {
@@ -1094,18 +861,18 @@ fn python_to_json(value: &PyAny) -> PyResult<Value> {
     }
 }
 
-/// Python dict -> JSON Value konverzió
-fn python_dict_to_json_value(dict: &PyDict) -> PyResult<Value> {
+/// Python dict -> JSON Value
+fn python_dict_to_json_value(py: Python<'_>, dict: &Bound<'_, PyDict>) -> PyResult<Value> {
     let mut map = serde_json::Map::new();
     for (k, v) in dict.iter() {
         let key: String = k.extract()?;
-        map.insert(key, python_to_json(v)?);
+        map.insert(key, python_to_json(py, &v)?);
     }
     Ok(Value::Object(map))
 }
 
-/// JSON Value -> Python dict konverzió
-fn json_to_python_dict<'a>(py: Python<'a>, value: &Value) -> PyResult<&'a PyDict> {
+/// JSON Value -> Python dict
+fn json_to_python_dict<'py>(py: Python<'py>, value: &Value) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
 
     if let Value::Object(map) = value {
@@ -1118,41 +885,41 @@ fn json_to_python_dict<'a>(py: Python<'a>, value: &Value) -> PyResult<&'a PyDict
     Ok(dict)
 }
 
-/// JSON Value -> Python value konverzió
-fn json_value_to_python(py: Python, value: &Value) -> PyResult<PyObject> {
+/// JSON Value -> Python value
+fn json_value_to_python(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     match value {
         Value::Null => Ok(py.None()),
-        Value::Bool(b) => Ok(b.into_py(py)),
+        Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Ok(i.into_py(py))
+                Ok(i.into_pyobject(py)?.into_any().unbind())
             } else if let Some(f) = n.as_f64() {
-                Ok(f.into_py(py))
+                Ok(f.into_pyobject(py)?.into_any().unbind())
             } else {
                 Ok(py.None())
             }
         }
-        Value::String(s) => Ok(s.into_py(py)),
+        Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
         Value::Array(arr) => {
             let py_list = PyList::empty(py);
             for item in arr {
                 py_list.append(json_value_to_python(py, item)?)?;
             }
-            Ok(py_list.into())
+            Ok(py_list.into_any().unbind())
         }
         Value::Object(map) => {
             let py_dict = PyDict::new(py);
             for (k, v) in map.iter() {
                 py_dict.set_item(k, json_value_to_python(py, v)?)?;
             }
-            Ok(py_dict.into())
+            Ok(py_dict.into_any().unbind())
         }
     }
 }
 
-/// Python modul inicializálás
+/// Python module initialization
 #[pymodule]
-fn ironbase(_py: Python, m: &PyModule) -> PyResult<()> {
+fn ironbase(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<IronBase>()?;
     m.add_class::<Collection>()?;
     m.add_class::<Cursor>()?;

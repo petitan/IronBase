@@ -7,8 +7,11 @@ use std::ptr;
 
 use ironbase_core::{DatabaseCore, DurabilityMode};
 
+use crate::error::{
+    c_str_to_string, clear_last_error, set_error, set_last_error, string_to_c_str,
+    IronBaseErrorCode,
+};
 use crate::handles::{DatabaseHandle, DbHandle};
-use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_error, c_str_to_string, string_to_c_str};
 
 /// Open a database file
 ///
@@ -25,10 +28,7 @@ use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_erro
 /// - `out_handle` must be a valid pointer to a DbHandle
 /// - The returned handle must be closed with `ironbase_close()`
 #[no_mangle]
-pub extern "C" fn ironbase_open(
-    path: *const c_char,
-    out_handle: *mut DbHandle,
-) -> i32 {
+pub extern "C" fn ironbase_open(path: *const c_char, out_handle: *mut DbHandle) -> i32 {
     clear_last_error();
 
     // Validate parameters
@@ -54,9 +54,7 @@ pub extern "C" fn ironbase_open(
             }
             IronBaseErrorCode::Success as i32
         }
-        Err(e) => {
-            set_error(&e) as i32
-        }
+        Err(e) => set_error(&e) as i32,
     }
 }
 
@@ -95,7 +93,9 @@ pub extern "C" fn ironbase_open_with_durability(
 
     let mode = match durability_mode {
         0 => DurabilityMode::Safe,
-        1 => DurabilityMode::Batch { batch_size: batch_size as usize },
+        1 => DurabilityMode::Batch {
+            batch_size: batch_size as usize,
+        },
         2 => DurabilityMode::unsafe_manual(),
         _ => {
             set_last_error("Invalid durability mode (must be 0=Safe, 1=Batch, 2=Unsafe)");
@@ -111,9 +111,7 @@ pub extern "C" fn ironbase_open_with_durability(
             }
             IronBaseErrorCode::Success as i32
         }
-        Err(e) => {
-            set_error(&e) as i32
-        }
+        Err(e) => set_error(&e) as i32,
     }
 }
 
@@ -266,10 +264,7 @@ pub extern "C" fn ironbase_path(handle: DbHandle) -> *mut c_char {
 /// - `IronBaseErrorCode::Success` (0) on success
 /// - Error code on failure
 #[no_mangle]
-pub extern "C" fn ironbase_compact(
-    handle: DbHandle,
-    out_stats: *mut *mut c_char,
-) -> i32 {
+pub extern "C" fn ironbase_compact(handle: DbHandle, out_stats: *mut *mut c_char) -> i32 {
     clear_last_error();
 
     let db = match crate::handles::validate_db_handle(handle) {
@@ -346,10 +341,7 @@ pub extern "C" fn ironbase_list_collections(handle: DbHandle) -> *mut c_char {
 /// - `IronBaseErrorCode::Success` (0) on success
 /// - Error code on failure
 #[no_mangle]
-pub extern "C" fn ironbase_drop_collection(
-    handle: DbHandle,
-    name: *const c_char,
-) -> i32 {
+pub extern "C" fn ironbase_drop_collection(handle: DbHandle, name: *const c_char) -> i32 {
     clear_last_error();
 
     let db = match crate::handles::validate_db_handle(handle) {

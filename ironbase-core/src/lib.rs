@@ -1,6 +1,30 @@
 // ironbase-core/src/lib.rs
 // Pure Rust API - NO Python/PyO3 dependencies
 
+// Allow clippy lints that are too strict for this codebase
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::should_implement_trait)]
+#![allow(clippy::only_used_in_recursion)]
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::ptr_arg)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::nonminimal_bool)]
+#![allow(clippy::field_reassign_with_default)]
+#![allow(clippy::redundant_comparisons)]
+#![allow(clippy::suspicious_open_options)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::result_large_err)]
+#![allow(clippy::match_result_ok)]
+#![allow(clippy::manual_unwrap_or_default)]
+#![allow(clippy::manual_unwrap_or)]
+#![allow(clippy::single_match)]
+#![allow(clippy::unnecessary_cast)]
+#![allow(clippy::manual_is_multiple_of)]
+#![allow(clippy::approx_constant)]
+// Tests may have helper functions not used in all test cases
+#![cfg_attr(test, allow(dead_code))]
+#![cfg_attr(test, allow(unused_variables))]
+
 pub mod aggregation;
 pub mod btree;
 pub mod catalog_serde;

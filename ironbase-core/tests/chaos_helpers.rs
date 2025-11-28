@@ -1,6 +1,8 @@
 // chaos_helpers.rs
 // Utility functions for chaos/corruption testing
 
+#![allow(dead_code)]
+
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -113,7 +115,11 @@ pub fn write_wal_entry_bad_crc(
 }
 
 /// Write a document with partial data (simulating crash during write)
-pub fn write_partial_document(path: &Path, data: &[u8], truncate_at: usize) -> std::io::Result<u64> {
+pub fn write_partial_document(
+    path: &Path,
+    data: &[u8],
+    truncate_at: usize,
+) -> std::io::Result<u64> {
     let mut file = OpenOptions::new().append(true).open(path)?;
     let offset = file.seek(SeekFrom::End(0))?;
 

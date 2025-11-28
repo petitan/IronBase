@@ -3,8 +3,8 @@
 use std::os::raw::c_char;
 use std::ptr;
 
-use crate::handles::{CollHandle, validate_coll_handle};
-use crate::error::{set_last_error, set_error, clear_last_error, c_str_to_string, string_to_c_str};
+use crate::error::{c_str_to_string, clear_last_error, set_error, set_last_error, string_to_c_str};
+use crate::handles::{validate_coll_handle, CollHandle};
 
 /// Execute an aggregation pipeline
 ///
@@ -80,15 +80,13 @@ pub extern "C" fn ironbase_aggregate(
     }
 
     match coll.inner.aggregate(&pipeline) {
-        Ok(results) => {
-            match serde_json::to_string(&results) {
-                Ok(json) => string_to_c_str(&json),
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize results: {}", e));
-                    ptr::null_mut()
-                }
+        Ok(results) => match serde_json::to_string(&results) {
+            Ok(json) => string_to_c_str(&json),
+            Err(e) => {
+                set_last_error(&format!("Failed to serialize results: {}", e));
+                ptr::null_mut()
             }
-        }
+        },
         Err(e) => {
             set_error(&e);
             ptr::null_mut()

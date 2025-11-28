@@ -3,10 +3,10 @@
 //! Provides error codes and thread-local error messages for FFI consumers.
 //! Pattern: Functions return error codes, detailed messages available via ironbase_get_last_error()
 
+use ironbase_core::MongoLiteError;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use ironbase_core::MongoLiteError;
 
 /// Error codes returned by FFI functions
 ///
@@ -90,7 +90,7 @@ impl From<&MongoLiteError> for IronBaseErrorCode {
 
 // Thread-local storage for the last error message
 thread_local! {
-    static LAST_ERROR: RefCell<Option<CString>> = RefCell::new(None);
+    static LAST_ERROR: RefCell<Option<CString>> = const { RefCell::new(None) };
 }
 
 /// Set the last error message (internal use)
@@ -124,11 +124,9 @@ pub(crate) fn clear_last_error() {
 /// The pointer is only valid until the next FFI call on the same thread.
 #[no_mangle]
 pub extern "C" fn ironbase_get_last_error() -> *const c_char {
-    LAST_ERROR.with(|e| {
-        match e.borrow().as_ref() {
-            Some(cstr) => cstr.as_ptr(),
-            None => std::ptr::null(),
-        }
+    LAST_ERROR.with(|e| match e.borrow().as_ref() {
+        Some(cstr) => cstr.as_ptr(),
+        None => std::ptr::null(),
     })
 }
 
@@ -146,9 +144,7 @@ pub extern "C" fn ironbase_clear_error() {
 /// Returns 1 if there is an error message, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn ironbase_has_error() -> i32 {
-    LAST_ERROR.with(|e| {
-        if e.borrow().is_some() { 1 } else { 0 }
-    })
+    LAST_ERROR.with(|e| if e.borrow().is_some() { 1 } else { 0 })
 }
 
 /// Helper to convert C string to Rust string
@@ -158,12 +154,7 @@ pub(crate) fn c_str_to_string(ptr: *const c_char) -> Option<String> {
     if ptr.is_null() {
         return None;
     }
-    unsafe {
-        CStr::from_ptr(ptr)
-            .to_str()
-            .ok()
-            .map(|s| s.to_string())
-    }
+    unsafe { CStr::from_ptr(ptr).to_str().ok().map(|s| s.to_string()) }
 }
 
 /// Helper to convert Rust string to C string (caller must free with ironbase_free_string)

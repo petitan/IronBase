@@ -172,11 +172,14 @@ mod tests {
 
     #[test]
     fn test_compare_values_numbers() {
-        assert_eq!(compare_values(&json!(10), &json!(5)), Some(Ordering::Greater));
+        assert_eq!(
+            compare_values(&json!(10), &json!(5)),
+            Some(Ordering::Greater)
+        );
         assert_eq!(compare_values(&json!(5), &json!(10)), Some(Ordering::Less));
         assert_eq!(compare_values(&json!(5), &json!(5)), Some(Ordering::Equal));
         assert_eq!(
-            compare_values(&json!(3.14), &json!(2.71)),
+            compare_values(&json!(3.5), &json!(2.5)),
             Some(Ordering::Greater)
         );
     }

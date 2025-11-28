@@ -139,9 +139,8 @@ fn test_read_during_write() {
         s.create_collection("rw_test").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("rw_test".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("rw_test".to_string(), Arc::clone(&storage)).unwrap());
 
     let running = Arc::new(AtomicBool::new(true));
     let writes_done = Arc::new(AtomicU64::new(0));
@@ -210,9 +209,8 @@ fn test_mixed_crud_concurrent() {
         s.create_collection("mixed").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("mixed".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("mixed".to_string(), Arc::clone(&storage)).unwrap());
 
     // Pre-populate
     for i in 0..50 {
@@ -288,9 +286,8 @@ fn test_concurrent_index_creation() {
         s.create_collection("idx_test").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("idx_test".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("idx_test".to_string(), Arc::clone(&storage)).unwrap());
 
     // Pre-populate
     for i in 0..100 {
@@ -341,9 +338,8 @@ fn test_insert_during_index_build() {
         s.create_collection("idx_insert").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("idx_insert".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("idx_insert".to_string(), Arc::clone(&storage)).unwrap());
 
     let barrier = Arc::new(Barrier::new(2));
 
@@ -390,15 +386,9 @@ fn test_multiple_collections_concurrent() {
         s.create_collection("coll_c").unwrap();
     }
 
-    let coll_a = Arc::new(
-        CollectionCore::new("coll_a".to_string(), Arc::clone(&storage)).unwrap(),
-    );
-    let coll_b = Arc::new(
-        CollectionCore::new("coll_b".to_string(), Arc::clone(&storage)).unwrap(),
-    );
-    let coll_c = Arc::new(
-        CollectionCore::new("coll_c".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let coll_a = Arc::new(CollectionCore::new("coll_a".to_string(), Arc::clone(&storage)).unwrap());
+    let coll_b = Arc::new(CollectionCore::new("coll_b".to_string(), Arc::clone(&storage)).unwrap());
+    let coll_c = Arc::new(CollectionCore::new("coll_c".to_string(), Arc::clone(&storage)).unwrap());
 
     let barrier = Arc::new(Barrier::new(3));
 
@@ -456,12 +446,10 @@ fn test_no_deadlock_with_cross_collection_access() {
         s.create_collection("deadlock_b").unwrap();
     }
 
-    let coll_a = Arc::new(
-        CollectionCore::new("deadlock_a".to_string(), Arc::clone(&storage)).unwrap(),
-    );
-    let coll_b = Arc::new(
-        CollectionCore::new("deadlock_b".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let coll_a =
+        Arc::new(CollectionCore::new("deadlock_a".to_string(), Arc::clone(&storage)).unwrap());
+    let coll_b =
+        Arc::new(CollectionCore::new("deadlock_b".to_string(), Arc::clone(&storage)).unwrap());
 
     let barrier = Arc::new(Barrier::new(2));
 
@@ -524,9 +512,8 @@ fn test_cache_invalidation_during_reads() {
         s.create_collection("cache_test").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("cache_test".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("cache_test".to_string(), Arc::clone(&storage)).unwrap());
 
     // Pre-populate
     for i in 0..50 {
@@ -586,9 +573,8 @@ fn test_high_contention_stress() {
         s.create_collection("high_contention").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("high_contention".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("high_contention".to_string(), Arc::clone(&storage)).unwrap());
 
     const NUM_THREADS: usize = 20;
     const OPS_PER_THREAD: usize = 50;
@@ -609,8 +595,10 @@ fn test_high_contention_stress() {
                     // Alternate between operations
                     match i % 3 {
                         0 => {
-                            let doc =
-                                HashMap::from([("t".to_string(), json!(thread_id)), ("i".to_string(), json!(i))]);
+                            let doc = HashMap::from([
+                                ("t".to_string(), json!(thread_id)),
+                                ("i".to_string(), json!(i)),
+                            ]);
                             coll.insert_one(doc).unwrap();
                         }
                         1 => {
@@ -631,10 +619,7 @@ fn test_high_contention_stress() {
         handle.join().expect("Thread should not panic");
     }
 
-    println!(
-        "Completed {} operations",
-        total_ops.load(Ordering::Relaxed)
-    );
+    println!("Completed {} operations", total_ops.load(Ordering::Relaxed));
 
     // Should have inserted ~1/3 of operations
     let expected_inserts = (NUM_THREADS * OPS_PER_THREAD) / 3;
@@ -657,9 +642,8 @@ fn test_sustained_concurrent_load() {
         s.create_collection("sustained").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("sustained".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("sustained".to_string(), Arc::clone(&storage)).unwrap());
 
     let running = Arc::new(AtomicBool::new(true));
     let ops_count = Arc::new(AtomicU64::new(0));
@@ -672,7 +656,10 @@ fn test_sustained_concurrent_load() {
 
             thread::spawn(move || {
                 while running.load(Ordering::Relaxed) {
-                    let doc = HashMap::from([("timestamp".to_string(), json!(ops.load(Ordering::Relaxed)))]);
+                    let doc = HashMap::from([(
+                        "timestamp".to_string(),
+                        json!(ops.load(Ordering::Relaxed)),
+                    )]);
                     let _ = coll.insert_one(doc);
                     let _ = coll.find(&json!({}));
                     ops.fetch_add(2, Ordering::Relaxed);
@@ -708,9 +695,8 @@ fn test_empty_collection_concurrent() {
         s.create_collection("empty").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("empty".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("empty".to_string(), Arc::clone(&storage)).unwrap());
 
     // Multiple threads querying empty collection
     let handles: Vec<_> = (0..10)
@@ -742,9 +728,8 @@ fn test_single_document_high_contention() {
         s.create_collection("single_doc").unwrap();
     }
 
-    let collection = Arc::new(
-        CollectionCore::new("single_doc".to_string(), Arc::clone(&storage)).unwrap(),
-    );
+    let collection =
+        Arc::new(CollectionCore::new("single_doc".to_string(), Arc::clone(&storage)).unwrap());
 
     // Insert one document
     collection
@@ -764,10 +749,8 @@ fn test_single_document_high_contention() {
 
             thread::spawn(move || {
                 for _ in 0..50 {
-                    let result = coll.update_one(
-                        &json!({"_id": 1}),
-                        &json!({"$inc": {"counter": 1}}),
-                    );
+                    let result =
+                        coll.update_one(&json!({"_id": 1}), &json!({"$inc": {"counter": 1}}));
                     if result.is_ok() {
                         updates.fetch_add(1, Ordering::Relaxed);
                     }

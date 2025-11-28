@@ -453,16 +453,12 @@ mod tests {
         // Insert in non-sequential order
         let keys = vec![50, 25, 75, 10, 30, 60, 90, 5, 15, 20];
         for &k in &keys {
-            tree.insert(IndexKey::Int(k), DocumentId::Int(k as i64))
-                .unwrap();
+            tree.insert(IndexKey::Int(k), DocumentId::Int(k)).unwrap();
         }
 
         // All should be searchable
         for &k in &keys {
-            assert_eq!(
-                tree.search(&IndexKey::Int(k)),
-                Some(DocumentId::Int(k as i64))
-            );
+            assert_eq!(tree.search(&IndexKey::Int(k)), Some(DocumentId::Int(k)));
         }
     }
 

@@ -8,8 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::Value;
 
-use crate::handles::{CollHandle, validate_coll_handle};
-use crate::error::{IronBaseErrorCode, set_last_error, clear_last_error, c_str_to_string, string_to_c_str};
+use crate::error::{
+    c_str_to_string, clear_last_error, set_last_error, string_to_c_str, IronBaseErrorCode,
+};
+use crate::handles::{validate_coll_handle, CollHandle};
 
 /// Opaque cursor handle
 pub struct CursorState {
@@ -283,7 +285,11 @@ pub extern "C" fn ironbase_cursor_is_finished(cursor: CursorHandle) -> i32 {
     }
 
     let state = unsafe { &*cursor };
-    if state.position >= state.documents.len() { 1 } else { 0 }
+    if state.position >= state.documents.len() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Reset cursor to the beginning

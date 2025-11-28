@@ -157,7 +157,10 @@ fn test_update_one_unique_constraint_violation() {
         &json!({"$set": {"email": "alice@example.com"}}),
     );
 
-    assert!(result.is_err(), "Update to duplicate unique value should fail");
+    assert!(
+        result.is_err(),
+        "Update to duplicate unique value should fail"
+    );
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("Duplicate key") || err_msg.contains("unique"),
@@ -166,8 +169,14 @@ fn test_update_one_unique_constraint_violation() {
     );
 
     // Verify Bob's email is unchanged
-    let bob = collection.find_one(&json!({"name": "Bob"})).unwrap().unwrap();
-    assert_eq!(bob.get("email").unwrap().as_str().unwrap(), "bob@example.com");
+    let bob = collection
+        .find_one(&json!({"name": "Bob"}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        bob.get("email").unwrap().as_str().unwrap(),
+        "bob@example.com"
+    );
 }
 
 #[test]
@@ -196,7 +205,10 @@ fn test_update_one_same_value_allowed() {
     assert!(result.is_ok(), "Update to same value should succeed");
 
     // Verify the update worked
-    let alice = collection.find_one(&json!({"name": "Alice"})).unwrap().unwrap();
+    let alice = collection
+        .find_one(&json!({"name": "Alice"}))
+        .unwrap()
+        .unwrap();
     assert_eq!(alice.get("age").unwrap().as_i64().unwrap(), 30);
 }
 
@@ -230,7 +242,10 @@ fn test_update_many_unique_constraint_violation() {
         &json!({"$set": {"email": "alice@example.com"}}),
     );
 
-    assert!(result.is_err(), "Update many to duplicate value should fail");
+    assert!(
+        result.is_err(),
+        "Update many to duplicate value should fail"
+    );
 }
 
 #[test]
@@ -301,13 +316,19 @@ fn test_delete_many_removes_from_index() {
     fields3.insert("name".to_string(), json!("NewAlice"));
     fields3.insert("email".to_string(), json!("alice@example.com"));
     let result1 = collection.insert_one(fields3);
-    assert!(result1.is_ok(), "Insert alice email after delete_many should succeed");
+    assert!(
+        result1.is_ok(),
+        "Insert alice email after delete_many should succeed"
+    );
 
     let mut fields4 = std::collections::HashMap::new();
     fields4.insert("name".to_string(), json!("NewBob"));
     fields4.insert("email".to_string(), json!("bob@example.com"));
     let result2 = collection.insert_one(fields4);
-    assert!(result2.is_ok(), "Insert bob email after delete_many should succeed");
+    assert!(
+        result2.is_ok(),
+        "Insert bob email after delete_many should succeed"
+    );
 }
 
 #[test]

@@ -1,4 +1,5 @@
 // Index performance and integration tests
+
 use ironbase_core::DatabaseCore;
 use serde_json::json;
 use std::time::Instant;
@@ -64,7 +65,7 @@ fn test_index_range_query() {
     // Verify all results are in range
     for doc in &results {
         let price = doc.get("price").unwrap().as_i64().unwrap();
-        assert!(price >= 200 && price < 500);
+        assert!((200..500).contains(&price));
     }
 }
 
@@ -108,7 +109,7 @@ fn test_index_with_multiple_queries() {
         .unwrap();
 
     // Insert employees
-    let salaries = vec![30000, 45000, 60000, 75000, 90000, 105000, 120000];
+    let salaries = [30000, 45000, 60000, 75000, 90000, 105000, 120000];
     for (i, &salary) in salaries.iter().enumerate() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("name".to_string(), json!(format!("Employee{}", i)));
@@ -241,8 +242,11 @@ fn test_index_performance_comparison() {
     // The indexed version may return fewer results due to optimization
     // but should at least find the same unique ages
     // For now, we just verify both found some results
-    assert!(results_indexed.len() > 0, "Indexed should find results");
-    assert!(results_unindexed.len() > 0, "Unindexed should find results");
+    assert!(!results_indexed.is_empty(), "Indexed should find results");
+    assert!(
+        !results_unindexed.is_empty(),
+        "Unindexed should find results"
+    );
 
     println!("\n✅ Performance test complete!");
 }

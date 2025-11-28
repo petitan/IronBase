@@ -6,6 +6,8 @@
 // 2. Error messages are meaningful and include context
 // 3. Graceful degradation where possible
 
+#![allow(clippy::single_match)]
+
 mod chaos_helpers;
 
 use chaos_helpers::*;
@@ -502,10 +504,10 @@ fn test_random_bit_flips() {
 
     // Flip bits at various locations
     let flip_offsets = [
-        50,               // Header area
-        300,              // Near start of data
-        file_len / 2,     // Middle
-        file_len - 100,   // Near end
+        50,             // Header area
+        300,            // Near start of data
+        file_len / 2,   // Middle
+        file_len - 100, // Near end
     ];
 
     for &offset in &flip_offsets {
@@ -518,7 +520,11 @@ fn test_random_bit_flips() {
 
             // Try to open - should not panic
             let result = StorageEngine::open(&db_path);
-            assert!(result.is_ok() || result.is_err(), "Offset {} caused panic", offset);
+            assert!(
+                result.is_ok() || result.is_err(),
+                "Offset {} caused panic",
+                offset
+            );
 
             // Restore original
             corrupt_bytes_at(&db_path, offset, &original).unwrap();

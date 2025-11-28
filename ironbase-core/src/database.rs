@@ -106,7 +106,7 @@ impl DatabaseCore<StorageEngine> {
             // Group by collection name (now properly included in RecoveredIndexChange)
             changes_by_collection
                 .entry(change.collection.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(change);
         }
 
@@ -204,7 +204,7 @@ impl DatabaseCore<StorageEngine> {
             // Group by collection name (now properly included in RecoveredIndexChange)
             changes_by_collection
                 .entry(change.collection.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(change);
         }
 
@@ -424,7 +424,10 @@ impl DatabaseCore<StorageEngine> {
                 // so that recovery can rebuild the catalog correctly
                 let mut doc_with_metadata = document.clone();
                 doc_with_metadata.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
-                doc_with_metadata.insert("_collection".to_string(), Value::String(collection_name.to_string()));
+                doc_with_metadata.insert(
+                    "_collection".to_string(),
+                    Value::String(collection_name.to_string()),
+                );
                 let doc_value = serde_json::to_value(&doc_with_metadata)
                     .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
                 auto_tx.add_operation(Operation::Insert {
@@ -452,7 +455,10 @@ impl DatabaseCore<StorageEngine> {
                 // IMPORTANT: WAL must contain the FULL document with _id and _collection
                 let mut doc_with_metadata = document.clone();
                 doc_with_metadata.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
-                doc_with_metadata.insert("_collection".to_string(), Value::String(collection_name.to_string()));
+                doc_with_metadata.insert(
+                    "_collection".to_string(),
+                    Value::String(collection_name.to_string()),
+                );
                 let doc_value = serde_json::to_value(&doc_with_metadata)
                     .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
                 let should_flush = self.add_to_batch(Operation::Insert {
@@ -469,7 +475,9 @@ impl DatabaseCore<StorageEngine> {
                 Ok(doc_id)
             }
 
-            DurabilityMode::Unsafe { auto_checkpoint_ops } => {
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops,
+            } => {
                 // Unsafe mode: Fast path, optional auto-checkpoint
                 let collection = self.collection(collection_name)?;
                 let doc_id = collection.insert_one(document)?;

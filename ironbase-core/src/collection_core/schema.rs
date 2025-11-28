@@ -9,10 +9,10 @@ use crate::error::{MongoLiteError, Result};
 #[derive(Clone, Debug)]
 pub struct PropertySchema {
     pub schema_type: SchemaType,
-    pub enum_values: Option<Vec<Value>>,  // enum validation
-    pub pattern: Option<Regex>,            // regex pattern validation
-    pub min_items: Option<usize>,          // array minimum length
-    pub max_items: Option<usize>,          // array maximum length
+    pub enum_values: Option<Vec<Value>>, // enum validation
+    pub pattern: Option<Regex>,          // regex pattern validation
+    pub min_items: Option<usize>,        // array minimum length
+    pub max_items: Option<usize>,        // array maximum length
 }
 
 impl PropertySchema {
@@ -244,7 +244,9 @@ impl CompiledSchema {
                         if arr.len() < min {
                             return Err(MongoLiteError::SchemaError(format!(
                                 "Field '{}' has {} items, minimum required is {}",
-                                field, arr.len(), min
+                                field,
+                                arr.len(),
+                                min
                             )));
                         }
                     }
@@ -254,7 +256,9 @@ impl CompiledSchema {
                         if arr.len() > max {
                             return Err(MongoLiteError::SchemaError(format!(
                                 "Field '{}' has {} items, maximum allowed is {}",
-                                field, arr.len(), max
+                                field,
+                                arr.len(),
+                                max
                             )));
                         }
                     }
@@ -275,32 +279,50 @@ mod tests {
 
     #[test]
     fn test_schema_type_from_str_string() {
-        assert!(matches!(SchemaType::from_str("string"), Some(SchemaType::String)));
+        assert!(matches!(
+            SchemaType::from_str("string"),
+            Some(SchemaType::String)
+        ));
     }
 
     #[test]
     fn test_schema_type_from_str_number() {
-        assert!(matches!(SchemaType::from_str("number"), Some(SchemaType::Number)));
+        assert!(matches!(
+            SchemaType::from_str("number"),
+            Some(SchemaType::Number)
+        ));
     }
 
     #[test]
     fn test_schema_type_from_str_integer() {
-        assert!(matches!(SchemaType::from_str("integer"), Some(SchemaType::Number)));
+        assert!(matches!(
+            SchemaType::from_str("integer"),
+            Some(SchemaType::Number)
+        ));
     }
 
     #[test]
     fn test_schema_type_from_str_boolean() {
-        assert!(matches!(SchemaType::from_str("boolean"), Some(SchemaType::Boolean)));
+        assert!(matches!(
+            SchemaType::from_str("boolean"),
+            Some(SchemaType::Boolean)
+        ));
     }
 
     #[test]
     fn test_schema_type_from_str_object() {
-        assert!(matches!(SchemaType::from_str("object"), Some(SchemaType::Object)));
+        assert!(matches!(
+            SchemaType::from_str("object"),
+            Some(SchemaType::Object)
+        ));
     }
 
     #[test]
     fn test_schema_type_from_str_array() {
-        assert!(matches!(SchemaType::from_str("array"), Some(SchemaType::Array)));
+        assert!(matches!(
+            SchemaType::from_str("array"),
+            Some(SchemaType::Array)
+        ));
     }
 
     #[test]
@@ -322,7 +344,7 @@ mod tests {
     #[test]
     fn test_schema_type_matches_number() {
         assert!(SchemaType::Number.matches(&json!(123)));
-        assert!(SchemaType::Number.matches(&json!(3.14)));
+        assert!(SchemaType::Number.matches(&json!(1.5)));
         assert!(!SchemaType::Number.matches(&json!("123")));
     }
 
@@ -394,7 +416,10 @@ mod tests {
         let schema = json!("not an object");
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a JSON object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a JSON object"));
     }
 
     #[test]
@@ -404,7 +429,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("type must be a string"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("type must be a string"));
     }
 
     #[test]
@@ -414,7 +442,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Only object schemas"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Only object schemas"));
     }
 
     #[test]
@@ -425,7 +456,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("required must be an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("required must be an array"));
     }
 
     #[test]
@@ -436,7 +470,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("required entries must be strings"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("required entries must be strings"));
     }
 
     #[test]
@@ -447,7 +484,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("properties must be an object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("properties must be an object"));
     }
 
     #[test]
@@ -460,7 +500,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("type must be a string"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("type must be a string"));
     }
 
     #[test]
@@ -519,7 +562,10 @@ mod tests {
 
         let result = compiled.validate(&json!("not an object"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be a JSON object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a JSON object"));
     }
 
     #[test]
@@ -533,7 +579,10 @@ mod tests {
         let doc = json!({"name": "Alice"});
         let result = compiled.validate(&doc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Missing required field 'email'"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Missing required field 'email'"));
     }
 
     #[test]
@@ -549,7 +598,10 @@ mod tests {
         let doc = json!({"age": "thirty"});
         let result = compiled.validate(&doc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("expected type number"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("expected type number"));
     }
 
     #[test]
@@ -645,7 +697,10 @@ mod tests {
         let doc = json!({"status": "deleted"});
         let result = compiled.validate(&doc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not in allowed enum values"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not in allowed enum values"));
     }
 
     #[test]
@@ -684,7 +739,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("enum must be an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("enum must be an array"));
     }
 
     // ========== Pattern validation tests ==========
@@ -725,7 +783,10 @@ mod tests {
         let doc = json!({"version": "invalid-version"});
         let result = compiled.validate(&doc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("does not match required pattern"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("does not match required pattern"));
     }
 
     #[test]
@@ -764,7 +825,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("invalid regex pattern"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("invalid regex pattern"));
     }
 
     #[test]
@@ -780,7 +844,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("pattern must be a string"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("pattern must be a string"));
     }
 
     // ========== Array constraints (minItems/maxItems) tests ==========
@@ -821,7 +888,10 @@ mod tests {
         let doc = json!({"tags": ["only_one"]});
         let result = compiled.validate(&doc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("minimum required is 2"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("minimum required is 2"));
     }
 
     #[test]
@@ -879,7 +949,10 @@ mod tests {
         let doc = json!({"tags": ["one", "two", "three"]});
         let result = compiled.validate(&doc);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("maximum allowed is 2"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("maximum allowed is 2"));
     }
 
     #[test]
@@ -922,7 +995,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("minItems must be a non-negative integer"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("minItems must be a non-negative integer"));
     }
 
     #[test]
@@ -938,7 +1014,10 @@ mod tests {
         });
         let result = CompiledSchema::from_value(&schema);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("maxItems must be a non-negative integer"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("maxItems must be a non-negative integer"));
     }
 
     // ========== Combined constraints tests ==========

@@ -107,7 +107,9 @@ impl DurabilityMode {
     /// Get auto checkpoint ops if in unsafe mode with auto checkpoint
     pub fn auto_checkpoint_ops(&self) -> Option<usize> {
         match self {
-            DurabilityMode::Unsafe { auto_checkpoint_ops } => *auto_checkpoint_ops,
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops,
+            } => *auto_checkpoint_ops,
             _ => None,
         }
     }
@@ -164,17 +166,33 @@ mod tests {
     #[test]
     fn test_auto_checkpoint_ops() {
         assert_eq!(DurabilityMode::Safe.auto_checkpoint_ops(), None);
-        assert_eq!(DurabilityMode::Batch { batch_size: 100 }.auto_checkpoint_ops(), None);
+        assert_eq!(
+            DurabilityMode::Batch { batch_size: 100 }.auto_checkpoint_ops(),
+            None
+        );
         assert_eq!(DurabilityMode::unsafe_manual().auto_checkpoint_ops(), None);
-        assert_eq!(DurabilityMode::unsafe_auto(5000).auto_checkpoint_ops(), Some(5000));
+        assert_eq!(
+            DurabilityMode::unsafe_auto(5000).auto_checkpoint_ops(),
+            Some(5000)
+        );
     }
 
     #[test]
     fn test_unsafe_constructors() {
         let manual = DurabilityMode::unsafe_manual();
-        assert!(matches!(manual, DurabilityMode::Unsafe { auto_checkpoint_ops: None }));
+        assert!(matches!(
+            manual,
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops: None
+            }
+        ));
 
         let auto = DurabilityMode::unsafe_auto(10000);
-        assert!(matches!(auto, DurabilityMode::Unsafe { auto_checkpoint_ops: Some(10000) }));
+        assert!(matches!(
+            auto,
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops: Some(10000)
+            }
+        ));
     }
 }

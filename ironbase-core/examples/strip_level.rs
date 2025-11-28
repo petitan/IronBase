@@ -77,10 +77,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     remove_level(&mut cleaned);
 
     let mut output = cleaned;
-    output.as_object_mut().map(|map| {
+    if let Some(map) = output.as_object_mut() {
         map.remove("_id");
         map.remove("_collection");
-    });
+    }
 
     let output_path = PathBuf::from(output_path);
     if let Some(parent) = output_path.parent() {

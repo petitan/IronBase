@@ -196,7 +196,7 @@ impl Transaction {
         }
         self.index_changes
             .entry(index_name)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(change);
         Ok(())
     }

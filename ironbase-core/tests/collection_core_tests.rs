@@ -8,8 +8,8 @@ use ironbase_core::DatabaseCore;
 use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -1060,13 +1060,19 @@ fn test_aggregation_with_nested_fields_from_storage() {
     // Insert documents with nested fields
     let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
     doc1.insert("Name".to_string(), json!("TechCorp"));
-    doc1.insert("Location".to_string(), json!({"Country": "USA", "City": "NYC"}));
+    doc1.insert(
+        "Location".to_string(),
+        json!({"Country": "USA", "City": "NYC"}),
+    );
     doc1.insert("Stats".to_string(), json!({"Employees": 100}));
     collection.insert_one(doc1).unwrap();
 
     let mut doc2: HashMap<String, serde_json::Value> = HashMap::new();
     doc2.insert("Name".to_string(), json!("DataSoft"));
-    doc2.insert("Location".to_string(), json!({"Country": "USA", "City": "LA"}));
+    doc2.insert(
+        "Location".to_string(),
+        json!({"Country": "USA", "City": "LA"}),
+    );
     doc2.insert("Stats".to_string(), json!({"Employees": 200}));
     collection.insert_one(doc2).unwrap();
 
@@ -1078,19 +1084,25 @@ fn test_aggregation_with_nested_fields_from_storage() {
     }
 
     // Aggregate
-    let results = collection.aggregate(&json!([
-        {"$group": {
-            "_id": "$Location.Country",
-            "totalEmployees": {"$sum": "$Stats.Employees"},
-            "count": {"$sum": 1}
-        }}
-    ])).unwrap();
+    let results = collection
+        .aggregate(&json!([
+            {"$group": {
+                "_id": "$Location.Country",
+                "totalEmployees": {"$sum": "$Stats.Employees"},
+                "count": {"$sum": 1}
+            }}
+        ]))
+        .unwrap();
 
     println!("Aggregation results: {:?}", results);
 
     // Should have 1 group: USA
     assert_eq!(results.len(), 1, "Expected 1 group, got {:?}", results);
-    assert_eq!(results[0]["_id"], "USA", "Expected _id=USA, got {:?}", results[0]["_id"]);
+    assert_eq!(
+        results[0]["_id"], "USA",
+        "Expected _id=USA, got {:?}",
+        results[0]["_id"]
+    );
     assert_eq!(results[0]["totalEmployees"], 300);
     assert_eq!(results[0]["count"], 2);
 }
@@ -1101,7 +1113,7 @@ fn test_aggregation_with_nested_fields_from_storage() {
 
 mod nested_document_tests {
     use super::*;
-    use ironbase_core::{DatabaseCore, storage::MemoryStorage, FindOptions};
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore, FindOptions};
 
     /// Helper to create a test database with nested documents
     fn setup_nested_test_db() -> DatabaseCore<MemoryStorage> {
@@ -1112,83 +1124,111 @@ mod nested_document_tests {
         coll.insert_one(HashMap::from([
             ("name".to_string(), json!("Alice")),
             ("age".to_string(), json!(30)),
-            ("address".to_string(), json!({
-                "city": "New York",
-                "zip": "10001",
-                "location": {
-                    "lat": 40.7128,
-                    "lng": -74.0060
-                }
-            })),
-            ("profile".to_string(), json!({
-                "score": 95,
-                "level": "senior",
-                "stats": {
-                    "posts": 150,
-                    "likes": 2500
-                }
-            })),
-            ("tags".to_string(), json!(["developer", "team-lead"]))
-        ])).unwrap();
+            (
+                "address".to_string(),
+                json!({
+                    "city": "New York",
+                    "zip": "10001",
+                    "location": {
+                        "lat": 40.7128,
+                        "lng": -74.0060
+                    }
+                }),
+            ),
+            (
+                "profile".to_string(),
+                json!({
+                    "score": 95,
+                    "level": "senior",
+                    "stats": {
+                        "posts": 150,
+                        "likes": 2500
+                    }
+                }),
+            ),
+            ("tags".to_string(), json!(["developer", "team-lead"])),
+        ]))
+        .unwrap();
 
         coll.insert_one(HashMap::from([
             ("name".to_string(), json!("Bob")),
             ("age".to_string(), json!(25)),
-            ("address".to_string(), json!({
-                "city": "Los Angeles",
-                "zip": "90001",
-                "location": {
-                    "lat": 34.0522,
-                    "lng": -118.2437
-                }
-            })),
-            ("profile".to_string(), json!({
-                "score": 75,
-                "level": "junior",
-                "stats": {
-                    "posts": 30,
-                    "likes": 500
-                }
-            })),
-            ("tags".to_string(), json!(["developer"]))
-        ])).unwrap();
+            (
+                "address".to_string(),
+                json!({
+                    "city": "Los Angeles",
+                    "zip": "90001",
+                    "location": {
+                        "lat": 34.0522,
+                        "lng": -118.2437
+                    }
+                }),
+            ),
+            (
+                "profile".to_string(),
+                json!({
+                    "score": 75,
+                    "level": "junior",
+                    "stats": {
+                        "posts": 30,
+                        "likes": 500
+                    }
+                }),
+            ),
+            ("tags".to_string(), json!(["developer"])),
+        ]))
+        .unwrap();
 
         coll.insert_one(HashMap::from([
             ("name".to_string(), json!("Carol")),
             ("age".to_string(), json!(35)),
-            ("address".to_string(), json!({
-                "city": "New York",
-                "zip": "10002",
-                "location": {
-                    "lat": 40.7589,
-                    "lng": -73.9851
-                }
-            })),
-            ("profile".to_string(), json!({
-                "score": 88,
-                "level": "senior",
-                "stats": {
-                    "posts": 200,
-                    "likes": 3500
-                }
-            })),
-            ("tags".to_string(), json!(["manager", "speaker"]))
-        ])).unwrap();
+            (
+                "address".to_string(),
+                json!({
+                    "city": "New York",
+                    "zip": "10002",
+                    "location": {
+                        "lat": 40.7589,
+                        "lng": -73.9851
+                    }
+                }),
+            ),
+            (
+                "profile".to_string(),
+                json!({
+                    "score": 88,
+                    "level": "senior",
+                    "stats": {
+                        "posts": 200,
+                        "likes": 3500
+                    }
+                }),
+            ),
+            ("tags".to_string(), json!(["manager", "speaker"])),
+        ]))
+        .unwrap();
 
         // David - missing location and stats for edge case testing
         coll.insert_one(HashMap::from([
             ("name".to_string(), json!("David")),
             ("age".to_string(), json!(28)),
-            ("address".to_string(), json!({
-                "city": "Chicago",
-                "zip": "60601"
-            })),
-            ("profile".to_string(), json!({
-                "score": 82,
-                "level": "mid"
-            })),
-            ("tags".to_string(), json!(["developer"]))
-        ])).unwrap();
+            (
+                "address".to_string(),
+                json!({
+                    "city": "Chicago",
+                    "zip": "60601"
+                }),
+            ),
+            (
+                "profile".to_string(),
+                json!({
+                    "score": 82,
+                    "level": "mid"
+                }),
+            ),
+            ("tags".to_string(), json!(["developer"])),
+        ]))
+        .unwrap();
 
         db
     }
@@ -1206,7 +1246,8 @@ mod nested_document_tests {
         let results = coll.find(&json!({"address.city": "New York"})).unwrap();
         assert_eq!(results.len(), 2, "Should find 2 users in New York");
 
-        let names: Vec<&str> = results.iter()
+        let names: Vec<&str> = results
+            .iter()
             .map(|d| d["name"].as_str().unwrap())
             .collect();
         assert!(names.contains(&"Alice"));
@@ -1233,10 +1274,14 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Query 3-level deep nesting
-        let results = coll.find(&json!({"profile.stats.posts": {"$gte": 100}})).unwrap();
+        let results = coll
+            .find(&json!({"profile.stats.posts": {"$gte": 100}}))
+            .unwrap();
         assert_eq!(results.len(), 2, "Should find 2 users with posts >= 100");
 
-        let results = coll.find(&json!({"address.location.lat": {"$gt": 40.0}})).unwrap();
+        let results = coll
+            .find(&json!({"address.location.lat": {"$gt": 40.0}}))
+            .unwrap();
         assert_eq!(results.len(), 2, "Should find 2 users with lat > 40.0");
     }
 
@@ -1259,11 +1304,17 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Multiple conditions including nested fields
-        let results = coll.find(&json!({
-            "address.city": "New York",
-            "profile.score": {"$gte": 90}
-        })).unwrap();
-        assert_eq!(results.len(), 1, "Should find 1 user in NYC with score >= 90");
+        let results = coll
+            .find(&json!({
+                "address.city": "New York",
+                "profile.score": {"$gte": 90}
+            }))
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Should find 1 user in NYC with score >= 90"
+        );
         assert_eq!(results[0]["name"], "Alice");
     }
 
@@ -1273,12 +1324,14 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // OR query with nested fields
-        let results = coll.find(&json!({
-            "$or": [
-                {"address.city": "Chicago"},
-                {"profile.level": "junior"}
-            ]
-        })).unwrap();
+        let results = coll
+            .find(&json!({
+                "$or": [
+                    {"address.city": "Chicago"},
+                    {"profile.level": "junior"}
+                ]
+            }))
+            .unwrap();
         assert_eq!(results.len(), 2, "Should find 2 users (Chicago or junior)");
     }
 
@@ -1288,11 +1341,15 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Query for field that doesn't exist in some docs
-        let results = coll.find(&json!({"address.location.lat": {"$exists": true}})).unwrap();
+        let results = coll
+            .find(&json!({"address.location.lat": {"$exists": true}}))
+            .unwrap();
         assert_eq!(results.len(), 3, "Should find 3 users with location.lat");
 
         // David doesn't have location
-        let results = coll.find(&json!({"address.location": {"$exists": false}})).unwrap();
+        let results = coll
+            .find(&json!({"address.location": {"$exists": false}}))
+            .unwrap();
         assert_eq!(results.len(), 1, "Should find 1 user without location");
         assert_eq!(results[0]["name"], "David");
     }
@@ -1307,10 +1364,12 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Update nested field - returns (matched, modified)
-        let (matched, modified) = coll.update_one(
-            &json!({"name": "Alice"}),
-            &json!({"$set": {"address.city": "Boston"}})
-        ).unwrap();
+        let (matched, modified) = coll
+            .update_one(
+                &json!({"name": "Alice"}),
+                &json!({"$set": {"address.city": "Boston"}}),
+            )
+            .unwrap();
         assert_eq!(matched, 1);
         assert_eq!(modified, 1);
 
@@ -1325,10 +1384,12 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Update 3-level deep nested field
-        let (matched, modified) = coll.update_one(
-            &json!({"name": "Alice"}),
-            &json!({"$set": {"profile.stats.likes": 3000}})
-        ).unwrap();
+        let (matched, modified) = coll
+            .update_one(
+                &json!({"name": "Alice"}),
+                &json!({"$set": {"profile.stats.likes": 3000}}),
+            )
+            .unwrap();
         assert_eq!(matched, 1);
         assert_eq!(modified, 1);
 
@@ -1343,10 +1404,12 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Increment nested field
-        let (matched, modified) = coll.update_one(
-            &json!({"name": "Bob"}),
-            &json!({"$inc": {"profile.score": 10}})
-        ).unwrap();
+        let (matched, modified) = coll
+            .update_one(
+                &json!({"name": "Bob"}),
+                &json!({"$inc": {"profile.score": 10}}),
+            )
+            .unwrap();
         assert_eq!(matched, 1);
         assert_eq!(modified, 1);
 
@@ -1361,17 +1424,20 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Unset nested field
-        let (matched, modified) = coll.update_one(
-            &json!({"name": "Alice"}),
-            &json!({"$unset": {"address.zip": ""}})
-        ).unwrap();
+        let (matched, modified) = coll
+            .update_one(
+                &json!({"name": "Alice"}),
+                &json!({"$unset": {"address.zip": ""}}),
+            )
+            .unwrap();
         assert_eq!(matched, 1);
         assert_eq!(modified, 1);
 
         // Verify - zip should be removed
         let results = coll.find(&json!({"name": "Alice"})).unwrap();
-        assert!(results[0]["address"].get("zip").is_none() ||
-                results[0]["address"]["zip"].is_null());
+        assert!(
+            results[0]["address"].get("zip").is_none() || results[0]["address"]["zip"].is_null()
+        );
     }
 
     #[test]
@@ -1380,10 +1446,12 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Update all seniors - returns (matched, modified)
-        let (matched, modified) = coll.update_many(
-            &json!({"profile.level": "senior"}),
-            &json!({"$inc": {"profile.score": 5}})
-        ).unwrap();
+        let (matched, modified) = coll
+            .update_many(
+                &json!({"profile.level": "senior"}),
+                &json!({"$inc": {"profile.score": 5}}),
+            )
+            .unwrap();
         assert_eq!(matched, 2, "Should match 2 senior users");
         assert_eq!(modified, 2, "Should modify 2 senior users");
 
@@ -1405,13 +1473,15 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Group by nested field
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": "$address.city",
-                "count": {"$sum": 1}
-            }},
-            {"$sort": {"count": -1}}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": "$address.city",
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"count": -1}}
+            ]))
+            .unwrap();
 
         assert_eq!(results.len(), 3, "Should have 3 cities");
         assert_eq!(results[0]["_id"], "New York");
@@ -1424,16 +1494,19 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Sum nested numeric field
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": "$profile.level",
-                "totalScore": {"$sum": "$profile.score"},
-                "count": {"$sum": 1}
-            }}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": "$profile.level",
+                    "totalScore": {"$sum": "$profile.score"},
+                    "count": {"$sum": 1}
+                }}
+            ]))
+            .unwrap();
 
         // Find senior group
-        let senior = results.iter()
+        let senior = results
+            .iter()
             .find(|r| r["_id"] == "senior")
             .expect("Should have senior group");
         assert_eq!(senior["totalScore"], 95 + 88); // Alice + Carol
@@ -1446,12 +1519,14 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Average nested numeric field
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": null,
-                "avgScore": {"$avg": "$profile.score"}
-            }}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": null,
+                    "avgScore": {"$avg": "$profile.score"}
+                }}
+            ]))
+            .unwrap();
 
         assert_eq!(results.len(), 1);
         // (95 + 75 + 88 + 82) / 4 = 85
@@ -1464,16 +1539,19 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Sum 3-level deep nested field
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": "$address.city",
-                "totalPosts": {"$sum": "$profile.stats.posts"},
-                "totalLikes": {"$sum": "$profile.stats.likes"}
-            }}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": "$address.city",
+                    "totalPosts": {"$sum": "$profile.stats.posts"},
+                    "totalLikes": {"$sum": "$profile.stats.likes"}
+                }}
+            ]))
+            .unwrap();
 
         // Find New York group (Alice + Carol have stats)
-        let nyc = results.iter()
+        let nyc = results
+            .iter()
             .find(|r| r["_id"] == "New York")
             .expect("Should have New York group");
 
@@ -1487,13 +1565,15 @@ mod nested_document_tests {
         let db = setup_nested_test_db();
         let coll = db.collection("users").unwrap();
 
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": null,
-                "minScore": {"$min": "$profile.score"},
-                "maxScore": {"$max": "$profile.score"}
-            }}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": null,
+                    "minScore": {"$min": "$profile.score"},
+                    "maxScore": {"$max": "$profile.score"}
+                }}
+            ]))
+            .unwrap();
 
         // Aggregation returns floats
         assert_eq!(results[0]["minScore"], 75.0); // Bob
@@ -1506,15 +1586,17 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Match first, then group
-        let results = coll.aggregate(&json!([
-            {"$match": {"profile.score": {"$gte": 80}}},
-            {"$group": {
-                "_id": "$address.city",
-                "avgScore": {"$avg": "$profile.score"},
-                "count": {"$sum": 1}
-            }},
-            {"$sort": {"avgScore": -1}}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$match": {"profile.score": {"$gte": 80}}},
+                {"$group": {
+                    "_id": "$address.city",
+                    "avgScore": {"$avg": "$profile.score"},
+                    "count": {"$sum": 1}
+                }},
+                {"$sort": {"avgScore": -1}}
+            ]))
+            .unwrap();
 
         // Alice(95), Carol(88), David(82) pass the filter - Bob(75) is excluded
         // Alice and Carol are in New York, David is in Chicago
@@ -1531,8 +1613,7 @@ mod nested_document_tests {
         let db = setup_nested_test_db();
         let coll = db.collection("users").unwrap();
 
-        let options = FindOptions::new()
-            .with_sort(vec![("profile.score".to_string(), 1)]);
+        let options = FindOptions::new().with_sort(vec![("profile.score".to_string(), 1)]);
 
         let results = coll.find_with_options(&json!({}), options).unwrap();
 
@@ -1548,8 +1629,7 @@ mod nested_document_tests {
         let db = setup_nested_test_db();
         let coll = db.collection("users").unwrap();
 
-        let options = FindOptions::new()
-            .with_sort(vec![("profile.score".to_string(), -1)]);
+        let options = FindOptions::new().with_sort(vec![("profile.score".to_string(), -1)]);
 
         let results = coll.find_with_options(&json!({}), options).unwrap();
 
@@ -1565,8 +1645,7 @@ mod nested_document_tests {
         let db = setup_nested_test_db();
         let coll = db.collection("users").unwrap();
 
-        let options = FindOptions::new()
-            .with_sort(vec![("profile.stats.posts".to_string(), -1)]);
+        let options = FindOptions::new().with_sort(vec![("profile.stats.posts".to_string(), -1)]);
 
         let results = coll.find_with_options(&json!({}), options).unwrap();
 
@@ -1580,8 +1659,7 @@ mod nested_document_tests {
         let db = setup_nested_test_db();
         let coll = db.collection("users").unwrap();
 
-        let options = FindOptions::new()
-            .with_sort(vec![("address.city".to_string(), 1)]);
+        let options = FindOptions::new().with_sort(vec![("address.city".to_string(), 1)]);
 
         let results = coll.find_with_options(&json!({}), options).unwrap();
 
@@ -1599,8 +1677,7 @@ mod nested_document_tests {
         projection.insert("name".to_string(), 1);
         projection.insert("address.city".to_string(), 1);
 
-        let options = FindOptions::new()
-            .with_projection(projection);
+        let options = FindOptions::new().with_projection(projection);
 
         let results = coll.find_with_options(&json!({}), options).unwrap();
 
@@ -1639,7 +1716,11 @@ mod nested_document_tests {
 
         // Query for completely non-existent path
         let results = coll.find(&json!({"foo.bar.baz": "test"})).unwrap();
-        assert_eq!(results.len(), 0, "Should find nothing for non-existent path");
+        assert_eq!(
+            results.len(),
+            0,
+            "Should find nothing for non-existent path"
+        );
     }
 
     #[test]
@@ -1648,17 +1729,21 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Group by field that some docs don't have
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": "$address.location.lat",
-                "count": {"$sum": 1}
-            }}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": "$address.location.lat",
+                    "count": {"$sum": 1}
+                }}
+            ]))
+            .unwrap();
 
         // David has no location, should group as null
-        let null_group = results.iter()
-            .find(|r| r["_id"].is_null());
-        assert!(null_group.is_some(), "Should have null group for missing fields");
+        let null_group = results.iter().find(|r| r["_id"].is_null());
+        assert!(
+            null_group.is_some(),
+            "Should have null group for missing fields"
+        );
     }
 
     #[test]
@@ -1667,12 +1752,14 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Sum field that some docs don't have
-        let results = coll.aggregate(&json!([
-            {"$group": {
-                "_id": null,
-                "totalPosts": {"$sum": "$profile.stats.posts"}
-            }}
-        ])).unwrap();
+        let results = coll
+            .aggregate(&json!([
+                {"$group": {
+                    "_id": null,
+                    "totalPosts": {"$sum": "$profile.stats.posts"}
+                }}
+            ]))
+            .unwrap();
 
         // Alice: 150, Bob: 30, Carol: 200, David: missing (should be 0)
         // Total: 380
@@ -1692,8 +1779,9 @@ mod nested_document_tests {
         // Create nested path via update
         coll.update_one(
             &json!({"name": "Test"}),
-            &json!({"$set": {"new.nested.field": "value"}})
-        ).unwrap();
+            &json!({"$set": {"new.nested.field": "value"}}),
+        )
+        .unwrap();
 
         let results = coll.find(&json!({"name": "Test"})).unwrap();
         assert_eq!(results[0]["new"]["nested"]["field"], "value");
@@ -1731,20 +1819,21 @@ mod nested_document_tests {
         let coll = db.collection("test").unwrap();
 
         let mut doc = HashMap::new();
-        doc.insert("a".to_string(), json!({
-            "b": {
-                "c": {
-                    "d": 1
+        doc.insert(
+            "a".to_string(),
+            json!({
+                "b": {
+                    "c": {
+                        "d": 1
+                    }
                 }
-            }
-        }));
+            }),
+        );
         coll.insert_one(doc).unwrap();
 
         // Update 4-level deep field
-        coll.update_one(
-            &json!({}),
-            &json!({"$inc": {"a.b.c.d": 99}})
-        ).unwrap();
+        coll.update_one(&json!({}), &json!({"$inc": {"a.b.c.d": 99}}))
+            .unwrap();
 
         let results = coll.find(&json!({})).unwrap();
         assert_eq!(results[0]["a"]["b"]["c"]["d"], 100);

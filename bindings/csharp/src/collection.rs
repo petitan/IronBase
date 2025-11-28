@@ -3,8 +3,10 @@
 use std::os::raw::c_char;
 use std::sync::Arc;
 
-use crate::handles::{CollectionHandle, CollHandle, DbHandle, validate_db_handle};
-use crate::error::{IronBaseErrorCode, set_last_error, set_error, clear_last_error, c_str_to_string};
+use crate::error::{
+    c_str_to_string, clear_last_error, set_error, set_last_error, IronBaseErrorCode,
+};
+use crate::handles::{validate_db_handle, CollHandle, CollectionHandle, DbHandle};
 
 /// Get or create a collection
 ///
@@ -51,11 +53,7 @@ pub extern "C" fn ironbase_collection(
 
     match db.inner.collection(&name_str) {
         Ok(coll) => {
-            let handle = Box::new(CollectionHandle::new(
-                coll,
-                Arc::clone(&db.inner),
-                name_str,
-            ));
+            let handle = Box::new(CollectionHandle::new(coll, Arc::clone(&db.inner), name_str));
             unsafe {
                 *out_handle = Box::into_raw(handle);
             }
@@ -218,15 +216,13 @@ pub extern "C" fn ironbase_distinct(
     };
 
     match coll.inner.distinct(&field_str, &query) {
-        Ok(values) => {
-            match serde_json::to_string(&values) {
-                Ok(json) => crate::error::string_to_c_str(&json),
-                Err(e) => {
-                    set_last_error(&format!("Failed to serialize values: {}", e));
-                    std::ptr::null_mut()
-                }
+        Ok(values) => match serde_json::to_string(&values) {
+            Ok(json) => crate::error::string_to_c_str(&json),
+            Err(e) => {
+                set_last_error(&format!("Failed to serialize values: {}", e));
+                std::ptr::null_mut()
             }
-        }
+        },
         Err(e) => {
             set_error(&e);
             std::ptr::null_mut()

@@ -141,7 +141,11 @@ fn import_data(file: &Path, db_path: &Path) -> Result<()> {
         );
     }
 
-    println!("Total: {} documents imported to {}", total_docs, db_path.display());
+    println!(
+        "Total: {} documents imported to {}",
+        total_docs,
+        db_path.display()
+    );
     Ok(())
 }
 
@@ -175,13 +179,17 @@ fn export_data(file: &Path, db_path: &Path, collection_filter: Option<&str>) -> 
         output.insert(coll_name.clone(), Value::Array(docs));
     }
 
-    let json = serde_json::to_string_pretty(&output)
-        .with_context(|| "Failed to serialize to JSON")?;
+    let json =
+        serde_json::to_string_pretty(&output).with_context(|| "Failed to serialize to JSON")?;
 
     fs::write(file, json)
         .with_context(|| format!("Failed to write to file: {}", file.display()))?;
 
-    println!("Total: {} documents exported to {}", total_docs, file.display());
+    println!(
+        "Total: {} documents exported to {}",
+        total_docs,
+        file.display()
+    );
     Ok(())
 }
 
@@ -225,8 +233,9 @@ fn load_schema(path: &Path, db_path: &Path, collection: Option<&str>) -> Result<
         println!("Total: {} schemas loaded from {}", count, path.display());
     } else {
         // Single file: require collection name
-        let coll_name = collection
-            .ok_or_else(|| anyhow::anyhow!("--collection required when loading single schema file"))?;
+        let coll_name = collection.ok_or_else(|| {
+            anyhow::anyhow!("--collection required when loading single schema file")
+        })?;
 
         let schema_content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read: {}", path.display()))?;
@@ -252,7 +261,10 @@ fn save_schema(path: &Path, db_path: &Path, collection: Option<&str>, all: bool)
     let db = DatabaseCore::<StorageEngine>::open(db_path)
         .with_context(|| format!("Failed to open database: {}", db_path.display()))?;
 
-    if all || path.is_dir() || (collection.is_none() && !path.extension().map_or(false, |e| e == "json")) {
+    if all
+        || path.is_dir()
+        || (collection.is_none() && path.extension().is_none_or(|e| e != "json"))
+    {
         // Export all schemas to directory
         let dir_path = if path.exists() && path.is_dir() {
             path.to_path_buf()
@@ -278,7 +290,11 @@ fn save_schema(path: &Path, db_path: &Path, collection: Option<&str>, all: bool)
                 fs::write(&file_path, json)
                     .with_context(|| format!("Failed to write: {}", file_path.display()))?;
 
-                println!("Saved schema for '{}' to {}", coll_name, file_path.display());
+                println!(
+                    "Saved schema for '{}' to {}",
+                    coll_name,
+                    file_path.display()
+                );
                 count += 1;
             }
         }
@@ -286,8 +302,9 @@ fn save_schema(path: &Path, db_path: &Path, collection: Option<&str>, all: bool)
         println!("Total: {} schemas saved to {}", count, dir_path.display());
     } else {
         // Single file export
-        let coll_name = collection
-            .ok_or_else(|| anyhow::anyhow!("--collection required when saving single schema file"))?;
+        let coll_name = collection.ok_or_else(|| {
+            anyhow::anyhow!("--collection required when saving single schema file")
+        })?;
 
         let coll = db
             .collection(coll_name)
@@ -297,11 +314,10 @@ fn save_schema(path: &Path, db_path: &Path, collection: Option<&str>, all: bool)
             .get_schema()
             .ok_or_else(|| anyhow::anyhow!("Collection '{}' has no schema", coll_name))?;
 
-        let json = serde_json::to_string_pretty(&schema)
-            .with_context(|| "Failed to serialize schema")?;
+        let json =
+            serde_json::to_string_pretty(&schema).with_context(|| "Failed to serialize schema")?;
 
-        fs::write(path, json)
-            .with_context(|| format!("Failed to write: {}", path.display()))?;
+        fs::write(path, json).with_context(|| format!("Failed to write: {}", path.display()))?;
 
         println!("Saved schema for '{}' to {}", coll_name, path.display());
     }

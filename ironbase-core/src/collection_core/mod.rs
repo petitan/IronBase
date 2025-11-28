@@ -390,12 +390,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Prepare all documents with IDs
         let mut prepared_docs = Vec::with_capacity(documents.len());
         let mut auto_id_count = 0u64;
-        for (_idx, mut fields) in documents.into_iter().enumerate() {
+        for mut fields in documents.into_iter() {
             // Check if _id already exists in fields (same logic as insert_one)
             let doc_id = if let Some(existing_id) = fields.get("_id") {
                 // Use existing _id from fields - MongoDB compatible behavior
-                serde_json::from_value(existing_id.clone())
-                    .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?
+                serde_json::from_value(existing_id.clone()).map_err(|e| {
+                    MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                })?
             } else {
                 // Auto-generate new _id only if not provided
                 let new_id = DocumentId::new_auto(start_id + auto_id_count);
@@ -481,7 +482,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // 🚀 OPTIMIZED: find({}) special case - return all docs directly
         // Avoids ID collection + re-read cycle - significant speedup for full scans
-        if query_json.as_object().map_or(false, |o| o.is_empty()) {
+        if query_json.as_object().is_some_and(|o| o.is_empty()) {
             let docs_by_id = self.scan_documents_via_catalog()?;
             return Ok(docs_by_id.into_values().collect());
         }
@@ -1257,7 +1258,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         DocumentId::String(s) => IndexKey::String(s.clone()),
                         DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
                     };
-                    (old_key, original_doc.id.clone(), new_key, updated_doc.id.clone())
+                    (
+                        old_key,
+                        original_doc.id.clone(),
+                        new_key,
+                        updated_doc.id.clone(),
+                    )
                 })
                 .collect();
 
@@ -1306,7 +1312,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Check if a document would violate unique constraints
     /// exclude_id: Optional document ID to exclude from check (for updates)
-    fn check_index_constraints(&self, doc: &Document, exclude_id: Option<&DocumentId>) -> Result<()> {
+    fn check_index_constraints(
+        &self,
+        doc: &Document,
+        exclude_id: Option<&DocumentId>,
+    ) -> Result<()> {
         let indexes = self.indexes.read();
         let id_index_name = format!("{}_id", self.name);
 
@@ -1329,7 +1339,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // Check if key already exists
                     if let Some(existing_id) = index.search(&index_key) {
                         // If exclude_id is provided, skip if it's the same document
-                        let is_same_doc = exclude_id.map_or(false, |excl| excl == &existing_id);
+                        let is_same_doc = exclude_id == Some(&existing_id);
                         if !is_same_doc {
                             return Err(MongoLiteError::IndexError(format!(
                                 "Duplicate key: {:?} in field '{}' (unique index)",
@@ -1363,19 +1373,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         if let Value::Object(ref field_values) = fields {
                             for (field, inc_value) in field_values {
                                 // MongoDB: if field doesn't exist, treat it as 0
-                                let current = document.get(field).cloned().unwrap_or(Value::from(0));
+                                let current =
+                                    document.get(field).cloned().unwrap_or(Value::from(0));
                                 // Try int first to preserve integer types
                                 if let (Some(curr_int), Some(inc_int)) =
                                     (current.as_i64(), inc_value.as_i64())
                                 {
-                                    document
-                                        .set_nested(field, Value::from(curr_int + inc_int));
+                                    document.set_nested(field, Value::from(curr_int + inc_int));
                                     was_modified = true;
                                 } else if let (Some(curr_num), Some(inc_num)) =
                                     (current.as_f64(), inc_value.as_f64())
                                 {
-                                    document
-                                        .set_nested(field, Value::from(curr_num + inc_num));
+                                    document.set_nested(field, Value::from(curr_num + inc_num));
                                     was_modified = true;
                                 }
                             }
@@ -1898,9 +1907,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut entries: Vec<(IndexKey, DocumentId)> = docs_by_id
             .iter()
             .filter_map(|(doc_id, doc)| {
-                get_nested_value(doc, &field).map(|field_value| {
-                    (IndexKey::from(field_value), doc_id.clone())
-                })
+                get_nested_value(doc, &field)
+                    .map(|field_value| (IndexKey::from(field_value), doc_id.clone()))
             })
             .collect();
 
@@ -2061,9 +2069,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
-            let id_value = old_doc
-                .get("_id")
-                .ok_or_else(|| MongoLiteError::DocumentNotFound)?;
+            let id_value = old_doc.get("_id").ok_or(MongoLiteError::DocumentNotFound)?;
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
@@ -2163,9 +2169,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
-            let id_value = old_doc
-                .get("_id")
-                .ok_or_else(|| MongoLiteError::DocumentNotFound)?;
+            let id_value = old_doc.get("_id").ok_or(MongoLiteError::DocumentNotFound)?;
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
@@ -2316,7 +2320,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Clone only the offsets we need
         let offsets: Vec<(DocumentId, u64)> = doc_ids
             .iter()
-            .filter_map(|id| meta.document_catalog.get(id).map(|&offset| (id.clone(), offset)))
+            .filter_map(|id| {
+                meta.document_catalog
+                    .get(id)
+                    .map(|&offset| (id.clone(), offset))
+            })
             .collect();
 
         // Release the borrow on meta before reading (meta is already dropped after collect)
@@ -2532,7 +2540,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
         None
     }
-
 }
 
 /// Streaming cursor over query results

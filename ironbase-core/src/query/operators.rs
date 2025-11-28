@@ -1003,9 +1003,7 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
         // Comparison operators
         "$eq" => evaluate_comparison_expr(args, document, |ord| ord == std::cmp::Ordering::Equal),
         "$ne" => evaluate_comparison_expr(args, document, |ord| ord != std::cmp::Ordering::Equal),
-        "$gt" => {
-            evaluate_comparison_expr(args, document, |ord| ord == std::cmp::Ordering::Greater)
-        }
+        "$gt" => evaluate_comparison_expr(args, document, |ord| ord == std::cmp::Ordering::Greater),
         "$gte" => evaluate_comparison_expr(args, document, |ord| {
             ord == std::cmp::Ordering::Greater || ord == std::cmp::Ordering::Equal
         }),
@@ -1188,7 +1186,7 @@ where
             if let Value::Array(arr) = v {
                 Ok(arr.iter().any(|elem| {
                     compare_values(elem, filter_value)
-                        .map(|ord| predicate(ord))
+                        .map(&predicate)
                         .unwrap_or(false)
                 }))
             } else {
@@ -1233,7 +1231,7 @@ fn matches_filter_value(
         Ok(true)
     } else {
         // Direct value comparison (implicit $eq)
-        Ok(doc_value.map_or(false, |v| v == filter_value))
+        Ok(doc_value == Some(filter_value))
     }
 }
 
@@ -1467,7 +1465,10 @@ mod tests {
         let op = InOperator;
         let result = op.matches(Some(&json!("NYC")), &json!("not an array"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires an array"));
     }
 
     #[test]
@@ -1475,7 +1476,10 @@ mod tests {
         let op = NinOperator;
         let result = op.matches(Some(&json!("NYC")), &json!("not an array"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires an array"));
     }
 
     #[test]
@@ -1488,7 +1492,9 @@ mod tests {
     fn test_all_not_array_doc() {
         let op = AllOperator;
         // Doc value is not an array
-        assert!(!op.matches(Some(&json!("not an array")), &json!(["a"]), None).unwrap());
+        assert!(!op
+            .matches(Some(&json!("not an array")), &json!(["a"]), None)
+            .unwrap());
     }
 
     #[test]
@@ -1496,7 +1502,10 @@ mod tests {
         let op = AllOperator;
         let result = op.matches(Some(&json!(["a", "b"])), &json!("not an array"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires an array"));
     }
 
     // ========== Element operator tests ==========
@@ -1506,7 +1515,10 @@ mod tests {
         let op = ExistsOperator;
         let result = op.matches(Some(&json!("value")), &json!("not a boolean"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires a boolean"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires a boolean"));
     }
 
     #[test]
@@ -1519,7 +1531,9 @@ mod tests {
     fn test_regex_not_string_doc() {
         let op = RegexOperator;
         // Doc value is not a string
-        assert!(!op.matches(Some(&json!(123)), &json!("pattern"), None).unwrap());
+        assert!(!op
+            .matches(Some(&json!(123)), &json!("pattern"), None)
+            .unwrap());
     }
 
     #[test]
@@ -1527,14 +1541,17 @@ mod tests {
         let op = RegexOperator;
         let result = op.matches(Some(&json!("hello")), &json!(123), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires a string pattern"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires a string pattern"));
     }
 
     #[test]
     fn test_type_bson_numbers() {
         let op = TypeOperator;
         // BSON type 1 = double
-        assert!(op.matches(Some(&json!(3.14)), &json!(1), None).unwrap());
+        assert!(op.matches(Some(&json!(1.5)), &json!(1), None).unwrap());
         // BSON type 2 = string
         assert!(op.matches(Some(&json!("hello")), &json!(2), None).unwrap());
         // BSON type 3 = object
@@ -1548,7 +1565,9 @@ mod tests {
         // BSON type 16 = int
         assert!(op.matches(Some(&json!(42)), &json!(16), None).unwrap());
         // BSON type 18 = long
-        assert!(op.matches(Some(&json!(9223372036854775807_i64)), &json!(18), None).unwrap());
+        assert!(op
+            .matches(Some(&json!(9223372036854775807_i64)), &json!(18), None)
+            .unwrap());
     }
 
     #[test]
@@ -1556,7 +1575,10 @@ mod tests {
         let op = TypeOperator;
         let result = op.matches(Some(&json!("hello")), &json!(999), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown BSON type number"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown BSON type number"));
     }
 
     #[test]
@@ -1564,7 +1586,10 @@ mod tests {
         let op = TypeOperator;
         let result = op.matches(Some(&json!("hello")), &json!("unknown_type"), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Unknown type name"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Unknown type name"));
     }
 
     #[test]
@@ -1572,7 +1597,10 @@ mod tests {
         let op = TypeOperator;
         let result = op.matches(Some(&json!("hello")), &json!([1, 2]), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires a string or number"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires a string or number"));
     }
 
     #[test]
@@ -1584,8 +1612,12 @@ mod tests {
     #[test]
     fn test_type_boolean_alias() {
         let op = TypeOperator;
-        assert!(op.matches(Some(&json!(true)), &json!("boolean"), None).unwrap());
-        assert!(op.matches(Some(&json!(false)), &json!("bool"), None).unwrap());
+        assert!(op
+            .matches(Some(&json!(true)), &json!("boolean"), None)
+            .unwrap());
+        assert!(op
+            .matches(Some(&json!(false)), &json!("bool"), None)
+            .unwrap());
     }
 
     #[test]
@@ -1621,7 +1653,10 @@ mod tests {
         let op = NorOperator;
         let result = op.matches(None, &json!({"age": 25}), Some(&doc));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires an array"));
     }
 
     #[test]
@@ -1629,7 +1664,10 @@ mod tests {
         let op = NorOperator;
         let result = op.matches(None, &json!([{"age": 25}]), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires document context"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires document context"));
     }
 
     #[test]
@@ -1638,7 +1676,10 @@ mod tests {
         let op = AndOperator;
         let result = op.matches(None, &json!({"age": 25}), Some(&doc));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires an array"));
     }
 
     #[test]
@@ -1646,7 +1687,10 @@ mod tests {
         let op = AndOperator;
         let result = op.matches(None, &json!([{"age": 25}]), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires document context"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires document context"));
     }
 
     #[test]
@@ -1655,7 +1699,10 @@ mod tests {
         let op = OrOperator;
         let result = op.matches(None, &json!({"age": 25}), Some(&doc));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires an array"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires an array"));
     }
 
     #[test]
@@ -1663,7 +1710,10 @@ mod tests {
         let op = OrOperator;
         let result = op.matches(None, &json!([{"age": 25}]), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires document context"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires document context"));
     }
 
     #[test]
@@ -1696,7 +1746,10 @@ mod tests {
         let op = NotOperator;
         let result = op.matches(Some(&json!(25)), &json!({"$gt": 30}), None);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("requires document context"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires document context"));
     }
 
     // ========== matches_filter tests ==========
@@ -1732,7 +1785,10 @@ mod tests {
         let filter = json!("not an object");
         let result = matches_filter(&doc, &filter);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Filter must be an object"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Filter must be an object"));
     }
 
     #[test]
@@ -1775,7 +1831,13 @@ mod tests {
     #[test]
     fn test_elemmatch_not_array() {
         let op = ElemMatchOperator;
-        assert!(!op.matches(Some(&json!("not an array")), &json!({"name": "Alice"}), None).unwrap());
+        assert!(!op
+            .matches(
+                Some(&json!("not an array")),
+                &json!({"name": "Alice"}),
+                None
+            )
+            .unwrap());
     }
 
     #[test]
@@ -2102,7 +2164,10 @@ mod tests {
     #[test]
     fn test_expr_eq_and_ne() {
         // Test $eq and $ne in $expr
-        let doc = create_test_document(1, vec![("a", json!(10)), ("b", json!(10)), ("c", json!(20))]);
+        let doc = create_test_document(
+            1,
+            vec![("a", json!(10)), ("b", json!(10)), ("c", json!(20))],
+        );
 
         let filter_eq = json!({"$expr": {"$eq": ["$a", "$b"]}});
         let filter_ne = json!({"$expr": {"$ne": ["$a", "$c"]}});

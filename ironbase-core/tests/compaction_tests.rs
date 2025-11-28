@@ -17,10 +17,10 @@ fn test_compaction_removes_tombstones() {
         let mut fields = HashMap::new();
         fields.insert("id".to_string(), json!(i));
         fields.insert("name".to_string(), json!(format!("User{}", i)));
-        let doc = Document::new(DocumentId::Int(i as i64), fields);
+        let doc = Document::new(DocumentId::Int(i), fields);
         let doc_json = doc.to_json().unwrap();
         storage
-            .write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes())
+            .write_document_raw("users", &DocumentId::Int(i), doc_json.as_bytes())
             .unwrap();
     }
 
@@ -30,10 +30,10 @@ fn test_compaction_removes_tombstones() {
         fields.insert("id".to_string(), json!(i));
         fields.insert("_tombstone".to_string(), json!(true));
         fields.insert("_collection".to_string(), json!("users"));
-        let doc = Document::new(DocumentId::Int(i as i64), fields);
+        let doc = Document::new(DocumentId::Int(i), fields);
         let doc_json = doc.to_json().unwrap();
         storage
-            .write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes())
+            .write_document_raw("users", &DocumentId::Int(i), doc_json.as_bytes())
             .unwrap();
     }
 
@@ -66,10 +66,10 @@ fn test_compaction_preserves_live_documents() {
         let mut fields = HashMap::new();
         fields.insert("value".to_string(), json!(i * 100));
         fields.insert("_collection".to_string(), json!("items"));
-        let doc = Document::new(DocumentId::Int(i as i64), fields);
+        let doc = Document::new(DocumentId::Int(i), fields);
         let doc_json = doc.to_json().unwrap();
         storage
-            .write_document_raw("items", &DocumentId::Int(i as i64), doc_json.as_bytes())
+            .write_document_raw("items", &DocumentId::Int(i), doc_json.as_bytes())
             .unwrap();
         expected_ids.push(i);
     }
@@ -123,20 +123,20 @@ fn test_compaction_multi_collection() {
         let mut fields = HashMap::new();
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("_collection".to_string(), json!("users"));
-        let doc = Document::new(DocumentId::Int(i as i64), fields);
+        let doc = Document::new(DocumentId::Int(i), fields);
         let doc_json = doc.to_json().unwrap();
         storage
-            .write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes())
+            .write_document_raw("users", &DocumentId::Int(i), doc_json.as_bytes())
             .unwrap();
 
         // Posts
         let mut fields = HashMap::new();
         fields.insert("title".to_string(), json!(format!("Post{}", i)));
         fields.insert("_collection".to_string(), json!("posts"));
-        let doc = Document::new(DocumentId::Int(i as i64), fields);
+        let doc = Document::new(DocumentId::Int(i), fields);
         let doc_json = doc.to_json().unwrap();
         storage
-            .write_document_raw("posts", &DocumentId::Int(i as i64), doc_json.as_bytes())
+            .write_document_raw("posts", &DocumentId::Int(i), doc_json.as_bytes())
             .unwrap();
     }
 
@@ -145,10 +145,10 @@ fn test_compaction_multi_collection() {
         let mut fields = HashMap::new();
         fields.insert("_tombstone".to_string(), json!(true));
         fields.insert("_collection".to_string(), json!("users"));
-        let doc = Document::new(DocumentId::Int(i as i64), fields);
+        let doc = Document::new(DocumentId::Int(i), fields);
         let doc_json = doc.to_json().unwrap();
         storage
-            .write_document_raw("users", &DocumentId::Int(i as i64), doc_json.as_bytes())
+            .write_document_raw("users", &DocumentId::Int(i), doc_json.as_bytes())
             .unwrap();
     }
 

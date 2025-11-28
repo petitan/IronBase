@@ -161,7 +161,6 @@ impl WriteAheadLog {
         let file = OpenOptions::new()
             .create(true)
             .read(true)
-            .write(true)
             .append(true)
             .open(&path)?;
 
@@ -204,9 +203,7 @@ impl WriteAheadLog {
         use std::collections::HashMap;
         let mut txs: HashMap<TransactionId, Vec<WALEntry>> = HashMap::new();
         for entry in entries {
-            txs.entry(entry.transaction_id)
-                .or_insert_with(Vec::new)
-                .push(entry);
+            txs.entry(entry.transaction_id).or_default().push(entry);
         }
 
         // Filter to committed transactions only
@@ -322,7 +319,6 @@ impl WriteAheadLog {
         // Reopen file
         self.file = OpenOptions::new()
             .read(true)
-            .write(true)
             .append(true)
             .open(&self.path)?;
 

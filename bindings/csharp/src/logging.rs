@@ -4,7 +4,9 @@
 
 use std::os::raw::c_char;
 
-use crate::error::{IronBaseErrorCode, set_last_error, clear_last_error, c_str_to_string, string_to_c_str};
+use crate::error::{
+    c_str_to_string, clear_last_error, set_last_error, string_to_c_str, IronBaseErrorCode,
+};
 
 /// Set the global log level
 ///

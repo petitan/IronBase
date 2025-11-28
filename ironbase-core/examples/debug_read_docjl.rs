@@ -1,7 +1,7 @@
 // Debug script to read docjl_storage.mlite using ironbase-core
 // This mimics what the MCP server does
 
-use ironbase_core::{DatabaseCore, storage::StorageEngine};
+use ironbase_core::{storage::StorageEngine, DatabaseCore};
 use std::path::PathBuf;
 
 fn main() {
@@ -26,7 +26,11 @@ fn main() {
 
     println!("\n2. Listing collections...");
     let collections = db.list_collections();
-    println!("   ✅ Found {} collection(s): {:?}", collections.len(), collections);
+    println!(
+        "   ✅ Found {} collection(s): {:?}",
+        collections.len(),
+        collections
+    );
 
     println!("\n3. Getting 'documents' collection...");
     let collection = match db.collection("documents") {

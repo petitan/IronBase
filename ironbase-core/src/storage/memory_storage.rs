@@ -172,10 +172,9 @@ impl Storage for MemoryStorage {
                     .iter()
                     .filter(|doc| {
                         // Check if document is a tombstone
-                        doc.get("_tombstone")
+                        !doc.get("_tombstone")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false)
-                            == false
                     })
                     .cloned()
                     .collect();
@@ -318,17 +317,21 @@ impl RawStorage for MemoryStorage {
         if start + 4 > self.raw_data.len() {
             return Err(MongoLiteError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
-                format!("Offset {} out of bounds (len={})", offset, self.raw_data.len()),
+                format!(
+                    "Offset {} out of bounds (len={})",
+                    offset,
+                    self.raw_data.len()
+                ),
             )));
         }
 
         // Read length prefix
-        let len_bytes: [u8; 4] = self.raw_data[start..start + 4]
-            .try_into()
-            .map_err(|_| MongoLiteError::Io(std::io::Error::new(
+        let len_bytes: [u8; 4] = self.raw_data[start..start + 4].try_into().map_err(|_| {
+            MongoLiteError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Failed to read length prefix",
-            )))?;
+            ))
+        })?;
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         // Check data bounds
@@ -617,9 +620,7 @@ mod tests {
         let doc_id = DocumentId::Int(1);
         let data = b"{\"name\":\"Alice\"}";
 
-        let offset = storage
-            .write_document_raw("test", &doc_id, data)
-            .unwrap();
+        let offset = storage.write_document_raw("test", &doc_id, data).unwrap();
 
         // Offset should be after header (256 bytes)
         assert_eq!(offset, 256);
@@ -695,9 +696,7 @@ mod tests {
         let doc_id = DocumentId::String("doc1".to_string());
         let data = b"{\"_id\":\"doc1\"}";
 
-        let offset = storage
-            .write_document_raw("test", &doc_id, data)
-            .unwrap();
+        let offset = storage.write_document_raw("test", &doc_id, data).unwrap();
 
         // Check catalog was updated
         let meta = storage.get_collection_meta("test").unwrap();
