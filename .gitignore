@@ -15,6 +15,8 @@ build/
 # Database files
 *.db
 *.mlite
+*.wal
+*.idx
 
 # Debug files
 debug_*.py
