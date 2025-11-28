@@ -3,7 +3,7 @@
 MCP Bridge for Windows Claude Desktop -> WSL HTTP Server
 
 This script acts as a simple STDIO <-> HTTP proxy between Claude Desktop (Windows)
-and the MCP DOCJL Server running in WSL via HTTP.
+and the MCP IronBase Server running in WSL via HTTP.
 
 All MCP protocol logic is handled by the Rust server.
 
@@ -13,22 +13,27 @@ Usage:
 Claude Desktop Configuration (Windows):
     {
       "mcpServers": {
-        "docjl-editor": {
+        "ironbase": {
           "command": "python",
           "args": ["C:\\path\\to\\mcp_bridge.py"]
         }
       }
     }
+
+Environment Variables:
+    MCP_SERVER_URL - Override server URL (default: http://localhost:8080/mcp)
+    MCP_DEBUG      - Set to "1" for debug logging
 """
 
 import sys
+import os
 import json
 import requests
 from typing import Dict, Any
 
 # Configuration
-MCP_SERVER_URL = "http://localhost:8080/mcp"
-DEBUG = False  # Set to True for debugging
+MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8080/mcp")
+DEBUG = os.environ.get("MCP_DEBUG", "0") == "1"
 
 def log_debug(message: str):
     """Log debug message to stderr (won't interfere with stdout)"""
@@ -56,11 +61,13 @@ def process_request(request_line: str) -> Dict[str, Any]:
     Returns:
         JSON-RPC response dict
     """
+    request_id = 1  # Default ID in case parsing fails
+
     try:
         # Parse incoming JSON-RPC request
         request = json.loads(request_line)
         method = request.get("method", "unknown")
-        request_id = request.get("id")
+        request_id = request.get("id", 1)  # Use 1 as fallback, never None
 
         log_debug(f"Forwarding request: {method} (id: {request_id})")
 
@@ -81,7 +88,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
             log_debug(f"HTTP error {response.status_code} for {method}")
             return {
                 "jsonrpc": "2.0",
-                "id": request_id if request_id is not None else -1,
+                "id": request_id,
                 "error": {
                     "code": -32603,
                     "message": f"HTTP error {response.status_code}: {response.text}"
@@ -92,27 +99,27 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug(f"JSON decode error: {e}")
         return {
             "jsonrpc": "2.0",
-            "id": -1,  # Use -1 for parse errors (no valid request ID available)
+            "id": request_id,
             "error": {
                 "code": -32700,
                 "message": f"Parse error: {str(e)}"
             }
         }
-    except requests.exceptions.ConnectionError:
-        log_debug("Connection error - is WSL server running?")
+    except requests.exceptions.ConnectionError as e:
+        log_debug(f"Connection error - is WSL server running? {e}")
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id") if 'request' in locals() else -1,
+            "id": request_id,
             "error": {
                 "code": -32603,
-                "message": "Cannot connect to WSL server at http://localhost:8080. Is the server running?"
+                "message": f"Cannot connect to WSL server at {MCP_SERVER_URL}. Is the server running?"
             }
         }
     except requests.exceptions.Timeout:
         log_debug("Request timeout")
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id") if 'request' in locals() else -1,
+            "id": request_id,
             "error": {
                 "code": -32603,
                 "message": "Request timeout (30s)"
@@ -122,7 +129,7 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug(f"Unexpected error: {e}")
         return {
             "jsonrpc": "2.0",
-            "id": request.get("id") if 'request' in locals() else -1,
+            "id": request_id,
             "error": {
                 "code": -32603,
                 "message": f"Internal error: {str(e)}"
@@ -133,21 +140,22 @@ def main():
     """
     Main loop: Read JSON-RPC from stdin, forward to HTTP server, write response to stdout
     """
-    log_debug("MCP Bridge starting (dumb proxy mode)...")
+    log_debug("MCP IronBase Bridge starting...")
     log_debug(f"Target server: {MCP_SERVER_URL}")
 
     # Test connection to server
     try:
-        response = requests.get("http://localhost:8080/health", timeout=5)
+        health_url = MCP_SERVER_URL.rsplit('/mcp', 1)[0] + '/health'
+        response = requests.get(health_url, timeout=5)
         if response.status_code == 200:
-            log_debug("✅ WSL server is reachable")
+            log_debug("WSL server is reachable")
         else:
-            log_debug(f"⚠️  WSL server returned status {response.status_code}")
+            log_debug(f"WSL server returned status {response.status_code}")
     except Exception as e:
-        log_debug(f"⚠️  Cannot reach WSL server: {e}")
+        log_debug(f"Cannot reach WSL server: {e}")
         log_debug("Make sure the server is running in WSL:")
         log_debug("  cd /home/petitan/MongoLite/mcp-server")
-        log_debug("  DOCJL_CONFIG=config.toml ./target/release/mcp-docjl-server")
+        log_debug("  ./target/release/mcp-ironbase-server")
 
     # Main loop: read from stdin, process, write to stdout
     log_debug("Entering main loop (waiting for stdin)...")
@@ -175,4 +183,14 @@ if __name__ == "__main__":
         sys.exit(0)
     except Exception as e:
         log_debug(f"Fatal error: {e}")
+        # Output a proper JSON-RPC error so Claude Desktop doesn't crash
+        error_response = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32603,
+                "message": f"Bridge fatal error: {str(e)}"
+            }
+        }
+        print(json.dumps(error_response), flush=True)
         sys.exit(1)

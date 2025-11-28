@@ -14,6 +14,7 @@ use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
 use crate::query_planner::{QueryPlan, QueryPlanner};
 use crate::storage::{RawStorage, Storage};
+use crate::value_utils::get_nested_value;
 use crate::{log_debug, log_trace, log_warn};
 
 mod index_persistence;
@@ -21,32 +22,6 @@ mod schema;
 
 use self::index_persistence::persist_index_to_disk;
 use self::schema::CompiledSchema;
-
-/// Get nested field value from serde_json::Value using dot notation
-/// e.g., "profile.score" gets doc["profile"]["score"]
-fn get_nested_value<'a>(doc: &'a Value, field: &str) -> Option<&'a Value> {
-    if !field.contains('.') {
-        return doc.get(field);
-    }
-
-    let mut value = doc;
-    for part in field.split('.') {
-        match value {
-            Value::Object(map) => {
-                value = map.get(part)?;
-            }
-            Value::Array(arr) => {
-                if let Ok(index) = part.parse::<usize>() {
-                    value = arr.get(index)?;
-                } else {
-                    return None;
-                }
-            }
-            _ => return None,
-        }
-    }
-    Some(value)
-}
 
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
@@ -712,10 +687,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if parsed_query.matches(&document) {
                 matched = 1;
 
+                // Save original document for index removal
+                let original_document = document.clone();
+
                 // Apply update operators
                 let was_modified = self.apply_update_operators(&mut document, update_json)?;
 
                 if was_modified {
+                    // ✅ Ensure updated document has _collection before constraint check
+                    document.set("_collection".to_string(), Value::String(self.name.clone()));
+
+                    // 🔒 CHECK UNIQUE CONSTRAINTS BEFORE ANY CHANGES
+                    // exclude_id = Some to allow updating same document's non-key fields
+                    self.check_index_constraints(&document, Some(&document.id))?;
+
+                    // Release storage lock for index operations
+                    drop(storage);
+
+                    // 📤 REMOVE OLD DOCUMENT FROM INDEXES
+                    self.remove_from_indexes(&original_document)?;
+
+                    // 📥 ADD UPDATED DOCUMENT TO INDEXES
+                    self.add_to_indexes(&document)?;
+
+                    // Re-acquire storage lock
+                    storage = self.storage.write();
+
                     // Mark old document as tombstone
                     let mut tombstone = doc.clone();
                     if let Value::Object(ref mut map) = tombstone {
@@ -727,8 +724,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // Write tombstone (no catalog tracking for tombstones)
                     storage.write_data(tombstone_json.as_bytes())?;
 
-                    // ✅ Ensure updated document has _collection
-                    document.set("_collection".to_string(), Value::String(self.name.clone()));
                     self.validate_document(&document)?;
 
                     // Write updated document WITH catalog tracking
@@ -786,10 +781,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if parsed_query.matches(&document) {
                 matched += 1;
 
+                // Save original document for index removal
+                let original_document = document.clone();
+
                 // Apply update operators
                 let was_modified = self.apply_update_operators(&mut document, update_json)?;
 
                 if was_modified {
+                    // ✅ Ensure updated document has _collection before constraint check
+                    document.set("_collection".to_string(), Value::String(self.name.clone()));
+
+                    // 🔒 CHECK UNIQUE CONSTRAINTS BEFORE ANY CHANGES
+                    // exclude_id = Some to allow updating same document's non-key fields
+                    self.check_index_constraints(&document, Some(&document.id))?;
+
+                    // Release storage lock for index operations
+                    drop(storage);
+
+                    // 📤 REMOVE OLD DOCUMENT FROM INDEXES
+                    self.remove_from_indexes(&original_document)?;
+
+                    // 📥 ADD UPDATED DOCUMENT TO INDEXES
+                    self.add_to_indexes(&document)?;
+
+                    // Re-acquire storage lock
+                    storage = self.storage.write();
+
                     // Mark old document as tombstone
                     let mut tombstone = doc.clone();
                     if let Value::Object(ref mut map) = tombstone {
@@ -801,8 +818,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // Write tombstone (no catalog tracking for tombstones)
                     storage.write_data(tombstone_json.as_bytes())?;
 
-                    // ✅ Ensure updated document has _collection
-                    document.set("_collection".to_string(), Value::String(self.name.clone()));
                     self.validate_document(&document)?;
 
                     // Write updated document WITH catalog tracking
@@ -869,6 +884,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Check if matches query
             if parsed_query.matches(&document) {
+                // Remove from all indexes BEFORE deleting
+                // Drop storage lock temporarily to avoid potential deadlock
+                drop(storage);
+                self.remove_from_indexes(&document)?;
+                storage = self.storage.write();
+
                 // Mark as tombstone (logical delete)
                 let mut tombstone = doc.clone();
                 if let Value::Object(ref mut map) = tombstone {
@@ -916,6 +937,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Check if matches query
             if parsed_query.matches(&document) {
+                // Remove from all indexes BEFORE deleting
+                // Drop storage lock temporarily to avoid potential deadlock
+                drop(storage);
+                self.remove_from_indexes(&document)?;
+                storage = self.storage.write();
+
                 // Mark as tombstone (logical delete)
                 let mut tombstone = doc.clone();
                 if let Value::Object(ref mut map) = tombstone {
@@ -1082,6 +1109,116 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
         Ok(results)
+    }
+
+    // ========== INDEX HELPER FUNCTIONS FOR UPDATE/DELETE ==========
+
+    /// Remove a document from all indexes
+    /// Used during update and delete operations
+    fn remove_from_indexes(&self, doc: &Document) -> Result<()> {
+        let mut indexes = self.indexes.write();
+        let id_index_name = format!("{}_id", self.name);
+
+        // Remove from _id index
+        if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+            let id_key = match &doc.id {
+                DocumentId::Int(i) => IndexKey::Int(*i),
+                DocumentId::String(s) => IndexKey::String(s.clone()),
+                DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+            };
+            id_index.delete(&id_key, &doc.id)?;
+        }
+
+        // Remove from all other indexes
+        for index_name in indexes.list_indexes() {
+            if index_name == id_index_name {
+                continue; // Already handled
+            }
+
+            if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                let field = index.metadata.field.clone();
+                if let Some(field_value) = doc.get(&field) {
+                    let index_key = IndexKey::from(field_value);
+                    index.delete(&index_key, &doc.id)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Add a document to all indexes (with unique constraint checking)
+    /// Used during update operations after removing old values
+    fn add_to_indexes(&self, doc: &Document) -> Result<()> {
+        let mut indexes = self.indexes.write();
+        let id_index_name = format!("{}_id", self.name);
+
+        // Add to _id index
+        if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+            let id_key = match &doc.id {
+                DocumentId::Int(i) => IndexKey::Int(*i),
+                DocumentId::String(s) => IndexKey::String(s.clone()),
+                DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+            };
+            id_index.insert(id_key, doc.id.clone())?;
+        }
+
+        // Add to all other indexes
+        for index_name in indexes.list_indexes() {
+            if index_name == id_index_name {
+                continue; // Already handled
+            }
+
+            if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                let field = index.metadata.field.clone();
+                if let Some(field_value) = doc.get(&field) {
+                    let index_key = IndexKey::from(field_value);
+                    index.insert(index_key, doc.id.clone())?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a document would violate unique constraints
+    /// exclude_id: Optional document ID to exclude from check (for updates)
+    fn check_index_constraints(&self, doc: &Document, exclude_id: Option<&DocumentId>) -> Result<()> {
+        let indexes = self.indexes.read();
+        let id_index_name = format!("{}_id", self.name);
+
+        // Check all indexes (except _id which is handled separately)
+        for index_name in indexes.list_indexes() {
+            if index_name == id_index_name {
+                continue;
+            }
+
+            if let Some(index) = indexes.get_btree_index(&index_name) {
+                // Only check unique indexes
+                if !index.metadata.unique {
+                    continue;
+                }
+
+                let field = &index.metadata.field;
+                if let Some(field_value) = doc.get(field) {
+                    let index_key = IndexKey::from(field_value);
+
+                    // Check if key already exists
+                    if let Some(existing_id) = index.search(&index_key) {
+                        // If exclude_id is provided, skip if it's the same document
+                        let is_same_doc = exclude_id.map_or(false, |excl| excl == &existing_id);
+                        if !is_same_doc {
+                            return Err(MongoLiteError::IndexError(format!(
+                                "Duplicate key: {:?} in field '{}' (unique index)",
+                                index_key, field
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Apply update operators to document - returns whether document was modified

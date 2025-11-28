@@ -126,3 +126,223 @@ fn test_drop_index() {
     let indexes = collection.list_indexes();
     assert!(!indexes.contains(&index_name));
 }
+
+// ========== UNIQUE INDEX CONSTRAINT TESTS FOR UPDATE/DELETE ==========
+
+#[test]
+fn test_update_one_unique_constraint_violation() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Insert two documents with different emails
+    let mut fields1 = std::collections::HashMap::new();
+    fields1.insert("name".to_string(), json!("Alice"));
+    fields1.insert("email".to_string(), json!("alice@example.com"));
+    collection.insert_one(fields1).unwrap();
+
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("name".to_string(), json!("Bob"));
+    fields2.insert("email".to_string(), json!("bob@example.com"));
+    collection.insert_one(fields2).unwrap();
+
+    // Try to update Bob's email to Alice's email - should fail
+    let result = collection.update_one(
+        &json!({"name": "Bob"}),
+        &json!({"$set": {"email": "alice@example.com"}}),
+    );
+
+    assert!(result.is_err(), "Update to duplicate unique value should fail");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Duplicate key") || err_msg.contains("unique"),
+        "Error should mention duplicate key or unique constraint, got: {}",
+        err_msg
+    );
+
+    // Verify Bob's email is unchanged
+    let bob = collection.find_one(&json!({"name": "Bob"})).unwrap().unwrap();
+    assert_eq!(bob.get("email").unwrap().as_str().unwrap(), "bob@example.com");
+}
+
+#[test]
+fn test_update_one_same_value_allowed() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Insert document
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("name".to_string(), json!("Alice"));
+    fields.insert("email".to_string(), json!("alice@example.com"));
+    collection.insert_one(fields).unwrap();
+
+    // Update same document to same email value - should work
+    let result = collection.update_one(
+        &json!({"name": "Alice"}),
+        &json!({"$set": {"email": "alice@example.com", "age": 30}}),
+    );
+
+    assert!(result.is_ok(), "Update to same value should succeed");
+
+    // Verify the update worked
+    let alice = collection.find_one(&json!({"name": "Alice"})).unwrap().unwrap();
+    assert_eq!(alice.get("age").unwrap().as_i64().unwrap(), 30);
+}
+
+#[test]
+fn test_update_many_unique_constraint_violation() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Insert documents
+    let mut fields1 = std::collections::HashMap::new();
+    fields1.insert("name".to_string(), json!("Alice"));
+    fields1.insert("email".to_string(), json!("alice@example.com"));
+    fields1.insert("role".to_string(), json!("admin"));
+    collection.insert_one(fields1).unwrap();
+
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("name".to_string(), json!("Bob"));
+    fields2.insert("email".to_string(), json!("bob@example.com"));
+    fields2.insert("role".to_string(), json!("user"));
+    collection.insert_one(fields2).unwrap();
+
+    // Try to update Bob to have Alice's email - should fail
+    let result = collection.update_many(
+        &json!({"role": "user"}),
+        &json!({"$set": {"email": "alice@example.com"}}),
+    );
+
+    assert!(result.is_err(), "Update many to duplicate value should fail");
+}
+
+#[test]
+fn test_delete_removes_from_index() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Insert document
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("name".to_string(), json!("Alice"));
+    fields.insert("email".to_string(), json!("alice@example.com"));
+    collection.insert_one(fields).unwrap();
+
+    // Delete the document
+    let deleted = collection.delete_one(&json!({"name": "Alice"})).unwrap();
+    assert_eq!(deleted, 1);
+
+    // Now insert a new document with the same email - should succeed
+    // because the old entry was removed from the index
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("name".to_string(), json!("Alice2"));
+    fields2.insert("email".to_string(), json!("alice@example.com"));
+    let result = collection.insert_one(fields2);
+
+    assert!(
+        result.is_ok(),
+        "Insert after delete should succeed, got: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_delete_many_removes_from_index() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Insert multiple documents
+    let mut fields1 = std::collections::HashMap::new();
+    fields1.insert("name".to_string(), json!("Alice"));
+    fields1.insert("email".to_string(), json!("alice@example.com"));
+    fields1.insert("active".to_string(), json!(false));
+    collection.insert_one(fields1).unwrap();
+
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("name".to_string(), json!("Bob"));
+    fields2.insert("email".to_string(), json!("bob@example.com"));
+    fields2.insert("active".to_string(), json!(false));
+    collection.insert_one(fields2).unwrap();
+
+    // Delete all inactive users
+    let deleted = collection.delete_many(&json!({"active": false})).unwrap();
+    assert_eq!(deleted, 2);
+
+    // Now insert new documents with the same emails - should succeed
+    let mut fields3 = std::collections::HashMap::new();
+    fields3.insert("name".to_string(), json!("NewAlice"));
+    fields3.insert("email".to_string(), json!("alice@example.com"));
+    let result1 = collection.insert_one(fields3);
+    assert!(result1.is_ok(), "Insert alice email after delete_many should succeed");
+
+    let mut fields4 = std::collections::HashMap::new();
+    fields4.insert("name".to_string(), json!("NewBob"));
+    fields4.insert("email".to_string(), json!("bob@example.com"));
+    let result2 = collection.insert_one(fields4);
+    assert!(result2.is_ok(), "Insert bob email after delete_many should succeed");
+}
+
+#[test]
+fn test_update_one_changes_indexed_value() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Insert document
+    let mut fields = std::collections::HashMap::new();
+    fields.insert("name".to_string(), json!("Alice"));
+    fields.insert("email".to_string(), json!("alice@example.com"));
+    collection.insert_one(fields).unwrap();
+
+    // Update email to a new value
+    let result = collection.update_one(
+        &json!({"name": "Alice"}),
+        &json!({"$set": {"email": "alice.new@example.com"}}),
+    );
+    assert!(result.is_ok());
+
+    // The old email should now be available for reuse
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("name".to_string(), json!("Bob"));
+    fields2.insert("email".to_string(), json!("alice@example.com"));
+    let result2 = collection.insert_one(fields2);
+
+    assert!(
+        result2.is_ok(),
+        "Old email should be available after update, got: {:?}",
+        result2.err()
+    );
+}
