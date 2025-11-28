@@ -13,11 +13,11 @@ namespace IronBase.Interop
     internal static unsafe partial class NativeMethods
     {
 #if IRONBASE_WINDOWS
-        const string __DllName = "ironbase_ffi.dll";
+        const string __DllName = "ironbase_csharp.dll";
 #elif IRONBASE_LINUX
-        const string __DllName = "libironbase_ffi.so";
+        const string __DllName = "libironbase_csharp.so";
 #else
-        const string __DllName = "ironbase_ffi";
+        const string __DllName = "ironbase_csharp";
 #endif
         
 

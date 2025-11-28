@@ -1,5 +1,5 @@
 [package]
-name = "ironbase-ffi"
+name = "ironbase-csharp"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 description = "C FFI bindings for IronBase - for C#/Unity integration"
 
 [lib]
-name = "ironbase_ffi"
+name = "ironbase_csharp"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]

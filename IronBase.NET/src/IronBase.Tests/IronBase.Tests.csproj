@@ -25,10 +25,10 @@
 
   <!-- Copy native library for testing -->
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Linux'))">
-    <None Include="..\..\runtimes\linux-x64\native\libironbase_ffi.so" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\runtimes\linux-x64\native\libironbase_ffi.so')" />
+    <None Include="..\..\runtimes\linux-x64\native\libironbase_csharp.so" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\runtimes\linux-x64\native\libironbase_csharp.so')" />
   </ItemGroup>
   <ItemGroup Condition="$([MSBuild]::IsOSPlatform('Windows'))">
-    <None Include="..\..\runtimes\win-x64\native\ironbase_ffi.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\runtimes\win-x64\native\ironbase_ffi.dll')" />
+    <None Include="..\..\runtimes\win-x64\native\ironbase_csharp.dll" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\runtimes\win-x64\native\ironbase_csharp.dll')" />
   </ItemGroup>
 
 </Project>

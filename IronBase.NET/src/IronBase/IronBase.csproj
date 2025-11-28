@@ -34,8 +34,8 @@
 
   <!-- Include native libraries in NuGet package -->
   <ItemGroup>
-    <None Include="..\..\runtimes\win-x64\native\ironbase_ffi.dll" Pack="true" PackagePath="runtimes\win-x64\native\" Condition="Exists('..\..\runtimes\win-x64\native\ironbase_ffi.dll')" />
-    <None Include="..\..\runtimes\linux-x64\native\libironbase_ffi.so" Pack="true" PackagePath="runtimes\linux-x64\native\" Condition="Exists('..\..\runtimes\linux-x64\native\libironbase_ffi.so')" />
+    <None Include="..\..\runtimes\win-x64\native\ironbase_csharp.dll" Pack="true" PackagePath="runtimes\win-x64\native\" Condition="Exists('..\..\runtimes\win-x64\native\ironbase_csharp.dll')" />
+    <None Include="..\..\runtimes\linux-x64\native\libironbase_csharp.so" Pack="true" PackagePath="runtimes\linux-x64\native\" Condition="Exists('..\..\runtimes\linux-x64\native\libironbase_csharp.so')" />
   </ItemGroup>
 
   <!-- Include .targets file for copying native libraries at build time -->
