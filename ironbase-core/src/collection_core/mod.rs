@@ -384,18 +384,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .get_collection_meta_mut(&self.name)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        // Generate all IDs upfront
+        // Get starting ID for auto-generation (don't pre-reserve)
         let start_id = meta.last_id;
-        meta.last_id += documents.len() as u64;
 
         // Prepare all documents with IDs
         let mut prepared_docs = Vec::with_capacity(documents.len());
-        for (idx, mut fields) in documents.into_iter().enumerate() {
-            // new_auto adds 1 internally, so we pass start_id + idx
-            let doc_id = DocumentId::new_auto(start_id + idx as u64);
-
-            // Add _id to fields
-            fields.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+        let mut auto_id_count = 0u64;
+        for (_idx, mut fields) in documents.into_iter().enumerate() {
+            // Check if _id already exists in fields (same logic as insert_one)
+            let doc_id = if let Some(existing_id) = fields.get("_id") {
+                // Use existing _id from fields - MongoDB compatible behavior
+                serde_json::from_value(existing_id.clone())
+                    .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?
+            } else {
+                // Auto-generate new _id only if not provided
+                let new_id = DocumentId::new_auto(start_id + auto_id_count);
+                auto_id_count += 1;
+                fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
+                new_id
+            };
 
             // Add _collection field
             fields.insert("_collection".to_string(), Value::String(self.name.clone()));
@@ -406,6 +413,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             prepared_docs.push((doc_id.clone(), doc));
             inserted_ids.push(doc_id);
         }
+
+        // Update last_id with actual auto-generated count only
+        meta.last_id = start_id + auto_id_count;
 
         // Update indexes in batch BEFORE writing to storage
         {

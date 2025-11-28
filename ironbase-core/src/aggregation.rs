@@ -90,9 +90,17 @@ pub struct ProjectStage {
 
 #[derive(Debug, Clone)]
 pub enum ProjectField {
-    Include,        // 1
-    Exclude,        // 0
-    Rename(String), // "$fieldName"
+    Include,                      // 1
+    Exclude,                      // 0
+    Rename(String),               // "$fieldName"
+    Expression(ProjectExpression), // {"$size": "$field"}, etc.
+}
+
+/// Expressions that can be used in $project stage
+#[derive(Debug, Clone)]
+pub enum ProjectExpression {
+    /// $size - returns the length of an array field
+    Size(String), // Field name (e.g., "$tags" -> "tags")
 }
 
 /// $group stage - group documents and compute aggregates
@@ -286,9 +294,13 @@ impl ProjectStage {
                             s
                         )));
                     }
+                } else if let Value::Object(expr_obj) = value {
+                    // Parse expression objects like {"$size": "$tags"}
+                    Self::parse_expression(expr_obj)?
                 } else {
                     return Err(MongoLiteError::AggregationError(
-                        "Project field must be 0, 1, or field reference".to_string(),
+                        "Project field must be 0, 1, field reference, or expression object"
+                            .to_string(),
                     ));
                 };
 
@@ -300,6 +312,43 @@ impl ProjectStage {
             Err(MongoLiteError::AggregationError(
                 "$project must be an object".to_string(),
             ))
+        }
+    }
+
+    /// Parse an expression object like {"$size": "$tags"}
+    fn parse_expression(obj: &serde_json::Map<String, Value>) -> Result<ProjectField> {
+        if obj.len() != 1 {
+            return Err(MongoLiteError::AggregationError(
+                "Expression object must have exactly one operator".to_string(),
+            ));
+        }
+
+        let (op, arg) = obj.iter().next().unwrap();
+
+        match op.as_str() {
+            "$size" => {
+                // $size expects a field reference like "$tags"
+                if let Some(field_ref) = arg.as_str() {
+                    if field_ref.starts_with('$') {
+                        let field_name = field_ref.trim_start_matches('$').to_string();
+                        Ok(ProjectField::Expression(ProjectExpression::Size(
+                            field_name,
+                        )))
+                    } else {
+                        Err(MongoLiteError::AggregationError(
+                            "$size argument must be a field reference starting with $".to_string(),
+                        ))
+                    }
+                } else {
+                    Err(MongoLiteError::AggregationError(
+                        "$size argument must be a string field reference".to_string(),
+                    ))
+                }
+            }
+            _ => Err(MongoLiteError::AggregationError(format!(
+                "Unknown projection expression operator: {}",
+                op
+            ))),
         }
     }
 
@@ -319,10 +368,13 @@ impl ProjectStage {
 
         if let Value::Object(obj) = doc {
             // Check if we're in include mode or exclude mode
-            let has_inclusions = self
-                .fields
-                .values()
-                .any(|f| matches!(f, ProjectField::Include | ProjectField::Rename(_)));
+            // Expression is treated as an inclusion (it produces a new field)
+            let has_inclusions = self.fields.values().any(|f| {
+                matches!(
+                    f,
+                    ProjectField::Include | ProjectField::Rename(_) | ProjectField::Expression(_)
+                )
+            });
             let has_non_id_exclusions = self
                 .fields
                 .iter()
@@ -349,6 +401,10 @@ impl ProjectStage {
                                 result.insert(field.clone(), value.clone());
                             }
                         }
+                        ProjectField::Expression(expr) => {
+                            let value = Self::evaluate_expression(expr, doc);
+                            result.insert(field.clone(), value);
+                        }
                         ProjectField::Exclude => {
                             // Should not happen in include mode
                         }
@@ -365,7 +421,7 @@ impl ProjectStage {
                             ProjectField::Include => {
                                 result.insert(field.clone(), value.clone());
                             }
-                            ProjectField::Rename(_) => {
+                            ProjectField::Rename(_) | ProjectField::Expression(_) => {
                                 // Handled below
                             }
                         }
@@ -375,20 +431,47 @@ impl ProjectStage {
                     }
                 }
 
-                // Handle renames in exclude mode
+                // Handle renames and expressions in exclude mode
                 for (target_field, action) in &self.fields {
-                    if let ProjectField::Rename(source) = action {
-                        let source_field = source.trim_start_matches('$');
-                        // Use get_nested_value to support dot notation (e.g., "$address.city")
-                        if let Some(value) = get_nested_value(doc, source_field) {
-                            result.insert(target_field.clone(), value.clone());
+                    match action {
+                        ProjectField::Rename(source) => {
+                            let source_field = source.trim_start_matches('$');
+                            // Use get_nested_value to support dot notation (e.g., "$address.city")
+                            if let Some(value) = get_nested_value(doc, source_field) {
+                                result.insert(target_field.clone(), value.clone());
+                            }
                         }
+                        ProjectField::Expression(expr) => {
+                            let value = Self::evaluate_expression(expr, doc);
+                            result.insert(target_field.clone(), value);
+                        }
+                        _ => {}
                     }
                 }
             }
         }
 
         Ok(Value::Object(result))
+    }
+
+    /// Evaluate a projection expression against a document
+    fn evaluate_expression(expr: &ProjectExpression, doc: &Value) -> Value {
+        match expr {
+            ProjectExpression::Size(field_name) => {
+                // Get the array field and return its length
+                if let Some(value) = get_nested_value(doc, field_name) {
+                    if let Value::Array(arr) = value {
+                        Value::Number(serde_json::Number::from(arr.len()))
+                    } else {
+                        // Not an array - return null (MongoDB behavior)
+                        Value::Null
+                    }
+                } else {
+                    // Field doesn't exist - return null
+                    Value::Null
+                }
+            }
+        }
     }
 }
 
@@ -800,6 +883,65 @@ mod tests {
     }
 
     #[test]
+    fn test_project_size_expression() {
+        let docs = vec![
+            json!({"name": "Alice", "tags": ["rust", "python", "javascript"]}),
+            json!({"name": "Bob", "tags": ["go", "java"]}),
+            json!({"name": "Charlie", "tags": []}),
+            json!({"name": "Dave"}), // No tags field
+        ];
+        let stage = ProjectStage::from_json(&json!({
+            "name": 1,
+            "tagCount": {"$size": "$tags"}
+        })).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 4);
+        assert_eq!(results[0]["name"], "Alice");
+        assert_eq!(results[0]["tagCount"], 3);
+        assert_eq!(results[1]["name"], "Bob");
+        assert_eq!(results[1]["tagCount"], 2);
+        assert_eq!(results[2]["name"], "Charlie");
+        assert_eq!(results[2]["tagCount"], 0);
+        assert_eq!(results[3]["name"], "Dave");
+        assert!(results[3]["tagCount"].is_null()); // Missing field returns null
+    }
+
+    #[test]
+    fn test_project_size_non_array() {
+        let docs = vec![json!({"name": "Alice", "count": 42})];
+        let stage = ProjectStage::from_json(&json!({
+            "name": 1,
+            "countSize": {"$size": "$count"}
+        })).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Non-array field returns null
+        assert!(results[0]["countSize"].is_null());
+    }
+
+    #[test]
+    fn test_project_size_invalid_arg() {
+        // $size requires field reference with $
+        let result = ProjectStage::from_json(&json!({
+            "tagCount": {"$size": "tags"}  // Missing $ prefix
+        }));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be a field reference starting with $"));
+    }
+
+    #[test]
+    fn test_project_size_nested_field() {
+        let docs = vec![json!({"user": {"skills": ["a", "b", "c"]}})];
+        let stage = ProjectStage::from_json(&json!({
+            "skillCount": {"$size": "$user.skills"}
+        })).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["skillCount"], 3);
+    }
+
+    #[test]
     fn test_project_invalid_value() {
         let result = ProjectStage::from_json(&json!({"field": 5}));
         assert!(result.is_err());
@@ -817,7 +959,7 @@ mod tests {
     fn test_project_invalid_type() {
         let result = ProjectStage::from_json(&json!({"field": [1, 2]}));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be 0, 1, or field reference"));
+        assert!(result.unwrap_err().to_string().contains("must be 0, 1, field reference, or expression object"));
     }
 
     #[test]

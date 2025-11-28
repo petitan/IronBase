@@ -454,32 +454,34 @@ impl StorageEngine {
             match operation {
                 Operation::Insert {
                     collection,
-                    doc_id: _,
+                    doc_id,
                     doc,
                 } => {
-                    // Serialize and write document to storage
+                    // Serialize and write document to storage with catalog update
                     let doc_json = serde_json::to_string(doc)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                    self.write_data(doc_json.as_bytes())?;
+                    // Use write_document_raw to properly update document_catalog
+                    self.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
                     self.adjust_live_count(collection, 1);
                 }
                 Operation::Update {
-                    collection: _,
-                    doc_id: _,
+                    collection,
+                    doc_id,
                     old_doc: _,
                     new_doc,
                 } => {
-                    // Write new version of document (append-only)
+                    // Write new version of document (append-only) with catalog update
                     let doc_json = serde_json::to_string(new_doc)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                    self.write_data(doc_json.as_bytes())?;
+                    // Use write_document_raw to properly update document_catalog
+                    self.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
                 }
                 Operation::Delete {
                     collection,
                     doc_id,
                     old_doc: _,
                 } => {
-                    // Write tombstone marker with collection info
+                    // Write tombstone marker with collection info and catalog update
                     let tombstone = serde_json::json!({
                         "_id": doc_id,
                         "_collection": collection,
@@ -487,7 +489,9 @@ impl StorageEngine {
                     });
                     let tombstone_json = serde_json::to_string(&tombstone)
                         .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-                    self.write_data(tombstone_json.as_bytes())?;
+                    // Use write_document_raw - it will handle tombstone in catalog properly
+                    // (tombstones remove entry from catalog when processed by rebuild_catalog)
+                    self.write_document_raw(collection, doc_id, tombstone_json.as_bytes())?;
                     self.adjust_live_count(collection, -1);
                 }
             }
@@ -613,6 +617,131 @@ impl StorageEngine {
         self.wal.clear()?;
 
         Ok((recovered, all_index_changes))
+    }
+
+    /// Rebuild document catalog from file after WAL recovery
+    ///
+    /// This function scans the entire data section of the file and rebuilds
+    /// the document_catalog for each collection. This is necessary because:
+    /// 1. WAL recovery uses write_data() which doesn't update the catalog
+    /// 2. The catalog may be empty or inconsistent after a crash
+    ///
+    /// This is the "recovery rebuild" approach - simpler and more robust than
+    /// fixing apply_operations to maintain the catalog during recovery.
+    pub fn rebuild_catalog_from_file(&mut self) -> Result<()> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let file_len = self.file.metadata()?.len();
+
+        // If file is too small to have any documents, nothing to rebuild
+        if file_len <= DATA_START_OFFSET {
+            return Ok(());
+        }
+
+        // Clear existing catalogs and reset counts
+        for meta in self.collections.values_mut() {
+            meta.document_catalog.clear();
+            meta.document_count = 0;
+            meta.live_document_count = 0;
+        }
+
+        // Scan all documents from DATA_START_OFFSET to end of file
+        let mut offset = DATA_START_OFFSET;
+        let mut max_ids_by_collection: HashMap<String, u64> = HashMap::new();
+
+        while offset + 4 < file_len {
+            // Read document length (4 bytes)
+            self.file.seek(SeekFrom::Start(offset))?;
+            let mut len_bytes = [0u8; 4];
+            if self.file.read_exact(&mut len_bytes).is_err() {
+                break; // EOF or read error
+            }
+            let len = u32::from_le_bytes(len_bytes) as usize;
+
+            // Validate length
+            if len == 0 || offset + 4 + (len as u64) > file_len {
+                break; // Corrupted or truncated document
+            }
+
+            // Read document data
+            let mut data = vec![0u8; len];
+            if self.file.read_exact(&mut data).is_err() {
+                break; // EOF or read error
+            }
+
+            // Parse JSON to extract _id and _collection
+            if let Ok(doc_value) = serde_json::from_slice::<serde_json::Value>(&data) {
+                // Check if tombstone
+                let is_tombstone = doc_value
+                    .get("_tombstone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                // Extract collection name
+                if let Some(collection_name) = doc_value
+                    .get("_collection")
+                    .and_then(|v| v.as_str())
+                {
+                    // Extract _id
+                    if let Some(id_val) = doc_value.get("_id") {
+                        if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                            // Get or create collection meta
+                            let meta = self.collections
+                                .entry(collection_name.to_string())
+                                .or_insert_with(|| CollectionMeta {
+                                    name: collection_name.to_string(),
+                                    document_count: 0,
+                                    live_document_count: 0,
+                                    data_offset: DATA_START_OFFSET,
+                                    index_offset: 0,
+                                    last_id: 0,
+                                    document_catalog: HashMap::new(),
+                                    indexes: Vec::new(),
+                                    schema: None,
+                                });
+
+                            if is_tombstone {
+                                // Remove from catalog if exists (tombstone = deletion)
+                                meta.document_catalog.remove(&doc_id);
+                                // Don't increment counts for tombstones
+                            } else {
+                                // Add/update catalog entry (newer version overwrites older)
+                                meta.document_catalog.insert(doc_id.clone(), offset);
+                                meta.document_count += 1;
+                                meta.live_document_count += 1;
+
+                                // Track max ID for last_id
+                                if let DocumentId::Int(id_num) = &doc_id {
+                                    let current_max = max_ids_by_collection
+                                        .entry(collection_name.to_string())
+                                        .or_insert(0);
+                                    if (*id_num as u64) > *current_max {
+                                        *current_max = *id_num as u64;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Move to next document
+            offset += 4 + (len as u64);
+        }
+
+        // Update last_id for each collection
+        for (collection_name, max_id) in max_ids_by_collection {
+            if let Some(meta) = self.collections.get_mut(&collection_name) {
+                if max_id > meta.last_id {
+                    meta.last_id = max_id;
+                }
+            }
+        }
+
+        // Mark metadata as dirty so it gets flushed
+        self.metadata_dirty = true;
+
+        Ok(())
     }
 }
 

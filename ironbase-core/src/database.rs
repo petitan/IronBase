@@ -82,6 +82,10 @@ impl DatabaseCore<StorageEngine> {
         // Recover from WAL (includes both data and index changes)
         let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
 
+        // Rebuild document catalog from file after WAL recovery
+        // This ensures all documents are properly indexed in memory
+        storage.rebuild_catalog_from_file()?;
+
         // Create DatabaseCore instance with default Safe mode
         let db = DatabaseCore {
             storage: Arc::new(RwLock::new(storage)),
@@ -175,6 +179,10 @@ impl DatabaseCore<StorageEngine> {
 
         // Recover from WAL (includes both data and index changes)
         let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
+
+        // Rebuild document catalog from file after WAL recovery
+        // This ensures all documents are properly indexed in memory
+        storage.rebuild_catalog_from_file()?;
 
         // Create DatabaseCore instance with specified mode
         let db = DatabaseCore {
@@ -412,7 +420,12 @@ impl DatabaseCore<StorageEngine> {
                 let doc_id = collection.insert_one(document.clone())?;
 
                 // 3. Add operation to transaction
-                let doc_value = serde_json::to_value(&document)
+                // IMPORTANT: WAL must contain the FULL document with _id and _collection
+                // so that recovery can rebuild the catalog correctly
+                let mut doc_with_metadata = document.clone();
+                doc_with_metadata.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                doc_with_metadata.insert("_collection".to_string(), Value::String(collection_name.to_string()));
+                let doc_value = serde_json::to_value(&doc_with_metadata)
                     .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
                 auto_tx.add_operation(Operation::Insert {
                     collection: collection_name.to_string(),
@@ -436,7 +449,11 @@ impl DatabaseCore<StorageEngine> {
                 let doc_id = collection.insert_one(document.clone())?;
 
                 // 2. Add to batch buffer
-                let doc_value = serde_json::to_value(&document)
+                // IMPORTANT: WAL must contain the FULL document with _id and _collection
+                let mut doc_with_metadata = document.clone();
+                doc_with_metadata.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                doc_with_metadata.insert("_collection".to_string(), Value::String(collection_name.to_string()));
+                let doc_value = serde_json::to_value(&doc_with_metadata)
                     .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
                 let should_flush = self.add_to_batch(Operation::Insert {
                     collection: collection_name.to_string(),
