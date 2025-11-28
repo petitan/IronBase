@@ -634,7 +634,8 @@ impl StorageEngine {
         let file_len = self.file.metadata()?.len();
 
         // If file is too small to have any documents, nothing to rebuild
-        if file_len <= DATA_START_OFFSET {
+        // Documents start right after header (HEADER_SIZE = 256 bytes), NOT at DATA_START_OFFSET!
+        if file_len <= HEADER_SIZE {
             return Ok(());
         }
 
@@ -645,8 +646,9 @@ impl StorageEngine {
             meta.live_document_count = 0;
         }
 
-        // Scan all documents from DATA_START_OFFSET to end of file
-        let mut offset = DATA_START_OFFSET;
+        // Scan all documents from HEADER_SIZE (256 bytes) to end of file
+        // CRITICAL: Documents start at HEADER_SIZE, not DATA_START_OFFSET!
+        let mut offset = HEADER_SIZE;
         let mut max_ids_by_collection: HashMap<String, u64> = HashMap::new();
 
         while offset + 4 < file_len {
@@ -692,7 +694,7 @@ impl StorageEngine {
                                     name: collection_name.to_string(),
                                     document_count: 0,
                                     live_document_count: 0,
-                                    data_offset: DATA_START_OFFSET,
+                                    data_offset: HEADER_SIZE,
                                     index_offset: 0,
                                     last_id: 0,
                                     document_catalog: HashMap::new(),
