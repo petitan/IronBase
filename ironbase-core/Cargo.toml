@@ -23,7 +23,7 @@ anyhow = { workspace = true }
 bincode = { workspace = true }
 lazy_static = { workspace = true }
 crc32fast = "1.4"  # For WAL checksums
-lru = "0.12"       # For query result caching
+lru = "0.16"       # For query result caching
 regex = "1.10"     # For full $regex operator support
 
 [dev-dependencies]
