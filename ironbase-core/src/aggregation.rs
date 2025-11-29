@@ -6,7 +6,7 @@ use crate::error::{MongoLiteError, Result};
 use crate::query::Query;
 use crate::value_utils::{get_nested_value, set_nested_value};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -136,12 +136,20 @@ pub struct ReduceExpression {
 pub enum ReduceInExpr {
     /// {$add: ["$$value", "$$this"]} - sum values
     Add,
+    /// {$add: ["$$value", "$$this.field"]} - sum field values from objects
+    AddField(String),
     /// {$multiply: ["$$value", "$$this"]} - multiply values
     Multiply,
+    /// {$multiply: ["$$value", "$$this.field"]} - multiply field values from objects
+    MultiplyField(String),
     /// {$concat: ["$$value", "$$this"]} - concatenate strings
     Concat,
+    /// {$concat: ["$$value", "$$this.field"]} - concatenate field values from objects
+    ConcatField(String),
     /// {$concat: ["$$value", separator, "$$this"]} - concatenate with separator
     ConcatWithSeparator(String),
+    /// {$concat: ["$$value", separator, "$$this.field"]} - concat fields with separator
+    ConcatFieldWithSeparator { field: String, separator: String },
 }
 
 /// $group stage - group documents and compute aggregates
@@ -166,6 +174,8 @@ pub enum Accumulator {
     First(String),
     Last(String),
     Count,
+    Push(String),     // $push - collect all values into array
+    AddToSet(String), // $addToSet - collect unique values into array
 }
 
 #[derive(Debug, Clone)]
@@ -468,6 +478,7 @@ impl ProjectStage {
     /// Parse the 'in' expression of $reduce
     ///
     /// Supports: {$add: [...]}, {$multiply: [...]}, {$concat: [...]}
+    /// Also supports object field references: {$add: ["$$value", "$$this.field"]}
     fn parse_reduce_in_expr(expr: &Value) -> Result<ReduceInExpr> {
         let obj = expr.as_object().ok_or_else(|| {
             MongoLiteError::AggregationError(
@@ -483,31 +494,55 @@ impl ProjectStage {
 
         let (op, args) = obj.iter().next().unwrap();
 
+        // Check for $$this.field reference
+        let this_field = Self::parse_this_field_reference(args);
+
         match op.as_str() {
             "$add" => {
-                // Validate it contains $$value and $$this
                 Self::validate_reduce_args(args, "$add")?;
-                Ok(ReduceInExpr::Add)
+                match this_field {
+                    Some(field) => Ok(ReduceInExpr::AddField(field)),
+                    None => Ok(ReduceInExpr::Add),
+                }
             }
             "$multiply" => {
                 Self::validate_reduce_args(args, "$multiply")?;
-                Ok(ReduceInExpr::Multiply)
+                match this_field {
+                    Some(field) => Ok(ReduceInExpr::MultiplyField(field)),
+                    None => Ok(ReduceInExpr::Multiply),
+                }
             }
             "$concat" => {
                 // $concat can have 2 or 3 arguments
                 if let Some(arr) = args.as_array() {
                     if arr.len() == 3 {
-                        // {$concat: ["$$value", separator, "$$this"]}
+                        // {$concat: ["$$value", separator, "$$this"]} or
+                        // {$concat: ["$$value", separator, "$$this.field"]}
                         if let Some(sep) = arr.get(1).and_then(|v| v.as_str()) {
                             // Check it's not a variable reference
                             if !sep.starts_with("$$") {
-                                return Ok(ReduceInExpr::ConcatWithSeparator(sep.to_string()));
+                                match this_field {
+                                    Some(field) => {
+                                        return Ok(ReduceInExpr::ConcatFieldWithSeparator {
+                                            field,
+                                            separator: sep.to_string(),
+                                        })
+                                    }
+                                    None => {
+                                        return Ok(ReduceInExpr::ConcatWithSeparator(
+                                            sep.to_string(),
+                                        ))
+                                    }
+                                }
                             }
                         }
                     }
                 }
                 Self::validate_reduce_args(args, "$concat")?;
-                Ok(ReduceInExpr::Concat)
+                match this_field {
+                    Some(field) => Ok(ReduceInExpr::ConcatField(field)),
+                    None => Ok(ReduceInExpr::Concat),
+                }
             }
             _ => Err(MongoLiteError::AggregationError(format!(
                 "Unsupported $reduce operator: {}. Supported: $add, $multiply, $concat",
@@ -516,18 +551,39 @@ impl ProjectStage {
         }
     }
 
-    /// Validate that reduce arguments contain $$value and $$this
+    /// Parse $$this.field reference from arguments
+    ///
+    /// Returns Some(field_name) if $$this.field is found, None if just $$this
+    fn parse_this_field_reference(args: &Value) -> Option<String> {
+        if let Some(arr) = args.as_array() {
+            for item in arr {
+                if let Some(s) = item.as_str() {
+                    if s.starts_with("$$this.") {
+                        return Some(s.trim_start_matches("$$this.").to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Validate that reduce arguments contain $$value and $$this (or $$this.field)
     fn validate_reduce_args(args: &Value, op_name: &str) -> Result<()> {
         let arr = args.as_array().ok_or_else(|| {
             MongoLiteError::AggregationError(format!("{} arguments must be an array", op_name))
         })?;
 
         let has_value = arr.iter().any(|v| v.as_str() == Some("$$value"));
-        let has_this = arr.iter().any(|v| v.as_str() == Some("$$this"));
+        // Accept both $$this and $$this.field
+        let has_this = arr.iter().any(|v| {
+            v.as_str()
+                .map(|s| s == "$$this" || s.starts_with("$$this."))
+                .unwrap_or(false)
+        });
 
         if !has_value || !has_this {
             return Err(MongoLiteError::AggregationError(format!(
-                "{} in $reduce must use $$value and $$this",
+                "{} in $reduce must use $$value and $$this (or $$this.field)",
                 op_name
             )));
         }
@@ -680,14 +736,33 @@ impl ProjectStage {
                     let elem_num = Self::value_to_f64(&element);
                     Value::from(acc_num + elem_num)
                 }
+                ReduceInExpr::AddField(field) => {
+                    let acc_num = Self::value_to_f64(&accumulator);
+                    // Get nested field from object element
+                    let elem_value = get_nested_value(&element, field).unwrap_or(&Value::Null);
+                    let elem_num = Self::value_to_f64(elem_value);
+                    Value::from(acc_num + elem_num)
+                }
                 ReduceInExpr::Multiply => {
                     let acc_num = Self::value_to_f64(&accumulator);
                     let elem_num = Self::value_to_f64(&element);
                     Value::from(acc_num * elem_num)
                 }
+                ReduceInExpr::MultiplyField(field) => {
+                    let acc_num = Self::value_to_f64(&accumulator);
+                    let elem_value = get_nested_value(&element, field).unwrap_or(&Value::Null);
+                    let elem_num = Self::value_to_f64(elem_value);
+                    Value::from(acc_num * elem_num)
+                }
                 ReduceInExpr::Concat => {
                     let acc_str = Self::value_to_string(&accumulator);
                     let elem_str = Self::value_to_string(&element);
+                    Value::from(format!("{}{}", acc_str, elem_str))
+                }
+                ReduceInExpr::ConcatField(field) => {
+                    let acc_str = Self::value_to_string(&accumulator);
+                    let elem_value = get_nested_value(&element, field).unwrap_or(&Value::Null);
+                    let elem_str = Self::value_to_string(elem_value);
                     Value::from(format!("{}{}", acc_str, elem_str))
                 }
                 ReduceInExpr::ConcatWithSeparator(sep) => {
@@ -697,6 +772,16 @@ impl ProjectStage {
                         Value::from(elem_str)
                     } else {
                         Value::from(format!("{}{}{}", acc_str, sep, elem_str))
+                    }
+                }
+                ReduceInExpr::ConcatFieldWithSeparator { field, separator } => {
+                    let acc_str = Self::value_to_string(&accumulator);
+                    let elem_value = get_nested_value(&element, field).unwrap_or(&Value::Null);
+                    let elem_str = Self::value_to_string(elem_value);
+                    if acc_str.is_empty() {
+                        Value::from(elem_str)
+                    } else {
+                        Value::from(format!("{}{}{}", acc_str, separator, elem_str))
                     }
                 }
             };
@@ -860,6 +945,11 @@ impl Accumulator {
                 "$max" => Ok(Accumulator::Max(parse_field_reference(value, "$max")?)),
                 "$first" => Ok(Accumulator::First(parse_field_reference(value, "$first")?)),
                 "$last" => Ok(Accumulator::Last(parse_field_reference(value, "$last")?)),
+                "$push" => Ok(Accumulator::Push(parse_field_reference(value, "$push")?)),
+                "$addToSet" => Ok(Accumulator::AddToSet(parse_field_reference(
+                    value,
+                    "$addToSet",
+                )?)),
                 _ => Err(MongoLiteError::AggregationError(format!(
                     "Unknown accumulator: {}",
                     op
@@ -948,6 +1038,34 @@ impl Accumulator {
                 .ok_or_else(|| {
                     MongoLiteError::AggregationError("No documents in group".to_string())
                 }),
+
+            Accumulator::Push(field) => {
+                // Collect all values from the field into an array
+                let values: Vec<Value> = docs
+                    .iter()
+                    .filter_map(|doc| get_nested_value(doc, field).cloned())
+                    .collect();
+                Ok(Value::Array(values))
+            }
+
+            Accumulator::AddToSet(field) => {
+                // Collect unique values from the field into an array
+                // Use JSON string representation for equality comparison
+                let mut seen = HashSet::new();
+                let mut values = Vec::new();
+
+                for doc in docs {
+                    if let Some(value) = get_nested_value(doc, field) {
+                        // Serialize to string for uniqueness check
+                        let key = value.to_string();
+                        if seen.insert(key) {
+                            values.push(value.clone());
+                        }
+                    }
+                }
+
+                Ok(Value::Array(values))
+            }
         }
     }
 }
@@ -2589,5 +2707,375 @@ mod tests {
         }));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("$$value"));
+    }
+
+    // ========== $push ACCUMULATOR TESTS ==========
+
+    #[test]
+    fn test_push_basic() {
+        let docs = vec![
+            json!({"category": "A", "item": "apple"}),
+            json!({"category": "A", "item": "banana"}),
+            json!({"category": "B", "item": "cherry"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$category", "items": {"$push": "$item"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        // Find category A result
+        let cat_a = results.iter().find(|r| r["_id"] == "A").unwrap();
+        let items_a = cat_a["items"].as_array().unwrap();
+        assert_eq!(items_a.len(), 2);
+        assert!(items_a.contains(&json!("apple")));
+        assert!(items_a.contains(&json!("banana")));
+
+        // Find category B result
+        let cat_b = results.iter().find(|r| r["_id"] == "B").unwrap();
+        let items_b = cat_b["items"].as_array().unwrap();
+        assert_eq!(items_b.len(), 1);
+        assert!(items_b.contains(&json!("cherry")));
+    }
+
+    #[test]
+    fn test_push_with_numbers() {
+        let docs = vec![
+            json!({"group": "X", "value": 10}),
+            json!({"group": "X", "value": 20}),
+            json!({"group": "X", "value": 30}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$group", "values": {"$push": "$value"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        let values = results[0]["values"].as_array().unwrap();
+        assert_eq!(values.len(), 3);
+        assert!(values.contains(&json!(10)));
+        assert!(values.contains(&json!(20)));
+        assert!(values.contains(&json!(30)));
+    }
+
+    #[test]
+    fn test_push_null_group() {
+        let docs = vec![
+            json!({"name": "Alice"}),
+            json!({"name": "Bob"}),
+            json!({"name": "Charlie"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": null, "allNames": {"$push": "$name"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        assert_eq!(results.len(), 1);
+        let names = results[0]["allNames"].as_array().unwrap();
+        assert_eq!(names.len(), 3);
+    }
+
+    #[test]
+    fn test_push_with_dot_notation() {
+        let docs = vec![
+            json!({"user": {"name": "Alice"}, "type": "admin"}),
+            json!({"user": {"name": "Bob"}, "type": "admin"}),
+            json!({"user": {"name": "Charlie"}, "type": "user"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$type", "names": {"$push": "$user.name"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        let admin = results.iter().find(|r| r["_id"] == "admin").unwrap();
+        let admin_names = admin["names"].as_array().unwrap();
+        assert_eq!(admin_names.len(), 2);
+        assert!(admin_names.contains(&json!("Alice")));
+        assert!(admin_names.contains(&json!("Bob")));
+    }
+
+    // ========== $addToSet ACCUMULATOR TESTS ==========
+
+    #[test]
+    fn test_addtoset_basic() {
+        let docs = vec![
+            json!({"category": "A", "tag": "red"}),
+            json!({"category": "A", "tag": "blue"}),
+            json!({"category": "A", "tag": "red"}), // duplicate
+            json!({"category": "B", "tag": "green"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$category", "uniqueTags": {"$addToSet": "$tag"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        let cat_a = results.iter().find(|r| r["_id"] == "A").unwrap();
+        let tags_a = cat_a["uniqueTags"].as_array().unwrap();
+        assert_eq!(tags_a.len(), 2); // Only unique: red, blue
+        assert!(tags_a.contains(&json!("red")));
+        assert!(tags_a.contains(&json!("blue")));
+
+        let cat_b = results.iter().find(|r| r["_id"] == "B").unwrap();
+        let tags_b = cat_b["uniqueTags"].as_array().unwrap();
+        assert_eq!(tags_b.len(), 1);
+    }
+
+    #[test]
+    fn test_addtoset_all_duplicates() {
+        let docs = vec![
+            json!({"group": "X", "status": "active"}),
+            json!({"group": "X", "status": "active"}),
+            json!({"group": "X", "status": "active"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$group", "statuses": {"$addToSet": "$status"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        let statuses = results[0]["statuses"].as_array().unwrap();
+        assert_eq!(statuses.len(), 1); // All duplicates collapsed
+        assert_eq!(statuses[0], "active");
+    }
+
+    #[test]
+    fn test_addtoset_with_numbers() {
+        let docs = vec![
+            json!({"type": "score", "value": 100}),
+            json!({"type": "score", "value": 200}),
+            json!({"type": "score", "value": 100}), // duplicate
+            json!({"type": "score", "value": 300}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$type", "uniqueScores": {"$addToSet": "$value"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        let scores = results[0]["uniqueScores"].as_array().unwrap();
+        assert_eq!(scores.len(), 3); // 100, 200, 300
+    }
+
+    #[test]
+    fn test_addtoset_null_group() {
+        let docs = vec![
+            json!({"color": "red"}),
+            json!({"color": "blue"}),
+            json!({"color": "red"}),
+            json!({"color": "green"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": null, "allColors": {"$addToSet": "$color"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        let colors = results[0]["allColors"].as_array().unwrap();
+        assert_eq!(colors.len(), 3); // red, blue, green
+    }
+
+    // ========== $reduce WITH OBJECT ARRAYS TESTS ==========
+
+    #[test]
+    fn test_reduce_object_array_sum() {
+        // Sum prices from array of objects
+        let docs = vec![json!({
+            "name": "Order1",
+            "items": [
+                {"name": "apple", "price": 10},
+                {"name": "banana", "price": 20},
+                {"name": "cherry", "price": 30}
+            ]
+        })];
+
+        let stage = ProjectStage::from_json(&json!({
+            "name": 1,
+            "totalPrice": {"$reduce": {
+                "input": "$items",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this.price"]}
+            }}
+        }))
+        .unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["name"], "Order1");
+        assert_eq!(results[0]["totalPrice"], 60.0);
+    }
+
+    #[test]
+    fn test_reduce_object_array_multiply() {
+        let docs = vec![json!({
+            "name": "Test",
+            "factors": [
+                {"factor": 2},
+                {"factor": 3},
+                {"factor": 4}
+            ]
+        })];
+
+        let stage = ProjectStage::from_json(&json!({
+            "name": 1,
+            "product": {"$reduce": {
+                "input": "$factors",
+                "initialValue": 1,
+                "in": {"$multiply": ["$$value", "$$this.factor"]}
+            }}
+        }))
+        .unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["product"], 24.0); // 2 * 3 * 4
+    }
+
+    #[test]
+    fn test_reduce_object_array_concat() {
+        let docs = vec![json!({
+            "id": 1,
+            "people": [
+                {"name": "Alice"},
+                {"name": "Bob"},
+                {"name": "Charlie"}
+            ]
+        })];
+
+        let stage = ProjectStage::from_json(&json!({
+            "id": 1,
+            "allNames": {"$reduce": {
+                "input": "$people",
+                "initialValue": "",
+                "in": {"$concat": ["$$value", "$$this.name"]}
+            }}
+        }))
+        .unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["allNames"], "AliceBobCharlie");
+    }
+
+    #[test]
+    fn test_reduce_object_array_concat_with_separator() {
+        let docs = vec![json!({
+            "id": 1,
+            "tags": [
+                {"label": "rust"},
+                {"label": "mongodb"},
+                {"label": "database"}
+            ]
+        })];
+
+        let stage = ProjectStage::from_json(&json!({
+            "id": 1,
+            "tagString": {"$reduce": {
+                "input": "$tags",
+                "initialValue": "",
+                "in": {"$concat": ["$$value", ", ", "$$this.label"]}
+            }}
+        }))
+        .unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["tagString"], "rust, mongodb, database");
+    }
+
+    #[test]
+    fn test_reduce_object_array_nested_field() {
+        // Access nested fields within objects
+        let docs = vec![json!({
+            "name": "Store",
+            "products": [
+                {"details": {"price": 100}},
+                {"details": {"price": 200}},
+                {"details": {"price": 50}}
+            ]
+        })];
+
+        let stage = ProjectStage::from_json(&json!({
+            "name": 1,
+            "total": {"$reduce": {
+                "input": "$products",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this.details.price"]}
+            }}
+        }))
+        .unwrap();
+
+        let results = stage.execute(docs).unwrap();
+        assert_eq!(results[0]["total"], 350.0);
+    }
+
+    #[test]
+    fn test_reduce_object_array_in_pipeline() {
+        let docs = vec![
+            json!({
+                "orderId": "A",
+                "items": [{"price": 10}, {"price": 20}]
+            }),
+            json!({
+                "orderId": "B",
+                "items": [{"price": 5}, {"price": 15}, {"price": 25}]
+            }),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$project": {
+                "orderId": 1,
+                "orderTotal": {"$reduce": {
+                    "input": "$items",
+                    "initialValue": 0,
+                    "in": {"$add": ["$$value", "$$this.price"]}
+                }}
+            }},
+            {"$sort": {"orderTotal": -1}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        assert_eq!(results[0]["orderId"], "B");
+        assert_eq!(results[0]["orderTotal"], 45.0);
+        assert_eq!(results[1]["orderId"], "A");
+        assert_eq!(results[1]["orderTotal"], 30.0);
+    }
+
+    #[test]
+    fn test_push_and_addtoset_combined() {
+        let docs = vec![
+            json!({"dept": "Sales", "name": "Alice", "skill": "Excel"}),
+            json!({"dept": "Sales", "name": "Bob", "skill": "Excel"}),
+            json!({"dept": "Sales", "name": "Charlie", "skill": "Python"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {
+                "_id": "$dept",
+                "allNames": {"$push": "$name"},
+                "uniqueSkills": {"$addToSet": "$skill"}
+            }}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let names = results[0]["allNames"].as_array().unwrap();
+        assert_eq!(names.len(), 3); // All names
+
+        let skills = results[0]["uniqueSkills"].as_array().unwrap();
+        assert_eq!(skills.len(), 2); // Only unique: Excel, Python
     }
 }
