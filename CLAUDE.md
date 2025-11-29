@@ -7,11 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **IronBase** is a high-performance embedded NoSQL document database written in Rust with Python and C# bindings. It provides a MongoDB-compatible API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
 
 **Key Stats:**
-- 554+ tests passing
+- 554+ tests passing (unit + integration + doctest)
 - Python (PyO3), C# (.NET 8), Rust APIs
 - 18 query operators, 7 update operators
 - Full aggregation pipeline with dot notation
 - B+ tree indexing with compound index support
+- LRU query cache with collection-level invalidation
+- MCP server for AI assistant integration (HTTP + stdio modes)
 
 ## Build and Development Commands
 
@@ -32,6 +34,12 @@ cd IronBase.NET && dotnet test                 # C# tests
 # MCP Server (separate workspace)
 cd mcp-server && cargo build --release
 cd mcp-server && cargo test
+
+# Fuzz Testing (requires nightly)
+cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_query_parser -- -max_total_time=60
+cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_wal_bytes -- -max_total_time=60
+cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_document_parse -- -max_total_time=60
+cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_json_ops -- -max_total_time=60
 ```
 
 ## Architecture
@@ -104,6 +112,11 @@ MongoLite/
 - Write-Ahead Log with CRC32 checksums
 - Crash recovery with automatic replay
 - begin_transaction/commit_transaction/rollback_transaction
+
+**query_cache.rs** - Query result caching:
+- LRU cache with configurable capacity (default: 1000)
+- Collection-level invalidation via reverse index
+- Thread-safe with parking_lot::RwLock
 
 ### Storage File Format (.mlite)
 
@@ -188,6 +201,43 @@ cp target/release/libironbase_ffi.so IronBase.NET/Demo/bin/Debug/net8.0/libironb
 ```
 
 This is especially important when debugging FFI issues - if debug logging doesn't appear, check that the correct library version is being loaded.
+
+## MCP Server
+
+The `mcp-server/` directory contains a standalone MCP (Model Context Protocol) server that exposes IronBase as an AI assistant tool.
+
+### Running the MCP Server
+```bash
+# Build
+cd mcp-server && cargo build --release
+
+# HTTP mode (port 8080)
+./target/release/mcp-ironbase-server
+
+# stdio mode (for Claude Desktop integration)
+./target/release/mcp-ironbase-server --stdio
+```
+
+### Key MCP Tools
+- `insert_one`, `insert_many` - Insert documents
+- `find`, `find_one` - Query documents
+- `update_one`, `update_many` - Update documents
+- `delete_one`, `delete_many` - Delete documents
+- `aggregate` - Run aggregation pipelines
+- `create_index`, `drop_index` - Index management
+- `schema_get`, `schema_set` - JSON schema validation
+- `db_stats` - Database statistics
+
+### Testing HTTP Mode
+```bash
+# Health check
+curl http://127.0.0.1:8080/health
+
+# MCP request
+curl -X POST http://127.0.0.1:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
 
 ## Testing Strategy
 

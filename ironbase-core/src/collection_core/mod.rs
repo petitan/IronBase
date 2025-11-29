@@ -476,9 +476,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // Check if _id already exists in fields (same logic as insert_one)
             let doc_id = if let Some(existing_id) = fields.get("_id") {
                 // Use existing _id from fields - MongoDB compatible behavior
-                serde_json::from_value(existing_id.clone()).map_err(|e| {
-                    MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
-                })?
+                let parsed_id: DocumentId =
+                    serde_json::from_value(existing_id.clone()).map_err(|e| {
+                        MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                    })?;
+
+                // Ensure last_id tracks highest numeric _id from manual inserts
+                if let DocumentId::Int(num) = parsed_id {
+                    if num >= 0 {
+                        let numeric = num as u64;
+                        if numeric > meta.last_id {
+                            meta.last_id = numeric;
+                        }
+                    }
+                }
+
+                parsed_id
             } else {
                 // Auto-generate new _id only if not provided
                 let new_id = DocumentId::new_auto(start_id + auto_id_count);
@@ -497,8 +510,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             inserted_ids.push(doc_id);
         }
 
-        // Update last_id with actual auto-generated count only
-        meta.last_id = start_id + auto_id_count;
+        // Update last_id with max of manual + auto-generated IDs
+        meta.last_id = meta.last_id.max(start_id + auto_id_count);
 
         // Update indexes in batch BEFORE writing to storage
         let docs_for_index: Vec<Document> =

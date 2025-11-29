@@ -37,8 +37,8 @@ fn run_stdio_server() {
     eprintln!("MCP IronBase Server v{} (stdio mode)", VERSION);
 
     // Get database path from env or use default
-    let db_path = std::env::var("IRONBASE_PATH")
-        .unwrap_or_else(|_| "ironbase_data.mlite".to_string());
+    let db_path =
+        std::env::var("IRONBASE_PATH").unwrap_or_else(|_| "ironbase_data.mlite".to_string());
 
     eprintln!("Database path: {}", db_path);
 
@@ -75,12 +75,13 @@ fn run_stdio_server() {
         let request: McpRequest = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                let error_response = create_error_response(
-                    -32700,
-                    &format!("Parse error: {}", e),
-                    None,
+                let error_response =
+                    create_error_response(-32700, &format!("Parse error: {}", e), None);
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    serde_json::to_string(&error_response).unwrap()
                 );
-                let _ = writeln!(stdout, "{}", serde_json::to_string(&error_response).unwrap());
                 let _ = stdout.flush();
                 continue;
             }
@@ -100,8 +101,7 @@ fn run_stdio_server() {
 
 fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Option<McpResponse> {
     // Check if this is a notification (no id) - notifications get no response per JSON-RPC spec
-    let is_notification = request.id.is_none()
-        || matches!(&request.id, Some(v) if v.is_null());
+    let is_notification = request.id.is_none() || matches!(&request.id, Some(v) if v.is_null());
 
     match request.method.as_str() {
         "initialize" => Some(create_success_response(
@@ -130,7 +130,10 @@ fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Optio
 
         "ping" => {
             // Keep-alive ping - return empty result
-            Some(create_success_response(serde_json::json!({}), request.id.clone()))
+            Some(create_success_response(
+                serde_json::json!({}),
+                request.id.clone(),
+            ))
         }
 
         "notifications/cancelled" => {
@@ -139,7 +142,10 @@ fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Optio
             None
         }
 
-        "tools/list" => Some(create_success_response(get_tools_list(), request.id.clone())),
+        "tools/list" => Some(create_success_response(
+            get_tools_list(),
+            request.id.clone(),
+        )),
 
         "tools/call" => {
             let params: ToolsCallParams = match serde_json::from_value(request.params.clone()) {
@@ -178,7 +184,10 @@ fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Optio
             }
         }
 
-        "prompts/list" => Some(create_success_response(get_prompts_list(), request.id.clone())),
+        "prompts/list" => Some(create_success_response(
+            get_prompts_list(),
+            request.id.clone(),
+        )),
 
         "prompts/get" => {
             let params: PromptsGetParams = match serde_json::from_value(request.params.clone()) {
@@ -206,7 +215,10 @@ fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Optio
 
         // Unknown method - but if it's a notification, don't respond
         _ if is_notification => {
-            eprintln!("Unknown notification: {} (no response sent)", request.method);
+            eprintln!(
+                "Unknown notification: {} (no response sent)",
+                request.method
+            );
             None
         }
 
@@ -220,7 +232,10 @@ fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Optio
 
 /// Create a JSON-RPC 2.0 success response
 /// ALWAYS includes jsonrpc: "2.0" and id field per spec
-fn create_success_response(result: serde_json::Value, id: Option<serde_json::Value>) -> McpResponse {
+fn create_success_response(
+    result: serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> McpResponse {
     McpResponse::Success {
         jsonrpc: "2.0".to_string(),
         id: id.unwrap_or(serde_json::Value::Null),
@@ -384,13 +399,13 @@ struct PromptsGetParams {
 #[serde(untagged)]
 enum McpResponse {
     Success {
-        jsonrpc: String,           // ALWAYS "2.0" - required by JSON-RPC 2.0 spec
-        id: serde_json::Value,     // ALWAYS present (null if unknown) - required for requests
+        jsonrpc: String,       // ALWAYS "2.0" - required by JSON-RPC 2.0 spec
+        id: serde_json::Value, // ALWAYS present (null if unknown) - required for requests
         result: serde_json::Value,
     },
     Error {
-        jsonrpc: String,           // ALWAYS "2.0" - required by JSON-RPC 2.0 spec
-        id: serde_json::Value,     // ALWAYS present (null if unknown) - required for requests
+        jsonrpc: String,       // ALWAYS "2.0" - required by JSON-RPC 2.0 spec
+        id: serde_json::Value, // ALWAYS present (null if unknown) - required for requests
         error: McpErrorResponse,
     },
 }

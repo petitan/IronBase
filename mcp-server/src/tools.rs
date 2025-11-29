@@ -384,11 +384,7 @@ pub fn get_tools_list() -> Value {
 }
 
 /// Dispatch a tool call to the appropriate handler
-pub fn dispatch_tool(
-    name: &str,
-    params: Value,
-    adapter: &IronBaseAdapter,
-) -> Result<Value> {
+pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Result<Value> {
     match name {
         // Database Management
         "db_stats" => Ok(adapter.stats()),
@@ -434,8 +430,14 @@ pub fn dispatch_tool(
             let options = FindOptions {
                 projection: params.get("projection").cloned(),
                 sort: params.get("sort").cloned(),
-                limit: params.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
-                skip: params.get("skip").and_then(|v| v.as_u64()).map(|v| v as usize),
+                limit: params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
+                skip: params
+                    .get("skip")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
             };
             let documents = adapter.find(&collection, query, options)?;
             Ok(json!({"documents": documents, "count": documents.len()}))
@@ -503,7 +505,10 @@ pub fn dispatch_tool(
         // Index Management
         "index_create" => {
             let collection = get_string(&params, "collection")?;
-            let unique = params.get("unique").and_then(|v| v.as_bool()).unwrap_or(false);
+            let unique = params
+                .get("unique")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             // Check for compound index
             if let Some(fields) = params.get("fields").and_then(|v| v.as_array()) {
@@ -561,7 +566,12 @@ fn get_object(params: &Value, key: &str) -> Result<Value> {
         .get(key)
         .filter(|v| v.is_object())
         .cloned()
-        .ok_or_else(|| McpError::InvalidParams(format!("Missing or invalid '{}' parameter (expected object)", key)))
+        .ok_or_else(|| {
+            McpError::InvalidParams(format!(
+                "Missing or invalid '{}' parameter (expected object)",
+                key
+            ))
+        })
 }
 
 fn get_array(params: &Value, key: &str) -> Result<Vec<Value>> {
@@ -569,5 +579,10 @@ fn get_array(params: &Value, key: &str) -> Result<Vec<Value>> {
         .get(key)
         .and_then(|v| v.as_array())
         .cloned()
-        .ok_or_else(|| McpError::InvalidParams(format!("Missing or invalid '{}' parameter (expected array)", key)))
+        .ok_or_else(|| {
+            McpError::InvalidParams(format!(
+                "Missing or invalid '{}' parameter (expected array)",
+                key
+            ))
+        })
 }

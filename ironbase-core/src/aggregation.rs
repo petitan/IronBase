@@ -657,17 +657,17 @@ impl Accumulator {
 
             Accumulator::Avg(field) => {
                 let mut sum = 0.0;
-                let mut count = 0;
+                let mut count: usize = 0;
 
                 for doc in docs {
                     // Use get_nested_value to support dot notation
                     if let Some(value) = get_nested_value(doc, field) {
                         if let Some(n) = value.as_f64() {
                             sum += n;
-                            count += 1;
+                            count = count.saturating_add(1);
                         } else if let Some(n) = value.as_i64() {
                             sum += n as f64;
-                            count += 1;
+                            count = count.saturating_add(1);
                         }
                     }
                 }

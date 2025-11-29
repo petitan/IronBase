@@ -129,12 +129,7 @@ impl IronBaseAdapter {
     }
 
     /// Find documents
-    pub fn find(
-        &self,
-        collection: &str,
-        query: Value,
-        options: FindOptions,
-    ) -> Result<Vec<Value>> {
+    pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<Vec<Value>> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
 

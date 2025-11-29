@@ -280,7 +280,8 @@ fn get_query_examples_prompt(arguments: &Value) -> Value {
         .unwrap_or("all");
 
     let content = match category {
-        "crud" => r#"# CRUD Query Examples
+        "crud" => {
+            r#"# CRUD Query Examples
 
 ## Insert
 ```json
@@ -325,8 +326,10 @@ fn get_query_examples_prompt(arguments: &Value) -> Value {
 
 // Delete many
 {"collection": "users", "filter": {"status": "inactive"}}
-```"#,
-        "aggregation" => r#"# Aggregation Examples
+```"#
+        }
+        "aggregation" => {
+            r#"# Aggregation Examples
 
 ## Count by category
 ```json
@@ -360,8 +363,10 @@ fn get_query_examples_prompt(arguments: &Value) -> Value {
     "avgPrice": {"$avg": "$price"}
   }}
 ]}
-```"#,
-        "indexes" => r#"# Index Examples
+```"#
+        }
+        "indexes" => {
+            r#"# Index Examples
 
 ## Create single-field index
 ```json
@@ -379,8 +384,10 @@ fn get_query_examples_prompt(arguments: &Value) -> Value {
 ```
 
 ## Use explain to check index usage
-Use the find tool with explain to see if indexes are being used."#,
-        _ => r#"# IronBase Query Examples
+Use the find tool with explain to see if indexes are being used."#
+        }
+        _ => {
+            r#"# IronBase Query Examples
 
 ## CRUD Operations
 - insert_one/insert_many: Add documents
@@ -396,7 +403,8 @@ Use the find tool with explain to see if indexes are being used."#,
 ## Indexes
 - Create indexes for frequently queried fields
 - Use compound indexes for multi-field queries
-- Check query plans with explain"#,
+- Check query plans with explain"#
+        }
     };
 
     json!({
