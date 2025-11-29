@@ -30,6 +30,105 @@ pub struct InsertManyResult {
     pub inserted_count: usize,
 }
 
+/// Query execution context extracted from FindOptions
+/// Single Responsibility: Transform user options into execution strategy
+#[derive(Debug)]
+struct QueryExecutionContext {
+    /// Single-field sort optimization info
+    sort_field: Option<String>,
+    sort_descending: bool,
+
+    /// Whether to defer limit/skip until after sorting
+    apply_limit_after_sort: bool,
+
+    /// Pre-fetch parameters (0/None if deferred)
+    fetch_skip: usize,
+    fetch_limit: Option<usize>,
+
+    /// Original user options for post-processing
+    original_skip: usize,
+    original_limit: Option<usize>,
+
+    /// Original sort specification
+    sort_spec: Option<Vec<(String, i32)>>,
+
+    /// Projection specification
+    projection: Option<HashMap<String, i32>>,
+}
+
+impl QueryExecutionContext {
+    /// Build execution context from FindOptions
+    fn from_options(options: &crate::find_options::FindOptions) -> Self {
+        let original_skip = options.skip.unwrap_or(0);
+        let original_limit = options.limit;
+
+        // Extract single-field sort for index optimization
+        let (sort_field, sort_descending) = options
+            .sort
+            .as_ref()
+            .filter(|s| s.len() == 1)
+            .map(|s| (Some(s[0].0.clone()), s[0].1 < 0))
+            .unwrap_or((None, false));
+
+        // Determine fetch strategy
+        let apply_limit_after_sort = options.sort.is_some();
+        let (fetch_skip, fetch_limit) = if apply_limit_after_sort {
+            (0, None)
+        } else {
+            (original_skip, original_limit)
+        };
+
+        Self {
+            sort_field,
+            sort_descending,
+            apply_limit_after_sort,
+            fetch_skip,
+            fetch_limit,
+            original_skip,
+            original_limit,
+            sort_spec: options.sort.clone(),
+            projection: options.projection.clone(),
+        }
+    }
+
+    /// Get sort field reference (for collect_doc_ids_with_options)
+    fn sort_field_ref(&self) -> Option<&str> {
+        self.sort_field.as_deref()
+    }
+
+    /// Determine if in-memory sort is needed (when index didn't sort for us)
+    fn needs_memory_sort(&self, index_sorted: bool) -> bool {
+        match &self.sort_spec {
+            Some(sort) => !(index_sorted && sort.len() == 1),
+            None => false,
+        }
+    }
+
+    /// Apply pagination after sorting (returns owned docs)
+    fn apply_post_sort_pagination(&self, docs: Vec<Value>) -> Vec<Value> {
+        if self.apply_limit_after_sort {
+            crate::find_options::apply_limit_skip(
+                docs,
+                self.original_limit,
+                Some(self.original_skip),
+            )
+        } else {
+            docs
+        }
+    }
+
+    /// Apply projection to documents (returns owned docs)
+    fn apply_projection_to_docs(&self, docs: Vec<Value>) -> Vec<Value> {
+        match &self.projection {
+            Some(proj) => docs
+                .into_iter()
+                .map(|doc| crate::find_options::apply_projection(&doc, proj))
+                .collect(),
+            None => docs,
+        }
+    }
+}
+
 /// Pure Rust Collection - language-independent core logic
 ///
 /// Generic over Storage backend:
@@ -296,8 +395,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Check if _id already exists in fields
         let doc_id = if let Some(existing_id) = fields.get("_id") {
             // Use existing _id from fields
-            serde_json::from_value(existing_id.clone())
-                .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?
+            let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
+                .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?;
+
+            // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
+            if let DocumentId::Int(num) = parsed_id {
+                if num >= 0 {
+                    let numeric = num as u64;
+                    if numeric > meta.last_id {
+                        meta.last_id = numeric;
+                    }
+                }
+            }
+
+            parsed_id
         } else {
             // Auto-generate new _id
             let new_id = DocumentId::new_auto(meta.last_id);
@@ -316,36 +427,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.validate_document(&doc)?;
 
         // Update indexes BEFORE writing to storage
-        {
-            let mut indexes = self.indexes.write();
-
-            // Update _id index
-            let id_index_name = format!("{}_id", self.name);
-            if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
-                let id_key = match &doc_id {
-                    DocumentId::Int(i) => IndexKey::Int(*i),
-                    DocumentId::String(s) => IndexKey::String(s.clone()),
-                    DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
-                };
-                id_index.insert(id_key, doc_id.clone())?;
-            }
-
-            // Update all other indexes
-            for index_name in indexes.list_indexes() {
-                if index_name == id_index_name {
-                    continue; // Already handled
-                }
-
-                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                    let field = &index.metadata.field;
-                    // Document::get() already supports dot notation for nested fields
-                    if let Some(field_value) = doc.get(field) {
-                        let index_key = IndexKey::from(field_value);
-                        index.insert(index_key, doc_id.clone())?;
-                    }
-                }
-            }
-        }
+        self.add_to_indexes(&doc)?;
 
         // Szerializálás és írás - USE NEW write_document with catalog tracking
         let doc_json = doc.to_json()?;
@@ -419,38 +501,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         meta.last_id = start_id + auto_id_count;
 
         // Update indexes in batch BEFORE writing to storage
-        {
-            let mut indexes = self.indexes.write();
-            let id_index_name = format!("{}_id", self.name);
-
-            for (doc_id, doc) in &prepared_docs {
-                // Update _id index
-                if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
-                    let id_key = match &doc_id {
-                        DocumentId::Int(i) => IndexKey::Int(*i),
-                        DocumentId::String(s) => IndexKey::String(s.clone()),
-                        DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
-                    };
-                    id_index.insert(id_key, doc_id.clone())?;
-                }
-
-                // Update all other indexes
-                for index_name in indexes.list_indexes() {
-                    if index_name == id_index_name {
-                        continue;
-                    }
-
-                    if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                        let field = &index.metadata.field;
-                        // Document::get() already supports dot notation for nested fields
-                        if let Some(field_value) = doc.get(field) {
-                            let index_key = IndexKey::from(field_value);
-                            index.insert(index_key, doc_id.clone())?;
-                        }
-                    }
-                }
-            }
-        }
+        let docs_for_index: Vec<Document> =
+            prepared_docs.iter().map(|(_, doc)| doc.clone()).collect();
+        self.batch_add_to_indexes(&docs_for_index)?;
 
         // Write all documents to storage
         for (doc_id, doc) in prepared_docs {
@@ -498,47 +551,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Find documents with options (projection, sort, limit, skip)
+    ///
+    /// Clean Architecture: Uses QueryExecutionContext for configuration,
+    /// separating setup logic from execution.
     pub fn find_with_options(
         &self,
         query_json: &Value,
         options: crate::find_options::FindOptions,
     ) -> Result<Vec<Value>> {
-        use crate::find_options::{apply_limit_skip, apply_projection, apply_sort};
+        // Phase 1: Build execution context (all setup logic centralized)
+        let ctx = QueryExecutionContext::from_options(&options);
 
-        let original_skip = options.skip.unwrap_or(0);
-        let original_limit = options.limit;
-
-        let mut sort_field_ref: Option<&str> = None;
-        let mut sort_desc = false;
-        if let Some(ref sort_spec) = options.sort {
-            if sort_spec.len() == 1 {
-                sort_field_ref = Some(sort_spec[0].0.as_str());
-                sort_desc = sort_spec[0].1 < 0;
-            }
-        }
-
-        let apply_limit_after_sort = options.sort.is_some();
-        let fetch_skip = if apply_limit_after_sort {
-            0
-        } else {
-            original_skip
-        };
-        let fetch_limit = if apply_limit_after_sort {
-            None
-        } else {
-            original_limit
-        };
-
+        // Phase 2: Collect document IDs (may use index for sorting)
         let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
             query_json,
             None,
-            sort_field_ref,
-            sort_desc,
-            fetch_skip,
-            fetch_limit,
-            sort_field_ref.is_none(),
+            ctx.sort_field_ref(),
+            ctx.sort_descending,
+            ctx.fetch_skip,
+            ctx.fetch_limit,
+            ctx.sort_field.is_none(),
         )?;
 
+        // Phase 3: Load documents
         let mut docs = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
@@ -546,25 +581,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // 2. Apply sort
-        if let Some(ref sort) = options.sort {
-            if !(index_sorted && sort.len() == 1) {
-                apply_sort(&mut docs, sort);
+        // Phase 4: Post-processing pipeline
+        // 4a. Apply sort if needed (index didn't sort for us)
+        if ctx.needs_memory_sort(index_sorted) {
+            if let Some(ref sort_spec) = ctx.sort_spec {
+                crate::find_options::apply_sort(&mut docs, sort_spec);
             }
         }
 
-        // 3. Apply post-sort limit/skip if needed
-        if apply_limit_after_sort {
-            docs = apply_limit_skip(docs, original_limit, options.skip);
-        }
+        // 4b. Apply pagination after sorting
+        let docs = ctx.apply_post_sort_pagination(docs);
 
-        // 4. Apply projection
-        if let Some(ref projection) = options.projection {
-            docs = docs
-                .into_iter()
-                .map(|doc| apply_projection(&doc, projection))
-                .collect();
-        }
+        // 4c. Apply projection
+        let docs = ctx.apply_projection_to_docs(docs);
 
         Ok(docs)
     }
@@ -865,14 +894,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // 🚀 BATCH STORAGE WRITE: Single lock acquisition for all storage operations
-        if !storage_writes.is_empty() {
-            let mut storage = self.storage.write();
-            for (doc_id, tombstone, updated_json) in storage_writes {
-                let tombstone_json = serde_json::to_string(&tombstone)?;
-                storage.write_data(tombstone_json.as_bytes())?;
-                storage.write_document_raw(&self.name, &doc_id, updated_json.as_bytes())?;
-            }
-        }
+        self.batch_write_updates(storage_writes)?;
 
         // Invalidate query cache if any document was modified
         if modified > 0 {
@@ -882,35 +904,68 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok((matched, modified))
     }
 
+    // =========================================================================
+    // HELPER FUNCTIONS (Extracted for reduced CC and cognitive complexity)
+    // =========================================================================
+
+    /// Try O(1) _id lookup if query is simple _id equality
+    ///
+    /// Returns:
+    /// - `Ok(Some(docs))` if _id optimization was successful (may be empty if doc not found)
+    /// - `Ok(None)` if query doesn't match _id pattern, caller should fallback to scan
+    fn try_id_query_optimization(
+        &self,
+        query_json: &Value,
+    ) -> Result<Option<HashMap<DocumentId, Value>>> {
+        // 1. Check: {_id: value} format?
+        let query_obj = match query_json.as_object() {
+            Some(obj) if obj.len() == 1 && obj.contains_key("_id") => obj,
+            _ => return Ok(None), // Fallback needed
+        };
+
+        // 2. DocumentId conversion
+        let id_val = query_obj.get("_id").unwrap(); // Safe: we checked contains_key above
+        let doc_id = match serde_json::from_value::<DocumentId>(id_val.clone()) {
+            Ok(id) => id,
+            Err(_) => return Ok(None), // Invalid _id format, fallback to scan
+        };
+
+        // 3. O(1) lookup
+        if let Some(doc) = self.read_document_by_id(&doc_id)? {
+            let mut result = HashMap::new();
+            result.insert(doc_id, doc);
+            Ok(Some(result))
+        } else {
+            Ok(Some(HashMap::new())) // Empty result (doc doesn't exist)
+        }
+    }
+
+    /// Batch write tombstones and updated documents to storage
+    ///
+    /// Acquires storage lock once and writes all updates atomically.
+    /// Each update consists of: (doc_id, tombstone, updated_json)
+    fn batch_write_updates(&self, writes: Vec<(DocumentId, Value, String)>) -> Result<()> {
+        if writes.is_empty() {
+            return Ok(());
+        }
+
+        let mut storage = self.storage.write();
+        for (doc_id, tombstone, updated_json) in writes {
+            let tombstone_json = serde_json::to_string(&tombstone)?;
+            storage.write_data(tombstone_json.as_bytes())?;
+            storage.write_document_raw(&self.name, &doc_id, updated_json.as_bytes())?;
+        }
+        Ok(())
+    }
+
     /// Delete one document - returns deleted_count
     pub fn delete_one(&self, query_json: &Value) -> Result<u64> {
         let parsed_query = Query::from_json(query_json)?;
 
-        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
-        let docs_by_id = if let Some(query_obj) = query_json.as_object() {
-            if query_obj.len() == 1 && query_obj.contains_key("_id") {
-                if let Some(id_val) = query_obj.get("_id") {
-                    // Direct O(1) lookup using document_catalog (direct DocumentId conversion!)
-                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
-                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                            let mut single_doc_map = HashMap::new();
-                            single_doc_map.insert(doc_id, doc);
-                            single_doc_map
-                        } else {
-                            HashMap::new()
-                        }
-                    } else {
-                        HashMap::new()
-                    }
-                } else {
-                    self.scan_documents_via_catalog()?
-                }
-            } else {
-                // Fallback: Full scan using catalog iteration
-                self.scan_documents_via_catalog()?
-            }
-        } else {
-            self.scan_documents_via_catalog()?
+        // OPTIMIZATION: Try O(1) _id lookup first, fallback to full scan
+        let docs_by_id = match self.try_id_query_optimization(query_json)? {
+            Some(docs) => docs,
+            None => self.scan_documents_via_catalog()?,
         };
 
         // Find first matching and delete (skip tombstones already filtered by catalog scan)
@@ -1303,6 +1358,46 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if !field_updates.is_empty() {
                 if let Some(index) = indexes.get_btree_index_mut(index_name) {
                     index.apply_batch_updates(field_updates)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Batch add multiple documents to all indexes
+    /// Single lock acquisition for performance - used by insert_many
+    fn batch_add_to_indexes(&self, docs: &[Document]) -> Result<()> {
+        if docs.is_empty() {
+            return Ok(());
+        }
+
+        let mut indexes = self.indexes.write();
+        let id_index_name = format!("{}_id", self.name);
+
+        for doc in docs {
+            // Add to _id index
+            if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
+                let id_key = match &doc.id {
+                    DocumentId::Int(i) => IndexKey::Int(*i),
+                    DocumentId::String(s) => IndexKey::String(s.clone()),
+                    DocumentId::ObjectId(oid) => IndexKey::String(oid.clone()),
+                };
+                id_index.insert(id_key, doc.id.clone())?;
+            }
+
+            // Add to all other indexes
+            for index_name in indexes.list_indexes() {
+                if index_name == id_index_name {
+                    continue; // Already handled
+                }
+
+                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                    let field = index.metadata.field.clone();
+                    if let Some(field_value) = doc.get(&field) {
+                        let index_key = IndexKey::from(field_value);
+                        index.insert(index_key, doc.id.clone())?;
+                    }
                 }
             }
         }
