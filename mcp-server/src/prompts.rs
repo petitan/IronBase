@@ -247,7 +247,9 @@ fn get_aggregation_guide_prompt() -> Value {
     "minPrice": {"$min": "$price"},
     "maxPrice": {"$max": "$price"},
     "firstDoc": {"$first": "$name"},
-    "lastDoc": {"$last": "$name"}
+    "lastDoc": {"$last": "$name"},
+    "allNames": {"$push": "$name"},      // Collect all values into array
+    "uniqueTags": {"$addToSet": "$tag"}  // Collect unique values only
   }
 }
 ```
@@ -259,9 +261,28 @@ fn get_aggregation_guide_prompt() -> Value {
     "_id": 0,                 // Exclude _id
     "fullName": "$name",      // Rename field
     "years": "$age",          // Rename field
-    "city": 1                 // Include field
+    "city": 1,                // Include field
+    "tagCount": {"$size": "$tags"},  // Array size
+    "total": {"$reduce": {           // Reduce array
+      "input": "$items",
+      "initialValue": 0,
+      "in": {"$add": ["$$value", "$$this.price"]}
+    }}
   }
 }
+```
+
+### $unwind - Deconstruct array field
+```json
+// Simple form - creates one document per array element
+{"$unwind": "$tags"}
+
+// Extended form with options
+{"$unwind": {
+  "path": "$items",
+  "includeArrayIndex": "idx",        // Add index field
+  "preserveNullAndEmptyArrays": true // Keep docs with empty/null arrays
+}}
 ```
 
 ### $sort - Sort documents
@@ -280,16 +301,55 @@ fn get_aggregation_guide_prompt() -> Value {
 ```
 
 ## Accumulators (in $group)
-| Accumulator | Description |
-|-------------|-------------|
-| `$sum` | Sum values or count (`{"$sum": 1}`) |
-| `$avg` | Average |
-| `$min` | Minimum |
-| `$max` | Maximum |
-| `$first` | First value in group |
-| `$last` | Last value in group |
+| Accumulator | Description | Example |
+|-------------|-------------|---------|
+| `$sum` | Sum values or count | `{"$sum": 1}` or `{"$sum": "$amount"}` |
+| `$avg` | Average | `{"$avg": "$price"}` |
+| `$min` | Minimum | `{"$min": "$score"}` |
+| `$max` | Maximum | `{"$max": "$score"}` |
+| `$first` | First value in group | `{"$first": "$name"}` |
+| `$last` | Last value in group | `{"$last": "$name"}` |
+| `$push` | Collect ALL values into array | `{"$push": "$item"}` |
+| `$addToSet` | Collect UNIQUE values only | `{"$addToSet": "$tag"}` |
 
-## Example Pipeline
+## $reduce Expression (in $project)
+Reduce an array to a single value with custom logic.
+
+### Sum prices from object array
+```json
+{"$reduce": {
+  "input": "$items",           // Array of objects
+  "initialValue": 0,
+  "in": {"$add": ["$$value", "$$this.price"]}  // Access object field
+}}
+```
+
+### Concatenate names with separator
+```json
+{"$reduce": {
+  "input": "$people",
+  "initialValue": "",
+  "in": {"$concat": ["$$value", ", ", "$$this.name"]}
+}}
+```
+
+### Multiply factors
+```json
+{"$reduce": {
+  "input": "$factors",
+  "initialValue": 1,
+  "in": {"$multiply": ["$$value", "$$this"]}
+}}
+```
+
+**Supported operators in $reduce:**
+- `$add` - Sum numbers
+- `$multiply` - Multiply numbers
+- `$concat` - Concatenate strings (with optional separator)
+
+## Example Pipelines
+
+### Basic grouping with count
 ```json
 [
   {"$match": {"status": "completed"}},
@@ -301,6 +361,45 @@ fn get_aggregation_guide_prompt() -> Value {
   }},
   {"$sort": {"totalRevenue": -1}},
   {"$limit": 5}
+]
+```
+
+### Collect items per category
+```json
+[
+  {"$group": {
+    "_id": "$category",
+    "allItems": {"$push": "$name"},
+    "uniqueBrands": {"$addToSet": "$brand"}
+  }}
+]
+```
+
+### Unwind and re-aggregate
+```json
+[
+  {"$unwind": "$items"},
+  {"$group": {
+    "_id": "$items.category",
+    "totalValue": {"$sum": "$items.price"},
+    "count": {"$sum": 1}
+  }},
+  {"$sort": {"totalValue": -1}}
+]
+```
+
+### Calculate order totals with $reduce
+```json
+[
+  {"$project": {
+    "orderId": 1,
+    "orderTotal": {"$reduce": {
+      "input": "$items",
+      "initialValue": 0,
+      "in": {"$add": ["$$value", "$$this.price"]}
+    }}
+  }},
+  {"$sort": {"orderTotal": -1}}
 ]
 ```"#
                 }
