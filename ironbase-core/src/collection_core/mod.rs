@@ -2432,7 +2432,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         };
 
         if let Some(hash) = cache_hash {
-            self.query_cache.insert(hash, doc_ids_vec.clone());
+            self.query_cache
+                .insert(&self.name, hash, doc_ids_vec.clone());
         }
 
         Ok((doc_ids_vec, used_sort))

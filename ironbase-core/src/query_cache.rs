@@ -6,6 +6,7 @@ use lru::LruCache;
 use parking_lot::RwLock;
 use serde_json::Value;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 
@@ -28,12 +29,18 @@ impl QueryHash {
     }
 }
 
-/// Query cache with LRU eviction
+/// Query cache with LRU eviction and collection-level invalidation
 ///
 /// Caches query results (DocumentIds) to avoid repeated scans.
 /// Thread-safe with RwLock for concurrent access.
+///
+/// Uses a reverse index (collection → query hashes) to enable
+/// selective invalidation: only queries for the modified collection
+/// are invalidated, not the entire cache.
 pub struct QueryCache {
     cache: RwLock<LruCache<QueryHash, Vec<DocumentId>>>,
+    /// Reverse index: collection name → set of query hashes for that collection
+    collection_index: RwLock<HashMap<String, HashSet<QueryHash>>>,
     capacity: usize,
 }
 
@@ -47,6 +54,7 @@ impl QueryCache {
             NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::new(1000).unwrap());
         QueryCache {
             cache: RwLock::new(LruCache::new(non_zero_capacity)),
+            collection_index: RwLock::new(HashMap::new()),
             capacity,
         }
     }
@@ -61,33 +69,61 @@ impl QueryCache {
 
     /// Insert query result into cache
     ///
-    /// Automatically evicts LRU entry if cache is full
-    pub fn insert(&self, query_hash: QueryHash, doc_ids: Vec<DocumentId>) {
+    /// # Arguments
+    /// * `collection` - The collection name this query belongs to
+    /// * `query_hash` - The hash of the query
+    /// * `doc_ids` - The document IDs returned by the query
+    ///
+    /// Automatically evicts LRU entry if cache is full and maintains
+    /// the reverse index for collection-level invalidation.
+    pub fn insert(&self, collection: &str, query_hash: QueryHash, doc_ids: Vec<DocumentId>) {
         let mut cache = self.cache.write();
+
+        // Handle LRU eviction: if at capacity and inserting new key, clean up reverse index
+        if cache.len() >= self.capacity && !cache.contains(&query_hash) {
+            if let Some((evicted_hash, _)) = cache.peek_lru() {
+                let evicted_hash = *evicted_hash;
+                // Remove from all collection indexes (we don't track which collection it belonged to)
+                // This is O(collections * entries_per_collection) but happens rarely
+                drop(cache); // Release cache lock before acquiring collection_index lock
+                let mut coll_index = self.collection_index.write();
+                for hashes in coll_index.values_mut() {
+                    hashes.remove(&evicted_hash);
+                }
+                drop(coll_index);
+                cache = self.cache.write(); // Re-acquire cache lock
+            }
+        }
+
         cache.put(query_hash, doc_ids);
+        drop(cache);
+
+        // Update reverse index
+        let mut coll_index = self.collection_index.write();
+        coll_index
+            .entry(collection.to_string())
+            .or_default()
+            .insert(query_hash);
     }
 
-    /// Invalidate all cached queries for a collection
+    /// Invalidate all cached queries for a specific collection
     ///
-    /// Called on insert/update/delete operations to maintain consistency
-    pub fn invalidate_collection(&self, _collection: &str) {
-        // Simple approach: clear entire cache
-        // OPTIMIZATION: More granular invalidation (track which queries belong to which collection)
-        //
-        // Current: Nuclear approach - clear entire cache on ANY write
-        // Impact: Cache becomes ineffective in write-heavy workloads
-        //
-        // Granular invalidation design:
-        // 1. Add collection tracking to cache entries:
-        //    struct CachedEntry { result: Vec<Value>, collections: HashSet<String> }
-        // 2. Parse query to extract collection references (easy for simple queries)
-        // 3. Only invalidate entries where collections.contains(collection)
-        //
-        // Complexity: Low (1-2 hours work)
-        // Benefit: Significant for multi-collection databases
-        // Priority: Low (correctness unaffected, only performance)
-        let mut cache = self.cache.write();
-        cache.clear();
+    /// Called on insert/update/delete operations to maintain consistency.
+    /// Only invalidates queries belonging to the specified collection,
+    /// leaving other collections' cached queries intact.
+    pub fn invalidate_collection(&self, collection: &str) {
+        // Get query hashes for this collection
+        let mut coll_index = self.collection_index.write();
+        let hashes_to_remove = coll_index.remove(collection);
+        drop(coll_index);
+
+        // Remove from LRU cache
+        if let Some(hashes) = hashes_to_remove {
+            let mut cache = self.cache.write();
+            for hash in hashes {
+                cache.pop(&hash);
+            }
+        }
     }
 
     /// Get cache statistics
@@ -159,7 +195,7 @@ mod tests {
         let hash = QueryHash::new("users", &query);
 
         let doc_ids = vec![DocumentId::Int(1), DocumentId::Int(2)];
-        cache.insert(hash, doc_ids.clone());
+        cache.insert("users", hash, doc_ids.clone());
 
         let result = cache.get(&hash);
         assert_eq!(result, Some(doc_ids));
@@ -177,9 +213,9 @@ mod tests {
         let hash2 = QueryHash::new("users", &query2);
         let hash3 = QueryHash::new("users", &query3);
 
-        cache.insert(hash1, vec![DocumentId::Int(1)]);
-        cache.insert(hash2, vec![DocumentId::Int(2)]);
-        cache.insert(hash3, vec![DocumentId::Int(3)]); // Should evict hash1 (LRU)
+        cache.insert("users", hash1, vec![DocumentId::Int(1)]);
+        cache.insert("users", hash2, vec![DocumentId::Int(2)]);
+        cache.insert("users", hash3, vec![DocumentId::Int(3)]); // Should evict hash1 (LRU)
 
         assert_eq!(cache.get(&hash1), None, "Oldest entry should be evicted");
         assert_eq!(cache.get(&hash2), Some(vec![DocumentId::Int(2)]));
@@ -192,7 +228,7 @@ mod tests {
         let query = json!({"age": 25});
         let hash = QueryHash::new("users", &query);
 
-        cache.insert(hash, vec![DocumentId::Int(1)]);
+        cache.insert("users", hash, vec![DocumentId::Int(1)]);
         assert!(cache.get(&hash).is_some());
 
         cache.invalidate_collection("users");
@@ -212,9 +248,41 @@ mod tests {
 
         let query = json!({"age": 25});
         let hash = QueryHash::new("users", &query);
-        cache.insert(hash, vec![DocumentId::Int(1)]);
+        cache.insert("users", hash, vec![DocumentId::Int(1)]);
 
         let stats = cache.stats();
         assert_eq!(stats.size, 1);
+    }
+
+    #[test]
+    fn test_selective_invalidation() {
+        let cache = QueryCache::new(100);
+
+        // Insert queries for two different collections
+        let query1 = json!({"age": 25});
+        let query2 = json!({"name": "Alice"});
+
+        let hash_users = QueryHash::new("users", &query1);
+        let hash_posts = QueryHash::new("posts", &query2);
+
+        cache.insert("users", hash_users, vec![DocumentId::Int(1)]);
+        cache.insert("posts", hash_posts, vec![DocumentId::Int(2)]);
+
+        // Verify both are cached
+        assert!(cache.get(&hash_users).is_some());
+        assert!(cache.get(&hash_posts).is_some());
+
+        // Invalidate only users collection
+        cache.invalidate_collection("users");
+
+        // users query should be gone, posts query should remain
+        assert!(
+            cache.get(&hash_users).is_none(),
+            "Users cache should be invalidated"
+        );
+        assert!(
+            cache.get(&hash_posts).is_some(),
+            "Posts cache should remain"
+        );
     }
 }

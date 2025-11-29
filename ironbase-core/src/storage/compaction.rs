@@ -54,19 +54,66 @@ impl StorageEngine {
     }
 
     /// Storage compaction with custom configuration
+    ///
+    /// Removes tombstones and old document versions using chunked processing.
+    /// Delegates to helper functions for each phase:
+    /// 1. prepare_compaction() - Setup temp file and collections
+    /// 2. scan_and_flush_documents() - Iterate catalogs and write documents
+    /// 3. write_compacted_metadata() - Write metadata at end of file
+    /// 4. finalize_compaction() - Atomic file swap and reload
     pub fn compact_with_config(&mut self, config: &CompactionConfig) -> Result<CompactionStats> {
+        let mut stats = CompactionStats::default();
+
+        // 1. Prepare: flush metadata, create temp file, initialize collections
+        let (mut new_file, mut new_collections, file_len) = self.prepare_compaction()?;
+        stats.size_before = self.file.metadata()?.len();
+        let collections_snapshot = self.collections.clone();
+
+        // 2. Scan and flush documents (catalog-based iteration with chunking)
+        let write_offset = self.scan_and_flush_documents(
+            &mut new_file,
+            &mut new_collections,
+            &collections_snapshot,
+            file_len,
+            config,
+            &mut stats,
+        )?;
+
+        // 3. Write metadata at end of file
+        Self::write_compacted_metadata(
+            &mut new_file,
+            &self.header,
+            &new_collections,
+            write_offset,
+        )?;
+
+        stats.size_after = new_file.metadata()?.len();
+
+        // 4. Finalize: close files, rename, reload
+        let temp_path = format!("{}.compact", self.file_path);
+        self.finalize_compaction(&temp_path, new_file)?;
+
+        Ok(stats)
+    }
+
+    // =========================================================================
+    // COMPACTION HELPER FUNCTIONS (Phase-based decomposition)
+    // =========================================================================
+
+    /// Prepare for compaction: flush metadata, create temp file, initialize collections
+    ///
+    /// Returns (temp_file, new_collections, document_region_end)
+    /// - temp_file: New file to write compacted data to
+    /// - new_collections: Cloned and reset collection metadata
+    /// - document_region_end: End of document region (metadata_offset for v2, file_len for v1)
+    fn prepare_compaction(
+        &mut self,
+    ) -> Result<(std::fs::File, HashMap<String, super::CollectionMeta>, u64)> {
         // CRITICAL: Flush metadata first to ensure header.metadata_offset is up-to-date!
         // This ensures we know where document data ends and metadata begins
         self.flush_metadata()?;
 
         let temp_path = format!("{}.compact", self.file_path);
-        let mut stats = CompactionStats::default();
-
-        // Get current file size
-        stats.size_before = self.file.metadata()?.len();
-
-        // Clone collections to avoid borrow conflicts
-        let collections_snapshot = self.collections.clone();
 
         // For version 2+: only scan up to metadata_offset (don't read metadata as documents!)
         // After flush_metadata(), metadata_offset is guaranteed to be > 0 for version 2
@@ -85,7 +132,7 @@ impl StorageEngine {
             .truncate(true)
             .open(&temp_path)?;
 
-        // Prepare new collections metadata
+        // Prepare new collections metadata (clone and reset)
         let mut new_collections = self.collections.clone();
         for coll_meta in new_collections.values_mut() {
             coll_meta.data_offset = super::HEADER_SIZE; // Version 2: no reserved space
@@ -100,8 +147,27 @@ impl StorageEngine {
             .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
         new_file.write_all(&header_bytes)?;
 
-        // Write documents starting right after header (version 2)
+        // Position at start of document region
         new_file.seek(SeekFrom::Start(super::HEADER_SIZE))?;
+
+        Ok((new_file, new_collections, file_len))
+    }
+
+    /// Scan documents from catalogs and write to new file with chunk-based flushing
+    ///
+    /// Iterates over all collection catalogs (not sequential file scan) and writes
+    /// live documents to the new file. Uses chunked processing to limit memory usage.
+    ///
+    /// Returns the final write offset (where metadata should be written)
+    fn scan_and_flush_documents(
+        &mut self,
+        new_file: &mut std::fs::File,
+        new_collections: &mut HashMap<String, super::CollectionMeta>,
+        collections_snapshot: &HashMap<String, super::CollectionMeta>,
+        file_len: u64,
+        config: &CompactionConfig,
+        stats: &mut CompactionStats,
+    ) -> Result<u64> {
         let mut write_offset = super::HEADER_SIZE;
 
         // Track documents per collection (all collections processed in single pass)
@@ -154,12 +220,12 @@ impl StorageEngine {
                                     for (flush_coll_name, docs) in collection_docs.iter_mut() {
                                         if !docs.is_empty() {
                                             write_offset = self.flush_compaction_chunk(
-                                                &mut new_file,
-                                                &mut new_collections,
+                                                new_file,
+                                                new_collections,
                                                 flush_coll_name,
                                                 docs,
                                                 write_offset,
-                                                &mut stats,
+                                                stats,
                                             )?;
                                             docs.clear();
                                         }
@@ -187,27 +253,38 @@ impl StorageEngine {
         for (coll_name, docs) in collection_docs.iter_mut() {
             if !docs.is_empty() {
                 write_offset = self.flush_compaction_chunk(
-                    &mut new_file,
-                    &mut new_collections,
+                    new_file,
+                    new_collections,
                     coll_name,
                     docs,
                     write_offset,
-                    &mut stats,
+                    stats,
                 )?;
             }
         }
 
         new_file.sync_all()?;
 
-        // Now write metadata at END of file (version 2 dynamic metadata)
-        // Find end of document data
-        let metadata_offset = write_offset; // After last document
+        Ok(write_offset)
+    }
 
+    /// Write metadata at end of compacted file and update header
+    ///
+    /// Serializes collection metadata and writes it at the specified offset,
+    /// then updates the header with the new metadata location.
+    fn write_compacted_metadata(
+        new_file: &mut std::fs::File,
+        header: &super::Header,
+        new_collections: &HashMap<String, super::CollectionMeta>,
+        metadata_offset: u64,
+    ) -> Result<()> {
         // Serialize metadata body
         let mut metadata_buffer = std::io::Cursor::new(Vec::new());
+
         // Write collection count
         let count = (new_collections.len() as u32).to_le_bytes();
         metadata_buffer.write_all(&count)?;
+
         // Write each collection metadata
         for meta in new_collections.values() {
             let meta_bytes = serde_json::to_vec(meta)?;
@@ -215,6 +292,7 @@ impl StorageEngine {
             metadata_buffer.write_all(&len)?;
             metadata_buffer.write_all(&meta_bytes)?;
         }
+
         let metadata_bytes = metadata_buffer.into_inner();
         let metadata_size = metadata_bytes.len() as u64;
 
@@ -223,28 +301,33 @@ impl StorageEngine {
         new_file.write_all(&metadata_bytes)?;
 
         // Update header with metadata location
-        let mut updated_header = self.header.clone();
+        let mut updated_header = header.clone();
         updated_header.metadata_offset = metadata_offset;
         updated_header.metadata_size = metadata_size;
 
-        // Rewrite header
+        // Rewrite header at file start
         new_file.seek(SeekFrom::Start(0))?;
         let header_bytes = bincode::serialize(&updated_header)
             .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
         new_file.write_all(&header_bytes)?;
+
         new_file.sync_all()?;
 
-        // Get new file size
-        stats.size_after = new_file.metadata()?.len();
+        Ok(())
+    }
 
+    /// Finalize compaction: close files, rename temp to original, reload metadata
+    ///
+    /// Performs the atomic file swap and reloads the database state.
+    fn finalize_compaction(&mut self, temp_path: &str, new_file: std::fs::File) -> Result<()> {
         // Close new file before renaming
         drop(new_file);
 
         // Close old file and mmap
         drop(self.mmap.take());
 
-        // Replace old file with new file
-        fs::rename(&temp_path, &self.file_path)?;
+        // Replace old file with new file (atomic on most filesystems)
+        fs::rename(temp_path, &self.file_path)?;
 
         // Reopen the compacted file
         let mut file = OpenOptions::new()
@@ -261,7 +344,7 @@ impl StorageEngine {
         self.collections = collections;
         self.mmap = None; // Reset mmap
 
-        Ok(stats)
+        Ok(())
     }
 
     /// Helper function to flush a chunk of documents to the compacted file
