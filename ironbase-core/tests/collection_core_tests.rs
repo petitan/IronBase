@@ -2,7 +2,7 @@
 //!
 //! These tests cover the main CRUD operations and various edge cases
 
-use ironbase_core::storage::StorageEngine;
+use ironbase_core::storage::{MemoryStorage, StorageEngine};
 use ironbase_core::CollectionCore;
 use ironbase_core::DatabaseCore;
 use parking_lot::RwLock;
@@ -1838,4 +1838,337 @@ mod nested_document_tests {
         let results = coll.find(&json!({})).unwrap();
         assert_eq!(results[0]["a"]["b"]["c"]["d"], 100);
     }
+}
+
+#[test]
+fn test_find_one_with_dot_notation_filter() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test_dot_notation").unwrap();
+
+    // Insert two documents with nested meta.documentId
+    let mut fields1 = HashMap::new();
+    fields1.insert(
+        "meta".to_string(),
+        json!({"documentId": "doc-1", "version": "1.0"}),
+    );
+    fields1.insert("data".to_string(), json!("first"));
+    coll.insert_one(fields1).unwrap();
+
+    let mut fields2 = HashMap::new();
+    fields2.insert(
+        "meta".to_string(),
+        json!({"documentId": "doc-2", "version": "2.0"}),
+    );
+    fields2.insert("data".to_string(), json!("second"));
+    coll.insert_one(fields2).unwrap();
+
+    // Test: find_one with dot notation should return the correct document
+    let result = coll.find_one(&json!({"meta.documentId": "doc-2"})).unwrap();
+    assert!(result.is_some(), "Should find doc-2");
+
+    let doc = result.unwrap();
+    let doc_id = doc
+        .get("meta")
+        .and_then(|m| m.get("documentId"))
+        .and_then(|v| v.as_str());
+
+    assert_eq!(
+        doc_id,
+        Some("doc-2"),
+        "find_one should return doc-2, not doc-1!"
+    );
+}
+
+// ============================================================================
+// MongoDB-style Implicit Array Flattening Tests
+// ============================================================================
+
+#[test]
+fn test_nested_array_query_with_equality() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("nested_array_test").unwrap();
+
+    // Insert document with nested arrays (like Schema v1.2 structure)
+    let mut doc = HashMap::new();
+    doc.insert(
+        "structure".to_string(),
+        json!([
+            {
+                "type": "section",
+                "children": [
+                    {"type": "paragraph", "content": ["hello", "world"]},
+                    {"type": "math", "content": ["sqrt", "pi"]}
+                ]
+            }
+        ]),
+    );
+    coll.insert_one(doc).unwrap();
+
+    // Query should find document via nested array traversal
+    let results = coll
+        .find(&json!({"structure.children.type": "math"}))
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "Should find document with nested array query"
+    );
+}
+
+#[test]
+fn test_nested_array_query_with_regex() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("nested_regex_test").unwrap();
+
+    // Insert document mimicking Schema v1.2 math content
+    let mut doc = HashMap::new();
+    doc.insert(
+        "structure".to_string(),
+        json!([
+            {
+                "children": [
+                    {
+                        "children": [
+                            {
+                                "type": "inline_math",
+                                "content": ["\\frac{\\sqrt{\\pi}}{2}"]
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]),
+    );
+    coll.insert_one(doc).unwrap();
+
+    // Insert another document without the formula
+    let mut doc2 = HashMap::new();
+    doc2.insert(
+        "structure".to_string(),
+        json!([
+            {
+                "children": [
+                    {"children": [{"type": "text", "content": ["hello world"]}]}
+                ]
+            }
+        ]),
+    );
+    coll.insert_one(doc2).unwrap();
+
+    // Query with regex should find only the first document
+    let results = coll
+        .find(&json!({
+            "structure.children.children.content": {"$regex": "sqrt"}
+        }))
+        .unwrap();
+
+    assert_eq!(
+        results.len(),
+        1,
+        "Regex should find document with sqrt in deeply nested array"
+    );
+}
+
+#[test]
+fn test_nested_array_query_multiple_matches() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("multi_match_test").unwrap();
+
+    // Insert documents with different nested values
+    for i in 0..5 {
+        let mut doc = HashMap::new();
+        doc.insert(
+            "items".to_string(),
+            json!([
+                {"tags": [format!("tag-{}", i), "common"]},
+                {"tags": ["other"]}
+            ]),
+        );
+        coll.insert_one(doc).unwrap();
+    }
+
+    // Query for common tag should find all 5 documents
+    let results = coll.find(&json!({"items.tags": "common"})).unwrap();
+    assert_eq!(
+        results.len(),
+        5,
+        "Should find all 5 documents with 'common' tag"
+    );
+
+    // Query for specific tag should find only one
+    let results = coll.find(&json!({"items.tags": "tag-2"})).unwrap();
+    assert_eq!(results.len(), 1, "Should find only document with 'tag-2'");
+}
+
+// ============================================================================
+// $** Wildcard Operator Tests (Recursive Descent Match)
+// ============================================================================
+
+#[test]
+fn test_wildcard_operator_simple_match() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("wildcard_test").unwrap();
+
+    // Insert document with nested "name" field
+    let mut doc = HashMap::new();
+    doc.insert("user".to_string(), json!({"profile": {"name": "Alice"}}));
+    coll.insert_one(doc).unwrap();
+
+    // $**.name should find the nested name field
+    let results = coll.find(&json!({"$**.name": "Alice"})).unwrap();
+    assert_eq!(results.len(), 1, "$**.name should find nested Alice");
+}
+
+#[test]
+fn test_wildcard_operator_multiple_matches() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("wildcard_multi").unwrap();
+
+    // Insert document with multiple "name" fields at different depths
+    let mut doc = HashMap::new();
+    doc.insert("company".to_string(), json!({"name": "Acme"}));
+    doc.insert("employee".to_string(), json!({"info": {"name": "Bob"}}));
+    coll.insert_one(doc).unwrap();
+
+    // $**.name with "Bob" should match
+    let results = coll.find(&json!({"$**.name": "Bob"})).unwrap();
+    assert_eq!(results.len(), 1);
+
+    // $**.name with "Acme" should also match
+    let results = coll.find(&json!({"$**.name": "Acme"})).unwrap();
+    assert_eq!(results.len(), 1);
+
+    // $**.name with non-existent value should not match
+    let results = coll.find(&json!({"$**.name": "NonExistent"})).unwrap();
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn test_wildcard_operator_with_arrays() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("wildcard_arrays").unwrap();
+
+    // Insert document with "content" inside nested arrays (Schema v1.2 style)
+    let mut doc = HashMap::new();
+    doc.insert(
+        "structure".to_string(),
+        json!([
+            {
+                "children": [
+                    {"content": ["hello", "world"]},
+                    {"content": ["sqrt", "pi"]}
+                ]
+            }
+        ]),
+    );
+    coll.insert_one(doc).unwrap();
+
+    // $**.content should find all content arrays
+    let results = coll.find(&json!({"$**.content": "sqrt"})).unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "$**.content should find 'sqrt' in nested array"
+    );
+
+    // Should also work with first content array
+    let results = coll.find(&json!({"$**.content": "hello"})).unwrap();
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn test_wildcard_operator_with_regex() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("wildcard_regex").unwrap();
+
+    // Insert document with deeply nested math formula
+    let mut doc = HashMap::new();
+    doc.insert(
+        "math".to_string(),
+        json!({
+            "section": {
+                "formulas": [
+                    {"content": ["\\frac{\\sqrt{\\pi}}{2}"]},
+                    {"content": ["e^{i\\pi} + 1 = 0"]}
+                ]
+            }
+        }),
+    );
+    coll.insert_one(doc).unwrap();
+
+    // $**.content with regex should find sqrt
+    let results = coll
+        .find(&json!({"$**.content": {"$regex": "sqrt"}}))
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "$**.content with regex should find sqrt formula"
+    );
+
+    // Should also find Euler's identity
+    let results = coll
+        .find(&json!({"$**.content": {"$regex": "e\\^"}}))
+        .unwrap();
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn test_wildcard_operator_invalid_nested_path() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("wildcard_invalid").unwrap();
+
+    // Insert a document
+    let mut doc = HashMap::new();
+    doc.insert("data".to_string(), json!({"value": 1}));
+    coll.insert_one(doc).unwrap();
+
+    // $**.children.content (nested path after $**) returns 0 results
+    // Note: Query::matches() swallows errors and returns false for invalid queries
+    // This is consistent with MongoDB behavior where invalid queries return empty results
+    let results = coll.find(&json!({"$**.children.content": "test"})).unwrap();
+    assert_eq!(
+        results.len(),
+        0,
+        "$** with nested path should return no matches"
+    );
+}
+
+#[test]
+fn test_wildcard_operator_bare_dollar_star_star() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("wildcard_bare").unwrap();
+
+    let mut doc = HashMap::new();
+    doc.insert("data".to_string(), json!({"value": 1}));
+    coll.insert_one(doc).unwrap();
+
+    // Bare $** without field name returns 0 results
+    // Note: Query::matches() swallows errors - invalid queries just don't match
+    let results = coll.find(&json!({"$**": "test"})).unwrap();
+    assert_eq!(results.len(), 0, "Bare $** should return no matches");
+}
+
+#[test]
+fn test_wildcard_operator_with_comparison() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("wildcard_comparison").unwrap();
+
+    // Insert documents with scores at different depths
+    for i in 0..5 {
+        let mut doc = HashMap::new();
+        doc.insert(
+            "game".to_string(),
+            json!({
+                "player": {
+                    "stats": {"score": i * 20}
+                }
+            }),
+        );
+        coll.insert_one(doc).unwrap();
+    }
+
+    // $**.score with $gte should find documents with score >= 60
+    let results = coll.find(&json!({"$**.score": {"$gte": 60}})).unwrap();
+    assert_eq!(results.len(), 2, "Should find 2 documents with score >= 60");
 }

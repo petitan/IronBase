@@ -58,6 +58,38 @@ pub fn get_prompts_list() -> Value {
                         "required": true
                     }
                 ]
+            },
+            {
+                "name": "wildcard-operator",
+                "description": "Guide for using the $** recursive descent wildcard operator to find fields at any nesting depth",
+                "arguments": []
+            },
+            {
+                "name": "schema-validation",
+                "description": "Guide for setting up JSON schema validation on collections to enforce document structure",
+                "arguments": [
+                    {
+                        "name": "collection",
+                        "description": "The collection name to set schema on",
+                        "required": true
+                    }
+                ]
+            },
+            {
+                "name": "index-optimization",
+                "description": "Guide for optimizing queries with indexes, including when to use single-field vs compound indexes",
+                "arguments": [
+                    {
+                        "name": "collection",
+                        "description": "The collection to analyze and optimize",
+                        "required": true
+                    }
+                ]
+            },
+            {
+                "name": "transaction-guide",
+                "description": "Guide for using ACD transactions with begin, commit, and rollback operations",
+                "arguments": []
             }
         ]
     })
@@ -71,6 +103,10 @@ pub fn get_prompt_content(name: &str, arguments: &Value) -> Option<Value> {
         "aggregation-guide" => Some(get_aggregation_guide_prompt()),
         "query-examples" => Some(get_query_examples_prompt(arguments)),
         "date-query" => Some(get_date_query_prompt(arguments)),
+        "wildcard-operator" => Some(get_wildcard_operator_prompt()),
+        "schema-validation" => Some(get_schema_validation_prompt(arguments)),
+        "index-optimization" => Some(get_index_optimization_prompt(arguments)),
+        "transaction-guide" => Some(get_transaction_guide_prompt()),
         _ => None,
     }
 }
@@ -478,6 +514,412 @@ Store dates as ISO strings: "2024-01-15T10:30:00Z"
 Please calculate the actual date values for "{}" and provide the complete query."#,
                         date_expr, date_field, date_field, date_field, date_field, date_expr
                     )
+                }
+            }
+        ]
+    })
+}
+
+fn get_wildcard_operator_prompt() -> Value {
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": r#"# $** Wildcard Operator (Recursive Descent)
+
+The `$**` operator finds a field name at ANY depth in the document structure.
+
+## Syntax
+```
+{"$**.fieldName": value}
+{"$**.fieldName": {"$operator": value}}
+```
+
+## Examples
+
+### Simple match - find "name" at any depth
+```json
+// Document: {"user": {"profile": {"name": "Alice"}}}
+{"$**.name": "Alice"}  // ✅ Matches
+```
+
+### With regex - search content anywhere
+```json
+// Find documents where ANY "content" field contains "sqrt"
+{"$**.content": {"$regex": "sqrt"}}
+```
+
+### With comparison operators
+```json
+// Find where ANY "score" field >= 85
+{"$**.score": {"$gte": 85}}
+
+// Find where ANY "status" is in list
+{"$**.status": {"$in": ["active", "pending"]}}
+```
+
+### Multiple matches
+```json
+// Document: {"a": {"name": "x"}, "b": {"name": "y"}}
+{"$**.name": "x"}  // ✅ Matches (finds first "name")
+```
+
+### Arrays - searches inside array elements
+```json
+// Document: {"items": [{"eid": "123"}, {"eid": "456"}]}
+{"$**.eid": "123"}  // ✅ Matches
+```
+
+## Limitations
+
+| Feature | Supported |
+|---------|-----------|
+| Simple field name | ✅ `$**.name` |
+| Nested paths | ❌ `$**.a.b` is INVALID |
+| Index usage | ❌ Always collection scan |
+| Max depth | 100 levels (DoS protection) |
+
+## Performance
+- ~5% overhead vs dot notation
+- ~50 ns per document (file storage)
+- Linear O(n) scaling with collection size
+
+## When to Use
+- Unknown document structure
+- Searching across varied schemas
+- Finding fields in deeply nested data
+- When exact path is not known
+
+## When NOT to Use
+- Known, fixed schema (use dot notation)
+- Performance-critical queries (cannot use indexes)
+- Very large collections without filtering"#
+                }
+            }
+        ]
+    })
+}
+
+fn get_schema_validation_prompt(arguments: &Value) -> Value {
+    let collection = arguments
+        .get("collection")
+        .and_then(|v| v.as_str())
+        .unwrap_or("your_collection");
+
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": format!(r#"# JSON Schema Validation Guide
+
+## Setting Schema on Collection: "{}"
+
+Use the `schema_set` tool to enforce document structure.
+
+## Basic Schema Example
+```json
+{{
+  "collection": "{}",
+  "schema": {{
+    "type": "object",
+    "required": ["name", "email"],
+    "properties": {{
+      "name": {{"type": "string", "minLength": 1}},
+      "email": {{"type": "string", "format": "email"}},
+      "age": {{"type": "integer", "minimum": 0}},
+      "active": {{"type": "boolean"}}
+    }}
+  }}
+}}
+```
+
+## Schema with Nested Objects
+```json
+{{
+  "type": "object",
+  "properties": {{
+    "user": {{
+      "type": "object",
+      "required": ["id"],
+      "properties": {{
+        "id": {{"type": "string"}},
+        "profile": {{
+          "type": "object",
+          "properties": {{
+            "name": {{"type": "string"}},
+            "bio": {{"type": "string", "maxLength": 500}}
+          }}
+        }}
+      }}
+    }}
+  }}
+}}
+```
+
+## Schema with Arrays
+```json
+{{
+  "type": "object",
+  "properties": {{
+    "tags": {{
+      "type": "array",
+      "items": {{"type": "string"}},
+      "minItems": 1,
+      "uniqueItems": true
+    }},
+    "scores": {{
+      "type": "array",
+      "items": {{"type": "number", "minimum": 0, "maximum": 100}}
+    }}
+  }}
+}}
+```
+
+## Validation Types
+| Type | Description |
+|------|-------------|
+| `string` | Text values |
+| `number` | Any numeric value |
+| `integer` | Whole numbers only |
+| `boolean` | true/false |
+| `array` | List of items |
+| `object` | Nested document |
+| `null` | Null value |
+
+## String Constraints
+- `minLength`, `maxLength`: Length limits
+- `pattern`: Regex pattern
+- `format`: email, uri, date-time, etc.
+
+## Number Constraints
+- `minimum`, `maximum`: Value range
+- `exclusiveMinimum`, `exclusiveMaximum`: Exclusive range
+
+## Array Constraints
+- `minItems`, `maxItems`: Array length
+- `uniqueItems`: No duplicates
+
+## Tools
+- `schema_set`: Set/update schema
+- `schema_get`: View current schema
+- `schema_delete`: Remove validation"#, collection, collection)
+                }
+            }
+        ]
+    })
+}
+
+fn get_index_optimization_prompt(arguments: &Value) -> Value {
+    let collection = arguments
+        .get("collection")
+        .and_then(|v| v.as_str())
+        .unwrap_or("your_collection");
+
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": format!(r#"# Index Optimization Guide
+
+## Collection: "{}"
+
+## Creating Indexes
+
+### Single-Field Index
+```json
+// create_index tool
+{{"collection": "{}", "field": "email", "unique": true}}
+```
+
+### Compound Index (multiple fields)
+```json
+// create_compound_index tool
+{{"collection": "{}", "fields": ["country", "city", "created_at"]}}
+```
+
+## When to Create Indexes
+
+| Query Pattern | Recommended Index |
+|---------------|-------------------|
+| `{{"email": "x"}}` | Single on `email` |
+| `{{"country": "x", "city": "y"}}` | Compound `[country, city]` |
+| `{{"status": "x"}}` + sort by `date` | Compound `[status, date]` |
+| `{{"age": {{"$gte": 18}}}}` | Single on `age` |
+
+## Index Selection Rules
+
+1. **Equality first**: Put exact match fields before range fields
+   - Good: `[status, created_at]` for `{{status: "active", created_at: {{$gte: ...}}}}`
+   - Bad: `[created_at, status]`
+
+2. **Sort field last**: If sorting, include sort field at end
+   - Query: `{{status: "active"}}` + sort by `name`
+   - Index: `[status, name]`
+
+3. **Selectivity matters**: More selective fields first
+   - `user_id` (unique) before `status` (few values)
+
+## Checking Index Usage
+
+Use the `explain` parameter to see query plan:
+```json
+{{"collection": "{}", "query": {{"status": "active"}}, "explain": true}}
+```
+
+## Index Hints
+
+Force specific index usage:
+```json
+{{"collection": "{}", "query": {{}}, "hint": "status_1"}}
+```
+
+## Listing Indexes
+```json
+// list_indexes tool
+{{"collection": "{}"}}
+```
+
+## Dropping Indexes
+```json
+// drop_index tool
+{{"collection": "{}", "index_name": "email_1"}}
+```
+
+## Performance Tips
+
+| Scenario | Recommendation |
+|----------|----------------|
+| High write volume | Fewer indexes |
+| Read-heavy | More indexes OK |
+| Large collections | Essential for performance |
+| Small collections (<1000) | May not need indexes |
+
+## Limitations
+- `$**` wildcard queries cannot use indexes
+- `$or` queries may not use compound indexes efficiently
+- `$regex` without anchor (^) cannot use index"#,
+                        collection, collection, collection, collection, collection, collection, collection)
+                }
+            }
+        ]
+    })
+}
+
+fn get_transaction_guide_prompt() -> Value {
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": r#"# IronBase Transaction Guide (ACD)
+
+IronBase supports ACD (Atomicity, Consistency, Durability) transactions with Write-Ahead Logging.
+
+## Transaction Lifecycle
+
+```
+begin_transaction
+    ↓
+[operations: insert, update, delete]
+    ↓
+commit_transaction  OR  rollback_transaction
+```
+
+## Basic Usage
+
+### 1. Begin Transaction
+```json
+// begin_transaction tool (no parameters)
+{}
+```
+Returns: `{"transaction_id": "uuid-here"}`
+
+### 2. Perform Operations
+All operations within transaction are isolated:
+```json
+// insert_one
+{"collection": "accounts", "document": {"id": 1, "balance": 1000}}
+
+// update_one
+{"collection": "accounts", "filter": {"id": 1}, "update": {"$inc": {"balance": -100}}}
+
+// update_one
+{"collection": "accounts", "filter": {"id": 2}, "update": {"$inc": {"balance": 100}}}
+```
+
+### 3. Commit or Rollback
+```json
+// commit_transaction - make changes permanent
+{}
+
+// rollback_transaction - discard all changes
+{}
+```
+
+## Example: Money Transfer
+
+```
+1. begin_transaction
+2. Check source account balance
+3. Deduct from source: update_one({id: 1}, {$inc: {balance: -100}})
+4. Add to destination: update_one({id: 2}, {$inc: {balance: 100}})
+5. If all OK: commit_transaction
+   If error: rollback_transaction
+```
+
+## Transaction Properties
+
+| Property | Description |
+|----------|-------------|
+| **Atomicity** | All operations succeed or all fail |
+| **Consistency** | Database remains valid after transaction |
+| **Durability** | Committed changes survive crashes (WAL) |
+
+## Write-Ahead Log (WAL)
+
+- All changes written to WAL before applying
+- CRC32 checksums for integrity
+- Automatic crash recovery on restart
+
+## Durability Modes
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| Safe | Sync after each write | Critical data |
+| Batch | Sync periodically | Better performance |
+| Unsafe | No sync | Testing only |
+
+## Best Practices
+
+1. **Keep transactions short**: Long transactions block other operations
+2. **Handle errors**: Always rollback on failure
+3. **Don't nest**: One transaction at a time per connection
+4. **Use for related changes**: Group logically related operations
+
+## Error Handling
+
+```
+begin_transaction
+try:
+    // operations
+    commit_transaction
+except:
+    rollback_transaction
+```
+
+## Limitations
+
+- Single-database transactions only
+- No distributed transactions
+- One active transaction per connection
+- Long transactions may impact performance"#
                 }
             }
         ]

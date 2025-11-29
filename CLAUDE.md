@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **IronBase** is a high-performance embedded NoSQL document database written in Rust with Python and C# bindings. It provides a MongoDB-compatible API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
 
 **Key Stats:**
-- 554+ tests passing (unit + integration + doctest)
+- 744+ tests passing (unit + integration + doctest)
 - Python (PyO3), C# (.NET 8), Rust APIs
-- 18 query operators, 7 update operators
+- 19 query operators, 7 update operators
 - Full aggregation pipeline with dot notation
 - B+ tree indexing with compound index support
 - LRU query cache with collection-level invalidation
@@ -142,12 +142,13 @@ MongoLite/
 
 ## Implemented Features
 
-### Query Operators (18)
+### Query Operators (19)
 - **Comparison**: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
 - **Logical**: $and, $or, $not, $nor
 - **Element**: $exists, $type
 - **Array**: $all, $elemMatch, $size
 - **String**: $regex
+- **Wildcard**: $** (recursive descent - finds field at any depth)
 
 ### Update Operators (7)
 - $set, $inc, $unset, $push, $pull, $addToSet, $pop
@@ -288,6 +289,28 @@ collection.create_compound_index(
     false  // unique
 )?;
 ```
+
+### $** Wildcard Operator (Recursive Descent)
+```rust
+// Find "name" field at ANY depth in the document
+coll.find(&json!({"$**.name": "Alice"}))?;
+
+// With regex - find all documents where any "content" field matches
+coll.find(&json!({"$**.content": {"$regex": "sqrt"}}))?;
+
+// With comparison operators
+coll.find(&json!({"$**.score": {"$gte": 85}}))?;
+
+// Multiple matches - returns docs where ANY occurrence matches
+coll.find(&json!({"$**.status": "active"}}))?;
+```
+
+**Notes:**
+- Syntax: `$**.fieldName` (only simple field names, no nested paths)
+- `$**.a.b` is INVALID - use separate queries or dot notation
+- Cannot use indexes - always performs collection scan
+- MAX_DEPTH=100 to prevent stack overflow
+- Works with arrays: searches inside array elements too
 
 ## Key Dependencies
 

@@ -103,6 +103,141 @@ impl Document {
         }
     }
 
+    /// MongoDB-style field access that flattens arrays automatically.
+    /// Returns all matching values when path traverses through arrays.
+    ///
+    /// Unlike `get()` which returns None when encountering arrays with non-numeric
+    /// path components, this method iterates through all array elements looking
+    /// for matching fields (MongoDB implicit array traversal).
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Document: {"items": [{"name": "a"}, {"name": "b"}]}
+    /// let values = doc.get_all("items.name");
+    /// // Returns: [Value::String("a"), Value::String("b")]
+    /// ```
+    pub fn get_all(&self, field: &str) -> Vec<&Value> {
+        if field.is_empty() {
+            return vec![];
+        }
+
+        let parts: Vec<&str> = field.split('.').collect();
+        let mut results = Vec::new();
+
+        if let Some(initial) = self.fields.get(parts[0]) {
+            Self::collect_values_recursive(initial, &parts[1..], &mut results);
+        }
+
+        results
+    }
+
+    /// Helper function for get_all() - recursively collects values from nested structures
+    fn collect_values_recursive<'a>(
+        value: &'a Value,
+        remaining_path: &[&str],
+        results: &mut Vec<&'a Value>,
+    ) {
+        if remaining_path.is_empty() {
+            results.push(value);
+            return;
+        }
+
+        let next_part = remaining_path[0];
+        let rest = &remaining_path[1..];
+
+        match value {
+            Value::Object(map) => {
+                if let Some(next_value) = map.get(next_part) {
+                    Self::collect_values_recursive(next_value, rest, results);
+                }
+            }
+            Value::Array(arr) => {
+                // Try numeric index first (explicit array access like "items.0.name")
+                if let Ok(index) = next_part.parse::<usize>() {
+                    if let Some(elem) = arr.get(index) {
+                        Self::collect_values_recursive(elem, rest, results);
+                    }
+                } else {
+                    // MongoDB-style implicit array traversal:
+                    // Iterate all elements looking for the field
+                    for elem in arr {
+                        if let Value::Object(map) = elem {
+                            if let Some(next_value) = map.get(next_part) {
+                                Self::collect_values_recursive(next_value, rest, results);
+                            }
+                        }
+                        // Also handle nested arrays (array of arrays)
+                        if let Value::Array(_) = elem {
+                            Self::collect_values_recursive(elem, remaining_path, results);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// MongoDB $** wildcard operator support.
+    /// Recursively finds ALL occurrences of a field name at ANY depth in the document.
+    ///
+    /// Unlike `get_all()` which follows a specific path, this method searches the entire
+    /// document structure for fields with the given name, regardless of their location.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Document: {"a": {"b": {"name": "Alice"}}, "items": [{"name": "Bob"}]}
+    /// let values = doc.get_all_by_field_name("name");
+    /// // Returns: [Value::String("Alice"), Value::String("Bob")]
+    /// ```
+    pub fn get_all_by_field_name(&self, field_name: &str) -> Vec<&Value> {
+        let mut results = Vec::new();
+        for (key, value) in &self.fields {
+            // Check if this top-level field matches
+            if key == field_name {
+                results.push(value);
+            }
+            // Also recursively search within the value
+            Self::collect_by_field_recursive(value, field_name, &mut results, 0);
+        }
+        results
+    }
+
+    /// Helper function for get_all_by_field_name() - recursively collects values
+    /// with a specific field name at any depth in the document structure.
+    fn collect_by_field_recursive<'a>(
+        value: &'a Value,
+        target_field: &str,
+        results: &mut Vec<&'a Value>,
+        depth: usize,
+    ) {
+        const MAX_DEPTH: usize = 100; // DoS protection
+        if depth > MAX_DEPTH {
+            return;
+        }
+
+        match value {
+            Value::Object(map) => {
+                // Check if this level has the target field
+                if let Some(field_value) = map.get(target_field) {
+                    results.push(field_value);
+                }
+                // Recursively traverse all nested objects
+                for (_, nested) in map {
+                    Self::collect_by_field_recursive(nested, target_field, results, depth + 1);
+                }
+            }
+            Value::Array(arr) => {
+                // Recurse into all array elements
+                for elem in arr {
+                    Self::collect_by_field_recursive(elem, target_field, results, depth + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Get the _id value as a JSON Value (for query matching)
     pub fn get_id_value(&self) -> Value {
         serde_json::to_value(&self.id).unwrap()
@@ -632,5 +767,254 @@ mod tests {
         let doc: Document = serde_json::from_str(json_str).unwrap();
         assert_eq!(doc.get("address.city").unwrap(), &json!("Budapest"));
         assert_eq!(doc.get("stats.login_count").unwrap(), &json!(42));
+    }
+
+    // ========================================================================
+    // get_all() tests - MongoDB-style implicit array flattening
+    // ========================================================================
+
+    #[test]
+    fn test_get_all_simple_array() {
+        let json_str = r#"{
+            "_id": 1,
+            "items": [{"name": "apple"}, {"name": "banana"}, {"name": "cherry"}]
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all("items.name");
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], &json!("apple"));
+        assert_eq!(values[1], &json!("banana"));
+        assert_eq!(values[2], &json!("cherry"));
+    }
+
+    #[test]
+    fn test_get_all_nested_arrays() {
+        let json_str = r#"{
+            "_id": 1,
+            "structure": [
+                {
+                    "children": [
+                        {"content": ["hello", "world"]},
+                        {"content": ["foo", "bar"]}
+                    ]
+                }
+            ]
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        // Get all content arrays
+        let values = doc.get_all("structure.children.content");
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], &json!(["hello", "world"]));
+        assert_eq!(values[1], &json!(["foo", "bar"]));
+    }
+
+    #[test]
+    fn test_get_all_deeply_nested() {
+        // This mimics the Schema v1.2 document structure
+        let json_str = r#"{
+            "_id": 1,
+            "structure": [
+                {
+                    "type": "section",
+                    "children": [
+                        {
+                            "type": "paragraph",
+                            "children": [
+                                {
+                                    "type": "inline_math",
+                                    "content": ["\\frac{\\sqrt{\\pi}}{2}"]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        // Get all content arrays (deeply nested)
+        let values = doc.get_all("structure.children.children.content");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], &json!(["\\frac{\\sqrt{\\pi}}{2}"]));
+    }
+
+    #[test]
+    fn test_get_all_with_numeric_index() {
+        let json_str = r#"{
+            "_id": 1,
+            "items": [{"name": "first"}, {"name": "second"}]
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        // Explicit numeric index should still work
+        let values = doc.get_all("items.0.name");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], &json!("first"));
+    }
+
+    #[test]
+    fn test_get_all_non_existent_field() {
+        let json_str = r#"{
+            "_id": 1,
+            "items": [{"name": "test"}]
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all("items.nonexistent");
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_empty_path() {
+        let json_str = r#"{"_id": 1, "name": "test"}"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all("");
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_get_all_no_array_traversal_needed() {
+        let json_str = r#"{
+            "_id": 1,
+            "user": {"profile": {"name": "Alice"}}
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        // Non-array path should return single value
+        let values = doc.get_all("user.profile.name");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], &json!("Alice"));
+    }
+
+    // ========================================================================
+    // get_all_by_field_name() tests - MongoDB $** wildcard operator support
+    // ========================================================================
+
+    #[test]
+    fn test_wildcard_simple_nested() {
+        let json_str = r#"{
+            "_id": 1,
+            "a": {"b": {"name": "Alice"}}
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all_by_field_name("name");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], &json!("Alice"));
+    }
+
+    #[test]
+    fn test_wildcard_multiple_matches() {
+        let json_str = r#"{
+            "_id": 1,
+            "user": {"name": "Alice"},
+            "company": {"name": "Acme"},
+            "project": {"info": {"name": "Secret"}}
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all_by_field_name("name");
+        assert_eq!(values.len(), 3);
+        // Check all names are found (order may vary due to HashMap)
+        let names: Vec<&str> = values.iter().filter_map(|v| v.as_str()).collect();
+        assert!(names.contains(&"Alice"));
+        assert!(names.contains(&"Acme"));
+        assert!(names.contains(&"Secret"));
+    }
+
+    #[test]
+    fn test_wildcard_in_arrays() {
+        let json_str = r#"{
+            "_id": 1,
+            "items": [
+                {"name": "first"},
+                {"name": "second"},
+                {"other": "skip"}
+            ]
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all_by_field_name("name");
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], &json!("first"));
+        assert_eq!(values[1], &json!("second"));
+    }
+
+    #[test]
+    fn test_wildcard_deeply_nested() {
+        let json_str = r#"{
+            "_id": 1,
+            "level1": {
+                "level2": {
+                    "level3": {
+                        "level4": {
+                            "content": "deep value"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all_by_field_name("content");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], &json!("deep value"));
+    }
+
+    #[test]
+    fn test_wildcard_mixed_arrays_and_objects() {
+        // This mimics Schema v1.2 structure
+        let json_str = r#"{
+            "_id": 1,
+            "structure": [
+                {
+                    "children": [
+                        {"content": ["hello"]},
+                        {"content": ["world"]}
+                    ]
+                },
+                {
+                    "children": [
+                        {"content": ["sqrt", "pi"]}
+                    ]
+                }
+            ]
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all_by_field_name("content");
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], &json!(["hello"]));
+        assert_eq!(values[1], &json!(["world"]));
+        assert_eq!(values[2], &json!(["sqrt", "pi"]));
+    }
+
+    #[test]
+    fn test_wildcard_nonexistent_field() {
+        let json_str = r#"{
+            "_id": 1,
+            "a": {"b": {"c": "value"}}
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all_by_field_name("nonexistent");
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_wildcard_top_level_field() {
+        let json_str = r#"{
+            "_id": 1,
+            "name": "top level",
+            "nested": {"other": "value"}
+        }"#;
+        let doc: Document = serde_json::from_str(json_str).unwrap();
+
+        let values = doc.get_all_by_field_name("name");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], &json!("top level"));
     }
 }

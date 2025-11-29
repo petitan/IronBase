@@ -46,6 +46,55 @@ pub fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
+/// Set a value at a nested path with dot notation support
+///
+/// Creates intermediate objects if they don't exist.
+/// Used by $unwind to set the unwound element back into the document.
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+/// use ironbase_core::value_utils::set_nested_value;
+///
+/// let mut doc = json!({"name": "Alice"});
+/// set_nested_value(&mut doc, "address.city", json!("NYC"));
+/// assert_eq!(doc["address"]["city"], "NYC");
+/// ```
+pub fn set_nested_value(doc: &mut Value, path: &str, value: Value) {
+    // Fast path: no dots means simple field assignment
+    if !path.contains('.') {
+        if let Value::Object(ref mut map) = doc {
+            map.insert(path.to_string(), value);
+        }
+        return;
+    }
+
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = doc;
+
+    for (i, part) in parts.iter().enumerate() {
+        if i == parts.len() - 1 {
+            // Last part - set the value
+            if let Value::Object(ref mut map) = current {
+                map.insert(part.to_string(), value);
+            }
+            return;
+        }
+
+        // Navigate deeper, creating intermediate objects if needed
+        if let Value::Object(ref mut map) = current {
+            if !map.contains_key(*part) {
+                map.insert(part.to_string(), Value::Object(serde_json::Map::new()));
+            }
+            current = map.get_mut(*part).unwrap();
+        } else {
+            // Cannot navigate into non-object
+            return;
+        }
+    }
+}
+
 /// Compare two JSON values
 ///
 /// Returns `Some(Ordering)` for comparable types (numbers, strings, booleans),
@@ -239,5 +288,40 @@ mod tests {
             compare_values_with_none(Some(&json!("a")), Some(&json!(1))),
             Ordering::Equal
         );
+    }
+
+    #[test]
+    fn test_set_nested_value_simple() {
+        let mut doc = json!({"name": "Alice"});
+        set_nested_value(&mut doc, "age", json!(30));
+        assert_eq!(doc["age"], 30);
+    }
+
+    #[test]
+    fn test_set_nested_value_overwrite() {
+        let mut doc = json!({"name": "Alice"});
+        set_nested_value(&mut doc, "name", json!("Bob"));
+        assert_eq!(doc["name"], "Bob");
+    }
+
+    #[test]
+    fn test_set_nested_value_nested_existing() {
+        let mut doc = json!({"address": {"city": "NYC"}});
+        set_nested_value(&mut doc, "address.city", json!("Boston"));
+        assert_eq!(doc["address"]["city"], "Boston");
+    }
+
+    #[test]
+    fn test_set_nested_value_nested_create() {
+        let mut doc = json!({"name": "Alice"});
+        set_nested_value(&mut doc, "address.city", json!("NYC"));
+        assert_eq!(doc["address"]["city"], "NYC");
+    }
+
+    #[test]
+    fn test_set_nested_value_deeply_nested() {
+        let mut doc = json!({"a": {}});
+        set_nested_value(&mut doc, "a.b.c.d", json!(42));
+        assert_eq!(doc["a"]["b"]["c"]["d"], 42);
     }
 }

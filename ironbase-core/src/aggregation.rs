@@ -4,7 +4,7 @@
 use crate::document::Document;
 use crate::error::{MongoLiteError, Result};
 use crate::query::Query;
-use crate::value_utils::get_nested_value;
+use crate::value_utils::{get_nested_value, set_nested_value};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -74,6 +74,7 @@ pub enum Stage {
     Sort(SortStage),
     Limit(LimitStage),
     Skip(SkipStage),
+    Unwind(UnwindStage),
 }
 
 /// $match stage - filter documents
@@ -101,6 +102,46 @@ pub enum ProjectField {
 pub enum ProjectExpression {
     /// $size - returns the length of an array field
     Size(String), // Field name (e.g., "$tags" -> "tags")
+    /// $reduce - apply a custom reduction to an array
+    Reduce(ReduceExpression),
+}
+
+/// $reduce expression - reduces an array to a single value
+///
+/// # MongoDB Syntax
+///
+/// ```json
+/// {$reduce: {
+///     input: "$arrayField",
+///     initialValue: 0,
+///     in: {$add: ["$$value", "$$this"]}
+/// }}
+/// ```
+///
+/// Special variables:
+/// - `$$value` - the accumulated value from previous iterations
+/// - `$$this` - the current array element
+#[derive(Debug, Clone)]
+pub struct ReduceExpression {
+    /// Input array field name (without $)
+    input: String,
+    /// Initial value for the accumulator
+    initial_value: Value,
+    /// Reduction expression to apply
+    in_expr: ReduceInExpr,
+}
+
+/// Supported reduction operations
+#[derive(Debug, Clone)]
+pub enum ReduceInExpr {
+    /// {$add: ["$$value", "$$this"]} - sum values
+    Add,
+    /// {$multiply: ["$$value", "$$this"]} - multiply values
+    Multiply,
+    /// {$concat: ["$$value", "$$this"]} - concatenate strings
+    Concat,
+    /// {$concat: ["$$value", separator, "$$this"]} - concatenate with separator
+    ConcatWithSeparator(String),
 }
 
 /// $group stage - group documents and compute aggregates
@@ -157,6 +198,33 @@ pub struct SkipStage {
     skip: usize,
 }
 
+/// $unwind stage - deconstruct an array field
+///
+/// Outputs one document per array element. The path field in each output document
+/// is replaced with the array element value.
+///
+/// # MongoDB Syntax
+///
+/// Simple form: `{$unwind: "$arrayField"}`
+///
+/// Extended form:
+/// ```json
+/// {$unwind: {
+///     path: "$arrayField",
+///     includeArrayIndex: "indexField",      // optional
+///     preserveNullAndEmptyArrays: true      // optional
+/// }}
+/// ```
+#[derive(Debug, Clone)]
+pub struct UnwindStage {
+    /// Field path to unwind (without leading $)
+    path: String,
+    /// Optional field name to store array index
+    include_array_index: Option<String>,
+    /// If true, preserve documents with null/missing/empty arrays
+    preserve_null_and_empty_arrays: bool,
+}
+
 impl Pipeline {
     /// Create pipeline from JSON array
     pub fn from_json(pipeline_json: &Value) -> Result<Self> {
@@ -210,6 +278,7 @@ impl Stage {
                 "$sort" => Ok(Stage::Sort(SortStage::from_json(stage_spec)?)),
                 "$limit" => Ok(Stage::Limit(LimitStage::from_json(stage_spec)?)),
                 "$skip" => Ok(Stage::Skip(SkipStage::from_json(stage_spec)?)),
+                "$unwind" => Ok(Stage::Unwind(UnwindStage::from_json(stage_spec)?)),
                 _ => Err(MongoLiteError::AggregationError(format!(
                     "Unknown pipeline stage: {}",
                     stage_name
@@ -231,6 +300,7 @@ impl Stage {
             Stage::Sort(stage) => stage.execute(docs),
             Stage::Limit(stage) => stage.execute(docs),
             Stage::Skip(stage) => stage.execute(docs),
+            Stage::Unwind(stage) => stage.execute(docs),
         }
     }
 }
@@ -315,7 +385,7 @@ impl ProjectStage {
         }
     }
 
-    /// Parse an expression object like {"$size": "$tags"}
+    /// Parse an expression object like {"$size": "$tags"} or {"$reduce": {...}}
     fn parse_expression(obj: &serde_json::Map<String, Value>) -> Result<ProjectField> {
         if obj.len() != 1 {
             return Err(MongoLiteError::AggregationError(
@@ -345,11 +415,124 @@ impl ProjectStage {
                     ))
                 }
             }
+            "$reduce" => Self::parse_reduce_expression(arg),
             _ => Err(MongoLiteError::AggregationError(format!(
                 "Unknown projection expression operator: {}",
                 op
             ))),
         }
+    }
+
+    /// Parse $reduce expression
+    ///
+    /// Format: {input: "$arrayField", initialValue: value, in: {$op: [...]}}
+    fn parse_reduce_expression(spec: &Value) -> Result<ProjectField> {
+        let obj = spec.as_object().ok_or_else(|| {
+            MongoLiteError::AggregationError("$reduce must be an object".to_string())
+        })?;
+
+        // Parse input field
+        let input = obj.get("input").and_then(|v| v.as_str()).ok_or_else(|| {
+            MongoLiteError::AggregationError("$reduce requires 'input' field reference".to_string())
+        })?;
+
+        if !input.starts_with('$') {
+            return Err(MongoLiteError::AggregationError(
+                "$reduce input must be a field reference starting with $".to_string(),
+            ));
+        }
+
+        let input_field = input.trim_start_matches('$').to_string();
+
+        // Parse initialValue
+        let initial_value = obj.get("initialValue").cloned().ok_or_else(|| {
+            MongoLiteError::AggregationError("$reduce requires 'initialValue'".to_string())
+        })?;
+
+        // Parse in expression
+        let in_expr = obj.get("in").ok_or_else(|| {
+            MongoLiteError::AggregationError("$reduce requires 'in' expression".to_string())
+        })?;
+
+        let reduce_in = Self::parse_reduce_in_expr(in_expr)?;
+
+        Ok(ProjectField::Expression(ProjectExpression::Reduce(
+            ReduceExpression {
+                input: input_field,
+                initial_value,
+                in_expr: reduce_in,
+            },
+        )))
+    }
+
+    /// Parse the 'in' expression of $reduce
+    ///
+    /// Supports: {$add: [...]}, {$multiply: [...]}, {$concat: [...]}
+    fn parse_reduce_in_expr(expr: &Value) -> Result<ReduceInExpr> {
+        let obj = expr.as_object().ok_or_else(|| {
+            MongoLiteError::AggregationError(
+                "$reduce 'in' must be an expression object".to_string(),
+            )
+        })?;
+
+        if obj.len() != 1 {
+            return Err(MongoLiteError::AggregationError(
+                "$reduce 'in' must have exactly one operator".to_string(),
+            ));
+        }
+
+        let (op, args) = obj.iter().next().unwrap();
+
+        match op.as_str() {
+            "$add" => {
+                // Validate it contains $$value and $$this
+                Self::validate_reduce_args(args, "$add")?;
+                Ok(ReduceInExpr::Add)
+            }
+            "$multiply" => {
+                Self::validate_reduce_args(args, "$multiply")?;
+                Ok(ReduceInExpr::Multiply)
+            }
+            "$concat" => {
+                // $concat can have 2 or 3 arguments
+                if let Some(arr) = args.as_array() {
+                    if arr.len() == 3 {
+                        // {$concat: ["$$value", separator, "$$this"]}
+                        if let Some(sep) = arr.get(1).and_then(|v| v.as_str()) {
+                            // Check it's not a variable reference
+                            if !sep.starts_with("$$") {
+                                return Ok(ReduceInExpr::ConcatWithSeparator(sep.to_string()));
+                            }
+                        }
+                    }
+                }
+                Self::validate_reduce_args(args, "$concat")?;
+                Ok(ReduceInExpr::Concat)
+            }
+            _ => Err(MongoLiteError::AggregationError(format!(
+                "Unsupported $reduce operator: {}. Supported: $add, $multiply, $concat",
+                op
+            ))),
+        }
+    }
+
+    /// Validate that reduce arguments contain $$value and $$this
+    fn validate_reduce_args(args: &Value, op_name: &str) -> Result<()> {
+        let arr = args.as_array().ok_or_else(|| {
+            MongoLiteError::AggregationError(format!("{} arguments must be an array", op_name))
+        })?;
+
+        let has_value = arr.iter().any(|v| v.as_str() == Some("$$value"));
+        let has_this = arr.iter().any(|v| v.as_str() == Some("$$this"));
+
+        if !has_value || !has_this {
+            return Err(MongoLiteError::AggregationError(format!(
+                "{} in $reduce must use $$value and $$this",
+                op_name
+            )));
+        }
+
+        Ok(())
     }
 
     fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
@@ -471,6 +654,73 @@ impl ProjectStage {
                     Value::Null
                 }
             }
+            ProjectExpression::Reduce(reduce_expr) => Self::evaluate_reduce(reduce_expr, doc),
+        }
+    }
+
+    /// Evaluate a $reduce expression against a document
+    ///
+    /// Iterates over the input array, applying the reduction operation
+    /// to accumulate a result.
+    fn evaluate_reduce(expr: &ReduceExpression, doc: &Value) -> Value {
+        // Get the input array
+        let array = match get_nested_value(doc, &expr.input) {
+            Some(Value::Array(arr)) => arr.clone(),
+            _ => return Value::Null, // Not an array or missing
+        };
+
+        // Start with initial value
+        let mut accumulator = expr.initial_value.clone();
+
+        // Apply reduction for each element
+        for element in array {
+            accumulator = match &expr.in_expr {
+                ReduceInExpr::Add => {
+                    let acc_num = Self::value_to_f64(&accumulator);
+                    let elem_num = Self::value_to_f64(&element);
+                    Value::from(acc_num + elem_num)
+                }
+                ReduceInExpr::Multiply => {
+                    let acc_num = Self::value_to_f64(&accumulator);
+                    let elem_num = Self::value_to_f64(&element);
+                    Value::from(acc_num * elem_num)
+                }
+                ReduceInExpr::Concat => {
+                    let acc_str = Self::value_to_string(&accumulator);
+                    let elem_str = Self::value_to_string(&element);
+                    Value::from(format!("{}{}", acc_str, elem_str))
+                }
+                ReduceInExpr::ConcatWithSeparator(sep) => {
+                    let acc_str = Self::value_to_string(&accumulator);
+                    let elem_str = Self::value_to_string(&element);
+                    if acc_str.is_empty() {
+                        Value::from(elem_str)
+                    } else {
+                        Value::from(format!("{}{}{}", acc_str, sep, elem_str))
+                    }
+                }
+            };
+        }
+
+        accumulator
+    }
+
+    /// Convert a JSON value to f64 for numeric operations
+    fn value_to_f64(value: &Value) -> f64 {
+        match value {
+            Value::Number(n) => n.as_f64().unwrap_or(0.0),
+            _ => 0.0,
+        }
+    }
+
+    /// Convert a JSON value to string for concatenation
+    fn value_to_string(value: &Value) -> String {
+        match value {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Null => String::new(),
+            _ => String::new(),
         }
     }
 }
@@ -814,6 +1064,139 @@ impl SkipStage {
 
     fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
         Ok(docs.into_iter().skip(self.skip).collect())
+    }
+}
+
+impl UnwindStage {
+    /// Parse $unwind stage from JSON
+    ///
+    /// Supports two forms:
+    /// - Simple: `"$fieldName"`
+    /// - Extended: `{path: "$fieldName", includeArrayIndex: "idx", preserveNullAndEmptyArrays: true}`
+    fn from_json(spec: &Value) -> Result<Self> {
+        // Simple form: "$fieldName"
+        if let Some(s) = spec.as_str() {
+            if s.starts_with('$') {
+                return Ok(UnwindStage {
+                    path: s.trim_start_matches('$').to_string(),
+                    include_array_index: None,
+                    preserve_null_and_empty_arrays: false,
+                });
+            }
+            return Err(MongoLiteError::AggregationError(
+                "$unwind path must start with $".to_string(),
+            ));
+        }
+
+        // Extended form: {path: "$fieldName", ...}
+        if let Value::Object(obj) = spec {
+            let path = obj.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
+                MongoLiteError::AggregationError("$unwind requires 'path' field".to_string())
+            })?;
+
+            if !path.starts_with('$') {
+                return Err(MongoLiteError::AggregationError(
+                    "$unwind path must start with $".to_string(),
+                ));
+            }
+
+            let include_array_index = obj
+                .get("includeArrayIndex")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+
+            let preserve_null_and_empty_arrays = obj
+                .get("preserveNullAndEmptyArrays")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            return Ok(UnwindStage {
+                path: path.trim_start_matches('$').to_string(),
+                include_array_index,
+                preserve_null_and_empty_arrays,
+            });
+        }
+
+        Err(MongoLiteError::AggregationError(
+            "$unwind must be a string or object".to_string(),
+        ))
+    }
+
+    /// Execute $unwind stage
+    ///
+    /// For each document, if the path field is an array, outputs one document
+    /// per array element with the path field replaced by that element.
+    fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
+        let mut results = Vec::new();
+
+        for doc in docs {
+            let array_value = get_nested_value(&doc, &self.path);
+
+            match array_value {
+                Some(Value::Array(arr)) if !arr.is_empty() => {
+                    // Non-empty array: output one doc per element
+                    for (index, element) in arr.iter().enumerate() {
+                        let mut new_doc = doc.clone();
+
+                        // Replace array field with single element
+                        set_nested_value(&mut new_doc, &self.path, element.clone());
+
+                        // Add index field if requested
+                        if let Some(ref index_field) = self.include_array_index {
+                            set_nested_value(
+                                &mut new_doc,
+                                index_field,
+                                Value::Number(serde_json::Number::from(index)),
+                            );
+                        }
+
+                        results.push(new_doc);
+                    }
+                }
+                Some(Value::Array(_)) => {
+                    // Empty array
+                    if self.preserve_null_and_empty_arrays {
+                        let mut new_doc = doc.clone();
+                        set_nested_value(&mut new_doc, &self.path, Value::Null);
+                        results.push(new_doc);
+                    }
+                    // else: skip document (default MongoDB behavior)
+                }
+                None => {
+                    // Missing field
+                    if self.preserve_null_and_empty_arrays {
+                        // Keep document with null value
+                        let mut new_doc = doc.clone();
+                        set_nested_value(&mut new_doc, &self.path, Value::Null);
+                        results.push(new_doc);
+                    }
+                    // else: skip document
+                }
+                Some(Value::Null) => {
+                    // Null value
+                    if self.preserve_null_and_empty_arrays {
+                        results.push(doc);
+                    }
+                    // else: skip document
+                }
+                Some(_) => {
+                    // Not an array - treat as single-element array (MongoDB behavior)
+                    if let Some(ref index_field) = self.include_array_index {
+                        let mut new_doc = doc.clone();
+                        set_nested_value(
+                            &mut new_doc,
+                            index_field,
+                            Value::Number(serde_json::Number::from(0)),
+                        );
+                        results.push(new_doc);
+                    } else {
+                        results.push(doc);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 }
 
@@ -1763,5 +2146,448 @@ mod tests {
         assert_eq!(results[1]["_id"], "Germany");
         assert_eq!(results[1]["totalEmployees"], 150);
         assert_eq!(results[1]["count"], 1);
+    }
+
+    // ========== $unwind stage tests ==========
+
+    #[test]
+    fn test_unwind_basic() {
+        let docs = vec![json!({"items": ["a", "b", "c"], "name": "doc1"})];
+        let stage = UnwindStage::from_json(&json!("$items")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["items"], "a");
+        assert_eq!(results[0]["name"], "doc1");
+        assert_eq!(results[1]["items"], "b");
+        assert_eq!(results[2]["items"], "c");
+    }
+
+    #[test]
+    fn test_unwind_with_numbers() {
+        let docs = vec![json!({"values": [10, 20, 30]})];
+        let stage = UnwindStage::from_json(&json!("$values")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["values"], 10);
+        assert_eq!(results[1]["values"], 20);
+        assert_eq!(results[2]["values"], 30);
+    }
+
+    #[test]
+    fn test_unwind_with_objects() {
+        let docs = vec![json!({
+            "orders": [
+                {"id": 1, "amount": 100},
+                {"id": 2, "amount": 200}
+            ]
+        })];
+        let stage = UnwindStage::from_json(&json!("$orders")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["orders"]["id"], 1);
+        assert_eq!(results[0]["orders"]["amount"], 100);
+        assert_eq!(results[1]["orders"]["id"], 2);
+        assert_eq!(results[1]["orders"]["amount"], 200);
+    }
+
+    #[test]
+    fn test_unwind_with_index() {
+        let docs = vec![json!({"arr": ["x", "y", "z"]})];
+        let stage = UnwindStage::from_json(&json!({
+            "path": "$arr",
+            "includeArrayIndex": "idx"
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["arr"], "x");
+        assert_eq!(results[0]["idx"], 0);
+        assert_eq!(results[1]["arr"], "y");
+        assert_eq!(results[1]["idx"], 1);
+        assert_eq!(results[2]["arr"], "z");
+        assert_eq!(results[2]["idx"], 2);
+    }
+
+    #[test]
+    fn test_unwind_empty_array_default() {
+        let docs = vec![json!({"items": [], "name": "doc1"})];
+        let stage = UnwindStage::from_json(&json!("$items")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Empty array - document is skipped by default
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_unwind_empty_array_preserve() {
+        let docs = vec![json!({"items": [], "name": "doc1"})];
+        let stage = UnwindStage::from_json(&json!({
+            "path": "$items",
+            "preserveNullAndEmptyArrays": true
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Empty array preserved with null value
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["items"].is_null());
+        assert_eq!(results[0]["name"], "doc1");
+    }
+
+    #[test]
+    fn test_unwind_missing_field_default() {
+        let docs = vec![json!({"name": "doc1"})];
+        let stage = UnwindStage::from_json(&json!("$items")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Missing field - document is skipped by default
+        assert_eq!(results.len(), 0);
+    }
+
+    #[test]
+    fn test_unwind_missing_field_preserve() {
+        let docs = vec![json!({"name": "doc1"})];
+        let stage = UnwindStage::from_json(&json!({
+            "path": "$items",
+            "preserveNullAndEmptyArrays": true
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Missing field preserved with null value
+        assert_eq!(results.len(), 1);
+        assert!(results[0]["items"].is_null());
+    }
+
+    #[test]
+    fn test_unwind_not_array() {
+        // When field is not an array, treat as single-element array
+        let docs = vec![json!({"value": 42, "name": "doc1"})];
+        let stage = UnwindStage::from_json(&json!("$value")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["value"], 42);
+    }
+
+    #[test]
+    fn test_unwind_multiple_docs() {
+        let docs = vec![
+            json!({"items": ["a", "b"], "id": 1}),
+            json!({"items": ["c"], "id": 2}),
+            json!({"items": ["d", "e", "f"], "id": 3}),
+        ];
+        let stage = UnwindStage::from_json(&json!("$items")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 6);
+        assert_eq!(results[0]["items"], "a");
+        assert_eq!(results[0]["id"], 1);
+        assert_eq!(results[1]["items"], "b");
+        assert_eq!(results[1]["id"], 1);
+        assert_eq!(results[2]["items"], "c");
+        assert_eq!(results[2]["id"], 2);
+        assert_eq!(results[3]["items"], "d");
+        assert_eq!(results[3]["id"], 3);
+    }
+
+    #[test]
+    fn test_unwind_nested_field() {
+        let docs = vec![json!({"data": {"tags": ["rust", "mongodb"]}})];
+        let stage = UnwindStage::from_json(&json!("$data.tags")).unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["data"]["tags"], "rust");
+        assert_eq!(results[1]["data"]["tags"], "mongodb");
+    }
+
+    #[test]
+    fn test_unwind_pipeline_integration() {
+        // Test $unwind in a full pipeline with $match and $group
+        let docs = vec![
+            json!({"category": "A", "items": [1, 2, 3]}),
+            json!({"category": "B", "items": [10, 20]}),
+            json!({"category": "A", "items": [4, 5]}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$unwind": "$items"},
+            {"$group": {
+                "_id": "$category",
+                "total": {"$sum": "$items"}
+            }},
+            {"$sort": {"_id": 1}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["_id"], "A");
+        assert_eq!(results[0]["total"], 15); // 1+2+3+4+5
+        assert_eq!(results[1]["_id"], "B");
+        assert_eq!(results[1]["total"], 30); // 10+20
+    }
+
+    #[test]
+    fn test_unwind_parse_error_no_dollar() {
+        let result = UnwindStage::from_json(&json!("items"));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must start with $"));
+    }
+
+    #[test]
+    fn test_unwind_parse_error_missing_path() {
+        let result = UnwindStage::from_json(&json!({"includeArrayIndex": "idx"}));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("requires 'path'"));
+    }
+
+    // ========== $reduce expression tests ==========
+
+    #[test]
+    fn test_reduce_sum() {
+        let docs = vec![json!({"numbers": [1, 2, 3, 4, 5]})];
+        let stage = ProjectStage::from_json(&json!({
+            "total": {"$reduce": {
+                "input": "$numbers",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["total"], 15.0);
+    }
+
+    #[test]
+    fn test_reduce_sum_floats() {
+        let docs = vec![json!({"values": [1.5, 2.5, 3.0]})];
+        let stage = ProjectStage::from_json(&json!({
+            "sum": {"$reduce": {
+                "input": "$values",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["sum"], 7.0);
+    }
+
+    #[test]
+    fn test_reduce_multiply() {
+        let docs = vec![json!({"numbers": [2, 3, 4]})];
+        let stage = ProjectStage::from_json(&json!({
+            "product": {"$reduce": {
+                "input": "$numbers",
+                "initialValue": 1,
+                "in": {"$multiply": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["product"], 24.0);
+    }
+
+    #[test]
+    fn test_reduce_concat() {
+        let docs = vec![json!({"words": ["Hello", " ", "World"]})];
+        let stage = ProjectStage::from_json(&json!({
+            "message": {"$reduce": {
+                "input": "$words",
+                "initialValue": "",
+                "in": {"$concat": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["message"], "Hello World");
+    }
+
+    #[test]
+    fn test_reduce_concat_with_separator() {
+        let docs = vec![json!({"tags": ["rust", "mongodb", "db"]})];
+        let stage = ProjectStage::from_json(&json!({
+            "tagList": {"$reduce": {
+                "input": "$tags",
+                "initialValue": "",
+                "in": {"$concat": ["$$value", ", ", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["tagList"], "rust, mongodb, db");
+    }
+
+    #[test]
+    fn test_reduce_empty_array() {
+        let docs = vec![json!({"numbers": []})];
+        let stage = ProjectStage::from_json(&json!({
+            "sum": {"$reduce": {
+                "input": "$numbers",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Empty array returns initial value
+        assert_eq!(results[0]["sum"], 0);
+    }
+
+    #[test]
+    fn test_reduce_missing_field() {
+        let docs = vec![json!({"name": "test"})];
+        let stage = ProjectStage::from_json(&json!({
+            "sum": {"$reduce": {
+                "input": "$numbers",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        // Missing field returns null
+        assert!(results[0]["sum"].is_null());
+    }
+
+    #[test]
+    fn test_reduce_nested_field() {
+        let docs = vec![json!({"data": {"scores": [10, 20, 30]}})];
+        let stage = ProjectStage::from_json(&json!({
+            "total": {"$reduce": {
+                "input": "$data.scores",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["total"], 60.0);
+    }
+
+    #[test]
+    fn test_reduce_with_other_projections() {
+        let docs = vec![json!({"name": "Test", "values": [1, 2, 3]})];
+        let stage = ProjectStage::from_json(&json!({
+            "name": 1,
+            "sum": {"$reduce": {
+                "input": "$values",
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }))
+        .unwrap();
+        let results = stage.execute(docs).unwrap();
+
+        assert_eq!(results[0]["name"], "Test");
+        assert_eq!(results[0]["sum"], 6.0);
+    }
+
+    #[test]
+    fn test_reduce_in_pipeline() {
+        let docs = vec![
+            json!({"category": "A", "prices": [10, 20, 30]}),
+            json!({"category": "B", "prices": [5, 15]}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$project": {
+                "category": 1,
+                "total": {"$reduce": {
+                    "input": "$prices",
+                    "initialValue": 0,
+                    "in": {"$add": ["$$value", "$$this"]}
+                }}
+            }},
+            {"$sort": {"total": -1}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        assert_eq!(results[0]["category"], "A");
+        assert_eq!(results[0]["total"], 60.0);
+        assert_eq!(results[1]["category"], "B");
+        assert_eq!(results[1]["total"], 20.0);
+    }
+
+    #[test]
+    fn test_reduce_parse_error_missing_input() {
+        let result = ProjectStage::from_json(&json!({
+            "total": {"$reduce": {
+                "initialValue": 0,
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("input"));
+    }
+
+    #[test]
+    fn test_reduce_parse_error_missing_initial_value() {
+        let result = ProjectStage::from_json(&json!({
+            "total": {"$reduce": {
+                "input": "$numbers",
+                "in": {"$add": ["$$value", "$$this"]}
+            }}
+        }));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("initialValue"));
+    }
+
+    #[test]
+    fn test_reduce_parse_error_missing_in() {
+        let result = ProjectStage::from_json(&json!({
+            "total": {"$reduce": {
+                "input": "$numbers",
+                "initialValue": 0
+            }}
+        }));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("in"));
+    }
+
+    #[test]
+    fn test_reduce_parse_error_unsupported_operator() {
+        let result = ProjectStage::from_json(&json!({
+            "total": {"$reduce": {
+                "input": "$numbers",
+                "initialValue": 0,
+                "in": {"$subtract": ["$$value", "$$this"]}
+            }}
+        }));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unsupported"));
+    }
+
+    #[test]
+    fn test_reduce_parse_error_missing_variables() {
+        let result = ProjectStage::from_json(&json!({
+            "total": {"$reduce": {
+                "input": "$numbers",
+                "initialValue": 0,
+                "in": {"$add": [1, 2]}  // Missing $$value and $$this
+            }}
+        }));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("$$value"));
     }
 }

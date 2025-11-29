@@ -1262,7 +1262,10 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
         .ok_or_else(|| MongoLiteError::InvalidQuery("Filter must be an object".to_string()))?;
 
     for (key, value) in filter_obj {
-        if key.starts_with('$') {
+        // Special handling for $** wildcard operator (must be checked BEFORE regular $ operators)
+        if key.starts_with("$**") {
+            // This is a $** wildcard query - treat as field-level condition below
+        } else if key.starts_with('$') {
             // Top-level logical operator
             if let Some(operator) = OPERATOR_REGISTRY.get(key.as_str()) {
                 if !operator.matches(None, value, Some(document))? {
@@ -1274,9 +1277,52 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                     key
                 )));
             }
-        } else {
+            continue; // Move to next filter condition after handling operator
+        }
+        // Field-level condition (including $** wildcard)
+        {
             // Field-level condition
-            let doc_value = document.get(key);
+            // Check for $** wildcard operator (recursive descent match)
+            let doc_values = if key.starts_with("$**.") {
+                let field_name = key.strip_prefix("$**.").unwrap();
+                // Validate: only simple field name, not a path
+                // Note: errors are swallowed by Query::matches() - invalid patterns just don't match
+                if field_name.contains('.') {
+                    return Err(MongoLiteError::InvalidQuery(format!(
+                        "$** wildcard does not support nested paths. Use $**.{} instead of $**.{}",
+                        field_name.split('.').next().unwrap(),
+                        field_name
+                    )));
+                }
+                document.get_all_by_field_name(field_name)
+            } else if key == "$**" {
+                return Err(MongoLiteError::InvalidQuery(
+                    "$** must be followed by a field name (e.g., $**.fieldName)".to_string(),
+                ));
+            } else {
+                // Use get_all() for MongoDB-style implicit array flattening
+                document.get_all(key)
+            };
+
+            // If get_all() returns values, check if ANY matches (MongoDB semantics)
+            // Otherwise, fall back to traditional get() for backward compat
+            // Note: For $** wildcard queries, we don't fall back to get() since the key is not a valid path
+            let is_wildcard_query = key.starts_with("$**.");
+            let doc_value = if doc_values.is_empty() {
+                if is_wildcard_query {
+                    None // $** query returned no values - field not found anywhere
+                } else {
+                    document.get(key)
+                }
+            } else {
+                // For get_all() results, we need to check if ANY value matches
+                // We'll do this by trying each value
+                None // Will be handled specially below
+            };
+
+            // MongoDB-style: if we have multiple values from array traversal,
+            // check if ANY of them matches the condition
+            let use_multi_value_matching = !doc_values.is_empty();
 
             if let Value::Object(condition_obj) = value {
                 // Special handling for $regex + $options combination
@@ -1299,23 +1345,39 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("");
 
-                    // Match against the document value with full regex support
-                    let matches = match doc_value {
-                        Some(Value::String(s)) => regex_match_with_options(s, pattern, options)?,
-                        Some(Value::Array(arr)) => {
-                            // Check if any string element in the array matches
-                            let mut found = false;
-                            for v in arr {
-                                if let Value::String(s) = v {
-                                    if regex_match_with_options(s, pattern, options)? {
-                                        found = true;
-                                        break;
+                    // Helper to check regex match on a single value
+                    let check_regex_match = |val: &Value| -> Result<bool> {
+                        match val {
+                            Value::String(s) => regex_match_with_options(s, pattern, options),
+                            Value::Array(arr) => {
+                                for v in arr {
+                                    if let Value::String(s) = v {
+                                        if regex_match_with_options(s, pattern, options)? {
+                                            return Ok(true);
+                                        }
                                     }
                                 }
+                                Ok(false)
                             }
-                            found
+                            _ => Ok(false),
                         }
-                        _ => false,
+                    };
+
+                    // MongoDB-style: if we have multiple values, ANY match is success
+                    let matches = if use_multi_value_matching {
+                        let mut found = false;
+                        for dv in &doc_values {
+                            if check_regex_match(dv)? {
+                                found = true;
+                                break;
+                            }
+                        }
+                        found
+                    } else {
+                        match doc_value {
+                            Some(v) => check_regex_match(v)?,
+                            None => false,
+                        }
                     };
 
                     if !matches {
@@ -1329,7 +1391,19 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                         }
                         if op_name.starts_with('$') {
                             if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
-                                if !operator.matches(doc_value, op_value, Some(document))? {
+                                // MongoDB-style: if we have multiple values, ANY match is success
+                                if use_multi_value_matching {
+                                    let mut any_match = false;
+                                    for dv in &doc_values {
+                                        if operator.matches(Some(*dv), op_value, Some(document))? {
+                                            any_match = true;
+                                            break;
+                                        }
+                                    }
+                                    if !any_match {
+                                        return Ok(false);
+                                    }
+                                } else if !operator.matches(doc_value, op_value, Some(document))? {
                                     return Ok(false);
                                 }
                             } else {
@@ -1346,7 +1420,19 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                     for (op_name, op_value) in condition_obj {
                         if op_name.starts_with('$') {
                             if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
-                                if !operator.matches(doc_value, op_value, Some(document))? {
+                                // MongoDB-style: if we have multiple values, ANY match is success
+                                if use_multi_value_matching {
+                                    let mut any_match = false;
+                                    for dv in &doc_values {
+                                        if operator.matches(Some(*dv), op_value, Some(document))? {
+                                            any_match = true;
+                                            break;
+                                        }
+                                    }
+                                    if !any_match {
+                                        return Ok(false);
+                                    }
+                                } else if !operator.matches(doc_value, op_value, Some(document))? {
                                     return Ok(false);
                                 }
                             } else {
@@ -1361,7 +1447,19 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
             } else {
                 // Direct equality check like { name: "Alice" }
                 // Use EqOperator for array element matching support
-                if !EqOperator.matches(doc_value, value, Some(document))? {
+                // MongoDB-style: if we have multiple values, ANY match is success
+                if use_multi_value_matching {
+                    let mut any_match = false;
+                    for dv in &doc_values {
+                        if EqOperator.matches(Some(*dv), value, Some(document))? {
+                            any_match = true;
+                            break;
+                        }
+                    }
+                    if !any_match {
+                        return Ok(false);
+                    }
+                } else if !EqOperator.matches(doc_value, value, Some(document))? {
                     return Ok(false);
                 }
             }
