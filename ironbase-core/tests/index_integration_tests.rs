@@ -55,8 +55,8 @@ fn test_insert_with_index_maintenance() {
     fields2.insert("name".to_string(), json!("Bob"));
     fields2.insert("age".to_string(), json!(25));
 
-    collection.insert_one(fields1).unwrap();
-    collection.insert_one(fields2).unwrap();
+    db.insert_one("users", fields1).unwrap();
+    db.insert_one("users", fields2).unwrap();
 
     // TEST ADDITION: Index-based query test (requires query optimizer)
     //
@@ -94,12 +94,12 @@ fn test_unique_index_constraint() {
     // Insert first document
     let mut fields1 = std::collections::HashMap::new();
     fields1.insert("email".to_string(), json!("alice@example.com"));
-    collection.insert_one(fields1).unwrap();
+    db.insert_one("users", fields1).unwrap();
 
     // Try to insert duplicate email - should fail
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("email".to_string(), json!("alice@example.com"));
-    let result = collection.insert_one(fields2);
+    let result = db.insert_one("users", fields2);
 
     assert!(result.is_err());
 }
@@ -144,15 +144,16 @@ fn test_update_one_unique_constraint_violation() {
     let mut fields1 = std::collections::HashMap::new();
     fields1.insert("name".to_string(), json!("Alice"));
     fields1.insert("email".to_string(), json!("alice@example.com"));
-    collection.insert_one(fields1).unwrap();
+    db.insert_one("users", fields1).unwrap();
 
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("name".to_string(), json!("Bob"));
     fields2.insert("email".to_string(), json!("bob@example.com"));
-    collection.insert_one(fields2).unwrap();
+    db.insert_one("users", fields2).unwrap();
 
     // Try to update Bob's email to Alice's email - should fail
-    let result = collection.update_one(
+    let result = db.update_one(
+        "users",
         &json!({"name": "Bob"}),
         &json!({"$set": {"email": "alice@example.com"}}),
     );
@@ -194,10 +195,11 @@ fn test_update_one_same_value_allowed() {
     let mut fields = std::collections::HashMap::new();
     fields.insert("name".to_string(), json!("Alice"));
     fields.insert("email".to_string(), json!("alice@example.com"));
-    collection.insert_one(fields).unwrap();
+    db.insert_one("users", fields).unwrap();
 
     // Update same document to same email value - should work
-    let result = collection.update_one(
+    let result = db.update_one(
+        "users",
         &json!({"name": "Alice"}),
         &json!({"$set": {"email": "alice@example.com", "age": 30}}),
     );
@@ -228,16 +230,17 @@ fn test_update_many_unique_constraint_violation() {
     fields1.insert("name".to_string(), json!("Alice"));
     fields1.insert("email".to_string(), json!("alice@example.com"));
     fields1.insert("role".to_string(), json!("admin"));
-    collection.insert_one(fields1).unwrap();
+    db.insert_one("users", fields1).unwrap();
 
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("name".to_string(), json!("Bob"));
     fields2.insert("email".to_string(), json!("bob@example.com"));
     fields2.insert("role".to_string(), json!("user"));
-    collection.insert_one(fields2).unwrap();
+    db.insert_one("users", fields2).unwrap();
 
     // Try to update Bob to have Alice's email - should fail
-    let result = collection.update_many(
+    let result = db.update_many(
+        "users",
         &json!({"role": "user"}),
         &json!({"$set": {"email": "alice@example.com"}}),
     );
@@ -263,10 +266,10 @@ fn test_delete_removes_from_index() {
     let mut fields = std::collections::HashMap::new();
     fields.insert("name".to_string(), json!("Alice"));
     fields.insert("email".to_string(), json!("alice@example.com"));
-    collection.insert_one(fields).unwrap();
+    db.insert_one("users", fields).unwrap();
 
     // Delete the document
-    let deleted = collection.delete_one(&json!({"name": "Alice"})).unwrap();
+    let deleted = db.delete_one("users", &json!({"name": "Alice"})).unwrap();
     assert_eq!(deleted, 1);
 
     // Now insert a new document with the same email - should succeed
@@ -274,7 +277,7 @@ fn test_delete_removes_from_index() {
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("name".to_string(), json!("Alice2"));
     fields2.insert("email".to_string(), json!("alice@example.com"));
-    let result = collection.insert_one(fields2);
+    let result = db.insert_one("users", fields2);
 
     assert!(
         result.is_ok(),
@@ -299,23 +302,23 @@ fn test_delete_many_removes_from_index() {
     fields1.insert("name".to_string(), json!("Alice"));
     fields1.insert("email".to_string(), json!("alice@example.com"));
     fields1.insert("active".to_string(), json!(false));
-    collection.insert_one(fields1).unwrap();
+    db.insert_one("users", fields1).unwrap();
 
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("name".to_string(), json!("Bob"));
     fields2.insert("email".to_string(), json!("bob@example.com"));
     fields2.insert("active".to_string(), json!(false));
-    collection.insert_one(fields2).unwrap();
+    db.insert_one("users", fields2).unwrap();
 
     // Delete all inactive users
-    let deleted = collection.delete_many(&json!({"active": false})).unwrap();
+    let deleted = db.delete_many("users", &json!({"active": false})).unwrap();
     assert_eq!(deleted, 2);
 
     // Now insert new documents with the same emails - should succeed
     let mut fields3 = std::collections::HashMap::new();
     fields3.insert("name".to_string(), json!("NewAlice"));
     fields3.insert("email".to_string(), json!("alice@example.com"));
-    let result1 = collection.insert_one(fields3);
+    let result1 = db.insert_one("users", fields3);
     assert!(
         result1.is_ok(),
         "Insert alice email after delete_many should succeed"
@@ -324,7 +327,7 @@ fn test_delete_many_removes_from_index() {
     let mut fields4 = std::collections::HashMap::new();
     fields4.insert("name".to_string(), json!("NewBob"));
     fields4.insert("email".to_string(), json!("bob@example.com"));
-    let result2 = collection.insert_one(fields4);
+    let result2 = db.insert_one("users", fields4);
     assert!(
         result2.is_ok(),
         "Insert bob email after delete_many should succeed"
@@ -346,10 +349,11 @@ fn test_update_one_changes_indexed_value() {
     let mut fields = std::collections::HashMap::new();
     fields.insert("name".to_string(), json!("Alice"));
     fields.insert("email".to_string(), json!("alice@example.com"));
-    collection.insert_one(fields).unwrap();
+    db.insert_one("users", fields).unwrap();
 
     // Update email to a new value
-    let result = collection.update_one(
+    let result = db.update_one(
+        "users",
         &json!({"name": "Alice"}),
         &json!({"$set": {"email": "alice.new@example.com"}}),
     );
@@ -359,7 +363,7 @@ fn test_update_one_changes_indexed_value() {
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("name".to_string(), json!("Bob"));
     fields2.insert("email".to_string(), json!("alice@example.com"));
-    let result2 = collection.insert_one(fields2);
+    let result2 = db.insert_one("users", fields2);
 
     assert!(
         result2.is_ok(),

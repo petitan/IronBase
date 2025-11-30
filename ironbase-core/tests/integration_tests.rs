@@ -189,17 +189,23 @@ fn test_collection_distinct_values() {
     let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
     let coll = db.collection("products").unwrap();
 
-    // Insert documents through CollectionCore to ensure catalog is populated
-    coll.insert_one(HashMap::from([
-        ("name".to_string(), json!("Laptop")),
-        ("category".to_string(), json!("electronics")),
-    ]))
+    // Insert documents through DatabaseCore to ensure catalog is populated
+    db.insert_one(
+        "products",
+        HashMap::from([
+            ("name".to_string(), json!("Laptop")),
+            ("category".to_string(), json!("electronics")),
+        ]),
+    )
     .unwrap();
 
-    coll.insert_one(HashMap::from([
-        ("name".to_string(), json!("Desk")),
-        ("category".to_string(), json!("furniture")),
-    ]))
+    db.insert_one(
+        "products",
+        HashMap::from([
+            ("name".to_string(), json!("Desk")),
+            ("category".to_string(), json!("furniture")),
+        ]),
+    )
     .unwrap();
 
     let distinct = coll
@@ -331,12 +337,12 @@ fn test_schema_validation_blocks_invalid_insert() {
 
     let mut invalid = HashMap::new();
     invalid.insert("name".to_string(), json!("Alice"));
-    assert!(collection.insert_one(invalid).is_err());
+    assert!(db.insert_one("users", invalid).is_err());
 
     let mut valid = HashMap::new();
     valid.insert("name".to_string(), json!("Bob"));
     valid.insert("age".to_string(), json!(30));
-    collection.insert_one(valid).unwrap();
+    db.insert_one("users", valid).unwrap();
 }
 
 #[test]
@@ -360,10 +366,13 @@ fn test_schema_validation_blocks_invalid_update() {
     let mut doc = HashMap::new();
     doc.insert("name".to_string(), json!("Carol"));
     doc.insert("age".to_string(), json!(28));
-    collection.insert_one(doc).unwrap();
+    db.insert_one("users", doc).unwrap();
 
-    let result =
-        collection.update_one(&json!({"name": "Carol"}), &json!({"$unset": {"age": true}}));
+    let result = db.update_one(
+        "users",
+        &json!({"name": "Carol"}),
+        &json!({"$unset": {"age": true}}),
+    );
     assert!(result.is_err());
 }
 
@@ -374,24 +383,30 @@ fn test_nested_field_queries_via_collection_core() {
     let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
     let coll = db.collection("customers").unwrap();
 
-    coll.insert_one(HashMap::from([
-        ("name".to_string(), json!("Anna")),
-        (
-            "address".to_string(),
-            json!({"city": "Budapest", "zip": 1111}),
-        ),
-        ("stats".to_string(), json!({"login_count": 42})),
-    ]))
+    db.insert_one(
+        "customers",
+        HashMap::from([
+            ("name".to_string(), json!("Anna")),
+            (
+                "address".to_string(),
+                json!({"city": "Budapest", "zip": 1111}),
+            ),
+            ("stats".to_string(), json!({"login_count": 42})),
+        ]),
+    )
     .unwrap();
 
-    coll.insert_one(HashMap::from([
-        ("name".to_string(), json!("Bence")),
-        (
-            "address".to_string(),
-            json!({"city": "Debrecen", "zip": 4025}),
-        ),
-        ("stats".to_string(), json!({"login_count": 5})),
-    ]))
+    db.insert_one(
+        "customers",
+        HashMap::from([
+            ("name".to_string(), json!("Bence")),
+            (
+                "address".to_string(),
+                json!({"city": "Debrecen", "zip": 4025}),
+            ),
+            ("stats".to_string(), json!({"login_count": 5})),
+        ]),
+    )
     .unwrap();
 
     let found = coll.find_one(&json!({"address.city": "Budapest"})).unwrap();
@@ -423,54 +438,59 @@ fn test_nested_crud_workflow_with_persistence() {
     // Session 1: Create and insert nested documents
     {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
-        let coll = db.collection("companies").unwrap();
 
-        coll.insert_one(HashMap::from([
-            ("name".to_string(), json!("TechCorp")),
-            (
-                "location".to_string(),
-                json!({
-                    "country": "USA",
-                    "city": "San Francisco",
-                    "address": {
-                        "street": "123 Tech Blvd",
-                        "zip": "94105"
-                    }
-                }),
-            ),
-            (
-                "stats".to_string(),
-                json!({
-                    "employees": 500,
-                    "revenue": 50000000,
-                    "rating": 4.8
-                }),
-            ),
-        ]))
+        db.insert_one(
+            "companies",
+            HashMap::from([
+                ("name".to_string(), json!("TechCorp")),
+                (
+                    "location".to_string(),
+                    json!({
+                        "country": "USA",
+                        "city": "San Francisco",
+                        "address": {
+                            "street": "123 Tech Blvd",
+                            "zip": "94105"
+                        }
+                    }),
+                ),
+                (
+                    "stats".to_string(),
+                    json!({
+                        "employees": 500,
+                        "revenue": 50000000,
+                        "rating": 4.8
+                    }),
+                ),
+            ]),
+        )
         .unwrap();
 
-        coll.insert_one(HashMap::from([
-            ("name".to_string(), json!("DataSoft")),
-            (
-                "location".to_string(),
-                json!({
-                    "country": "USA",
-                    "city": "New York",
-                    "address": {
-                        "street": "456 Data Ave",
-                        "zip": "10001"
-                    }
-                }),
-            ),
-            (
-                "stats".to_string(),
-                json!({
-                    "employees": 200,
-                    "revenue": 20000000,
-                    "rating": 4.2
-                }),
-            ),
-        ]))
+        db.insert_one(
+            "companies",
+            HashMap::from([
+                ("name".to_string(), json!("DataSoft")),
+                (
+                    "location".to_string(),
+                    json!({
+                        "country": "USA",
+                        "city": "New York",
+                        "address": {
+                            "street": "456 Data Ave",
+                            "zip": "10001"
+                        }
+                    }),
+                ),
+                (
+                    "stats".to_string(),
+                    json!({
+                        "employees": 200,
+                        "revenue": 20000000,
+                        "rating": 4.2
+                    }),
+                ),
+            ]),
+        )
         .unwrap();
     }
 
@@ -491,14 +511,16 @@ fn test_nested_crud_workflow_with_persistence() {
         assert_eq!(sf_company.unwrap()["name"], "TechCorp");
 
         // Update nested field
-        coll.update_one(
+        db.update_one(
+            "companies",
             &json!({"name": "TechCorp"}),
             &json!({"$set": {"stats.employees": 550}}),
         )
         .unwrap();
 
         // Update deep nested field
-        coll.update_one(
+        db.update_one(
+            "companies",
             &json!({"name": "DataSoft"}),
             &json!({"$set": {"location.address.zip": "10002"}}),
         )
@@ -532,7 +554,6 @@ fn test_nested_aggregation_with_persistence() {
     // Session 1: Insert data
     {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
-        let coll = db.collection("sales").unwrap();
 
         let regions = vec![
             ("North", "Electronics", 1000),
@@ -543,24 +564,27 @@ fn test_nested_aggregation_with_persistence() {
         ];
 
         for (region, category, amount) in regions {
-            coll.insert_one(HashMap::from([
-                (
-                    "region".to_string(),
-                    json!({
-                        "name": region,
-                        "active": true
-                    }),
-                ),
-                (
-                    "product".to_string(),
-                    json!({
-                        "category": category,
-                        "details": {
-                            "amount": amount
-                        }
-                    }),
-                ),
-            ]))
+            db.insert_one(
+                "sales",
+                HashMap::from([
+                    (
+                        "region".to_string(),
+                        json!({
+                            "name": region,
+                            "active": true
+                        }),
+                    ),
+                    (
+                        "product".to_string(),
+                        json!({
+                            "category": category,
+                            "details": {
+                                "amount": amount
+                            }
+                        }),
+                    ),
+                ]),
+            )
             .unwrap();
         }
     }
@@ -611,16 +635,19 @@ fn test_nested_index_with_persistence() {
             .unwrap();
 
         for i in 0..100 {
-            coll.insert_one(HashMap::from([
-                ("name".to_string(), json!(format!("User{}", i))),
-                (
-                    "profile".to_string(),
-                    json!({
-                        "score": i * 10,
-                        "level": if i < 50 { "junior" } else { "senior" }
-                    }),
-                ),
-            ]))
+            db.insert_one(
+                "users",
+                HashMap::from([
+                    ("name".to_string(), json!(format!("User{}", i))),
+                    (
+                        "profile".to_string(),
+                        json!({
+                            "score": i * 10,
+                            "level": if i < 50 { "junior" } else { "senior" }
+                        }),
+                    ),
+                ]),
+            )
             .unwrap();
         }
     }
@@ -658,20 +685,22 @@ fn test_nested_delete_with_persistence() {
     // Session 1: Insert data
     {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
-        let coll = db.collection("orders").unwrap();
 
         for i in 0..10 {
-            coll.insert_one(HashMap::from([
-                ("order_id".to_string(), json!(i)),
-                (
-                    "customer".to_string(),
-                    json!({
-                        "name": format!("Customer{}", i % 3),
-                        "tier": if i < 5 { "bronze" } else { "gold" }
-                    }),
-                ),
-                ("amount".to_string(), json!(100 * (i + 1))),
-            ]))
+            db.insert_one(
+                "orders",
+                HashMap::from([
+                    ("order_id".to_string(), json!(i)),
+                    (
+                        "customer".to_string(),
+                        json!({
+                            "name": format!("Customer{}", i % 3),
+                            "tier": if i < 5 { "bronze" } else { "gold" }
+                        }),
+                    ),
+                    ("amount".to_string(), json!(100 * (i + 1))),
+                ]),
+            )
             .unwrap();
         }
     }
@@ -686,8 +715,8 @@ fn test_nested_delete_with_persistence() {
         assert_eq!(before, 10);
 
         // Delete bronze tier orders
-        let deleted = coll
-            .delete_many(&json!({"customer.tier": "bronze"}))
+        let deleted = db
+            .delete_many("orders", &json!({"customer.tier": "bronze"}))
             .unwrap();
         assert_eq!(deleted, 5);
 
@@ -724,7 +753,6 @@ fn test_nested_find_options_with_persistence() {
     // Session 1: Insert data
     {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
-        let coll = db.collection("products").unwrap();
 
         let products = vec![
             ("Laptop", "Electronics", 999.99),
@@ -735,19 +763,22 @@ fn test_nested_find_options_with_persistence() {
         ];
 
         for (name, category, price) in products {
-            coll.insert_one(HashMap::from([
-                ("name".to_string(), json!(name)),
-                (
-                    "info".to_string(),
-                    json!({
-                        "category": category,
-                        "pricing": {
-                            "price": price,
-                            "currency": "USD"
-                        }
-                    }),
-                ),
-            ]))
+            db.insert_one(
+                "products",
+                HashMap::from([
+                    ("name".to_string(), json!(name)),
+                    (
+                        "info".to_string(),
+                        json!({
+                            "category": category,
+                            "pricing": {
+                                "price": price,
+                                "currency": "USD"
+                            }
+                        }),
+                    ),
+                ]),
+            )
             .unwrap();
         }
     }
@@ -792,16 +823,19 @@ fn test_deeply_nested_update_create_path() {
     // Session 1: Insert simple doc and update to create deep nested path
     {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
-        let coll = db.collection("config").unwrap();
 
-        coll.insert_one(HashMap::from([
-            ("name".to_string(), json!("app_config")),
-            ("version".to_string(), json!(1)),
-        ]))
+        db.insert_one(
+            "config",
+            HashMap::from([
+                ("name".to_string(), json!("app_config")),
+                ("version".to_string(), json!(1)),
+            ]),
+        )
         .unwrap();
 
         // Create deep nested path via update
-        coll.update_one(
+        db.update_one(
+            "config",
             &json!({"name": "app_config"}),
             &json!({"$set": {
                 "settings.database.connection.timeout": 30,
@@ -843,51 +877,56 @@ fn test_mixed_nested_and_flat_fields() {
 
     {
         let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
-        let coll = db.collection("events").unwrap();
 
-        coll.insert_one(HashMap::from([
-            ("event_type".to_string(), json!("purchase")),
-            ("timestamp".to_string(), json!("2024-01-15T10:30:00Z")),
-            (
-                "user".to_string(),
-                json!({
-                    "id": 123,
-                    "profile": {
-                        "name": "Alice",
-                        "premium": true
-                    }
-                }),
-            ),
-            (
-                "data".to_string(),
-                json!({
-                    "product_id": "P001",
-                    "amount": 99.99
-                }),
-            ),
-        ]))
+        db.insert_one(
+            "events",
+            HashMap::from([
+                ("event_type".to_string(), json!("purchase")),
+                ("timestamp".to_string(), json!("2024-01-15T10:30:00Z")),
+                (
+                    "user".to_string(),
+                    json!({
+                        "id": 123,
+                        "profile": {
+                            "name": "Alice",
+                            "premium": true
+                        }
+                    }),
+                ),
+                (
+                    "data".to_string(),
+                    json!({
+                        "product_id": "P001",
+                        "amount": 99.99
+                    }),
+                ),
+            ]),
+        )
         .unwrap();
 
-        coll.insert_one(HashMap::from([
-            ("event_type".to_string(), json!("view")),
-            ("timestamp".to_string(), json!("2024-01-15T11:00:00Z")),
-            (
-                "user".to_string(),
-                json!({
-                    "id": 456,
-                    "profile": {
-                        "name": "Bob",
-                        "premium": false
-                    }
-                }),
-            ),
-            (
-                "data".to_string(),
-                json!({
-                    "page": "/products"
-                }),
-            ),
-        ]))
+        db.insert_one(
+            "events",
+            HashMap::from([
+                ("event_type".to_string(), json!("view")),
+                ("timestamp".to_string(), json!("2024-01-15T11:00:00Z")),
+                (
+                    "user".to_string(),
+                    json!({
+                        "id": 456,
+                        "profile": {
+                            "name": "Bob",
+                            "premium": false
+                        }
+                    }),
+                ),
+                (
+                    "data".to_string(),
+                    json!({
+                        "page": "/products"
+                    }),
+                ),
+            ]),
+        )
         .unwrap();
     }
 

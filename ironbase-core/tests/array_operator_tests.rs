@@ -36,12 +36,16 @@ fn test_push_simple() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "tags": ["rust"]})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "tags": ["rust"]})))
         .unwrap();
 
     // Push single element
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$push": {"tags": "mongodb"}}))
+    let (matched, modified) = db
+        .update_one(
+            "test",
+            &json!({"_id": 1}),
+            &json!({"$push": {"tags": "mongodb"}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -60,12 +64,16 @@ fn test_push_to_nonexistent_field() {
     let coll = db.collection("test").unwrap();
 
     // Insert document without array field
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "test"})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "name": "test"})))
         .unwrap();
 
     // Push to nonexistent field (should create array)
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$push": {"tags": "new"}}))
+    let (matched, modified) = db
+        .update_one(
+            "test",
+            &json!({"_id": 1}),
+            &json!({"$push": {"tags": "new"}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -84,12 +92,16 @@ fn test_push_each() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "scores": [10, 20]})))
-        .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "scores": [10, 20]})),
+    )
+    .unwrap();
 
     // Push multiple elements with $each
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({"$push": {"scores": {"$each": [30, 40, 50]}}}),
         )
@@ -111,12 +123,16 @@ fn test_push_position() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "items": ["a", "b", "c"]})))
-        .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "items": ["a", "b", "c"]})),
+    )
+    .unwrap();
 
     // Push at position 1
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({"$push": {"items": {"$each": ["x", "y"], "$position": 1}}}),
         )
@@ -138,12 +154,16 @@ fn test_push_slice_positive() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3]})))
-        .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3]})),
+    )
+    .unwrap();
 
     // Push and keep only first 3 elements
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({"$push": {"items": {"$each": [4, 5], "$slice": 3}}}),
         )
@@ -165,12 +185,16 @@ fn test_push_slice_negative() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3]})))
-        .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3]})),
+    )
+    .unwrap();
 
     // Push and keep only last 3 elements
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({"$push": {"items": {"$each": [4, 5], "$slice": -3}}}),
         )
@@ -189,14 +213,18 @@ fn test_push_slice_negative() {
 #[test]
 fn test_push_to_non_array_field_should_error() {
     let db = setup_test_db("push_error");
-    let coll = db.collection("test").unwrap();
+    let _coll = db.collection("test").unwrap();
 
     // Insert document with non-array field
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "test"})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "name": "test"})))
         .unwrap();
 
     // Try to push to non-array field (should fail)
-    let result = coll.update_one(&json!({"_id": 1}), &json!({"$push": {"name": "value"}}));
+    let result = db.update_one(
+        "test",
+        &json!({"_id": 1}),
+        &json!({"$push": {"name": "value"}}),
+    );
 
     assert!(result.is_err());
 
@@ -211,14 +239,19 @@ fn test_pull_simple_equality() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "tags": ["rust", "python", "rust", "java"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "tags": ["rust", "python", "rust", "java"]})),
+    )
     .unwrap();
 
     // Pull all "rust" elements
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$pull": {"tags": "rust"}}))
+    let (matched, modified) = db
+        .update_one(
+            "test",
+            &json!({"_id": 1}),
+            &json!({"$pull": {"tags": "rust"}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -237,14 +270,16 @@ fn test_pull_with_condition() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array of numbers
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "scores": [5, 10, 15, 20, 25]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "scores": [5, 10, 15, 20, 25]})),
+    )
     .unwrap();
 
     // Pull elements less than 15
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({"$pull": {"scores": {"$lt": 15}}}),
         )
@@ -266,14 +301,16 @@ fn test_pull_with_in_operator() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "tags": ["a", "b", "c", "d", "e"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "tags": ["a", "b", "c", "d", "e"]})),
+    )
     .unwrap();
 
     // Pull elements in ["b", "d"]
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({"$pull": {"tags": {"$in": ["b", "d"]}}}),
         )
@@ -292,15 +329,19 @@ fn test_pull_with_in_operator() {
 #[test]
 fn test_pull_from_nonexistent_field() {
     let db = setup_test_db("pull_nonexistent");
-    let coll = db.collection("test").unwrap();
+    let _coll = db.collection("test").unwrap();
 
     // Insert document without array field
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "test"})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "name": "test"})))
         .unwrap();
 
     // Pull from nonexistent field (should be no-op)
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$pull": {"tags": "value"}}))
+    let (matched, modified) = db
+        .update_one(
+            "test",
+            &json!({"_id": 1}),
+            &json!({"$pull": {"tags": "value"}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -312,14 +353,18 @@ fn test_pull_from_nonexistent_field() {
 #[test]
 fn test_pull_from_non_array_field_should_error() {
     let db = setup_test_db("pull_error");
-    let coll = db.collection("test").unwrap();
+    let _coll = db.collection("test").unwrap();
 
     // Insert document with non-array field
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "test"})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "name": "test"})))
         .unwrap();
 
     // Try to pull from non-array field (should fail)
-    let result = coll.update_one(&json!({"_id": 1}), &json!({"$pull": {"name": "value"}}));
+    let result = db.update_one(
+        "test",
+        &json!({"_id": 1}),
+        &json!({"$pull": {"name": "value"}}),
+    );
 
     assert!(result.is_err());
 
@@ -334,14 +379,19 @@ fn test_addtoset_simple() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "tags": ["rust", "python"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "tags": ["rust", "python"]})),
+    )
     .unwrap();
 
     // Add unique element
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$addToSet": {"tags": "java"}}))
+    let (matched, modified) = db
+        .update_one(
+            "test",
+            &json!({"_id": 1}),
+            &json!({"$addToSet": {"tags": "java"}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -360,14 +410,19 @@ fn test_addtoset_duplicate() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "tags": ["rust", "python"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "tags": ["rust", "python"]})),
+    )
     .unwrap();
 
     // Try to add duplicate element
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$addToSet": {"tags": "rust"}}))
+    let (matched, modified) = db
+        .update_one(
+            "test",
+            &json!({"_id": 1}),
+            &json!({"$addToSet": {"tags": "rust"}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -386,14 +441,16 @@ fn test_addtoset_each() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "tags": ["rust", "python"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "tags": ["rust", "python"]})),
+    )
     .unwrap();
 
     // Add multiple unique elements with $each
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({"$addToSet": {"tags": {"$each": ["java", "rust", "go"]}}}),
         )
@@ -420,12 +477,16 @@ fn test_addtoset_to_nonexistent_field() {
     let coll = db.collection("test").unwrap();
 
     // Insert document without array field
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "test"})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "name": "test"})))
         .unwrap();
 
     // AddToSet to nonexistent field (should create array)
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$addToSet": {"tags": "new"}}))
+    let (matched, modified) = db
+        .update_one(
+            "test",
+            &json!({"_id": 1}),
+            &json!({"$addToSet": {"tags": "new"}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -441,14 +502,18 @@ fn test_addtoset_to_nonexistent_field() {
 #[test]
 fn test_addtoset_to_non_array_field_should_error() {
     let db = setup_test_db("addtoset_error");
-    let coll = db.collection("test").unwrap();
+    let _coll = db.collection("test").unwrap();
 
     // Insert document with non-array field
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "test"})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "name": "test"})))
         .unwrap();
 
     // Try to addToSet to non-array field (should fail)
-    let result = coll.update_one(&json!({"_id": 1}), &json!({"$addToSet": {"name": "value"}}));
+    let result = db.update_one(
+        "test",
+        &json!({"_id": 1}),
+        &json!({"$addToSet": {"name": "value"}}),
+    );
 
     assert!(result.is_err());
 
@@ -463,12 +528,15 @@ fn test_pop_first() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3, 4, 5]})))
-        .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3, 4, 5]})),
+    )
+    .unwrap();
 
     // Pop first element
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$pop": {"items": -1}}))
+    let (matched, modified) = db
+        .update_one("test", &json!({"_id": 1}), &json!({"$pop": {"items": -1}}))
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -487,12 +555,15 @@ fn test_pop_last() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3, 4, 5]})))
-        .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3, 4, 5]})),
+    )
+    .unwrap();
 
     // Pop last element
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$pop": {"items": 1}}))
+    let (matched, modified) = db
+        .update_one("test", &json!({"_id": 1}), &json!({"$pop": {"items": 1}}))
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -511,12 +582,12 @@ fn test_pop_empty_array() {
     let coll = db.collection("test").unwrap();
 
     // Insert document with empty array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "items": []})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "items": []})))
         .unwrap();
 
     // Pop from empty array (should be no-op)
-    let (matched, modified) = coll
-        .update_one(&json!({"_id": 1}), &json!({"$pop": {"items": 1}}))
+    let (matched, modified) = db
+        .update_one("test", &json!({"_id": 1}), &json!({"$pop": {"items": 1}}))
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -532,14 +603,17 @@ fn test_pop_empty_array() {
 #[test]
 fn test_pop_invalid_direction() {
     let db = setup_test_db("pop_invalid");
-    let coll = db.collection("test").unwrap();
+    let _coll = db.collection("test").unwrap();
 
     // Insert document with array
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3]})))
-        .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "items": [1, 2, 3]})),
+    )
+    .unwrap();
 
     // Try to pop with invalid direction (not -1 or 1)
-    let result = coll.update_one(&json!({"_id": 1}), &json!({"$pop": {"items": 2}}));
+    let result = db.update_one("test", &json!({"_id": 1}), &json!({"$pop": {"items": 2}}));
 
     assert!(result.is_err());
 
@@ -549,14 +623,14 @@ fn test_pop_invalid_direction() {
 #[test]
 fn test_pop_from_non_array_field_should_error() {
     let db = setup_test_db("pop_error");
-    let coll = db.collection("test").unwrap();
+    let _coll = db.collection("test").unwrap();
 
     // Insert document with non-array field
-    coll.insert_one(json_to_hashmap(json!({"_id": 1, "name": "test"})))
+    db.insert_one("test", json_to_hashmap(json!({"_id": 1, "name": "test"})))
         .unwrap();
 
     // Try to pop from non-array field (should fail)
-    let result = coll.update_one(&json!({"_id": 1}), &json!({"$pop": {"name": 1}}));
+    let result = db.update_one("test", &json!({"_id": 1}), &json!({"$pop": {"name": 1}}));
 
     assert!(result.is_err());
 
@@ -571,14 +645,16 @@ fn test_combined_array_operations() {
     let coll = db.collection("test").unwrap();
 
     // Insert document
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "tags": ["a", "b"], "scores": [10, 20]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "tags": ["a", "b"], "scores": [10, 20]})),
+    )
     .unwrap();
 
     // Apply multiple array operations at once
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "test",
             &json!({"_id": 1}),
             &json!({
                 "$push": {"tags": "c"},
@@ -604,22 +680,26 @@ fn test_update_many_with_array_operators() {
     let coll = db.collection("test").unwrap();
 
     // Insert multiple documents
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "category": "A", "tags": ["old"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "category": "A", "tags": ["old"]})),
+    )
     .unwrap();
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 2, "category": "A", "tags": ["old"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 2, "category": "A", "tags": ["old"]})),
+    )
     .unwrap();
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 3, "category": "B", "tags": ["old"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 3, "category": "B", "tags": ["old"]})),
+    )
     .unwrap();
 
     // Update all category A documents
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_many(
+            "test",
             &json!({"category": "A"}),
             &json!({"$push": {"tags": "new"}}),
         )
@@ -646,21 +726,25 @@ fn test_size_query_operator() {
     let coll = db.collection("test").unwrap();
 
     // Insert documents with arrays of various sizes
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]})),
+    )
     .unwrap();
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]})),
+    )
     .unwrap();
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 3, "name": "Charlie", "tags": []}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 3, "name": "Charlie", "tags": []})),
+    )
     .unwrap();
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 4, "name": "David", "tags": ["single"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 4, "name": "David", "tags": ["single"]})),
+    )
     .unwrap();
 
     // Test $size: 3
@@ -698,13 +782,15 @@ fn test_size_query_operator_with_options() {
     let coll = db.collection("test").unwrap();
 
     // Insert documents with arrays of various sizes
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 1, "name": "Alice", "tags": ["a", "b", "c"]})),
+    )
     .unwrap();
-    coll.insert_one(json_to_hashmap(
-        json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]}),
-    ))
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"_id": 2, "name": "Bob", "tags": ["x", "y"]})),
+    )
     .unwrap();
 
     // Test $size: 3 with FindOptions (like Python does)

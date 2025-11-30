@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let raw_doc: Value = serde_json::from_str(&fs::read_to_string(&document_path)?)?;
     let fields = value_to_map(raw_doc)?;
-    let inserted = collection.insert_one(fields)?;
+    let inserted = db.insert_one(&collection_name, fields)?;
     let doc_id_value = serde_json::to_value(&inserted)?;
 
     let stored = collection

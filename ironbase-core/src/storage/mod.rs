@@ -22,7 +22,10 @@ use std::path::{Path, PathBuf};
 pub use compaction::{CompactionConfig, CompactionStats};
 
 // Re-export traits module
-pub use traits::{CompactableStorage, IndexableStorage, RawStorage, Storage};
+// NOTE: RawStorage is intentionally NOT public - it uses sealed trait pattern
+// to prevent WAL bypass. Only crate-internal code can use it.
+pub(crate) use traits::RawStorage;
+pub use traits::{CompactableStorage, IndexableStorage, Storage};
 
 // Re-export storage implementations
 pub use file_storage::FileStorage;

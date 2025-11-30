@@ -42,7 +42,7 @@ fn main() -> anyhow::Result<()> {
             docs.push(build_nested_doc(idx as u64));
         }
 
-        collection.insert_many(docs)?;
+        db.insert_many("users", docs)?;
         inserted += batch_size;
 
         if inserted.is_multiple_of(5_000) || inserted >= target_docs {

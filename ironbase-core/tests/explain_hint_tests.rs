@@ -89,8 +89,11 @@ fn test_hint_forces_index_usage() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("age".to_string(), json!(i % 10)); // Ages 0-9, 5 docs each
-        collection.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
+
+    // Refresh collection reference after inserts
+    let collection = db.collection("users").unwrap();
 
     // Query with hint
     let results = collection
@@ -116,8 +119,11 @@ fn test_hint_with_range_query() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("name".to_string(), json!(format!("Product{}", i)));
         fields.insert("price".to_string(), json!(i * 10));
-        collection.insert_one(fields).unwrap();
+        db.insert_one("products", fields).unwrap();
     }
+
+    // Refresh collection reference after inserts
+    let collection = db.collection("products").unwrap();
 
     // Range query with hint
     let results = collection
@@ -183,8 +189,11 @@ fn test_explain_and_hint_consistency() {
     for i in 0..10 {
         let mut fields = std::collections::HashMap::new();
         fields.insert("age".to_string(), json!(i));
-        collection.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
+
+    // Refresh collection reference after inserts
+    let collection = db.collection("users").unwrap();
 
     let query = json!({"age": 5});
 

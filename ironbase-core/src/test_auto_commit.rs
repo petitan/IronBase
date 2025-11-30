@@ -46,7 +46,7 @@ mod tests {
             ("age".to_string(), json!(30)),
         ]);
 
-        let doc_id = db.insert_one_safe("users", doc).unwrap();
+        let doc_id = db.insert_one("users", doc).unwrap();
         println!("Inserted document with ID: {:?}", doc_id);
 
         // Verify the document was written
@@ -83,7 +83,7 @@ mod tests {
         // Insert 5 documents (should trigger 1 flush at 3, leaving 2 in buffer)
         for i in 0..5 {
             let doc = HashMap::from([("value".to_string(), json!(i))]);
-            db.insert_one_safe("test", doc).unwrap();
+            db.insert_one("test", doc).unwrap();
         }
 
         // Verify all documents were written
@@ -120,7 +120,7 @@ mod tests {
         // Insert document (fast path, no WAL)
         let doc = HashMap::from([("name".to_string(), json!("Bob"))]);
 
-        db.insert_one_safe("users", doc).unwrap();
+        db.insert_one("users", doc).unwrap();
 
         // Verify the document was written
         let collection = db.collection("users").unwrap();

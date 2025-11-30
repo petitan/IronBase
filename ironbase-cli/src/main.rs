@@ -117,10 +117,6 @@ fn import_data(file: &Path, db_path: &Path) -> Result<()> {
             .as_array()
             .with_context(|| format!("Collection '{}' must be an array", collection_name))?;
 
-        let coll = db
-            .collection(&collection_name)
-            .with_context(|| format!("Failed to get collection: {}", collection_name))?;
-
         for doc in docs {
             let doc_map: HashMap<String, Value> = doc
                 .as_object()
@@ -129,7 +125,7 @@ fn import_data(file: &Path, db_path: &Path) -> Result<()> {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
 
-            coll.insert_one(doc_map)
+            db.insert_one(&collection_name, doc_map)
                 .with_context(|| format!("Failed to insert document into {}", collection_name))?;
             total_docs += 1;
         }

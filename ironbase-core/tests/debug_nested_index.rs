@@ -25,16 +25,19 @@ fn debug_nested_index_persistence() {
         // Insert 10 docs (simpler)
         for i in 0..10 {
             let score = 900 + i * 10; // 900, 910, 920, ... 990
-            coll.insert_one(HashMap::from([
-                ("name".to_string(), json!(format!("User{}", i))),
-                (
-                    "profile".to_string(),
-                    json!({
-                        "score": score,
-                        "level": "senior"
-                    }),
-                ),
-            ]))
+            db.insert_one(
+                "users",
+                HashMap::from([
+                    ("name".to_string(), json!(format!("User{}", i))),
+                    (
+                        "profile".to_string(),
+                        json!({
+                            "score": score,
+                            "level": "senior"
+                        }),
+                    ),
+                ]),
+            )
             .unwrap();
             println!("Inserted user with score {}", score);
         }

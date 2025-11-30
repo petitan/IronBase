@@ -105,27 +105,21 @@ impl IronBaseAdapter {
         }
     }
 
-    /// Insert a single document
+    /// Insert a single document (with WAL durability)
     pub fn insert_one(&self, collection: &str, document: Value) -> Result<String> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
         let fields = Self::value_to_hashmap(document);
-        let id = coll.insert_one(fields)?;
+        let id = db.insert_one(collection, fields)?;
         Ok(Self::doc_id_to_string(&id))
     }
 
-    /// Insert multiple documents
+    /// Insert multiple documents (with WAL durability)
     pub fn insert_many(&self, collection: &str, documents: Vec<Value>) -> Result<Vec<String>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
         let docs: Vec<HashMap<String, Value>> =
             documents.into_iter().map(Self::value_to_hashmap).collect();
-        let result = coll.insert_many(docs)?;
-        Ok(result
-            .inserted_ids
-            .iter()
-            .map(Self::doc_id_to_string)
-            .collect())
+        let ids = db.insert_many(collection, docs)?;
+        Ok(ids.iter().map(Self::doc_id_to_string).collect())
     }
 
     /// Find documents
@@ -184,7 +178,7 @@ impl IronBaseAdapter {
         Ok(result)
     }
 
-    /// Update a single document
+    /// Update a single document (with WAL durability)
     pub fn update_one(
         &self,
         collection: &str,
@@ -192,15 +186,14 @@ impl IronBaseAdapter {
         update: Value,
     ) -> Result<UpdateResult> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
-        let (matched, modified) = coll.update_one(&filter, &update)?;
+        let (matched, modified) = db.update_one(collection, &filter, &update)?;
         Ok(UpdateResult {
             matched_count: matched,
             modified_count: modified,
         })
     }
 
-    /// Update multiple documents
+    /// Update multiple documents (with WAL durability)
     pub fn update_many(
         &self,
         collection: &str,
@@ -208,27 +201,24 @@ impl IronBaseAdapter {
         update: Value,
     ) -> Result<UpdateResult> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
-        let (matched, modified) = coll.update_many(&filter, &update)?;
+        let (matched, modified) = db.update_many(collection, &filter, &update)?;
         Ok(UpdateResult {
             matched_count: matched,
             modified_count: modified,
         })
     }
 
-    /// Delete a single document
+    /// Delete a single document (with WAL durability)
     pub fn delete_one(&self, collection: &str, filter: Value) -> Result<u64> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
-        let count = coll.delete_one(&filter)?;
+        let count = db.delete_one(collection, &filter)?;
         Ok(count)
     }
 
-    /// Delete multiple documents
+    /// Delete multiple documents (with WAL durability)
     pub fn delete_many(&self, collection: &str, filter: Value) -> Result<u64> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
-        let count = coll.delete_many(&filter)?;
+        let count = db.delete_many(collection, &filter)?;
         Ok(count)
     }
 

@@ -21,8 +21,11 @@ fn test_index_equality_query() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("age".to_string(), json!(i));
-        collection.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
+
+    // Refresh collection reference after inserts
+    let collection = db.collection("users").unwrap();
 
     // Query with index (should use IndexScan)
     let results = collection.find(&json!({"age": 50})).unwrap();
@@ -47,8 +50,11 @@ fn test_index_range_query() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("name".to_string(), json!(format!("Product{}", i)));
         fields.insert("price".to_string(), json!(i * 10));
-        collection.insert_one(fields).unwrap();
+        db.insert_one("products", fields).unwrap();
     }
+
+    // Refresh collection reference after inserts
+    let collection = db.collection("products").unwrap();
 
     // Range query: price >= 200 AND price < 500 (should use IndexRangeScan)
     let results = collection
@@ -85,7 +91,7 @@ fn test_query_without_index_fallback() {
         let mut fields = std::collections::HashMap::new();
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("age".to_string(), json!(i));
-        collection.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
 
     // Query on name (no index, should use collection scan)
@@ -115,8 +121,11 @@ fn test_index_with_multiple_queries() {
         fields.insert("name".to_string(), json!(format!("Employee{}", i)));
         fields.insert("salary".to_string(), json!(salary));
         fields.insert("department".to_string(), json!("Engineering"));
-        collection.insert_one(fields).unwrap();
+        db.insert_one("employees", fields).unwrap();
     }
+
+    // Refresh collection reference after inserts
+    let collection = db.collection("employees").unwrap();
 
     // Test 1: Exact match
     let results = collection.find(&json!({"salary": 60000})).unwrap();
@@ -169,8 +178,8 @@ fn test_index_performance_comparison() {
         fields.insert("age".to_string(), json!(i % 100)); // Ages 0-99
         fields.insert("city".to_string(), json!("TestCity"));
 
-        indexed_collection.insert_one(fields.clone()).unwrap();
-        unindexed_collection.insert_one(fields).unwrap();
+        db.insert_one("indexed_users", fields.clone()).unwrap();
+        db.insert_one("unindexed_users", fields).unwrap();
     }
 
     // Warm up
@@ -266,13 +275,13 @@ fn test_unique_index_prevents_duplicates() {
     let mut fields1 = std::collections::HashMap::new();
     fields1.insert("email".to_string(), json!("test@example.com"));
     fields1.insert("name".to_string(), json!("Alice"));
-    collection.insert_one(fields1).unwrap();
+    db.insert_one("users", fields1).unwrap();
 
     // Try to insert duplicate email
     let mut fields2 = std::collections::HashMap::new();
     fields2.insert("email".to_string(), json!("test@example.com"));
     fields2.insert("name".to_string(), json!("Bob"));
-    let result = collection.insert_one(fields2);
+    let result = db.insert_one("users", fields2);
 
     assert!(result.is_err(), "Should fail due to unique constraint");
 }

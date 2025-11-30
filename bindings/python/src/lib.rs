@@ -297,7 +297,7 @@ impl Collection {
 
         let inserted_id = self
             .db
-            .insert_one_safe(&self.name, doc_map)
+            .insert_one(&self.name, doc_map)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let result = PyDict::new(py);
@@ -327,17 +327,17 @@ impl Collection {
             docs.push(fields);
         }
 
-        let result = self
-            .core
-            .insert_many(docs)
+        let inserted_ids = self
+            .db
+            .insert_many(&self.name, docs)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("acknowledged", true)?;
-        result_dict.set_item("inserted_count", result.inserted_count)?;
+        result_dict.set_item("inserted_count", inserted_ids.len())?;
 
         let ids_list = PyList::empty(py);
-        for doc_id in result.inserted_ids {
+        for doc_id in inserted_ids {
             let id_value = doc_id_to_py(py, &doc_id)?;
             ids_list.append(id_value)?;
         }
@@ -477,8 +477,8 @@ impl Collection {
         let update_json = python_dict_to_json_value(py, &update)?;
 
         let (matched_count, modified_count) = self
-            .core
-            .update_one(&query_json, &update_json)
+            .db
+            .update_one(&self.name, &query_json, &update_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let result = PyDict::new(py);
@@ -499,8 +499,8 @@ impl Collection {
         let update_json = python_dict_to_json_value(py, &update)?;
 
         let (matched_count, modified_count) = self
-            .core
-            .update_many(&query_json, &update_json)
+            .db
+            .update_many(&self.name, &query_json, &update_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let result = PyDict::new(py);
@@ -519,8 +519,8 @@ impl Collection {
         let query_json = python_dict_to_json_value(py, &query)?;
 
         let deleted_count = self
-            .core
-            .delete_one(&query_json)
+            .db
+            .delete_one(&self.name, &query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let result = PyDict::new(py);
@@ -538,8 +538,8 @@ impl Collection {
         let query_json = python_dict_to_json_value(py, &query)?;
 
         let deleted_count = self
-            .core
-            .delete_many(&query_json)
+            .db
+            .delete_many(&self.name, &query_json)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         let result = PyDict::new(py);

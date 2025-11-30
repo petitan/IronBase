@@ -100,8 +100,8 @@ fn test_get_prompts_list_returns_prompts() {
 fn test_prompts_list_has_expected_count() {
     let result = get_prompts_list();
     let prompts = result.get("prompts").unwrap().as_array().unwrap();
-    // Expected: 5 prompts
-    assert_eq!(prompts.len(), 5);
+    // Expected: 9 prompts
+    assert_eq!(prompts.len(), 9);
 }
 
 #[test]

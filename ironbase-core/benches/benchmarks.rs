@@ -58,12 +58,11 @@ fn bench_storage_write(c: &mut Criterion) {
 
     c.bench_function("storage_write_1kb", |b| {
         let data = vec![0u8; 1024];
-        let coll = db.collection("bench").unwrap();
 
         b.iter(|| {
             let mut fields = HashMap::new();
             fields.insert("data".to_string(), json!(data.clone()));
-            black_box(coll.insert_one(fields).unwrap());
+            black_box(db.insert_one("bench", fields).unwrap());
         });
     });
 }
@@ -75,14 +74,13 @@ fn bench_storage_write_varying_sizes(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("bench.mlite");
         let db = DatabaseCore::open(&db_path).unwrap();
-        let coll = db.collection("bench").unwrap();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), size, |b, &size| {
             let data = vec![0u8; size];
             b.iter(|| {
                 let mut fields = HashMap::new();
                 fields.insert("data".to_string(), json!(data.clone()));
-                black_box(coll.insert_one(fields.clone()).unwrap());
+                black_box(db.insert_one("bench", fields.clone()).unwrap());
             });
         });
     }
@@ -95,7 +93,6 @@ fn bench_insert_one(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("users").unwrap();
 
     c.bench_function("insert_one", |b| {
         let mut counter = 0;
@@ -104,7 +101,7 @@ fn bench_insert_one(c: &mut Criterion) {
             fields.insert("name".to_string(), json!(format!("User{}", counter)));
             fields.insert("age".to_string(), json!(counter % 100));
             counter += 1;
-            black_box(coll.insert_one(fields).unwrap());
+            black_box(db.insert_one("users", fields).unwrap());
         });
     });
 }
@@ -113,16 +110,16 @@ fn bench_find_all(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("users").unwrap();
 
     // Pre-populate with 1000 documents
     for i in 0..1000 {
         let mut fields = HashMap::new();
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("age".to_string(), json!(i % 100));
-        coll.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
 
+    let coll = db.collection("users").unwrap();
     c.bench_function("find_all_1000_docs", |b| {
         b.iter(|| {
             let query = json!({});
@@ -135,7 +132,6 @@ fn bench_find_with_filter(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("users").unwrap();
 
     // Pre-populate
     for i in 0..1000 {
@@ -143,9 +139,10 @@ fn bench_find_with_filter(c: &mut Criterion) {
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("age".to_string(), json!(i % 100));
         fields.insert("active".to_string(), json!(i % 2 == 0));
-        coll.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
 
+    let coll = db.collection("users").unwrap();
     c.bench_function("find_filtered_1000_docs", |b| {
         b.iter(|| {
             let query = json!({"age": {"$gte": 25}});
@@ -158,15 +155,15 @@ fn bench_count_documents(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("users").unwrap();
 
     // Pre-populate
     for i in 0..1000 {
         let mut fields = HashMap::new();
         fields.insert("age".to_string(), json!(i % 100));
-        coll.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
 
+    let coll = db.collection("users").unwrap();
     c.bench_function("count_documents_1000_docs", |b| {
         b.iter(|| {
             let query = json!({"age": {"$gt": 50}});
@@ -179,14 +176,13 @@ fn bench_update_one(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("users").unwrap();
 
     // Pre-populate
     for i in 0..100 {
         let mut fields = HashMap::new();
         fields.insert("name".to_string(), json!(format!("User{}", i)));
         fields.insert("score".to_string(), json!(0));
-        coll.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
 
     c.bench_function("update_one_100_docs", |b| {
@@ -195,7 +191,7 @@ fn bench_update_one(c: &mut Criterion) {
             let query = json!({"name": format!("User{}", counter % 100)});
             let update = json!({"$inc": {"score": 1}});
             counter += 1;
-            black_box(coll.update_one(&query, &update).unwrap());
+            black_box(db.update_one("users", &query, &update).unwrap());
         });
     });
 }
@@ -208,19 +204,17 @@ fn bench_delete_one(c: &mut Criterion) {
                 let temp_dir = TempDir::new().unwrap();
                 let db_path = temp_dir.path().join("bench.mlite");
                 let db = DatabaseCore::open(&db_path).unwrap();
-                let coll = db.collection("users").unwrap();
 
                 for i in 0..100 {
                     let mut fields = HashMap::new();
                     fields.insert("id".to_string(), json!(i));
-                    coll.insert_one(fields).unwrap();
+                    db.insert_one("users", fields).unwrap();
                 }
                 (temp_dir, db)
             },
             |(temp_dir, db)| {
-                let coll = db.collection("users").unwrap();
                 let query = json!({"id": 50});
-                black_box(coll.delete_one(&query).unwrap());
+                black_box(db.delete_one("users", &query).unwrap());
                 drop(temp_dir);
             },
             criterion::BatchSize::SmallInput,
@@ -234,7 +228,6 @@ fn bench_complex_query(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("users").unwrap();
 
     // Pre-populate
     for i in 0..1000 {
@@ -242,9 +235,10 @@ fn bench_complex_query(c: &mut Criterion) {
         fields.insert("age".to_string(), json!(i % 100));
         fields.insert("city".to_string(), json!(["NYC", "LA", "SF"][i % 3]));
         fields.insert("active".to_string(), json!(i % 2 == 0));
-        coll.insert_one(fields).unwrap();
+        db.insert_one("users", fields).unwrap();
     }
 
+    let coll = db.collection("users").unwrap();
     c.bench_function("complex_query_and_or", |b| {
         b.iter(|| {
             let query = json!({
@@ -273,7 +267,6 @@ fn bench_wildcard_vs_dot_notation(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("wildcard_bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("nested_docs").unwrap();
 
     // Pre-populate with deeply nested documents
     for i in 0..1000 {
@@ -289,8 +282,10 @@ fn bench_wildcard_vs_dot_notation(c: &mut Criterion) {
             },
             "other": {"data": "noise"}
         }));
-        coll.insert_one(doc).unwrap();
+        db.insert_one("nested_docs", doc).unwrap();
     }
+
+    let coll = db.collection("nested_docs").unwrap();
 
     // Benchmark 1: Dot notation (exact path)
     group.bench_function("dot_notation_depth3", |b| {
@@ -334,7 +329,6 @@ fn bench_wildcard_varying_depths(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join(format!("depth_{}.mlite", depth));
         let db = DatabaseCore::open(&db_path).unwrap();
-        let coll = db.collection("depth_test").unwrap();
 
         // Create documents with varying nesting depth
         for i in 0..500 {
@@ -348,9 +342,10 @@ fn bench_wildcard_varying_depths(c: &mut Criterion) {
             doc.as_object_mut()
                 .unwrap()
                 .insert("deep".to_string(), nested);
-            coll.insert_one(json_to_hashmap(doc)).unwrap();
+            db.insert_one("depth_test", json_to_hashmap(doc)).unwrap();
         }
 
+        let coll = db.collection("depth_test").unwrap();
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("depth_{}", depth)),
             depth,
@@ -372,7 +367,6 @@ fn bench_wildcard_with_arrays(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("array_bench.mlite");
     let db = DatabaseCore::open(&db_path).unwrap();
-    let coll = db.collection("array_docs").unwrap();
 
     // Pre-populate with array-containing documents
     for i in 0..500 {
@@ -385,8 +379,10 @@ fn bench_wildcard_with_arrays(c: &mut Criterion) {
             ],
             "metadata": {"name": "meta_value"}
         }));
-        coll.insert_one(doc).unwrap();
+        db.insert_one("array_docs", doc).unwrap();
     }
+
+    let coll = db.collection("array_docs").unwrap();
 
     // Benchmark: $** finds "name" fields in arrays
     group.bench_function("wildcard_in_array", |b| {
@@ -423,7 +419,6 @@ fn bench_wildcard_collection_sizes(c: &mut Criterion) {
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join(format!("size_{}.mlite", size));
         let db = DatabaseCore::open(&db_path).unwrap();
-        let coll = db.collection("size_test").unwrap();
 
         for i in 0..*size {
             let doc = json_to_hashmap(json!({
@@ -434,9 +429,10 @@ fn bench_wildcard_collection_sizes(c: &mut Criterion) {
                     }
                 }
             }));
-            coll.insert_one(doc).unwrap();
+            db.insert_one("size_test", doc).unwrap();
         }
 
+        let coll = db.collection("size_test").unwrap();
         group.bench_with_input(
             BenchmarkId::from_parameter(format!("docs_{}", size)),
             size,

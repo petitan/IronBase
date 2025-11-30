@@ -69,7 +69,7 @@ pub extern "C" fn ironbase_insert_one(
     };
 
     // Use database-level insert for proper durability
-    match coll.db.insert_one_safe(&coll.name, doc_map) {
+    match coll.db.insert_one(&coll.name, doc_map) {
         Ok(id) => {
             if !out_id.is_null() {
                 let id_json = document_id_to_json(&id);
@@ -144,18 +144,17 @@ pub extern "C" fn ironbase_insert_many(
         }
     }
 
-    match coll.inner.insert_many(doc_maps) {
-        Ok(result) => {
+    match coll.db.insert_many(&coll.name, doc_maps) {
+        Ok(inserted_ids) => {
             if !out_result.is_null() {
-                let ids: Vec<Value> = result
-                    .inserted_ids
+                let ids: Vec<Value> = inserted_ids
                     .iter()
                     .map(|id| serde_json::from_str(&document_id_to_json(id)).unwrap_or(Value::Null))
                     .collect();
 
                 let result_json = serde_json::json!({
                     "acknowledged": true,
-                    "inserted_count": result.inserted_count,
+                    "inserted_count": inserted_ids.len(),
                     "inserted_ids": ids
                 });
 
@@ -451,7 +450,7 @@ pub extern "C" fn ironbase_update_one(
         }
     };
 
-    match coll.inner.update_one(&query, &update) {
+    match coll.db.update_one(&coll.name, &query, &update) {
         Ok((matched, modified)) => {
             if !out_matched.is_null() {
                 unsafe {
@@ -531,7 +530,7 @@ pub extern "C" fn ironbase_update_many(
         }
     };
 
-    match coll.inner.update_many(&query, &update) {
+    match coll.db.update_many(&coll.name, &query, &update) {
         Ok((matched, modified)) => {
             if !out_matched.is_null() {
                 unsafe {
@@ -593,7 +592,7 @@ pub extern "C" fn ironbase_delete_one(
         }
     };
 
-    match coll.inner.delete_one(&query) {
+    match coll.db.delete_one(&coll.name, &query) {
         Ok(count) => {
             if !out_deleted.is_null() {
                 unsafe {
@@ -648,7 +647,7 @@ pub extern "C" fn ironbase_delete_many(
         }
     };
 
-    match coll.inner.delete_many(&query) {
+    match coll.db.delete_many(&coll.name, &query) {
         Ok(count) => {
             if !out_deleted.is_null() {
                 unsafe {

@@ -3,17 +3,14 @@
 //! These tests cover the main CRUD operations and various edge cases
 
 use ironbase_core::storage::{MemoryStorage, StorageEngine};
-use ironbase_core::CollectionCore;
 use ironbase_core::DatabaseCore;
-use parking_lot::RwLock;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-fn create_test_collection(name: &str) -> CollectionCore<StorageEngine> {
+fn create_test_db(name: &str) -> (DatabaseCore<StorageEngine>, String) {
     let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
     let db_path = format!("/tmp/test_collection_{}_{}.mlite", name, counter);
 
@@ -21,19 +18,19 @@ fn create_test_collection(name: &str) -> CollectionCore<StorageEngine> {
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_file(format!("{}.wal", db_path.trim_end_matches(".mlite")));
 
-    let storage = StorageEngine::open(&db_path).unwrap();
-    let storage = Arc::new(RwLock::new(storage));
-    CollectionCore::new(name.to_string(), storage).unwrap()
+    let db = DatabaseCore::open(&db_path).unwrap();
+    (db, "test".to_string())
 }
 
 // ========== INSERT TESTS ==========
 
 #[test]
 fn test_insert_one_auto_id() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     // Should have auto-generated ID
     assert!(matches!(id, ironbase_core::DocumentId::Int(_)));
@@ -44,37 +41,36 @@ fn test_insert_one_auto_id() {
 
 #[test]
 fn test_insert_one_with_custom_id() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
 
     let doc = HashMap::from([
         ("_id".to_string(), json!("custom_id")),
         ("name".to_string(), json!("Bob")),
     ]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     assert!(matches!(id, ironbase_core::DocumentId::String(s) if s == "custom_id"));
 }
 
 #[test]
 fn test_insert_many_empty() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
 
-    let result = collection.insert_many(vec![]).unwrap();
-    assert_eq!(result.inserted_count, 0);
-    assert!(result.inserted_ids.is_empty());
+    let result = db.insert_many(&coll_name, vec![]).unwrap();
+    assert_eq!(result.len(), 0);
 }
 
 #[test]
 fn test_insert_many_batch() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let docs: Vec<HashMap<String, serde_json::Value>> = (0..100)
         .map(|i| HashMap::from([("value".to_string(), json!(i))]))
         .collect();
 
-    let result = collection.insert_many(docs).unwrap();
-    assert_eq!(result.inserted_count, 100);
-    assert_eq!(result.inserted_ids.len(), 100);
+    let result = db.insert_many(&coll_name, docs).unwrap();
+    assert_eq!(result.len(), 100);
 
     let count = collection.count_documents(&json!({})).unwrap();
     assert_eq!(count, 100);
@@ -84,17 +80,19 @@ fn test_insert_many_batch() {
 
 #[test]
 fn test_find_empty_collection() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
     let results = collection.find(&json!({})).unwrap();
     assert!(results.is_empty());
 }
 
 #[test]
 fn test_find_one_by_id() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     let found = collection
         .find_one(&json!({"_id": id}))
@@ -105,10 +103,11 @@ fn test_find_one_by_id() {
 
 #[test]
 fn test_find_one_not_found() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 
     let found = collection.find_one(&json!({"_id": 999})).unwrap();
     assert!(found.is_none());
@@ -116,14 +115,15 @@ fn test_find_one_not_found() {
 
 #[test]
 fn test_find_with_query() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([
             ("name".to_string(), json!(format!("User {}", i))),
             ("age".to_string(), json!(20 + i)),
         ]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     // Find users with age >= 25
@@ -133,11 +133,12 @@ fn test_find_with_query() {
 
 #[test]
 fn test_find_streaming() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..50 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let mut cursor = collection.find_streaming(&json!({})).unwrap();
@@ -174,11 +175,12 @@ fn test_find_streaming() {
 
 #[test]
 fn test_find_streaming_with_batch_size() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..25 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let mut cursor = collection
@@ -194,18 +196,20 @@ fn test_find_streaming_with_batch_size() {
 
 #[test]
 fn test_count_empty() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
     let count = collection.count_documents(&json!({})).unwrap();
     assert_eq!(count, 0);
 }
 
 #[test]
 fn test_count_all() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let count = collection.count_documents(&json!({})).unwrap();
@@ -214,11 +218,12 @@ fn test_count_all() {
 
 #[test]
 fn test_count_with_query() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("age".to_string(), json!(i * 10))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let count = collection
@@ -229,10 +234,11 @@ fn test_count_with_query() {
 
 #[test]
 fn test_count_by_id() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     let count = collection.count_documents(&json!({"_id": id})).unwrap();
     assert_eq!(count, 1);
@@ -245,16 +251,21 @@ fn test_count_by_id() {
 
 #[test]
 fn test_update_one_set() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([
         ("name".to_string(), json!("Alice")),
         ("age".to_string(), json!(25)),
     ]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
-    let (matched, modified) = collection
-        .update_one(&json!({"_id": id}), &json!({"$set": {"age": 30}}))
+    let (matched, modified) = db
+        .update_one(
+            &coll_name,
+            &json!({"_id": id}),
+            &json!({"$set": {"age": 30}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -266,14 +277,18 @@ fn test_update_one_set() {
 
 #[test]
 fn test_update_one_inc() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("counter".to_string(), json!(10))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$inc": {"counter": 5}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$inc": {"counter": 5}}),
+    )
+    .unwrap();
 
     let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
     assert_eq!(updated["counter"], 15);
@@ -281,17 +296,21 @@ fn test_update_one_inc() {
 
 #[test]
 fn test_update_one_unset() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([
         ("name".to_string(), json!("Alice")),
         ("temp".to_string(), json!("remove me")),
     ]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$unset": {"temp": ""}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$unset": {"temp": ""}}),
+    )
+    .unwrap();
 
     let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
     assert!(updated.get("temp").is_none());
@@ -299,14 +318,18 @@ fn test_update_one_unset() {
 
 #[test]
 fn test_update_one_push() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("tags".to_string(), json!(["a", "b"]))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$push": {"tags": "c"}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$push": {"tags": "c"}}),
+    )
+    .unwrap();
 
     let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
     assert_eq!(updated["tags"], json!(["a", "b", "c"]));
@@ -314,14 +337,18 @@ fn test_update_one_push() {
 
 #[test]
 fn test_update_one_pull() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("tags".to_string(), json!(["a", "b", "c"]))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$pull": {"tags": "b"}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$pull": {"tags": "b"}}),
+    )
+    .unwrap();
 
     let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
     assert_eq!(updated["tags"], json!(["a", "c"]));
@@ -329,20 +356,27 @@ fn test_update_one_pull() {
 
 #[test]
 fn test_update_one_addtoset() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("tags".to_string(), json!(["a", "b"]))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     // Add new value
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$addToSet": {"tags": "c"}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$addToSet": {"tags": "c"}}),
+    )
+    .unwrap();
 
     // Try to add existing value (should not duplicate)
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$addToSet": {"tags": "a"}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$addToSet": {"tags": "a"}}),
+    )
+    .unwrap();
 
     let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
     assert_eq!(updated["tags"], json!(["a", "b", "c"]));
@@ -350,23 +384,30 @@ fn test_update_one_addtoset() {
 
 #[test]
 fn test_update_one_pop() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("arr".to_string(), json!([1, 2, 3]))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     // Pop from end
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$pop": {"arr": 1}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$pop": {"arr": 1}}),
+    )
+    .unwrap();
 
     let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
     assert_eq!(updated["arr"], json!([1, 2]));
 
     // Pop from beginning
-    collection
-        .update_one(&json!({"_id": id}), &json!({"$pop": {"arr": -1}}))
-        .unwrap();
+    db.update_one(
+        &coll_name,
+        &json!({"_id": id}),
+        &json!({"$pop": {"arr": -1}}),
+    )
+    .unwrap();
 
     let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
     assert_eq!(updated["arr"], json!([2]));
@@ -374,10 +415,10 @@ fn test_update_one_pop() {
 
 #[test]
 fn test_update_one_not_found() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
 
-    let (matched, modified) = collection
-        .update_one(&json!({"_id": 999}), &json!({"$set": {"x": 1}}))
+    let (matched, modified) = db
+        .update_one(&coll_name, &json!({"_id": 999}), &json!({"$set": {"x": 1}}))
         .unwrap();
 
     assert_eq!(matched, 0);
@@ -386,14 +427,18 @@ fn test_update_one_not_found() {
 
 #[test]
 fn test_update_one_no_change() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
 
     let doc = HashMap::from([("value".to_string(), json!(10))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     // Update with same value - implementation counts modification even if value unchanged
-    let (matched, modified) = collection
-        .update_one(&json!({"_id": id}), &json!({"$set": {"value": 10}}))
+    let (matched, modified) = db
+        .update_one(
+            &coll_name,
+            &json!({"_id": id}),
+            &json!({"$set": {"value": 10}}),
+        )
         .unwrap();
 
     assert_eq!(matched, 1);
@@ -402,18 +447,19 @@ fn test_update_one_no_change() {
 
 #[test]
 fn test_update_many() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
 
     for i in 0..10 {
         let doc = HashMap::from([
             ("category".to_string(), json!(if i < 5 { "A" } else { "B" })),
             ("value".to_string(), json!(i)),
         ]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
-    let (matched, modified) = collection
+    let (matched, modified) = db
         .update_many(
+            &coll_name,
             &json!({"category": "A"}),
             &json!({"$set": {"updated": true}}),
         )
@@ -427,12 +473,13 @@ fn test_update_many() {
 
 #[test]
 fn test_delete_one() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
-    let deleted = collection.delete_one(&json!({"_id": id})).unwrap();
+    let deleted = db.delete_one(&coll_name, &json!({"_id": id})).unwrap();
     assert_eq!(deleted, 1);
 
     let count = collection.count_documents(&json!({})).unwrap();
@@ -441,23 +488,24 @@ fn test_delete_one() {
 
 #[test]
 fn test_delete_one_not_found() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
 
-    let deleted = collection.delete_one(&json!({"_id": 999})).unwrap();
+    let deleted = db.delete_one(&coll_name, &json!({"_id": 999})).unwrap();
     assert_eq!(deleted, 0);
 }
 
 #[test]
 fn test_delete_many() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("age".to_string(), json!(i * 10))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
-    let deleted = collection
-        .delete_many(&json!({"age": {"$lt": 50}}))
+    let deleted = db
+        .delete_many(&coll_name, &json!({"age": {"$lt": 50}}))
         .unwrap();
     assert_eq!(deleted, 5);
 
@@ -467,14 +515,14 @@ fn test_delete_many() {
 
 #[test]
 fn test_delete_many_all() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
 
     for i in 0..5 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
-    let deleted = collection.delete_many(&json!({})).unwrap();
+    let deleted = db.delete_many(&coll_name, &json!({})).unwrap();
     assert_eq!(deleted, 5);
 }
 
@@ -482,11 +530,12 @@ fn test_delete_many_all() {
 
 #[test]
 fn test_distinct_simple() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for city in &["NYC", "LA", "NYC", "SF", "LA", "NYC"] {
         let doc = HashMap::from([("city".to_string(), json!(city))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let distinct = collection.distinct("city", &json!({})).unwrap();
@@ -495,14 +544,15 @@ fn test_distinct_simple() {
 
 #[test]
 fn test_distinct_with_query() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([
             ("category".to_string(), json!(if i < 5 { "A" } else { "B" })),
             ("value".to_string(), json!(i % 3)),
         ]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let distinct = collection
@@ -513,13 +563,14 @@ fn test_distinct_with_query() {
 
 #[test]
 fn test_distinct_by_id() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([
         ("name".to_string(), json!("Alice")),
         ("city".to_string(), json!("NYC")),
     ]);
-    let id = collection.insert_one(doc).unwrap();
+    let id = db.insert_one(&coll_name, doc).unwrap();
 
     let distinct = collection.distinct("city", &json!({"_id": id})).unwrap();
     assert_eq!(distinct.len(), 1);
@@ -528,10 +579,11 @@ fn test_distinct_by_id() {
 
 #[test]
 fn test_distinct_missing_field() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 
     let distinct = collection.distinct("nonexistent", &json!({})).unwrap();
     assert!(distinct.is_empty());
@@ -541,7 +593,8 @@ fn test_distinct_missing_field() {
 
 #[test]
 fn test_create_index() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let index_name = collection.create_index("age".to_string(), false).unwrap();
     assert!(index_name.contains("age"));
@@ -552,22 +605,24 @@ fn test_create_index() {
 
 #[test]
 fn test_create_unique_index() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     collection.create_index("email".to_string(), true).unwrap();
 
     let doc1 = HashMap::from([("email".to_string(), json!("alice@test.com"))]);
-    collection.insert_one(doc1).unwrap();
+    db.insert_one(&coll_name, doc1).unwrap();
 
     // Should fail on duplicate
     let doc2 = HashMap::from([("email".to_string(), json!("alice@test.com"))]);
-    let result = collection.insert_one(doc2);
+    let result = db.insert_one(&coll_name, doc2);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_create_compound_index() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let index_name = collection
         .create_compound_index(vec!["country".to_string(), "city".to_string()], false)
@@ -582,7 +637,7 @@ fn test_create_compound_index() {
             ("country".to_string(), json!(country)),
             ("city".to_string(), json!(city)),
         ]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let count = collection.count_documents(&json!({})).unwrap();
@@ -591,7 +646,8 @@ fn test_create_compound_index() {
 
 #[test]
 fn test_drop_index() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let index_name = collection.create_index("temp".to_string(), false).unwrap();
 
@@ -605,7 +661,8 @@ fn test_drop_index() {
 
 #[test]
 fn test_list_indexes() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     // Should have at least _id index - list_indexes returns Vec<String>
     let indexes = collection.list_indexes();
@@ -617,11 +674,12 @@ fn test_list_indexes() {
 
 #[test]
 fn test_aggregate_match() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("age".to_string(), json!(20 + i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let results = collection
@@ -632,14 +690,15 @@ fn test_aggregate_match() {
 
 #[test]
 fn test_aggregate_group() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for (city, value) in &[("NYC", 10), ("LA", 20), ("NYC", 30), ("LA", 40)] {
         let doc = HashMap::from([
             ("city".to_string(), json!(city)),
             ("value".to_string(), json!(value)),
         ]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let results = collection
@@ -653,11 +712,12 @@ fn test_aggregate_group() {
 
 #[test]
 fn test_aggregate_sort_limit() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let results = collection
@@ -675,11 +735,12 @@ fn test_aggregate_sort_limit() {
 
 #[test]
 fn test_aggregate_skip() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let results = collection
@@ -694,14 +755,15 @@ fn test_aggregate_skip() {
 
 #[test]
 fn test_aggregate_project() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([
         ("name".to_string(), json!("Alice")),
         ("age".to_string(), json!(25)),
         ("secret".to_string(), json!("hidden")),
     ]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 
     let results = collection
         .aggregate(&json!([
@@ -719,7 +781,8 @@ fn test_aggregate_project() {
 
 #[test]
 fn test_schema_validation() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     collection
         .set_schema(Some(json!({
@@ -737,17 +800,18 @@ fn test_schema_validation() {
         ("name".to_string(), json!("Alice")),
         ("age".to_string(), json!(25)),
     ]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 
     // Invalid - missing required field
     let doc_invalid = HashMap::from([("age".to_string(), json!(25))]);
-    let result = collection.insert_one(doc_invalid);
+    let result = db.insert_one(&coll_name, doc_invalid);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_schema_type_mismatch() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     collection
         .set_schema(Some(json!({
@@ -760,13 +824,14 @@ fn test_schema_type_mismatch() {
 
     // Invalid - wrong type
     let doc = HashMap::from([("age".to_string(), json!("not a number"))]);
-    let result = collection.insert_one(doc);
+    let result = db.insert_one(&coll_name, doc);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_schema_clear() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     collection
         .set_schema(Some(json!({
@@ -780,21 +845,22 @@ fn test_schema_clear() {
 
     // Now any document should be valid
     let doc = HashMap::from([("any_field".to_string(), json!("any value"))]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 }
 
 // ========== FIND WITH OPTIONS TESTS ==========
 
 #[test]
 fn test_find_with_projection() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([
         ("name".to_string(), json!("Alice")),
         ("age".to_string(), json!(25)),
         ("secret".to_string(), json!("hidden")),
     ]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 
     let mut projection = HashMap::new();
     projection.insert("name".to_string(), 1);
@@ -814,11 +880,12 @@ fn test_find_with_projection() {
 
 #[test]
 fn test_find_with_sort() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in [3, 1, 4, 1, 5, 9, 2, 6] {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let options = ironbase_core::FindOptions {
@@ -835,11 +902,12 @@ fn test_find_with_sort() {
 
 #[test]
 fn test_find_with_limit_skip() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..20 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let options = ironbase_core::FindOptions {
@@ -858,12 +926,13 @@ fn test_find_with_limit_skip() {
 
 #[test]
 fn test_explain() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     collection.create_index("age".to_string(), false).unwrap();
 
     let doc = HashMap::from([("age".to_string(), json!(25))]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 
     let plan = collection.explain(&json!({"age": 25})).unwrap();
     // Plan is a JSON value containing "queryPlan" key
@@ -873,15 +942,18 @@ fn test_explain() {
 
 #[test]
 fn test_find_with_hint() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let index_name = collection.create_index("age".to_string(), false).unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("age".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
+    // Re-create collection instance to load indexes rebuilt from catalog
+    let collection = db.collection(&coll_name).unwrap();
     let results = collection
         .find_with_hint(&json!({"age": {"$gte": 5}}), &index_name)
         .unwrap();
@@ -892,10 +964,11 @@ fn test_find_with_hint() {
 
 #[test]
 fn test_null_query() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-    collection.insert_one(doc).unwrap();
+    db.insert_one(&coll_name, doc).unwrap();
 
     // Null query should match all
     let count = collection.count_documents(&json!(null)).unwrap();
@@ -904,11 +977,12 @@ fn test_null_query() {
 
 #[test]
 fn test_cursor_for_each() {
-    let collection = create_test_collection("test");
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
 
     for i in 0..5 {
         let doc = HashMap::from([("value".to_string(), json!(i))]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one(&coll_name, doc).unwrap();
     }
 
     let mut cursor = collection.find_streaming(&json!({})).unwrap();
@@ -929,27 +1003,25 @@ fn test_cursor_for_each() {
 
 mod memory_storage_tests {
     use ironbase_core::storage::MemoryStorage;
-    use ironbase_core::CollectionCore;
-    use parking_lot::RwLock;
+    use ironbase_core::DatabaseCore;
     use serde_json::json;
     use std::collections::HashMap;
-    use std::sync::Arc;
 
-    fn create_memory_collection(name: &str) -> CollectionCore<MemoryStorage> {
-        let storage = MemoryStorage::new();
-        let storage = Arc::new(RwLock::new(storage));
-        CollectionCore::new(name.to_string(), storage).unwrap()
+    fn create_memory_db() -> (DatabaseCore<MemoryStorage>, String) {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        (db, "test".to_string())
     }
 
     #[test]
     fn test_memory_insert_and_find() {
-        let collection = create_memory_collection("test");
+        let (db, coll_name) = create_memory_db();
+        let collection = db.collection(&coll_name).unwrap();
 
         let doc = HashMap::from([
             ("name".to_string(), json!("Alice")),
             ("age".to_string(), json!(30)),
         ]);
-        let id = collection.insert_one(doc).unwrap();
+        let id = db.insert_one(&coll_name, doc).unwrap();
 
         let found = collection.find_one(&json!({"_id": id})).unwrap();
         assert!(found.is_some());
@@ -958,11 +1030,12 @@ mod memory_storage_tests {
 
     #[test]
     fn test_memory_count() {
-        let collection = create_memory_collection("test");
+        let (db, coll_name) = create_memory_db();
+        let collection = db.collection(&coll_name).unwrap();
 
         for i in 0..10 {
             let doc = HashMap::from([("value".to_string(), json!(i))]);
-            collection.insert_one(doc).unwrap();
+            db.insert_one(&coll_name, doc).unwrap();
         }
 
         let count = collection.count_documents(&json!({})).unwrap();
@@ -971,14 +1044,18 @@ mod memory_storage_tests {
 
     #[test]
     fn test_memory_update() {
-        let collection = create_memory_collection("test");
+        let (db, coll_name) = create_memory_db();
+        let collection = db.collection(&coll_name).unwrap();
 
         let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-        let id = collection.insert_one(doc).unwrap();
+        let id = db.insert_one(&coll_name, doc).unwrap();
 
-        collection
-            .update_one(&json!({"_id": id}), &json!({"$set": {"name": "Bob"}}))
-            .unwrap();
+        db.update_one(
+            &coll_name,
+            &json!({"_id": id}),
+            &json!({"$set": {"name": "Bob"}}),
+        )
+        .unwrap();
 
         let updated = collection.find_one(&json!({"_id": id})).unwrap().unwrap();
         assert_eq!(updated["name"], "Bob");
@@ -986,12 +1063,13 @@ mod memory_storage_tests {
 
     #[test]
     fn test_memory_delete() {
-        let collection = create_memory_collection("test");
+        let (db, coll_name) = create_memory_db();
+        let collection = db.collection(&coll_name).unwrap();
 
         let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
-        let id = collection.insert_one(doc).unwrap();
+        let id = db.insert_one(&coll_name, doc).unwrap();
 
-        collection.delete_one(&json!({"_id": id})).unwrap();
+        db.delete_one(&coll_name, &json!({"_id": id})).unwrap();
 
         let count = collection.count_documents(&json!({})).unwrap();
         assert_eq!(count, 0);
@@ -999,27 +1077,31 @@ mod memory_storage_tests {
 
     #[test]
     fn test_memory_index() {
-        let collection = create_memory_collection("test");
+        let (db, coll_name) = create_memory_db();
+        let collection = db.collection(&coll_name).unwrap();
 
         let index_name = collection.create_index("age".to_string(), false).unwrap();
         assert!(index_name.contains("age"));
 
         for i in 0..10 {
             let doc = HashMap::from([("age".to_string(), json!(i))]);
-            collection.insert_one(doc).unwrap();
+            db.insert_one(&coll_name, doc).unwrap();
         }
 
+        // Re-create collection instance to load indexes rebuilt from catalog
+        let collection = db.collection(&coll_name).unwrap();
         let results = collection.find(&json!({"age": {"$gte": 5}})).unwrap();
         assert_eq!(results.len(), 5);
     }
 
     #[test]
     fn test_memory_aggregation() {
-        let collection = create_memory_collection("test");
+        let (db, coll_name) = create_memory_db();
+        let collection = db.collection(&coll_name).unwrap();
 
         for city in &["NYC", "LA", "NYC", "LA", "NYC"] {
             let doc = HashMap::from([("city".to_string(), json!(city))]);
-            collection.insert_one(doc).unwrap();
+            db.insert_one(&coll_name, doc).unwrap();
         }
 
         let results = collection
@@ -1033,11 +1115,12 @@ mod memory_storage_tests {
 
     #[test]
     fn test_memory_cursor() {
-        let collection = create_memory_collection("test");
+        let (db, coll_name) = create_memory_db();
+        let collection = db.collection(&coll_name).unwrap();
 
         for i in 0..20 {
             let doc = HashMap::from([("value".to_string(), json!(i))]);
-            collection.insert_one(doc).unwrap();
+            db.insert_one(&coll_name, doc).unwrap();
         }
 
         let mut cursor = collection.find_streaming(&json!({})).unwrap();
@@ -1065,7 +1148,7 @@ fn test_aggregation_with_nested_fields_from_storage() {
         json!({"Country": "USA", "City": "NYC"}),
     );
     doc1.insert("Stats".to_string(), json!({"Employees": 100}));
-    collection.insert_one(doc1).unwrap();
+    db.insert_one("companies", doc1).unwrap();
 
     let mut doc2: HashMap<String, serde_json::Value> = HashMap::new();
     doc2.insert("Name".to_string(), json!("DataSoft"));
@@ -1074,7 +1157,7 @@ fn test_aggregation_with_nested_fields_from_storage() {
         json!({"Country": "USA", "City": "LA"}),
     );
     doc2.insert("Stats".to_string(), json!({"Employees": 200}));
-    collection.insert_one(doc2).unwrap();
+    db.insert_one("companies", doc2).unwrap();
 
     // Find to verify storage
     let found = collection.find(&json!({})).unwrap();
@@ -1118,116 +1201,127 @@ mod nested_document_tests {
     /// Helper to create a test database with nested documents
     fn setup_nested_test_db() -> DatabaseCore<MemoryStorage> {
         let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
-        let coll = db.collection("users").unwrap();
 
         // Insert documents with various nested structures
-        coll.insert_one(HashMap::from([
-            ("name".to_string(), json!("Alice")),
-            ("age".to_string(), json!(30)),
-            (
-                "address".to_string(),
-                json!({
-                    "city": "New York",
-                    "zip": "10001",
-                    "location": {
-                        "lat": 40.7128,
-                        "lng": -74.0060
-                    }
-                }),
-            ),
-            (
-                "profile".to_string(),
-                json!({
-                    "score": 95,
-                    "level": "senior",
-                    "stats": {
-                        "posts": 150,
-                        "likes": 2500
-                    }
-                }),
-            ),
-            ("tags".to_string(), json!(["developer", "team-lead"])),
-        ]))
+        db.insert_one(
+            "users",
+            HashMap::from([
+                ("name".to_string(), json!("Alice")),
+                ("age".to_string(), json!(30)),
+                (
+                    "address".to_string(),
+                    json!({
+                        "city": "New York",
+                        "zip": "10001",
+                        "location": {
+                            "lat": 40.7128,
+                            "lng": -74.0060
+                        }
+                    }),
+                ),
+                (
+                    "profile".to_string(),
+                    json!({
+                        "score": 95,
+                        "level": "senior",
+                        "stats": {
+                            "posts": 150,
+                            "likes": 2500
+                        }
+                    }),
+                ),
+                ("tags".to_string(), json!(["developer", "team-lead"])),
+            ]),
+        )
         .unwrap();
 
-        coll.insert_one(HashMap::from([
-            ("name".to_string(), json!("Bob")),
-            ("age".to_string(), json!(25)),
-            (
-                "address".to_string(),
-                json!({
-                    "city": "Los Angeles",
-                    "zip": "90001",
-                    "location": {
-                        "lat": 34.0522,
-                        "lng": -118.2437
-                    }
-                }),
-            ),
-            (
-                "profile".to_string(),
-                json!({
-                    "score": 75,
-                    "level": "junior",
-                    "stats": {
-                        "posts": 30,
-                        "likes": 500
-                    }
-                }),
-            ),
-            ("tags".to_string(), json!(["developer"])),
-        ]))
+        db.insert_one(
+            "users",
+            HashMap::from([
+                ("name".to_string(), json!("Bob")),
+                ("age".to_string(), json!(25)),
+                (
+                    "address".to_string(),
+                    json!({
+                        "city": "Los Angeles",
+                        "zip": "90001",
+                        "location": {
+                            "lat": 34.0522,
+                            "lng": -118.2437
+                        }
+                    }),
+                ),
+                (
+                    "profile".to_string(),
+                    json!({
+                        "score": 75,
+                        "level": "junior",
+                        "stats": {
+                            "posts": 30,
+                            "likes": 500
+                        }
+                    }),
+                ),
+                ("tags".to_string(), json!(["developer"])),
+            ]),
+        )
         .unwrap();
 
-        coll.insert_one(HashMap::from([
-            ("name".to_string(), json!("Carol")),
-            ("age".to_string(), json!(35)),
-            (
-                "address".to_string(),
-                json!({
-                    "city": "New York",
-                    "zip": "10002",
-                    "location": {
-                        "lat": 40.7589,
-                        "lng": -73.9851
-                    }
-                }),
-            ),
-            (
-                "profile".to_string(),
-                json!({
-                    "score": 88,
-                    "level": "senior",
-                    "stats": {
-                        "posts": 200,
-                        "likes": 3500
-                    }
-                }),
-            ),
-            ("tags".to_string(), json!(["manager", "speaker"])),
-        ]))
+        db.insert_one(
+            "users",
+            HashMap::from([
+                ("name".to_string(), json!("Carol")),
+                ("age".to_string(), json!(35)),
+                (
+                    "address".to_string(),
+                    json!({
+                        "city": "New York",
+                        "zip": "10002",
+                        "location": {
+                            "lat": 40.7589,
+                            "lng": -73.9851
+                        }
+                    }),
+                ),
+                (
+                    "profile".to_string(),
+                    json!({
+                        "score": 88,
+                        "level": "senior",
+                        "stats": {
+                            "posts": 200,
+                            "likes": 3500
+                        }
+                    }),
+                ),
+                ("tags".to_string(), json!(["manager", "speaker"])),
+            ]),
+        )
         .unwrap();
 
         // David - missing location and stats for edge case testing
-        coll.insert_one(HashMap::from([
-            ("name".to_string(), json!("David")),
-            ("age".to_string(), json!(28)),
-            (
-                "address".to_string(),
-                json!({
-                    "city": "Chicago",
-                    "zip": "60601"
-                }),
-            ),
-            (
-                "profile".to_string(),
-                json!({
-                    "score": 82,
-                    "level": "mid"
-                }),
-            ),
-            ("tags".to_string(), json!(["developer"])),
-        ]))
+        db.insert_one(
+            "users",
+            HashMap::from([
+                ("name".to_string(), json!("David")),
+                ("age".to_string(), json!(28)),
+                (
+                    "address".to_string(),
+                    json!({
+                        "city": "Chicago",
+                        "zip": "60601"
+                    }),
+                ),
+                (
+                    "profile".to_string(),
+                    json!({
+                        "score": 82,
+                        "level": "mid"
+                    }),
+                ),
+                ("tags".to_string(), json!(["developer"])),
+            ]),
+        )
         .unwrap();
 
         db
@@ -1364,8 +1458,9 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Update nested field - returns (matched, modified)
-        let (matched, modified) = coll
+        let (matched, modified) = db
             .update_one(
+                "users",
                 &json!({"name": "Alice"}),
                 &json!({"$set": {"address.city": "Boston"}}),
             )
@@ -1384,8 +1479,9 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Update 3-level deep nested field
-        let (matched, modified) = coll
+        let (matched, modified) = db
             .update_one(
+                "users",
                 &json!({"name": "Alice"}),
                 &json!({"$set": {"profile.stats.likes": 3000}}),
             )
@@ -1404,8 +1500,9 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Increment nested field
-        let (matched, modified) = coll
+        let (matched, modified) = db
             .update_one(
+                "users",
                 &json!({"name": "Bob"}),
                 &json!({"$inc": {"profile.score": 10}}),
             )
@@ -1424,8 +1521,9 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Unset nested field
-        let (matched, modified) = coll
+        let (matched, modified) = db
             .update_one(
+                "users",
                 &json!({"name": "Alice"}),
                 &json!({"$unset": {"address.zip": ""}}),
             )
@@ -1446,8 +1544,9 @@ mod nested_document_tests {
         let coll = db.collection("users").unwrap();
 
         // Update all seniors - returns (matched, modified)
-        let (matched, modified) = coll
+        let (matched, modified) = db
             .update_many(
+                "users",
                 &json!({"profile.level": "senior"}),
                 &json!({"$inc": {"profile.score": 5}}),
             )
@@ -1774,10 +1873,11 @@ mod nested_document_tests {
         // Insert simple doc
         let mut doc = HashMap::new();
         doc.insert("name".to_string(), json!("Test"));
-        coll.insert_one(doc).unwrap();
+        db.insert_one("test", doc).unwrap();
 
         // Create nested path via update
-        coll.update_one(
+        db.update_one(
+            "test",
             &json!({"name": "Test"}),
             &json!({"$set": {"new.nested.field": "value"}}),
         )
@@ -1796,7 +1896,7 @@ mod nested_document_tests {
         let mut doc = HashMap::new();
         doc.insert("name".to_string(), json!("Test"));
         doc.insert("data".to_string(), json!({"value": null}));
-        coll.insert_one(doc).unwrap();
+        db.insert_one("test", doc).unwrap();
 
         // Query for null value
         let results = coll.find(&json!({"data.value": null})).unwrap();
@@ -1829,10 +1929,10 @@ mod nested_document_tests {
                 }
             }),
         );
-        coll.insert_one(doc).unwrap();
+        db.insert_one("test", doc).unwrap();
 
         // Update 4-level deep field
-        coll.update_one(&json!({}), &json!({"$inc": {"a.b.c.d": 99}}))
+        db.update_one("test", &json!({}), &json!({"$inc": {"a.b.c.d": 99}}))
             .unwrap();
 
         let results = coll.find(&json!({})).unwrap();
@@ -1852,7 +1952,7 @@ fn test_find_one_with_dot_notation_filter() {
         json!({"documentId": "doc-1", "version": "1.0"}),
     );
     fields1.insert("data".to_string(), json!("first"));
-    coll.insert_one(fields1).unwrap();
+    db.insert_one("test_dot_notation", fields1).unwrap();
 
     let mut fields2 = HashMap::new();
     fields2.insert(
@@ -1860,7 +1960,7 @@ fn test_find_one_with_dot_notation_filter() {
         json!({"documentId": "doc-2", "version": "2.0"}),
     );
     fields2.insert("data".to_string(), json!("second"));
-    coll.insert_one(fields2).unwrap();
+    db.insert_one("test_dot_notation", fields2).unwrap();
 
     // Test: find_one with dot notation should return the correct document
     let result = coll.find_one(&json!({"meta.documentId": "doc-2"})).unwrap();
@@ -1902,7 +2002,7 @@ fn test_nested_array_query_with_equality() {
             }
         ]),
     );
-    coll.insert_one(doc).unwrap();
+    db.insert_one("nested_array_test", doc).unwrap();
 
     // Query should find document via nested array traversal
     let results = coll
@@ -1939,7 +2039,7 @@ fn test_nested_array_query_with_regex() {
             }
         ]),
     );
-    coll.insert_one(doc).unwrap();
+    db.insert_one("nested_regex_test", doc).unwrap();
 
     // Insert another document without the formula
     let mut doc2 = HashMap::new();
@@ -1953,7 +2053,7 @@ fn test_nested_array_query_with_regex() {
             }
         ]),
     );
-    coll.insert_one(doc2).unwrap();
+    db.insert_one("nested_regex_test", doc2).unwrap();
 
     // Query with regex should find only the first document
     let results = coll
@@ -1984,7 +2084,7 @@ fn test_nested_array_query_multiple_matches() {
                 {"tags": ["other"]}
             ]),
         );
-        coll.insert_one(doc).unwrap();
+        db.insert_one("multi_match_test", doc).unwrap();
     }
 
     // Query for common tag should find all 5 documents
@@ -2012,7 +2112,7 @@ fn test_wildcard_operator_simple_match() {
     // Insert document with nested "name" field
     let mut doc = HashMap::new();
     doc.insert("user".to_string(), json!({"profile": {"name": "Alice"}}));
-    coll.insert_one(doc).unwrap();
+    db.insert_one("wildcard_test", doc).unwrap();
 
     // $**.name should find the nested name field
     let results = coll.find(&json!({"$**.name": "Alice"})).unwrap();
@@ -2028,7 +2128,7 @@ fn test_wildcard_operator_multiple_matches() {
     let mut doc = HashMap::new();
     doc.insert("company".to_string(), json!({"name": "Acme"}));
     doc.insert("employee".to_string(), json!({"info": {"name": "Bob"}}));
-    coll.insert_one(doc).unwrap();
+    db.insert_one("wildcard_multi", doc).unwrap();
 
     // $**.name with "Bob" should match
     let results = coll.find(&json!({"$**.name": "Bob"})).unwrap();
@@ -2061,7 +2161,7 @@ fn test_wildcard_operator_with_arrays() {
             }
         ]),
     );
-    coll.insert_one(doc).unwrap();
+    db.insert_one("wildcard_arrays", doc).unwrap();
 
     // $**.content should find all content arrays
     let results = coll.find(&json!({"$**.content": "sqrt"})).unwrap();
@@ -2094,7 +2194,7 @@ fn test_wildcard_operator_with_regex() {
             }
         }),
     );
-    coll.insert_one(doc).unwrap();
+    db.insert_one("wildcard_regex", doc).unwrap();
 
     // $**.content with regex should find sqrt
     let results = coll
@@ -2121,7 +2221,7 @@ fn test_wildcard_operator_invalid_nested_path() {
     // Insert a document
     let mut doc = HashMap::new();
     doc.insert("data".to_string(), json!({"value": 1}));
-    coll.insert_one(doc).unwrap();
+    db.insert_one("wildcard_invalid", doc).unwrap();
 
     // $**.children.content (nested path after $**) returns 0 results
     // Note: Query::matches() swallows errors and returns false for invalid queries
@@ -2141,7 +2241,7 @@ fn test_wildcard_operator_bare_dollar_star_star() {
 
     let mut doc = HashMap::new();
     doc.insert("data".to_string(), json!({"value": 1}));
-    coll.insert_one(doc).unwrap();
+    db.insert_one("wildcard_bare", doc).unwrap();
 
     // Bare $** without field name returns 0 results
     // Note: Query::matches() swallows errors - invalid queries just don't match
@@ -2165,7 +2265,7 @@ fn test_wildcard_operator_with_comparison() {
                 }
             }),
         );
-        coll.insert_one(doc).unwrap();
+        db.insert_one("wildcard_comparison", doc).unwrap();
     }
 
     // $**.score with $gte should find documents with score >= 60

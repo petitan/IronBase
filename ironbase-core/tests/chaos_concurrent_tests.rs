@@ -7,9 +7,7 @@
 // 3. All operations complete without panic
 
 use ironbase_core::database::DatabaseCore;
-use ironbase_core::storage::{MemoryStorage, Storage};
-use ironbase_core::CollectionCore;
-use parking_lot::RwLock;
+use ironbase_core::storage::MemoryStorage;
 use serde_json::json;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -29,22 +27,14 @@ fn test_concurrent_inserts_memory() {
     const NUM_THREADS: usize = 10;
     const DOCS_PER_THREAD: usize = 100;
 
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    // Create collection
-    {
-        let mut s = storage.write();
-        s.create_collection("stress").unwrap();
-    }
-
-    let collection = CollectionCore::new("stress".to_string(), Arc::clone(&storage)).unwrap();
-    let collection = Arc::new(collection);
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("stress").unwrap();
 
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
     let handles: Vec<_> = (0..NUM_THREADS)
         .map(|thread_id| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             let barrier = Arc::clone(&barrier);
 
             thread::spawn(move || {
@@ -56,7 +46,7 @@ fn test_concurrent_inserts_memory() {
                         ("seq".to_string(), json!(i)),
                         ("data".to_string(), json!(format!("t{}_{}", thread_id, i))),
                     ]);
-                    coll.insert_one(doc).expect("Insert should succeed");
+                    db.insert_one("stress", doc).expect("Insert should succeed");
                 }
             })
         })
@@ -68,6 +58,7 @@ fn test_concurrent_inserts_memory() {
     }
 
     // Verify count
+    let collection = db.collection("stress").unwrap();
     let count = collection.count_documents(&json!({})).unwrap();
     assert_eq!(
         count,
@@ -103,10 +94,7 @@ fn test_concurrent_inserts_file() {
                         ("thread".to_string(), json!(thread_id)),
                         ("seq".to_string(), json!(i)),
                     ]);
-                    db.collection("stress")
-                        .unwrap()
-                        .insert_one(doc)
-                        .expect("Insert should succeed");
+                    db.insert_one("stress", doc).expect("Insert should succeed");
                 }
             })
         })
@@ -116,11 +104,8 @@ fn test_concurrent_inserts_file() {
         handle.join().expect("Thread should not panic");
     }
 
-    let count = db
-        .collection("stress")
-        .unwrap()
-        .count_documents(&json!({}))
-        .unwrap();
+    let collection = db.collection("stress").unwrap();
+    let count = collection.count_documents(&json!({})).unwrap();
     assert_eq!(count, (NUM_THREADS * DOCS_PER_THREAD) as u64);
 }
 
@@ -132,29 +117,22 @@ fn test_concurrent_inserts_file() {
 /// Expected: Readers see consistent data, no panics
 #[test]
 fn test_read_during_write() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("rw_test").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("rw_test".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("rw_test").unwrap();
 
     let running = Arc::new(AtomicBool::new(true));
     let writes_done = Arc::new(AtomicU64::new(0));
     let reads_done = Arc::new(AtomicU64::new(0));
 
     // Writer thread
-    let coll_writer = Arc::clone(&collection);
+    let db_writer = Arc::clone(&db);
     let running_w = Arc::clone(&running);
     let writes = Arc::clone(&writes_done);
     let writer = thread::spawn(move || {
         let mut i = 0;
         while running_w.load(Ordering::Relaxed) {
             let doc = HashMap::from([("value".to_string(), json!(i))]);
-            if coll_writer.insert_one(doc).is_ok() {
+            if db_writer.insert_one("rw_test", doc).is_ok() {
                 writes.fetch_add(1, Ordering::Relaxed);
             }
             i += 1;
@@ -164,15 +142,16 @@ fn test_read_during_write() {
     // Reader threads
     let readers: Vec<_> = (0..5)
         .map(|_| {
-            let coll_reader = Arc::clone(&collection);
+            let db_reader = Arc::clone(&db);
             let running_r = Arc::clone(&running);
             let reads = Arc::clone(&reads_done);
 
             thread::spawn(move || {
                 while running_r.load(Ordering::Relaxed) {
                     // These should never panic
-                    let _ = coll_reader.find(&json!({}));
-                    let _ = coll_reader.count_documents(&json!({}));
+                    let coll = db_reader.collection("rw_test").unwrap();
+                    let _ = coll.find(&json!({}));
+                    let _ = coll.count_documents(&json!({}));
                     reads.fetch_add(1, Ordering::Relaxed);
                 }
             })
@@ -195,6 +174,7 @@ fn test_read_during_write() {
     );
 
     // Final count should match
+    let collection = db.collection("rw_test").unwrap();
     let final_count = collection.count_documents(&json!({})).unwrap();
     assert_eq!(final_count, writes_done.load(Ordering::Relaxed));
 }
@@ -202,15 +182,8 @@ fn test_read_during_write() {
 /// Test: Mixed CRUD operations concurrently
 #[test]
 fn test_mixed_crud_concurrent() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("mixed").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("mixed".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("mixed").unwrap();
 
     // Pre-populate
     for i in 0..50 {
@@ -218,14 +191,14 @@ fn test_mixed_crud_concurrent() {
             ("_id".to_string(), json!(i)),
             ("value".to_string(), json!(i)),
         ]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one("mixed", doc).unwrap();
     }
 
     let running = Arc::new(AtomicBool::new(true));
 
     let handles: Vec<_> = (0..8)
         .map(|thread_id| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             let running = Arc::clone(&running);
 
             thread::spawn(move || {
@@ -239,22 +212,25 @@ fn test_mixed_crud_concurrent() {
                         0 => {
                             // Insert
                             let doc = HashMap::from([("rnd".to_string(), json!(rng_seed))]);
-                            let _ = coll.insert_one(doc);
+                            let _ = db.insert_one("mixed", doc);
                         }
                         1 => {
                             // Find
+                            let coll = db.collection("mixed").unwrap();
                             let _ = coll.find(&json!({}));
                         }
                         2 => {
                             // Update
                             let id = (rng_seed % 50) as i64;
-                            let _ = coll.update_one(
+                            let _ = db.update_one(
+                                "mixed",
                                 &json!({"_id": id}),
                                 &json!({"$set": {"updated": true}}),
                             );
                         }
                         3 => {
                             // Count
+                            let coll = db.collection("mixed").unwrap();
                             let _ = coll.count_documents(&json!({}));
                         }
                         _ => {}
@@ -279,15 +255,8 @@ fn test_mixed_crud_concurrent() {
 /// Test: Concurrent index creation
 #[test]
 fn test_concurrent_index_creation() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("idx_test").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("idx_test".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("idx_test").unwrap();
 
     // Pre-populate
     for i in 0..100 {
@@ -296,7 +265,7 @@ fn test_concurrent_index_creation() {
             ("field_b".to_string(), json!(i * 2)),
             ("field_c".to_string(), json!(format!("str_{}", i))),
         ]);
-        collection.insert_one(doc).unwrap();
+        db.insert_one("idx_test", doc).unwrap();
     }
 
     let barrier = Arc::new(Barrier::new(3));
@@ -305,12 +274,13 @@ fn test_concurrent_index_creation() {
     let handles: Vec<_> = fields
         .into_iter()
         .map(|field| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             let barrier = Arc::clone(&barrier);
             let field_name = field.to_string();
 
             thread::spawn(move || {
                 barrier.wait();
+                let coll = db.collection("idx_test").unwrap();
                 coll.create_index(field_name, false)
             })
         })
@@ -322,6 +292,7 @@ fn test_concurrent_index_creation() {
     }
 
     // Verify all indexes exist
+    let collection = db.collection("idx_test").unwrap();
     let indexes = collection.list_indexes();
     assert!(indexes.iter().any(|i| i.contains("field_a")));
     assert!(indexes.iter().any(|i| i.contains("field_b")));
@@ -331,34 +302,28 @@ fn test_concurrent_index_creation() {
 /// Test: Insert during index operations
 #[test]
 fn test_insert_during_index_build() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("idx_insert").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("idx_insert".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("idx_insert").unwrap();
 
     let barrier = Arc::new(Barrier::new(2));
 
     // Thread 1: Create index
-    let coll1 = Arc::clone(&collection);
+    let db1 = Arc::clone(&db);
     let barrier1 = Arc::clone(&barrier);
     let indexer = thread::spawn(move || {
         barrier1.wait();
-        coll1.create_index("value".to_string(), false)
+        let coll = db1.collection("idx_insert").unwrap();
+        coll.create_index("value".to_string(), false)
     });
 
     // Thread 2: Insert documents
-    let coll2 = Arc::clone(&collection);
+    let db2 = Arc::clone(&db);
     let barrier2 = Arc::clone(&barrier);
     let inserter = thread::spawn(move || {
         barrier2.wait();
         for i in 0..100 {
             let doc = HashMap::from([("value".to_string(), json!(i))]);
-            coll2.insert_one(doc).unwrap();
+            db2.insert_one("idx_insert", doc).unwrap();
         }
     });
 
@@ -366,6 +331,7 @@ fn test_insert_during_index_build() {
     inserter.join().unwrap();
 
     // Verify data
+    let collection = db.collection("idx_insert").unwrap();
     let count = collection.count_documents(&json!({})).unwrap();
     assert_eq!(count, 100);
 }
@@ -377,50 +343,42 @@ fn test_insert_during_index_build() {
 /// Test: Multiple collections accessed concurrently
 #[test]
 fn test_multiple_collections_concurrent() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("coll_a").unwrap();
-        s.create_collection("coll_b").unwrap();
-        s.create_collection("coll_c").unwrap();
-    }
-
-    let coll_a = Arc::new(CollectionCore::new("coll_a".to_string(), Arc::clone(&storage)).unwrap());
-    let coll_b = Arc::new(CollectionCore::new("coll_b".to_string(), Arc::clone(&storage)).unwrap());
-    let coll_c = Arc::new(CollectionCore::new("coll_c".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("coll_a").unwrap();
+    db.collection("coll_b").unwrap();
+    db.collection("coll_c").unwrap();
 
     let barrier = Arc::new(Barrier::new(3));
 
     // Thread 1: Work on coll_a
-    let ca = Arc::clone(&coll_a);
+    let db1 = Arc::clone(&db);
     let b1 = Arc::clone(&barrier);
     let t1 = thread::spawn(move || {
         b1.wait();
         for i in 0..50 {
-            ca.insert_one(HashMap::from([("x".to_string(), json!(i))]))
+            db1.insert_one("coll_a", HashMap::from([("x".to_string(), json!(i))]))
                 .unwrap();
         }
     });
 
     // Thread 2: Work on coll_b
-    let cb = Arc::clone(&coll_b);
+    let db2 = Arc::clone(&db);
     let b2 = Arc::clone(&barrier);
     let t2 = thread::spawn(move || {
         b2.wait();
         for i in 0..50 {
-            cb.insert_one(HashMap::from([("y".to_string(), json!(i))]))
+            db2.insert_one("coll_b", HashMap::from([("y".to_string(), json!(i))]))
                 .unwrap();
         }
     });
 
     // Thread 3: Work on coll_c
-    let cc = Arc::clone(&coll_c);
+    let db3 = Arc::clone(&db);
     let b3 = Arc::clone(&barrier);
     let t3 = thread::spawn(move || {
         b3.wait();
         for i in 0..50 {
-            cc.insert_one(HashMap::from([("z".to_string(), json!(i))]))
+            db3.insert_one("coll_c", HashMap::from([("z".to_string(), json!(i))]))
                 .unwrap();
         }
     });
@@ -430,6 +388,9 @@ fn test_multiple_collections_concurrent() {
     t3.join().unwrap();
 
     // Verify each collection
+    let coll_a = db.collection("coll_a").unwrap();
+    let coll_b = db.collection("coll_b").unwrap();
+    let coll_c = db.collection("coll_c").unwrap();
     assert_eq!(coll_a.count_documents(&json!({})).unwrap(), 50);
     assert_eq!(coll_b.count_documents(&json!({})).unwrap(), 50);
     assert_eq!(coll_c.count_documents(&json!({})).unwrap(), 50);
@@ -438,51 +399,54 @@ fn test_multiple_collections_concurrent() {
 /// Test: Detect potential deadlocks (with timeout)
 #[test]
 fn test_no_deadlock_with_cross_collection_access() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("deadlock_a").unwrap();
-        s.create_collection("deadlock_b").unwrap();
-    }
-
-    let coll_a =
-        Arc::new(CollectionCore::new("deadlock_a".to_string(), Arc::clone(&storage)).unwrap());
-    let coll_b =
-        Arc::new(CollectionCore::new("deadlock_b".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("deadlock_a").unwrap();
+    db.collection("deadlock_b").unwrap();
 
     let barrier = Arc::new(Barrier::new(2));
 
     // Thread 1: Access A then B
-    let ca1 = Arc::clone(&coll_a);
-    let cb1 = Arc::clone(&coll_b);
+    let db1 = Arc::clone(&db);
     let b1 = Arc::clone(&barrier);
     let t1 = thread::spawn(move || {
         b1.wait();
         for i in 0..100 {
-            ca1.insert_one(HashMap::from([("from".to_string(), json!("t1"))]))
-                .unwrap();
-            cb1.insert_one(HashMap::from([("from".to_string(), json!("t1"))]))
-                .unwrap();
+            db1.insert_one(
+                "deadlock_a",
+                HashMap::from([("from".to_string(), json!("t1"))]),
+            )
+            .unwrap();
+            db1.insert_one(
+                "deadlock_b",
+                HashMap::from([("from".to_string(), json!("t1"))]),
+            )
+            .unwrap();
             if i % 10 == 0 {
-                let _ = ca1.find(&json!({}));
+                let coll_a = db1.collection("deadlock_a").unwrap();
+                let _ = coll_a.find(&json!({}));
             }
         }
     });
 
     // Thread 2: Access B then A (opposite order)
-    let ca2 = Arc::clone(&coll_a);
-    let cb2 = Arc::clone(&coll_b);
+    let db2 = Arc::clone(&db);
     let b2 = Arc::clone(&barrier);
     let t2 = thread::spawn(move || {
         b2.wait();
         for i in 0..100 {
-            cb2.insert_one(HashMap::from([("from".to_string(), json!("t2"))]))
-                .unwrap();
-            ca2.insert_one(HashMap::from([("from".to_string(), json!("t2"))]))
-                .unwrap();
+            db2.insert_one(
+                "deadlock_b",
+                HashMap::from([("from".to_string(), json!("t2"))]),
+            )
+            .unwrap();
+            db2.insert_one(
+                "deadlock_a",
+                HashMap::from([("from".to_string(), json!("t2"))]),
+            )
+            .unwrap();
             if i % 10 == 0 {
-                let _ = cb2.find(&json!({}));
+                let coll_b = db2.collection("deadlock_b").unwrap();
+                let _ = coll_b.find(&json!({}));
             }
         }
     });
@@ -492,6 +456,8 @@ fn test_no_deadlock_with_cross_collection_access() {
     t2.join().expect("Thread 2 should complete");
 
     // Verify data
+    let coll_a = db.collection("deadlock_a").unwrap();
+    let coll_b = db.collection("deadlock_b").unwrap();
     let count_a = coll_a.count_documents(&json!({})).unwrap();
     let count_b = coll_b.count_documents(&json!({})).unwrap();
     assert_eq!(count_a, 200);
@@ -505,21 +471,16 @@ fn test_no_deadlock_with_cross_collection_access() {
 /// Test: Cache invalidation during concurrent reads
 #[test]
 fn test_cache_invalidation_during_reads() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("cache_test").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("cache_test".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("cache_test").unwrap();
 
     // Pre-populate
     for i in 0..50 {
-        collection
-            .insert_one(HashMap::from([("value".to_string(), json!(i))]))
-            .unwrap();
+        db.insert_one(
+            "cache_test",
+            HashMap::from([("value".to_string(), json!(i))]),
+        )
+        .unwrap();
     }
 
     let running = Arc::new(AtomicBool::new(true));
@@ -527,11 +488,12 @@ fn test_cache_invalidation_during_reads() {
     // Reader threads - use same query (should hit cache)
     let readers: Vec<_> = (0..5)
         .map(|_| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             let running = Arc::clone(&running);
 
             thread::spawn(move || {
                 while running.load(Ordering::Relaxed) {
+                    let coll = db.collection("cache_test").unwrap();
                     let _ = coll.find(&json!({"value": {"$gte": 25}}));
                 }
             })
@@ -539,13 +501,13 @@ fn test_cache_invalidation_during_reads() {
         .collect();
 
     // Writer thread - invalidates cache
-    let coll_writer = Arc::clone(&collection);
+    let db_writer = Arc::clone(&db);
     let running_w = Arc::clone(&running);
     let writer = thread::spawn(move || {
         let mut i = 100;
         while running_w.load(Ordering::Relaxed) {
             let doc = HashMap::from([("value".to_string(), json!(i))]);
-            let _ = coll_writer.insert_one(doc);
+            let _ = db_writer.insert_one("cache_test", doc);
             i += 1;
         }
     });
@@ -566,15 +528,8 @@ fn test_cache_invalidation_during_reads() {
 /// Test: High contention scenario
 #[test]
 fn test_high_contention_stress() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("high_contention").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("high_contention".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("high_contention").unwrap();
 
     const NUM_THREADS: usize = 20;
     const OPS_PER_THREAD: usize = 50;
@@ -584,7 +539,7 @@ fn test_high_contention_stress() {
 
     let handles: Vec<_> = (0..NUM_THREADS)
         .map(|thread_id| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             let barrier = Arc::clone(&barrier);
             let ops = Arc::clone(&total_ops);
 
@@ -599,12 +554,14 @@ fn test_high_contention_stress() {
                                 ("t".to_string(), json!(thread_id)),
                                 ("i".to_string(), json!(i)),
                             ]);
-                            coll.insert_one(doc).unwrap();
+                            db.insert_one("high_contention", doc).unwrap();
                         }
                         1 => {
+                            let coll = db.collection("high_contention").unwrap();
                             let _ = coll.find(&json!({}));
                         }
                         2 => {
+                            let coll = db.collection("high_contention").unwrap();
                             let _ = coll.count_documents(&json!({}));
                         }
                         _ => {}
@@ -623,6 +580,7 @@ fn test_high_contention_stress() {
 
     // Should have inserted ~1/3 of operations
     let expected_inserts = (NUM_THREADS * OPS_PER_THREAD) / 3;
+    let collection = db.collection("high_contention").unwrap();
     let count = collection.count_documents(&json!({})).unwrap();
     assert!(
         count >= expected_inserts as u64 - 50,
@@ -635,22 +593,15 @@ fn test_high_contention_stress() {
 /// Test: Long-running concurrent operations
 #[test]
 fn test_sustained_concurrent_load() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("sustained").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("sustained".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("sustained").unwrap();
 
     let running = Arc::new(AtomicBool::new(true));
     let ops_count = Arc::new(AtomicU64::new(0));
 
     let handles: Vec<_> = (0..10)
         .map(|_| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             let running = Arc::clone(&running);
             let ops = Arc::clone(&ops_count);
 
@@ -660,7 +611,8 @@ fn test_sustained_concurrent_load() {
                         "timestamp".to_string(),
                         json!(ops.load(Ordering::Relaxed)),
                     )]);
-                    let _ = coll.insert_one(doc);
+                    let _ = db.insert_one("sustained", doc);
+                    let coll = db.collection("sustained").unwrap();
                     let _ = coll.find(&json!({}));
                     ops.fetch_add(2, Ordering::Relaxed);
                 }
@@ -688,22 +640,16 @@ fn test_sustained_concurrent_load() {
 /// Test: Empty collection concurrent access
 #[test]
 fn test_empty_collection_concurrent() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("empty").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("empty".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("empty").unwrap();
 
     // Multiple threads querying empty collection
     let handles: Vec<_> = (0..10)
         .map(|_| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             thread::spawn(move || {
                 for _ in 0..100 {
+                    let coll = db.collection("empty").unwrap();
                     let results = coll.find(&json!({})).unwrap();
                     assert_eq!(results.len(), 0);
                     let count = coll.count_documents(&json!({})).unwrap();
@@ -721,36 +667,34 @@ fn test_empty_collection_concurrent() {
 /// Test: Single document high contention
 #[test]
 fn test_single_document_high_contention() {
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        s.create_collection("single_doc").unwrap();
-    }
-
-    let collection =
-        Arc::new(CollectionCore::new("single_doc".to_string(), Arc::clone(&storage)).unwrap());
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    db.collection("single_doc").unwrap();
 
     // Insert one document
-    collection
-        .insert_one(HashMap::from([
+    db.insert_one(
+        "single_doc",
+        HashMap::from([
             ("_id".to_string(), json!(1)),
             ("counter".to_string(), json!(0)),
-        ]))
-        .unwrap();
+        ]),
+    )
+    .unwrap();
 
     let update_count = Arc::new(AtomicU64::new(0));
 
     // Multiple threads updating same document
     let handles: Vec<_> = (0..10)
         .map(|_| {
-            let coll = Arc::clone(&collection);
+            let db = Arc::clone(&db);
             let updates = Arc::clone(&update_count);
 
             thread::spawn(move || {
                 for _ in 0..50 {
-                    let result =
-                        coll.update_one(&json!({"_id": 1}), &json!({"$inc": {"counter": 1}}));
+                    let result = db.update_one(
+                        "single_doc",
+                        &json!({"_id": 1}),
+                        &json!({"$inc": {"counter": 1}}),
+                    );
                     if result.is_ok() {
                         updates.fetch_add(1, Ordering::Relaxed);
                     }

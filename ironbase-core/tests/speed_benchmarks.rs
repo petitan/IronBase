@@ -96,7 +96,7 @@ fn speed_benchmark_full_suite() {
 
     let start = Instant::now();
     for chunk in docs.chunks(BATCH_SIZE) {
-        coll.insert_many(chunk.to_vec()).unwrap();
+        db.insert_many("benchmark", chunk.to_vec()).unwrap();
     }
     let insert_time = start.elapsed();
 
@@ -281,8 +281,9 @@ fn speed_benchmark_full_suite() {
 
     // 4a. Update one document
     let start = Instant::now();
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_one(
+            "benchmark",
             &json!({"name": "User_1000"}),
             &json!({"$set": {"updated": true}}),
         )
@@ -297,8 +298,9 @@ fn speed_benchmark_full_suite() {
 
     // 4b. Update many (10% of documents)
     let start = Instant::now();
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_many(
+            "benchmark",
             &json!({"score": {"$gte": 900}}),
             &json!({"$set": {"high_score": true}}),
         )
@@ -313,8 +315,9 @@ fn speed_benchmark_full_suite() {
 
     // 4c. Increment operation
     let start = Instant::now();
-    let (matched, modified) = coll
+    let (matched, modified) = db
         .update_many(
+            "benchmark",
             &json!({"category": "electronics"}),
             &json!({"$inc": {"balance": 100.0}}),
         )
@@ -430,7 +433,9 @@ fn speed_benchmark_full_suite() {
 
     // 6a. Delete one
     let start = Instant::now();
-    let deleted = coll.delete_one(&json!({"name": "User_99999"})).unwrap();
+    let deleted = db
+        .delete_one("benchmark", &json!({"name": "User_99999"}))
+        .unwrap();
     let delete_one_time = start.elapsed();
     println!(
         "  delete_one(name: User_99999): {} (deleted: {})",
@@ -440,7 +445,9 @@ fn speed_benchmark_full_suite() {
 
     // 6b. Delete many (~10%)
     let start = Instant::now();
-    let deleted = coll.delete_many(&json!({"score": {"$lt": 100}})).unwrap();
+    let deleted = db
+        .delete_many("benchmark", &json!({"score": {"$lt": 100}}))
+        .unwrap();
     let delete_many_time = start.elapsed();
     println!(
         "  delete_many(score < 100): {} (deleted: {})",
@@ -484,21 +491,19 @@ fn speed_benchmark_insert_rates() {
 
     // Test different batch sizes
     for batch_size in [1, 10, 100, 1000, 10000] {
-        let coll = db
-            .collection(&format!("bench_batch_{}", batch_size))
-            .unwrap();
         let doc_count = 50_000.min(batch_size * 100); // Scale down for small batches
 
         let docs: Vec<_> = (0..doc_count).map(generate_doc).collect();
 
         let start = Instant::now();
+        let coll_name = format!("bench_batch_{}", batch_size);
         if batch_size == 1 {
             for doc in docs {
-                coll.insert_one(doc).unwrap();
+                db.insert_one(&coll_name, doc).unwrap();
             }
         } else {
             for chunk in docs.chunks(batch_size) {
-                coll.insert_many(chunk.to_vec()).unwrap();
+                db.insert_many(&coll_name, chunk.to_vec()).unwrap();
             }
         }
         let elapsed = start.elapsed();
@@ -529,7 +534,7 @@ fn speed_benchmark_query_selectivity() {
     // Insert 100K documents
     let docs: Vec<_> = (0..DOC_COUNT).map(generate_doc).collect();
     for chunk in docs.chunks(BATCH_SIZE) {
-        coll.insert_many(chunk.to_vec()).unwrap();
+        db.insert_many("selectivity", chunk.to_vec()).unwrap();
     }
 
     // Create index

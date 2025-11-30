@@ -21,6 +21,8 @@
 #![allow(clippy::unnecessary_cast)]
 #![allow(clippy::manual_is_multiple_of)]
 #![allow(clippy::approx_constant)]
+// Allow private_bounds - intentional for sealed trait pattern
+#![allow(private_bounds)]
 // Tests may have helper functions not used in all test cases
 #![cfg_attr(test, allow(dead_code))]
 #![cfg_attr(test, allow(unused_variables))]

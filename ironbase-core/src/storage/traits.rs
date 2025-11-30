@@ -162,11 +162,32 @@ pub trait IndexableStorage: Storage {
     fn list_indexes(&self, collection: &str) -> Vec<String>;
 }
 
+// ============================================================================
+// SEALED RAW STORAGE TRAIT
+// ============================================================================
+
+/// Private module that seals the RawStorage trait
+mod sealed_raw {
+    /// Marker trait that cannot be implemented outside this crate
+    pub trait SealedRawStorage {}
+
+    // Only our storage implementations can implement SealedRawStorage
+    impl SealedRawStorage for crate::storage::StorageEngine {}
+    impl SealedRawStorage for crate::storage::MemoryStorage {}
+}
+
 /// Low-level storage operations (used by CollectionCore)
 ///
-/// This trait provides raw byte-level document operations that give
-/// more control over serialization and catalog management.
-pub trait RawStorage: Storage {
+/// # WARNING: DO NOT MAKE THIS TRAIT PUBLIC
+///
+/// This trait provides raw byte-level document operations that bypass
+/// WAL durability guarantees. It uses the sealed trait pattern to prevent:
+/// 1. External crates from implementing this trait
+/// 2. Accidental exposure of unsafe operations
+/// 3. "Simplification" by making methods public
+///
+/// Use DatabaseCore methods for safe, durable operations.
+pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
     /// Write raw document bytes with explicit ID (tracked in catalog)
     ///
     /// # Arguments
@@ -224,6 +245,7 @@ pub trait RawStorage: Storage {
     /// # Returns
     ///
     /// Total file size in bytes
+    #[allow(dead_code)] // Used by compaction internally
     fn file_len(&self) -> Result<u64>;
 }
 

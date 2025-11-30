@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::collection_core::CollectionCore;
+use crate::collection_core::{CollectionCore, RawOperations};
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use crate::error::Result;
@@ -397,13 +397,13 @@ impl DatabaseCore<StorageEngine> {
     /// use serde_json::json;
     ///
     /// let db = DatabaseCore::<StorageEngine>::open("app.mlite")?; // Safe by default
-    /// let doc_id = db.insert_one_safe("users", HashMap::from([
+    /// let doc_id = db.insert_one("users", HashMap::from([
     ///     ("name".to_string(), json!("Alice")),
     ///     ("age".to_string(), json!(30)),
     /// ]))?;
     /// # Ok::<(), ironbase_core::MongoLiteError>(())
     /// ```
-    pub fn insert_one_safe(
+    pub fn insert_one(
         &self,
         collection_name: &str,
         document: HashMap<String, Value>,
@@ -417,7 +417,7 @@ impl DatabaseCore<StorageEngine> {
                 let mut auto_tx = self.begin_auto_transaction();
 
                 // 2. Execute insert
-                let doc_id = collection.insert_one(document.clone())?;
+                let doc_id = collection.insert_one_raw(document.clone())?;
 
                 // 3. Add operation to transaction
                 // IMPORTANT: WAL must contain the FULL document with _id and _collection
@@ -449,7 +449,7 @@ impl DatabaseCore<StorageEngine> {
                 let collection = self.collection(collection_name)?;
 
                 // 1. Execute insert
-                let doc_id = collection.insert_one(document.clone())?;
+                let doc_id = collection.insert_one_raw(document.clone())?;
 
                 // 2. Add to batch buffer
                 // IMPORTANT: WAL must contain the FULL document with _id and _collection
@@ -480,7 +480,7 @@ impl DatabaseCore<StorageEngine> {
             } => {
                 // Unsafe mode: Fast path, optional auto-checkpoint
                 let collection = self.collection(collection_name)?;
-                let doc_id = collection.insert_one(document)?;
+                let doc_id = collection.insert_one_raw(document)?;
 
                 // Auto checkpoint if configured
                 if let Some(threshold) = auto_checkpoint_ops {
@@ -492,6 +492,598 @@ impl DatabaseCore<StorageEngine> {
                 }
 
                 Ok(doc_id)
+            }
+        }
+    }
+
+    /// Update one document with WAL durability
+    ///
+    /// This method wraps update_one with proper WAL logging for crash recovery.
+    /// The document's old and new state are both logged to enable undo/redo.
+    ///
+    /// Returns (matched_count, modified_count)
+    pub fn update_one(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        update: &Value,
+    ) -> Result<(u64, u64)> {
+        match self.durability_mode {
+            DurabilityMode::Safe => {
+                let collection = self.collection(collection_name)?;
+
+                // 1. Find the document BEFORE update (for WAL old_doc)
+                let old_doc = collection.find_one(query)?;
+                if old_doc.is_none() {
+                    return Ok((0, 0)); // No match, nothing to update
+                }
+                let old_doc = old_doc.unwrap();
+
+                // Extract doc_id from old document
+                let doc_id = match old_doc.get("_id") {
+                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                    Some(Value::String(s)) => {
+                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                            DocumentId::ObjectId(s.clone())
+                        } else {
+                            DocumentId::String(s.clone())
+                        }
+                    }
+                    _ => {
+                        return Err(crate::error::MongoLiteError::InvalidQuery(
+                            "Document missing _id".to_string(),
+                        ))
+                    }
+                };
+
+                // 2. Begin auto-transaction
+                let mut auto_tx = self.begin_auto_transaction();
+
+                // 3. Execute update
+                let (matched, modified) = collection.update_one_raw(query, update)?;
+
+                // 4. If modified, get new state and add to WAL
+                if modified > 0 {
+                    // Find the updated document
+                    let new_doc = collection
+                        .find_one(&serde_json::json!({"_id": &doc_id}))?
+                        .unwrap_or(old_doc.clone());
+
+                    auto_tx.add_operation(Operation::Update {
+                        collection: collection_name.to_string(),
+                        doc_id: doc_id.clone(),
+                        old_doc,
+                        new_doc,
+                    })?;
+                    auto_tx.mark_operations_applied();
+
+                    // 5. Auto-commit (WAL write + fsync)
+                    self.commit_auto_transaction(auto_tx)?;
+                }
+
+                Ok((matched, modified))
+            }
+
+            DurabilityMode::Batch { .. } => {
+                let collection = self.collection(collection_name)?;
+                let old_doc = collection.find_one(query)?;
+                if old_doc.is_none() {
+                    return Ok((0, 0));
+                }
+                let old_doc = old_doc.unwrap();
+
+                let doc_id = match old_doc.get("_id") {
+                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                    Some(Value::String(s)) => {
+                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                            DocumentId::ObjectId(s.clone())
+                        } else {
+                            DocumentId::String(s.clone())
+                        }
+                    }
+                    _ => {
+                        return Err(crate::error::MongoLiteError::InvalidQuery(
+                            "Document missing _id".to_string(),
+                        ))
+                    }
+                };
+
+                let (matched, modified) = collection.update_one_raw(query, update)?;
+
+                if modified > 0 {
+                    let new_doc = collection
+                        .find_one(&serde_json::json!({"_id": &doc_id}))?
+                        .unwrap_or(old_doc.clone());
+
+                    let should_flush = self.add_to_batch(Operation::Update {
+                        collection: collection_name.to_string(),
+                        doc_id,
+                        old_doc,
+                        new_doc,
+                    })?;
+
+                    if should_flush {
+                        self.flush_batch()?;
+                    }
+                }
+
+                Ok((matched, modified))
+            }
+
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops,
+            } => {
+                let collection = self.collection(collection_name)?;
+                let result = collection.update_one_raw(query, update)?;
+
+                if let Some(threshold) = auto_checkpoint_ops {
+                    let count = self.unsafe_op_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count >= threshold as u64 {
+                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
+                        self.checkpoint()?;
+                    }
+                }
+
+                Ok(result)
+            }
+        }
+    }
+
+    /// Delete one document with WAL durability
+    ///
+    /// This method wraps delete_one with proper WAL logging for crash recovery.
+    /// The deleted document is logged for potential rollback.
+    ///
+    /// Returns deleted_count
+    pub fn delete_one(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        match self.durability_mode {
+            DurabilityMode::Safe => {
+                let collection = self.collection(collection_name)?;
+
+                // 1. Find the document BEFORE delete (for WAL old_doc)
+                let old_doc = collection.find_one(query)?;
+                if old_doc.is_none() {
+                    return Ok(0); // No match, nothing to delete
+                }
+                let old_doc = old_doc.unwrap();
+
+                // Extract doc_id
+                let doc_id = match old_doc.get("_id") {
+                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                    Some(Value::String(s)) => {
+                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                            DocumentId::ObjectId(s.clone())
+                        } else {
+                            DocumentId::String(s.clone())
+                        }
+                    }
+                    _ => {
+                        return Err(crate::error::MongoLiteError::InvalidQuery(
+                            "Document missing _id".to_string(),
+                        ))
+                    }
+                };
+
+                // 2. Begin auto-transaction
+                let mut auto_tx = self.begin_auto_transaction();
+
+                // 3. Execute delete
+                let deleted = collection.delete_one_raw(query)?;
+
+                // 4. If deleted, add to WAL
+                if deleted > 0 {
+                    auto_tx.add_operation(Operation::Delete {
+                        collection: collection_name.to_string(),
+                        doc_id,
+                        old_doc,
+                    })?;
+                    auto_tx.mark_operations_applied();
+
+                    // 5. Auto-commit (WAL write + fsync)
+                    self.commit_auto_transaction(auto_tx)?;
+                }
+
+                Ok(deleted)
+            }
+
+            DurabilityMode::Batch { .. } => {
+                let collection = self.collection(collection_name)?;
+                let old_doc = collection.find_one(query)?;
+                if old_doc.is_none() {
+                    return Ok(0);
+                }
+                let old_doc = old_doc.unwrap();
+
+                let doc_id = match old_doc.get("_id") {
+                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                    Some(Value::String(s)) => {
+                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                            DocumentId::ObjectId(s.clone())
+                        } else {
+                            DocumentId::String(s.clone())
+                        }
+                    }
+                    _ => {
+                        return Err(crate::error::MongoLiteError::InvalidQuery(
+                            "Document missing _id".to_string(),
+                        ))
+                    }
+                };
+
+                let deleted = collection.delete_one_raw(query)?;
+
+                if deleted > 0 {
+                    let should_flush = self.add_to_batch(Operation::Delete {
+                        collection: collection_name.to_string(),
+                        doc_id,
+                        old_doc,
+                    })?;
+
+                    if should_flush {
+                        self.flush_batch()?;
+                    }
+                }
+
+                Ok(deleted)
+            }
+
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops,
+            } => {
+                let collection = self.collection(collection_name)?;
+                let deleted = collection.delete_one_raw(query)?;
+
+                if let Some(threshold) = auto_checkpoint_ops {
+                    let count = self.unsafe_op_counter.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count >= threshold as u64 {
+                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
+                        self.checkpoint()?;
+                    }
+                }
+
+                Ok(deleted)
+            }
+        }
+    }
+
+    /// Insert multiple documents with WAL durability
+    ///
+    /// Each document is logged individually to the WAL for crash recovery.
+    ///
+    /// Returns vector of inserted document IDs
+    pub fn insert_many(
+        &self,
+        collection_name: &str,
+        documents: Vec<HashMap<String, Value>>,
+    ) -> Result<Vec<DocumentId>> {
+        match self.durability_mode {
+            DurabilityMode::Safe => {
+                let collection = self.collection(collection_name)?;
+                let mut auto_tx = self.begin_auto_transaction();
+                let mut inserted_ids = Vec::with_capacity(documents.len());
+
+                for document in documents {
+                    let doc_id = collection.insert_one_raw(document.clone())?;
+
+                    // Add full document to WAL
+                    let mut doc_with_metadata = document.clone();
+                    doc_with_metadata
+                        .insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                    doc_with_metadata.insert(
+                        "_collection".to_string(),
+                        Value::String(collection_name.to_string()),
+                    );
+                    let doc_value = serde_json::to_value(&doc_with_metadata)
+                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+
+                    auto_tx.add_operation(Operation::Insert {
+                        collection: collection_name.to_string(),
+                        doc_id: doc_id.clone(),
+                        doc: doc_value,
+                    })?;
+
+                    inserted_ids.push(doc_id);
+                }
+
+                auto_tx.mark_operations_applied();
+                self.commit_auto_transaction(auto_tx)?;
+
+                Ok(inserted_ids)
+            }
+
+            DurabilityMode::Batch { .. } => {
+                let collection = self.collection(collection_name)?;
+                let mut inserted_ids = Vec::with_capacity(documents.len());
+
+                for document in documents {
+                    let doc_id = collection.insert_one_raw(document.clone())?;
+
+                    let mut doc_with_metadata = document.clone();
+                    doc_with_metadata
+                        .insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                    doc_with_metadata.insert(
+                        "_collection".to_string(),
+                        Value::String(collection_name.to_string()),
+                    );
+                    let doc_value = serde_json::to_value(&doc_with_metadata)
+                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+
+                    let should_flush = self.add_to_batch(Operation::Insert {
+                        collection: collection_name.to_string(),
+                        doc_id: doc_id.clone(),
+                        doc: doc_value,
+                    })?;
+
+                    if should_flush {
+                        self.flush_batch()?;
+                    }
+
+                    inserted_ids.push(doc_id);
+                }
+
+                Ok(inserted_ids)
+            }
+
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops,
+            } => {
+                let collection = self.collection(collection_name)?;
+                let mut inserted_ids = Vec::with_capacity(documents.len());
+
+                for document in documents {
+                    let doc_id = collection.insert_one_raw(document)?;
+                    inserted_ids.push(doc_id);
+                }
+
+                if let Some(threshold) = auto_checkpoint_ops {
+                    let count = self
+                        .unsafe_op_counter
+                        .fetch_add(inserted_ids.len() as u64, Ordering::Relaxed)
+                        + inserted_ids.len() as u64;
+                    if count >= threshold as u64 {
+                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
+                        self.checkpoint()?;
+                    }
+                }
+
+                Ok(inserted_ids)
+            }
+        }
+    }
+
+    /// Update multiple documents with WAL durability
+    ///
+    /// Each document update is logged to the WAL for crash recovery.
+    /// All updates are committed in a single transaction.
+    ///
+    /// Returns (matched_count, modified_count)
+    pub fn update_many(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        update: &Value,
+    ) -> Result<(u64, u64)> {
+        match self.durability_mode {
+            DurabilityMode::Safe => {
+                let collection = self.collection(collection_name)?;
+
+                // 1. Find all matching documents BEFORE update
+                let old_docs = collection.find(query)?;
+                if old_docs.is_empty() {
+                    return Ok((0, 0));
+                }
+
+                // 2. Begin auto-transaction
+                let mut auto_tx = self.begin_auto_transaction();
+
+                // 3. Execute update_many
+                let (matched, modified) = collection.update_many_raw(query, update)?;
+
+                // 4. For each modified document, add WAL entry
+                if modified > 0 {
+                    for old_doc in old_docs.iter() {
+                        // Extract doc_id
+                        let doc_id = match old_doc.get("_id") {
+                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                            Some(Value::String(s)) => {
+                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    DocumentId::ObjectId(s.clone())
+                                } else {
+                                    DocumentId::String(s.clone())
+                                }
+                            }
+                            _ => continue, // Skip docs without valid _id
+                        };
+
+                        // Find the updated document
+                        if let Ok(Some(new_doc)) =
+                            collection.find_one(&serde_json::json!({"_id": &doc_id}))
+                        {
+                            auto_tx.add_operation(Operation::Update {
+                                collection: collection_name.to_string(),
+                                doc_id,
+                                old_doc: old_doc.clone(),
+                                new_doc,
+                            })?;
+                        }
+                    }
+                    auto_tx.mark_operations_applied();
+                    self.commit_auto_transaction(auto_tx)?;
+                }
+
+                Ok((matched, modified))
+            }
+
+            DurabilityMode::Batch { .. } => {
+                let collection = self.collection(collection_name)?;
+                let old_docs = collection.find(query)?;
+                if old_docs.is_empty() {
+                    return Ok((0, 0));
+                }
+
+                let (matched, modified) = collection.update_many_raw(query, update)?;
+
+                if modified > 0 {
+                    for old_doc in old_docs.iter() {
+                        let doc_id = match old_doc.get("_id") {
+                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                            Some(Value::String(s)) => {
+                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    DocumentId::ObjectId(s.clone())
+                                } else {
+                                    DocumentId::String(s.clone())
+                                }
+                            }
+                            _ => continue,
+                        };
+
+                        if let Ok(Some(new_doc)) =
+                            collection.find_one(&serde_json::json!({"_id": &doc_id}))
+                        {
+                            let should_flush = self.add_to_batch(Operation::Update {
+                                collection: collection_name.to_string(),
+                                doc_id,
+                                old_doc: old_doc.clone(),
+                                new_doc,
+                            })?;
+
+                            if should_flush {
+                                self.flush_batch()?;
+                            }
+                        }
+                    }
+                }
+
+                Ok((matched, modified))
+            }
+
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops,
+            } => {
+                let collection = self.collection(collection_name)?;
+                let result = collection.update_many_raw(query, update)?;
+
+                if let Some(threshold) = auto_checkpoint_ops {
+                    let count = self
+                        .unsafe_op_counter
+                        .fetch_add(result.1, Ordering::Relaxed)
+                        + result.1;
+                    if count >= threshold as u64 {
+                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
+                        self.checkpoint()?;
+                    }
+                }
+
+                Ok(result)
+            }
+        }
+    }
+
+    /// Delete multiple documents with WAL durability
+    ///
+    /// Each deleted document is logged to the WAL for crash recovery.
+    /// All deletes are committed in a single transaction.
+    ///
+    /// Returns deleted_count
+    pub fn delete_many(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        match self.durability_mode {
+            DurabilityMode::Safe => {
+                let collection = self.collection(collection_name)?;
+
+                // 1. Find all matching documents BEFORE delete
+                let old_docs = collection.find(query)?;
+                if old_docs.is_empty() {
+                    return Ok(0);
+                }
+
+                // 2. Begin auto-transaction
+                let mut auto_tx = self.begin_auto_transaction();
+
+                // 3. Execute delete_many
+                let deleted = collection.delete_many_raw(query)?;
+
+                // 4. For each deleted document, add WAL entry
+                if deleted > 0 {
+                    for old_doc in old_docs {
+                        let doc_id = match old_doc.get("_id") {
+                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                            Some(Value::String(s)) => {
+                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    DocumentId::ObjectId(s.clone())
+                                } else {
+                                    DocumentId::String(s.clone())
+                                }
+                            }
+                            _ => continue,
+                        };
+
+                        auto_tx.add_operation(Operation::Delete {
+                            collection: collection_name.to_string(),
+                            doc_id,
+                            old_doc,
+                        })?;
+                    }
+                    auto_tx.mark_operations_applied();
+                    self.commit_auto_transaction(auto_tx)?;
+                }
+
+                Ok(deleted)
+            }
+
+            DurabilityMode::Batch { .. } => {
+                let collection = self.collection(collection_name)?;
+                let old_docs = collection.find(query)?;
+                if old_docs.is_empty() {
+                    return Ok(0);
+                }
+
+                let deleted = collection.delete_many_raw(query)?;
+
+                if deleted > 0 {
+                    for old_doc in old_docs {
+                        let doc_id = match old_doc.get("_id") {
+                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
+                            Some(Value::String(s)) => {
+                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                                    DocumentId::ObjectId(s.clone())
+                                } else {
+                                    DocumentId::String(s.clone())
+                                }
+                            }
+                            _ => continue,
+                        };
+
+                        let should_flush = self.add_to_batch(Operation::Delete {
+                            collection: collection_name.to_string(),
+                            doc_id,
+                            old_doc,
+                        })?;
+
+                        if should_flush {
+                            self.flush_batch()?;
+                        }
+                    }
+                }
+
+                Ok(deleted)
+            }
+
+            DurabilityMode::Unsafe {
+                auto_checkpoint_ops,
+            } => {
+                let collection = self.collection(collection_name)?;
+                let deleted = collection.delete_many_raw(query)?;
+
+                if let Some(threshold) = auto_checkpoint_ops {
+                    let count =
+                        self.unsafe_op_counter.fetch_add(deleted, Ordering::Relaxed) + deleted;
+                    if count >= threshold as u64 {
+                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
+                        self.checkpoint()?;
+                    }
+                }
+
+                Ok(deleted)
             }
         }
     }
@@ -559,13 +1151,13 @@ impl DatabaseCore<MemoryStorage> {
     /// use ironbase_core::storage::MemoryStorage;
     ///
     /// let db = DatabaseCore::<MemoryStorage>::open_memory()?;
-    /// let users = db.collection("users")?;
     ///
-    /// // Use like normal - all CRUD operations work
-    /// users.insert_one(std::collections::HashMap::from([
+    /// // Use DatabaseCore methods for CRUD with durability
+    /// db.insert_one("users", std::collections::HashMap::from([
     ///     ("name".to_string(), serde_json::json!("Alice")),
     /// ]))?;
     ///
+    /// let users = db.collection("users")?;
     /// let count = users.count_documents(&serde_json::json!({}))?;
     /// assert_eq!(count, 1);
     /// # Ok::<(), ironbase_core::MongoLiteError>(())
@@ -582,6 +1174,76 @@ impl DatabaseCore<MemoryStorage> {
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
             unsafe_op_counter: AtomicU64::new(0),
         })
+    }
+
+    // ========== CRUD Operations (MemoryStorage - no WAL) ==========
+
+    /// Insert one document (MemoryStorage version - no WAL/durability)
+    ///
+    /// For in-memory databases, this is a simple fast-path insert without
+    /// WAL logging since data doesn't need to survive restarts.
+    pub fn insert_one(
+        &self,
+        collection_name: &str,
+        document: HashMap<String, Value>,
+    ) -> Result<DocumentId> {
+        let collection = self.collection(collection_name)?;
+        collection.insert_one_raw(document)
+    }
+
+    /// Update one document (MemoryStorage version - no WAL/durability)
+    ///
+    /// Returns (matched_count, modified_count)
+    pub fn update_one(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        update: &Value,
+    ) -> Result<(u64, u64)> {
+        let collection = self.collection(collection_name)?;
+        collection.update_one_raw(query, update)
+    }
+
+    /// Delete one document (MemoryStorage version - no WAL/durability)
+    ///
+    /// Returns deleted_count
+    pub fn delete_one(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        let collection = self.collection(collection_name)?;
+        collection.delete_one_raw(query)
+    }
+
+    /// Insert many documents (MemoryStorage version - no WAL/durability)
+    ///
+    /// Returns vector of inserted document IDs
+    pub fn insert_many(
+        &self,
+        collection_name: &str,
+        documents: Vec<HashMap<String, Value>>,
+    ) -> Result<Vec<DocumentId>> {
+        let collection = self.collection(collection_name)?;
+        let result = collection.insert_many_raw(documents)?;
+        Ok(result.inserted_ids)
+    }
+
+    /// Update many documents (MemoryStorage version - no WAL/durability)
+    ///
+    /// Returns (matched_count, modified_count)
+    pub fn update_many(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        update: &Value,
+    ) -> Result<(u64, u64)> {
+        let collection = self.collection(collection_name)?;
+        collection.update_many_raw(query, update)
+    }
+
+    /// Delete many documents (MemoryStorage version - no WAL/durability)
+    ///
+    /// Returns deleted_count
+    pub fn delete_many(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        let collection = self.collection(collection_name)?;
+        collection.delete_many_raw(query)
     }
 }
 
@@ -993,7 +1655,7 @@ mod tests {
 
         // And insert documents
         let doc = std::collections::HashMap::from([("name".to_string(), json!("Alice"))]);
-        let id = coll.insert_one(doc).unwrap();
+        let id = coll.insert_one_raw(doc).unwrap();
         assert!(matches!(id, DocumentId::Int(_)));
     }
 
@@ -1007,7 +1669,7 @@ mod tests {
             ("name".to_string(), json!("Alice")),
             ("age".to_string(), json!(30)),
         ]);
-        let id = coll.insert_one(doc).unwrap();
+        let id = coll.insert_one_raw(doc).unwrap();
 
         // Find
         let found = coll.find_one(&json!({"_id": id})).unwrap();
@@ -1015,13 +1677,13 @@ mod tests {
         assert_eq!(found.unwrap()["name"], "Alice");
 
         // Update
-        coll.update_one(&json!({"_id": id}), &json!({"$set": {"age": 31}}))
+        coll.update_one_raw(&json!({"_id": id}), &json!({"$set": {"age": 31}}))
             .unwrap();
         let updated = coll.find_one(&json!({"_id": id})).unwrap().unwrap();
         assert_eq!(updated["age"], 31);
 
         // Delete
-        coll.delete_one(&json!({"_id": id})).unwrap();
+        coll.delete_one_raw(&json!({"_id": id})).unwrap();
         let count = coll.count_documents(&json!({})).unwrap();
         assert_eq!(count, 0);
     }
@@ -1034,13 +1696,13 @@ mod tests {
         let posts = db.collection("posts").unwrap();
 
         users
-            .insert_one(std::collections::HashMap::from([(
+            .insert_one_raw(std::collections::HashMap::from([(
                 "name".to_string(),
                 json!("Alice"),
             )]))
             .unwrap();
         posts
-            .insert_one(std::collections::HashMap::from([(
+            .insert_one_raw(std::collections::HashMap::from([(
                 "title".to_string(),
                 json!("Hello"),
             )]))
@@ -1059,7 +1721,7 @@ mod tests {
         let coll = db.collection("sales").unwrap();
 
         for (city, amount) in &[("NYC", 100), ("LA", 200), ("NYC", 150), ("LA", 50)] {
-            coll.insert_one(std::collections::HashMap::from([
+            coll.insert_one_raw(std::collections::HashMap::from([
                 ("city".to_string(), json!(city)),
                 ("amount".to_string(), json!(amount)),
             ]))
@@ -1086,7 +1748,7 @@ mod tests {
 
         // Insert with index
         for i in 0..10 {
-            coll.insert_one(std::collections::HashMap::from([(
+            coll.insert_one_raw(std::collections::HashMap::from([(
                 "age".to_string(),
                 json!(i * 10),
             )]))
