@@ -160,6 +160,54 @@ pub fn compare_values_with_none(a: Option<&Value>, b: Option<&Value>) -> Orderin
     }
 }
 
+/// Creates a canonical string representation of a JSON value
+/// where object keys are always sorted alphabetically.
+///
+/// This ensures that two logically equivalent JSON objects with different
+/// key ordering (e.g., `{"a":1,"b":2}` and `{"b":2,"a":1}`) produce the
+/// same string representation.
+///
+/// Used by `$addToSet` accumulator to correctly deduplicate objects
+/// regardless of key insertion order.
+///
+/// # Examples
+///
+/// ```
+/// use serde_json::json;
+/// use ironbase_core::value_utils::canonical_json_string;
+///
+/// let v1 = json!({"a": 1, "b": 2});
+/// let v2 = json!({"b": 2, "a": 1});
+/// assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
+/// ```
+pub fn canonical_json_string(value: &Value) -> String {
+    match value {
+        Value::Object(map) => {
+            // Sort keys alphabetically for deterministic output
+            let mut pairs: Vec<_> = map.iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+
+            let inner: String = pairs
+                .iter()
+                .map(|(k, v)| format!("\"{}\":{}", k, canonical_json_string(v)))
+                .collect::<Vec<_>>()
+                .join(",");
+
+            format!("{{{}}}", inner)
+        }
+        Value::Array(arr) => {
+            let inner: String = arr
+                .iter()
+                .map(canonical_json_string)
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("[{}]", inner)
+        }
+        // Primitives: use standard serialization
+        _ => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +371,75 @@ mod tests {
         let mut doc = json!({"a": {}});
         set_nested_value(&mut doc, "a.b.c.d", json!(42));
         assert_eq!(doc["a"]["b"]["c"]["d"], 42);
+    }
+
+    // ========== canonical_json_string tests ==========
+
+    #[test]
+    fn test_canonical_json_string_object_key_order() {
+        // Two objects with same fields but different insertion order
+        // should produce identical canonical strings
+        let v1 = json!({"a": 1, "b": 2});
+        let v2 = json!({"b": 2, "a": 1});
+        assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
+        assert_eq!(canonical_json_string(&v1), r#"{"a":1,"b":2}"#);
+    }
+
+    #[test]
+    fn test_canonical_json_string_nested_objects() {
+        let v1 = json!({"outer": {"a": 1, "b": 2}});
+        let v2 = json!({"outer": {"b": 2, "a": 1}});
+        assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
+    }
+
+    #[test]
+    fn test_canonical_json_string_deeply_nested() {
+        let v1 = json!({"x": {"y": {"a": 1, "b": 2}}});
+        let v2 = json!({"x": {"y": {"b": 2, "a": 1}}});
+        assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
+    }
+
+    #[test]
+    fn test_canonical_json_string_array_with_objects() {
+        let v1 = json!([{"a": 1, "b": 2}]);
+        let v2 = json!([{"b": 2, "a": 1}]);
+        assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
+    }
+
+    #[test]
+    fn test_canonical_json_string_mixed_array() {
+        let v1 = json!([1, {"z": 1, "a": 2}, "hello"]);
+        let v2 = json!([1, {"a": 2, "z": 1}, "hello"]);
+        assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
+    }
+
+    #[test]
+    fn test_canonical_json_string_primitives() {
+        // Primitives should remain unchanged
+        assert_eq!(canonical_json_string(&json!(42)), "42");
+        assert_eq!(canonical_json_string(&json!("hello")), "\"hello\"");
+        assert_eq!(canonical_json_string(&json!(true)), "true");
+        assert_eq!(canonical_json_string(&json!(null)), "null");
+        assert_eq!(canonical_json_string(&json!(3.14)), "3.14");
+    }
+
+    #[test]
+    fn test_canonical_json_string_empty_structures() {
+        assert_eq!(canonical_json_string(&json!({})), "{}");
+        assert_eq!(canonical_json_string(&json!([])), "[]");
+    }
+
+    #[test]
+    fn test_canonical_json_string_complex() {
+        // Complex structure with multiple nesting levels
+        let v1 = json!({
+            "z": [{"b": 2, "a": 1}],
+            "a": {"y": 1, "x": 2}
+        });
+        let v2 = json!({
+            "a": {"x": 2, "y": 1},
+            "z": [{"a": 1, "b": 2}]
+        });
+        assert_eq!(canonical_json_string(&v1), canonical_json_string(&v2));
     }
 }

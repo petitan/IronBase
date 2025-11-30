@@ -4,7 +4,7 @@
 use crate::document::Document;
 use crate::error::{MongoLiteError, Result};
 use crate::query::Query;
-use crate::value_utils::{get_nested_value, set_nested_value};
+use crate::value_utils::{canonical_json_string, get_nested_value, set_nested_value};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -1050,14 +1050,16 @@ impl Accumulator {
 
             Accumulator::AddToSet(field) => {
                 // Collect unique values from the field into an array
-                // Use JSON string representation for equality comparison
+                // Use canonical JSON for equality comparison to handle
+                // objects with different key ordering (MongoDB compatible)
                 let mut seen = HashSet::new();
                 let mut values = Vec::new();
 
                 for doc in docs {
                     if let Some(value) = get_nested_value(doc, field) {
-                        // Serialize to string for uniqueness check
-                        let key = value.to_string();
+                        // Use canonical JSON string for uniqueness check
+                        // This ensures {"a":1,"b":2} == {"b":2,"a":1}
+                        let key = canonical_json_string(value);
                         if seen.insert(key) {
                             values.push(value.clone());
                         }
@@ -2886,6 +2888,63 @@ mod tests {
         let results = pipeline.execute(docs).unwrap();
         let colors = results[0]["allColors"].as_array().unwrap();
         assert_eq!(colors.len(), 3); // red, blue, green
+    }
+
+    #[test]
+    fn test_addtoset_object_key_order_independence() {
+        // This test verifies that $addToSet correctly deduplicates objects
+        // that have the same fields but different key insertion order.
+        // MongoDB treats {"a":1,"b":2} and {"b":2,"a":1} as equal.
+        let docs = vec![
+            json!({"category": "A", "data": {"x": 1, "y": 2}}),
+            json!({"category": "A", "data": {"y": 2, "x": 1}}), // Same as above, different key order
+            json!({"category": "A", "data": {"x": 1, "y": 3}}), // Different value
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$category", "uniqueData": {"$addToSet": "$data"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        let unique_data = results[0]["uniqueData"].as_array().unwrap();
+
+        // Should have only 2 unique values, not 3
+        // (the first two documents have equivalent data objects)
+        assert_eq!(
+            unique_data.len(),
+            2,
+            "Expected 2 unique values but got {}: {:?}",
+            unique_data.len(),
+            unique_data
+        );
+    }
+
+    #[test]
+    fn test_addtoset_nested_object_key_order() {
+        // Test with nested objects having different key orders
+        let docs = vec![
+            json!({"id": 1, "nested": {"outer": {"a": 1, "b": 2}}}),
+            json!({"id": 2, "nested": {"outer": {"b": 2, "a": 1}}}), // Same, different order
+            json!({"id": 3, "nested": {"outer": {"a": 1, "c": 3}}}), // Different
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": null, "uniqueNested": {"$addToSet": "$nested"}}}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        let unique_nested = results[0]["uniqueNested"].as_array().unwrap();
+
+        // Should have only 2 unique nested objects
+        assert_eq!(
+            unique_nested.len(),
+            2,
+            "Expected 2 unique nested objects but got {}: {:?}",
+            unique_nested.len(),
+            unique_nested
+        );
     }
 
     // ========== $reduce WITH OBJECT ARRAYS TESTS ==========
