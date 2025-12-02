@@ -90,10 +90,25 @@ impl WriteAheadLog {
     }
 
     /// Clear WAL file (after successful recovery)
+    ///
+    /// On Windows, `set_len(0)` fails with "Access Denied" when the file
+    /// is opened in append mode. We work around this by closing the file
+    /// and reopening it with truncate mode, then reopening in append mode.
     pub fn clear(&mut self) -> Result<()> {
-        self.file.set_len(0)?;
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.sync_all()?; // Ensure truncation is persisted to disk
+        // Close current handle by reopening with truncate (clears the file)
+        self.file = OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&self.path)?;
+        self.file.sync_all()?;
+
+        // Reopen in append mode for future writes
+        self.file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(&self.path)?;
+
         Ok(())
     }
 
