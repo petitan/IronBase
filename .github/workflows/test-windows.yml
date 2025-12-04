@@ -43,7 +43,7 @@ jobs:
       - name: Basic functionality test
         run: |
           python -c "
-          from ironbase import MongoLite
+          from ironbase import IronBase
           import tempfile
           import os
 
@@ -79,7 +79,7 @@ jobs:
       - name: Test file persistence
         run: |
           python -c "
-          from ironbase import MongoLite
+          from ironbase import IronBase
           import tempfile
           import os
 
