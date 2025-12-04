@@ -96,7 +96,7 @@ host = "0.0.0.0"
 port = 8080
 
 [database]
-path = "$($DataDir -replace '\\', '\\\\')\data.mlite"
+path = "$($DataDir.Replace('\', '\\'))\\data.mlite"
 
 [logging]
 level = "info"
