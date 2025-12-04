@@ -439,3 +439,49 @@ fn test_update_one_changes_indexed_value() {
         result2.err()
     );
 }
+
+/// BUG TEST: insert_many with duplicates WITHIN the batch should fail.
+/// This tests the same pattern as Issue #16, but for insert_many.
+#[test]
+#[ignore] // Remove #[ignore] after fixing the bug
+fn test_insert_many_duplicates_within_batch_bug() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on code field
+    collection.create_index("code".to_string(), true).unwrap();
+
+    // Try to insert multiple documents with THE SAME unique code value
+    // This should FAIL because they violate the unique constraint within the batch
+    let mut doc1 = std::collections::HashMap::new();
+    doc1.insert("name".to_string(), json!("Alice"));
+    doc1.insert("code".to_string(), json!("SAME_CODE"));
+
+    let mut doc2 = std::collections::HashMap::new();
+    doc2.insert("name".to_string(), json!("Bob"));
+    doc2.insert("code".to_string(), json!("SAME_CODE")); // DUPLICATE!
+
+    let mut doc3 = std::collections::HashMap::new();
+    doc3.insert("name".to_string(), json!("Charlie"));
+    doc3.insert("code".to_string(), json!("SAME_CODE")); // DUPLICATE!
+
+    let result = db.insert_many("users", vec![doc1, doc2, doc3]);
+
+    // EXPECTED BEHAVIOR: Should fail with duplicate key error
+    assert!(
+        result.is_err(),
+        "insert_many with duplicate unique values within batch should fail. Result: {:?}",
+        result
+    );
+
+    // Verify no documents were inserted (atomic failure)
+    let docs = collection.find(&json!({})).unwrap();
+    assert_eq!(
+        docs.len(),
+        0,
+        "No documents should be inserted on batch failure"
+    );
+}
