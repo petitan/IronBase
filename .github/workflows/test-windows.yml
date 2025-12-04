@@ -41,6 +41,7 @@ jobs:
         run: cargo test --workspace --verbose
 
       - name: Basic functionality test
+        shell: bash
         run: |
           python -c "
           from ironbase import IronBase
@@ -77,6 +78,7 @@ jobs:
           "
 
       - name: Test file persistence
+        shell: bash
         run: |
           python -c "
           from ironbase import IronBase
