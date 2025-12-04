@@ -2,10 +2,16 @@
 //
 // A lightweight MCP server that wraps IronBase document database.
 // Supports both stdio (for Claude Desktop) and HTTP modes.
+// Can be installed as a system service on Windows (Service), Linux (systemd), and macOS (launchd).
 //
 // Usage:
-//   mcp-ironbase-server --stdio          # Claude Desktop mode (stdin/stdout)
 //   mcp-ironbase-server                  # HTTP server mode (default)
+//   mcp-ironbase-server --stdio          # Claude Desktop mode (stdin/stdout)
+//   mcp-ironbase-server install          # Install as system service
+//   mcp-ironbase-server uninstall        # Uninstall system service
+//   mcp-ironbase-server start            # Start the service
+//   mcp-ironbase-server stop             # Stop the service
+//   mcp-ironbase-server status           # Check service status
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
@@ -13,19 +19,109 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mcp_docjl::{
-    dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, IronBaseAdapter, VERSION,
+    dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, service, shutdown,
+    IronBaseAdapter, VERSION,
 };
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Check for --stdio flag
-    if args.iter().any(|a| a == "--stdio") {
-        run_stdio_server();
-    } else {
-        run_http_server().await;
+    // Handle service commands
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "install" => {
+                match service::install() {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("Error installing service: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "uninstall" => {
+                match service::uninstall() {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("Error uninstalling service: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "start" => {
+                match service::start() {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("Error starting service: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "stop" => {
+                match service::stop() {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("Error stopping service: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "status" => {
+                match service::status() {
+                    Ok(status) => {
+                        println!("Service status: {}", status);
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("Error checking status: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            "--stdio" => {
+                run_stdio_server();
+                return;
+            }
+            "--help" | "-h" => {
+                print_help();
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("mcp-ironbase-server v{}", VERSION);
+                std::process::exit(0);
+            }
+            arg => {
+                eprintln!("Unknown command: {}", arg);
+                print_help();
+                std::process::exit(1);
+            }
+        }
     }
+
+    // Default: run HTTP server
+    run_http_server().await;
+}
+
+fn print_help() {
+    println!("IronBase MCP Server v{}", VERSION);
+    println!();
+    println!("USAGE:");
+    println!("    mcp-ironbase-server [COMMAND]");
+    println!();
+    println!("COMMANDS:");
+    println!("    (none)      Start HTTP server (default)");
+    println!("    --stdio     Start in stdio mode (for Claude Desktop)");
+    println!("    install     Install as system service");
+    println!("    uninstall   Uninstall system service");
+    println!("    start       Start the service");
+    println!("    stop        Stop the service");
+    println!("    status      Check service status");
+    println!("    --help      Show this help message");
+    println!("    --version   Show version");
+    println!();
+    println!("ENVIRONMENT:");
+    println!("    IRONBASE_PATH   Database file path (default: ironbase_data.mlite)");
+    println!("    MCP_CONFIG      Config file path (default: config.toml)");
 }
 
 // ============================================================
@@ -269,6 +365,7 @@ async fn run_http_server() {
         routing::{get, post},
         Router,
     };
+    use tokio::net::TcpListener;
     use tracing::info;
 
     // Initialize tracing
@@ -291,23 +388,9 @@ async fn run_http_server() {
         IronBaseAdapter::new(&config.database_path).expect("Failed to create IronBase adapter"),
     );
 
-    let app_state = Arc::new(HttpAppState { adapter });
-
-    let app = Router::new()
-        .route("/mcp", post(http_handle_mcp_request))
-        .route("/health", get(health_check))
-        .with_state(app_state);
-
-    let addr: std::net::SocketAddr = format!("{}:{}", host, port)
-        .parse()
-        .expect("Invalid address");
-
-    info!("Server listening on {}", addr);
-
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await
-        .expect("Server error");
+    let app_state = Arc::new(HttpAppState {
+        adapter: adapter.clone(),
+    });
 
     // HTTP request handler
     async fn http_handle_mcp_request(
@@ -333,6 +416,31 @@ async fn run_http_server() {
             })),
         )
     }
+
+    let app = Router::new()
+        .route("/mcp", post(http_handle_mcp_request))
+        .route("/health", get(health_check))
+        .with_state(app_state);
+
+    let addr = format!("{}:{}", host, port);
+    let listener = TcpListener::bind(&addr)
+        .await
+        .expect("Failed to bind address");
+
+    info!("Server listening on {}", addr);
+
+    // Run server with graceful shutdown
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown::shutdown_signal())
+        .await
+        .expect("Server error");
+
+    // Graceful shutdown: checkpoint database
+    info!("Shutting down gracefully...");
+    if let Err(e) = adapter.checkpoint() {
+        tracing::error!("Error checkpointing database: {}", e);
+    }
+    info!("Server stopped");
 }
 
 struct HttpAppState {

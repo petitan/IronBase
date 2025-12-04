@@ -3,6 +3,8 @@
 pub mod adapter;
 pub mod error;
 pub mod prompts;
+pub mod service;
+pub mod shutdown;
 pub mod tools;
 
 // Re-export main types
