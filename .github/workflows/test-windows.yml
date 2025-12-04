@@ -78,7 +78,30 @@ jobs:
           PYEOF
           python /tmp/test_basic.py
 
-      # Note: File persistence test skipped on Windows
-      # The Python binding lacks explicit close() method, causing persistence issues.
-      # Rust tests (cargo test) already verify persistence thoroughly.
-      # TODO: Add close() method to Python binding to fix this.
+      - name: Test file persistence
+        shell: bash
+        run: |
+          cat > /tmp/test_persist.py << 'PYEOF'
+          from ironbase import IronBase
+          import tempfile
+          import os
+
+          with tempfile.TemporaryDirectory() as tmpdir:
+              db_path = os.path.join(tmpdir, 'persist.mlite')
+
+              # Write data
+              db = IronBase(db_path)
+              coll = db.collection('persist')
+              coll.insert_one({'msg': 'persistence test'})
+              db.close()  # Explicitly flush and close
+
+              # Reopen and verify
+              db = IronBase(db_path)
+              coll = db.collection('persist')
+              doc = coll.find_one({})
+              assert doc is not None, "Document not found after reopen!"
+              assert doc['msg'] == 'persistence test'
+
+              print('Windows file persistence test passed!')
+          PYEOF
+          python /tmp/test_persist.py
