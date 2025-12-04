@@ -251,6 +251,73 @@ fn test_update_many_unique_constraint_violation() {
     );
 }
 
+/// BUG: update_many can bypass unique index constraint when updating multiple documents
+/// to the same NEW value. The constraint check passes for each document individually
+/// because the index isn't updated until after all checks complete.
+///
+/// This test should FAIL until the bug is fixed, demonstrating the issue.
+#[test]
+#[ignore] // Remove this when bug is fixed - test currently fails as expected
+fn test_update_many_creates_duplicates_in_unique_index_bug() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on code field
+    collection.create_index("code".to_string(), true).unwrap();
+
+    // Insert documents with DIFFERENT unique codes
+    let mut fields1 = std::collections::HashMap::new();
+    fields1.insert("name".to_string(), json!("Alice"));
+    fields1.insert("code".to_string(), json!("CODE_A"));
+    fields1.insert("role".to_string(), json!("admin"));
+    db.insert_one("users", fields1).unwrap();
+
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("name".to_string(), json!("Bob"));
+    fields2.insert("code".to_string(), json!("CODE_B"));
+    fields2.insert("role".to_string(), json!("admin"));
+    db.insert_one("users", fields2).unwrap();
+
+    let mut fields3 = std::collections::HashMap::new();
+    fields3.insert("name".to_string(), json!("Charlie"));
+    fields3.insert("code".to_string(), json!("CODE_C"));
+    fields3.insert("role".to_string(), json!("admin"));
+    db.insert_one("users", fields3).unwrap();
+
+    // BUG: Try to update ALL admins to the SAME NEW code
+    // This should FAIL because it would create duplicates
+    // But currently it PASSES because each check doesn't see pending updates!
+    let result = db.update_many(
+        "users",
+        &json!({"role": "admin"}),
+        &json!({"$set": {"code": "SAME_CODE_FOR_ALL"}}),
+    );
+
+    // This assertion currently FAILS - the update_many succeeds when it shouldn't!
+    assert!(
+        result.is_err(),
+        "BUG: update_many to same NEW value should fail for unique index, \
+        but it succeeds creating duplicates! Result: {:?}",
+        result
+    );
+
+    // If we get here, verify the database is in an inconsistent state
+    if result.is_ok() {
+        let docs = collection
+            .find(&json!({"code": "SAME_CODE_FOR_ALL"}))
+            .unwrap();
+        assert!(
+            docs.len() <= 1,
+            "BUG CONFIRMED: Found {} documents with same unique code! \
+            Unique index constraint was bypassed.",
+            docs.len()
+        );
+    }
+}
+
 #[test]
 fn test_delete_removes_from_index() {
     let temp_dir = TempDir::new().unwrap();
