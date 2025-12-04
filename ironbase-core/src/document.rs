@@ -56,10 +56,18 @@ impl Document {
         Ok(doc)
     }
 
-    /// 🚀 OPTIMIZED: Create Document directly from serde_json::Value
+    /// 🚀 OPTIMIZED: Create Document directly from serde_json::Value reference
     /// Avoids Value → String → Document round-trip serialization
+    /// Note: Clones the input value. Use `from_value_owned()` when you have an owned Value.
     pub fn from_value(value: &Value) -> serde_json::Result<Self> {
-        let mut doc: Self = serde_json::from_value(value.clone())?;
+        Self::from_value_owned(value.clone())
+    }
+
+    /// 🚀 ZERO-COPY: Create Document from owned serde_json::Value
+    /// Takes ownership of the Value, avoiding clone when caller has an owned Value.
+    /// This is the most efficient way to create a Document from JSON.
+    pub fn from_value_owned(value: Value) -> serde_json::Result<Self> {
+        let mut doc: Self = serde_json::from_value(value)?;
 
         // WORKAROUND: same as from_json - _id needs to be in fields for query matching
         doc.fields

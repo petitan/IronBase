@@ -867,7 +867,8 @@ impl Storage for StorageEngine {
                 continue;
             }
 
-            let document = Document::from_value(&doc_value)?;
+            // 🚀 OPTIMIZED: Use from_value_owned to avoid clone
+            let document = Document::from_value_owned(doc_value)?;
             documents.push(document);
         }
 

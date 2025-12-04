@@ -160,10 +160,7 @@ impl Storage for FileStorage {
             let doc_value: Value = serde_json::from_slice(&data)
                 .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
 
-            // Convert to Document struct (direct Value → Document, no string round-trip)
-            let document = Document::from_value(&doc_value)?;
-
-            // Skip tombstones (deleted documents)
+            // Skip tombstones (deleted documents) - check BEFORE creating Document
             if doc_value
                 .get("_tombstone")
                 .and_then(|v| v.as_bool())
@@ -172,6 +169,8 @@ impl Storage for FileStorage {
                 continue;
             }
 
+            // 🚀 OPTIMIZED: Use from_value_owned to avoid clone (doc_value consumed here)
+            let document = Document::from_value_owned(doc_value)?;
             documents.push(document);
         }
 

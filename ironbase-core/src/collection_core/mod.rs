@@ -2081,9 +2081,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let mut skipped = 0usize;
 
             for (doc_id, doc) in docs_by_id {
-                // 🚀 OPTIMIZED: Direct Value → Document conversion
-                // Avoids Value → String → Document round-trip serialization
-                let document = Document::from_value(&doc)?;
+                // 🚀 OPTIMIZED: Use from_value_owned to avoid clone (owned doc consumed here)
+                let document = Document::from_value_owned(doc)?;
 
                 if parsed_query.matches(&document) {
                     if skipped < skip {
