@@ -96,7 +96,7 @@ impl Ord for IndexKey {
     }
 }
 
-/// Convert serde_json::Value to IndexKey
+/// Convert serde_json::Value reference to IndexKey (borrows, must clone strings)
 impl From<&serde_json::Value> for IndexKey {
     fn from(value: &serde_json::Value) -> Self {
         match value {
@@ -112,6 +112,27 @@ impl From<&serde_json::Value> for IndexKey {
                 }
             }
             serde_json::Value::String(s) => IndexKey::String(s.clone()),
+            _ => IndexKey::Null, // Arrays and objects -> Null for simple index
+        }
+    }
+}
+
+/// Convert owned serde_json::Value to IndexKey (takes ownership, zero-copy for strings)
+impl From<serde_json::Value> for IndexKey {
+    fn from(value: serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Null => IndexKey::Null,
+            serde_json::Value::Bool(b) => IndexKey::Bool(b),
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_i64() {
+                    IndexKey::Int(i)
+                } else if let Some(f) = n.as_f64() {
+                    IndexKey::Float(OrderedFloat(f))
+                } else {
+                    IndexKey::Null
+                }
+            }
+            serde_json::Value::String(s) => IndexKey::String(s), // Zero-copy: takes ownership
             _ => IndexKey::Null, // Arrays and objects -> Null for simple index
         }
     }
