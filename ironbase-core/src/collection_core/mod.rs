@@ -404,16 +404,52 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// This is a pre-insert validation step that catches duplicates BEFORE any
     /// documents are written. Used by DatabaseCore::insert_many for atomic failure.
+    ///
+    /// FIX #18: Now checks BOTH:
+    /// 1. Duplicates within the batch (via BatchConstraintValidator)
+    /// 2. Conflicts with EXISTING documents in the index
     pub(crate) fn validate_batch_constraints(
         &self,
         documents: &[HashMap<String, Value>],
     ) -> Result<()> {
         let indexes = self.indexes.read();
         let mut batch_validator = BatchConstraintValidator::new(&indexes, &self.name);
+        let id_index_name = format!("{}_id", self.name);
+
         for document in documents {
             let doc_value = serde_json::to_value(document)
                 .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+
+            // Check for duplicates WITHIN the batch
             batch_validator.check_and_track(&doc_value)?;
+
+            // FIX #18: Check against EXISTING documents in the index
+            // This ensures atomic failure - all checks happen before any writes.
+            for index_name in indexes.list_indexes() {
+                if index_name == id_index_name {
+                    continue; // _id handled separately
+                }
+
+                if let Some(index) = indexes.get_btree_index(&index_name) {
+                    if !index.metadata.unique {
+                        continue; // Only check unique indexes
+                    }
+
+                    let field = &index.metadata.field;
+                    // Use get_nested_value to support dot notation (e.g., "profile.code")
+                    if let Some(field_value) =
+                        crate::value_utils::get_nested_value(&doc_value, field)
+                    {
+                        let index_key = IndexKey::from(field_value);
+                        if index.search(&index_key).is_some() {
+                            return Err(MongoLiteError::IndexError(format!(
+                                "Duplicate key: {:?} in field '{}' (unique index)",
+                                index_key, field
+                            )));
+                        }
+                    }
+                }
+            }
         }
         Ok(())
     }

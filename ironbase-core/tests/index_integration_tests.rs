@@ -485,3 +485,140 @@ fn test_insert_many_duplicates_within_batch_bug() {
         "No documents should be inserted on batch failure"
     );
 }
+
+/// BUG #3: insert_many should be atomic - if one document fails, none should be inserted
+/// This test verifies that insert_many properly rolls back on failure.
+#[test]
+fn test_insert_many_atomic_failure_against_existing_documents() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on code field
+    collection.create_index("code".to_string(), true).unwrap();
+
+    // Insert an EXISTING document with a unique code
+    let mut existing = std::collections::HashMap::new();
+    existing.insert("name".to_string(), json!("Existing"));
+    existing.insert("code".to_string(), json!("EXISTING_CODE"));
+    db.insert_one("users", existing).unwrap();
+
+    // Now try to insert_many with 3 documents:
+    // - First two have NEW unique codes (would succeed individually)
+    // - Third one has the SAME code as the existing document (should fail)
+    let mut doc1 = std::collections::HashMap::new();
+    doc1.insert("name".to_string(), json!("Alice"));
+    doc1.insert("code".to_string(), json!("CODE_A")); // New, unique
+
+    let mut doc2 = std::collections::HashMap::new();
+    doc2.insert("name".to_string(), json!("Bob"));
+    doc2.insert("code".to_string(), json!("CODE_B")); // New, unique
+
+    let mut doc3 = std::collections::HashMap::new();
+    doc3.insert("name".to_string(), json!("Charlie"));
+    doc3.insert("code".to_string(), json!("EXISTING_CODE")); // CONFLICT with existing!
+
+    let result = db.insert_many("users", vec![doc1, doc2, doc3]);
+
+    // EXPECTED: Should fail because doc3 conflicts with existing document
+    assert!(
+        result.is_err(),
+        "insert_many with conflict against existing should fail. Result: {:?}",
+        result
+    );
+
+    // CRITICAL: Verify ATOMICITY - no new documents should be inserted
+    let docs = collection.find(&json!({})).unwrap();
+    assert_eq!(
+        docs.len(),
+        1,
+        "Only the original document should exist (atomic failure - none of the batch inserted)"
+    );
+
+    // The only document should be the existing one
+    let existing_doc = collection.find_one(&json!({"name": "Existing"})).unwrap();
+    assert!(
+        existing_doc.is_some(),
+        "Original document should still exist"
+    );
+
+    // Alice should NOT exist (batch failed, so all should be rolled back)
+    let alice = collection.find_one(&json!({"name": "Alice"})).unwrap();
+    assert!(
+        alice.is_none(),
+        "Alice should NOT exist - batch should have been rolled back"
+    );
+}
+
+/// BUG #2: update_many with nested field unique index creates duplicates
+/// This test verifies that update_many correctly detects duplicates when
+/// updating nested fields with a unique index.
+#[test]
+fn test_update_many_nested_field_creates_duplicates_in_unique_index_bug() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on nested field profile.code
+    collection
+        .create_index("profile.code".to_string(), true)
+        .unwrap();
+
+    // Insert documents with DIFFERENT nested unique codes
+    let mut fields1 = std::collections::HashMap::new();
+    fields1.insert("name".to_string(), json!("Alice"));
+    fields1.insert("profile".to_string(), json!({"code": "CODE_A", "level": 1}));
+    fields1.insert("role".to_string(), json!("admin"));
+    db.insert_one("users", fields1).unwrap();
+
+    let mut fields2 = std::collections::HashMap::new();
+    fields2.insert("name".to_string(), json!("Bob"));
+    fields2.insert("profile".to_string(), json!({"code": "CODE_B", "level": 2}));
+    fields2.insert("role".to_string(), json!("admin"));
+    db.insert_one("users", fields2).unwrap();
+
+    let mut fields3 = std::collections::HashMap::new();
+    fields3.insert("name".to_string(), json!("Charlie"));
+    fields3.insert("profile".to_string(), json!({"code": "CODE_C", "level": 3}));
+    fields3.insert("role".to_string(), json!("admin"));
+    db.insert_one("users", fields3).unwrap();
+
+    // BUG #2: Try to update ALL admins to the SAME NEW nested code
+    // This should FAIL because it would create duplicates within the batch
+    let result = db.update_many(
+        "users",
+        &json!({"role": "admin"}),
+        &json!({"$set": {"profile.code": "SAME_CODE_FOR_ALL"}}),
+    );
+
+    // After fix: update_many correctly detects batch duplicates and fails
+    assert!(
+        result.is_err(),
+        "update_many to same NEW nested value should fail for unique index. Result: {:?}",
+        result
+    );
+
+    // Verify error message mentions duplicate
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Duplicate key") || err_msg.contains("unique"),
+        "Error should mention duplicate key, got: {}",
+        err_msg
+    );
+
+    // Verify no documents were modified (atomic failure)
+    let alice = collection
+        .find_one(&json!({"name": "Alice"}))
+        .unwrap()
+        .unwrap();
+    let profile = alice.get("profile").unwrap();
+    assert_eq!(
+        profile.get("code").unwrap().as_str().unwrap(),
+        "CODE_A",
+        "Alice's nested code should remain unchanged"
+    );
+}

@@ -210,6 +210,11 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
             batch_validator.check_and_track(&doc_value)?;
 
+            // 🔒 FIX #18: Check against EXISTING documents in index BEFORE any writes
+            // This ensures atomicity: all constraint checks happen first, then all writes.
+            // Previously, batch_add_to_indexes would fail mid-way leaving partial inserts.
+            self.check_index_constraints(&doc, None)?;
+
             prepared_docs.push((doc_id.clone(), doc));
             inserted_ids.push(doc_id);
         }

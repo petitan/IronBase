@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::{MongoLiteError, Result};
 use crate::index::IndexManager;
+use crate::value_utils::get_nested_value;
 use serde_json::Value;
 
 /// Validates unique constraints within a batch of documents
@@ -80,7 +81,9 @@ impl BatchConstraintValidator {
     /// * `Err(MongoLiteError::IndexError)` if a duplicate is detected
     pub fn check_and_track(&mut self, doc: &Value) -> Result<()> {
         for (field, index_name) in &self.unique_indexes {
-            if let Some(field_value) = doc.get(field) {
+            // FIX #17: Use get_nested_value to support dot notation (e.g., "profile.code")
+            // Previously used doc.get(field) which only works for top-level fields
+            if let Some(field_value) = get_nested_value(doc, field) {
                 let value_key = field_value.to_string();
                 let seen_set = self.pending_values.entry(index_name.clone()).or_default();
 
@@ -213,5 +216,66 @@ mod tests {
         // Should only track 'email', not '_id'
         assert_eq!(validator.unique_indexes.len(), 1);
         assert_eq!(validator.unique_indexes[0].0, "email");
+    }
+
+    /// FIX #17: Test nested field unique index support (dot notation)
+    #[test]
+    fn test_detects_duplicate_in_nested_field() {
+        // Create index on nested field "profile.code"
+        let mut manager = IndexManager::new();
+        manager
+            .create_btree_index(
+                "test_profile.code".to_string(),
+                "profile.code".to_string(),
+                true,
+            )
+            .unwrap();
+
+        let mut validator = BatchConstraintValidator::new(&manager, "test");
+
+        // First document with nested field
+        assert!(validator
+            .check_and_track(&json!({"name": "Alice", "profile": {"code": "CODE_A"}}))
+            .is_ok());
+
+        // Different nested value - should succeed
+        assert!(validator
+            .check_and_track(&json!({"name": "Bob", "profile": {"code": "CODE_B"}}))
+            .is_ok());
+
+        // Duplicate nested value - should fail
+        let result =
+            validator.check_and_track(&json!({"name": "Charlie", "profile": {"code": "CODE_A"}}));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate key in batch"));
+    }
+
+    #[test]
+    fn test_deeply_nested_field() {
+        // Create index on deeply nested field "user.address.city"
+        let mut manager = IndexManager::new();
+        manager
+            .create_btree_index(
+                "test_user.address.city".to_string(),
+                "user.address.city".to_string(),
+                true,
+            )
+            .unwrap();
+
+        let mut validator = BatchConstraintValidator::new(&manager, "test");
+
+        assert!(validator
+            .check_and_track(&json!({"user": {"address": {"city": "NYC"}}}))
+            .is_ok());
+        assert!(validator
+            .check_and_track(&json!({"user": {"address": {"city": "LA"}}}))
+            .is_ok());
+
+        // Duplicate deeply nested value
+        let result = validator.check_and_track(&json!({"user": {"address": {"city": "NYC"}}}));
+        assert!(result.is_err());
     }
 }
