@@ -160,8 +160,8 @@ impl Storage for FileStorage {
             let doc_value: Value = serde_json::from_slice(&data)
                 .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
 
-            // Convert to Document struct
-            let document = Document::from_json(&serde_json::to_string(&doc_value)?)?;
+            // Convert to Document struct (direct Value → Document, no string round-trip)
+            let document = Document::from_value(&doc_value)?;
 
             // Skip tombstones (deleted documents)
             if doc_value

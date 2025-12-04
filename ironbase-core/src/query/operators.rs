@@ -31,7 +31,7 @@ use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 // ============================================================================
 // REGEX WITH OPTIONS SUPPORT (Full regex crate implementation)
@@ -41,7 +41,8 @@ lazy_static! {
     /// Global cache for compiled regex patterns
     /// LRU with 100 entry limit to prevent memory bloat
     /// Key format: "pattern:options"
-    static ref REGEX_CACHE: Mutex<LruCache<String, Regex>> =
+    /// Uses Arc<Regex> for cheap cloning (reference count increment only)
+    static ref REGEX_CACHE: Mutex<LruCache<String, Arc<Regex>>> =
         Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap()));
 }
 
@@ -71,27 +72,28 @@ fn build_regex_pattern(pattern: &str, options: &str) -> String {
 ///
 /// Uses an LRU cache to avoid recompiling the same patterns repeatedly.
 /// Regex::new() is expensive, so caching provides significant performance benefits.
-fn get_or_compile_regex(pattern: &str, options: &str) -> Result<Regex> {
+/// Returns Arc<Regex> for cheap cloning (only increments reference count).
+fn get_or_compile_regex(pattern: &str, options: &str) -> Result<Arc<Regex>> {
     let cache_key = format!("{}:{}", pattern, options);
 
     // Try cache first
     {
         let mut cache = REGEX_CACHE.lock().unwrap();
         if let Some(regex) = cache.get(&cache_key) {
-            return Ok(regex.clone());
+            return Ok(Arc::clone(regex)); // Cheap: just increments ref count
         }
     }
 
     // Build and compile regex with options
     let regex_pattern = build_regex_pattern(pattern, options);
-    let regex = Regex::new(&regex_pattern).map_err(|e| {
+    let regex = Arc::new(Regex::new(&regex_pattern).map_err(|e| {
         MongoLiteError::InvalidQuery(format!("Invalid regex pattern '{}': {}", pattern, e))
-    })?;
+    })?);
 
     // Store in cache
     {
         let mut cache = REGEX_CACHE.lock().unwrap();
-        cache.put(cache_key, regex.clone());
+        cache.put(cache_key, Arc::clone(&regex));
     }
 
     Ok(regex)

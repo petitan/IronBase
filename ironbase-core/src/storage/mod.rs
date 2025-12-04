@@ -867,7 +867,7 @@ impl Storage for StorageEngine {
                 continue;
             }
 
-            let document = Document::from_json(&serde_json::to_string(&doc_value)?)?;
+            let document = Document::from_value(&doc_value)?;
             documents.push(document);
         }
 
