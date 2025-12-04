@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// MongoDB-szerű dokumentum
+/// MongoDB-style document
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Document {
     #[serde(rename = "_id")]
@@ -14,36 +14,36 @@ pub struct Document {
     pub fields: HashMap<String, Value>,
 }
 
-/// Dokumentum ID típusok
-/// FONTOS: Untagged, hogy a dokumentumokban egyszerű értékként jelenjen meg: {"_id": 2}
-/// A metadat catalog-ban külön kezeljük a típus megőrzést custom serialization-nel.
+/// Document ID types
+/// IMPORTANT: Untagged so it appears as simple value in documents: {"_id": 2}
+/// Type preservation is handled separately in metadata catalog via custom serialization.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(untagged)]
 pub enum DocumentId {
     Int(i64),
     String(String),
-    ObjectId(String), // BSON ObjectId string reprezentáció
+    ObjectId(String), // BSON ObjectId string representation
 }
 
 impl DocumentId {
-    /// Új auto-increment ID generálás
+    /// Generate new auto-increment ID
     pub fn new_auto(last_id: u64) -> Self {
         DocumentId::Int((last_id + 1) as i64)
     }
 
-    /// Új ObjectId generálás (UUID v4)
+    /// Generate new ObjectId (UUID v4)
     pub fn new_object_id() -> Self {
         DocumentId::ObjectId(Uuid::new_v4().to_string())
     }
 }
 
 impl Document {
-    /// Új dokumentum létrehozása
+    /// Create a new document
     pub fn new(id: DocumentId, fields: HashMap<String, Value>) -> Self {
         Document { id, fields }
     }
 
-    /// Dokumentum JSON-ből
+    /// Create document from JSON string
     pub fn from_json(json: &str) -> serde_json::Result<Self> {
         let mut doc: Self = serde_json::from_str(json)?;
 
@@ -76,12 +76,12 @@ impl Document {
         Ok(doc)
     }
 
-    /// Dokumentum JSON-be
+    /// Serialize document to JSON
     pub fn to_json(&self) -> serde_json::Result<String> {
         serde_json::to_string(self)
     }
 
-    /// Mező lekérése (includes _id)
+    /// Get field value (includes _id)
     /// WORKAROUND: Since _id is in doc.id field after deserialization,
     /// we can't return a reference to it. The query engine must special-case _id matching.
     pub fn get(&self, field: &str) -> Option<&Value> {
@@ -251,13 +251,13 @@ impl Document {
         serde_json::to_value(&self.id).unwrap()
     }
 
-    /// Mező beállítása (top-level only, use set_nested for dot notation)
+    /// Set field value (top-level only, use set_nested for dot notation)
     pub fn set(&mut self, field: String, value: Value) {
         self.fields.insert(field, value);
     }
 
-    /// Mező beállítása dot notation támogatással (MongoDB-style)
-    /// Pl: "address.city" -> address object-ben a city mezőt állítja be
+    /// Set field value with dot notation support (MongoDB-style)
+    /// Example: "address.city" -> sets city field inside address object
     pub fn set_nested(&mut self, field: &str, value: Value) {
         if !field.contains('.') {
             self.fields.insert(field.to_string(), value);
@@ -267,19 +267,19 @@ impl Document {
         let parts: Vec<&str> = field.split('.').collect();
         let first = parts[0];
 
-        // Ha nincs még ilyen top-level mező, létrehozzuk a teljes útvonalat
+        // If top-level field doesn't exist, create the full path
         if !self.fields.contains_key(first) {
             let nested = Self::create_nested_value(&parts[1..], value);
             self.fields.insert(first.to_string(), nested);
             return;
         }
 
-        // Meglévő struktúra módosítása
+        // Modify existing structure
         let root = self.fields.get_mut(first).unwrap();
         Self::set_value_at_path(root, &parts[1..], value);
     }
 
-    /// Helper: Beágyazott struktúra létrehozása
+    /// Helper: Create nested structure
     fn create_nested_value(parts: &[&str], value: Value) -> Value {
         if parts.is_empty() {
             return value;
@@ -293,14 +293,14 @@ impl Document {
         Value::Object(obj)
     }
 
-    /// Helper: Érték beállítása az útvonal mentén
+    /// Helper: Set value at the given path
     fn set_value_at_path(current: &mut Value, parts: &[&str], value: Value) {
         if parts.is_empty() {
             return;
         }
 
         if parts.len() == 1 {
-            // Utolsó rész - itt kell beállítani az értéket
+            // Last part - set the value here
             match current {
                 Value::Object(map) => {
                     map.insert(parts[0].to_string(), value);
@@ -313,7 +313,7 @@ impl Document {
                     }
                 }
                 _ => {
-                    // Ha nem object/array, cseréljük le object-re
+                    // If not object/array, replace with object
                     let mut obj = serde_json::Map::new();
                     obj.insert(parts[0].to_string(), value);
                     *current = Value::Object(obj);
@@ -322,17 +322,17 @@ impl Document {
             return;
         }
 
-        // Köztes rész - navigálunk vagy létrehozunk
+        // Intermediate part - navigate or create
         match current {
             Value::Object(map) => {
                 if !map.contains_key(parts[0]) {
-                    // Nem létezik - létrehozzuk a maradék útvonalat
+                    // Doesn't exist - create the remaining path
                     map.insert(
                         parts[0].to_string(),
                         Self::create_nested_value(&parts[1..], value),
                     );
                 } else {
-                    // Létezik - rekurzívan folytatjuk
+                    // Exists - continue recursively
                     let next = map.get_mut(parts[0]).unwrap();
                     Self::set_value_at_path(next, &parts[1..], value);
                 }
@@ -345,19 +345,19 @@ impl Document {
                 }
             }
             _ => {
-                // Nem navigálható - cseréljük le object-re
+                // Not navigable - replace with object
                 let nested = Self::create_nested_value(parts, value);
                 *current = nested;
             }
         }
     }
 
-    /// Mező törlése (top-level only)
+    /// Remove field (top-level only)
     pub fn remove(&mut self, field: &str) -> Option<Value> {
         self.fields.remove(field)
     }
 
-    /// Mező törlése dot notation támogatással (MongoDB-style)
+    /// Remove field with dot notation support (MongoDB-style)
     pub fn remove_nested(&mut self, field: &str) -> Option<Value> {
         if !field.contains('.') {
             return self.fields.remove(field);
@@ -374,7 +374,7 @@ impl Document {
         Self::remove_value_at_path(root, &parts[1..])
     }
 
-    /// Helper: Érték törlése az útvonal mentén
+    /// Helper: Remove value at the given path
     fn remove_value_at_path(current: &mut Value, parts: &[&str]) -> Option<Value> {
         if parts.is_empty() {
             return None;
@@ -412,7 +412,7 @@ impl Document {
         }
     }
 
-    /// Módosítható referencia egy beágyazott értékhez (dot notation)
+    /// Get mutable reference to nested value (dot notation)
     pub fn get_mut_nested(&mut self, field: &str) -> Option<&mut Value> {
         if field.is_empty() {
             return None;
@@ -441,7 +441,7 @@ impl Document {
         Some(current)
     }
 
-    /// Tartalmazza-e a mezőt
+    /// Check if document contains field
     pub fn contains(&self, field: &str) -> bool {
         self.fields.contains_key(field)
     }
@@ -451,12 +451,12 @@ impl From<Document> for Value {
     fn from(doc: Document) -> Self {
         let mut map = serde_json::Map::new();
 
-        // Többi mező először (including _id if present in fields)
+        // Other fields first (including _id if present in fields)
         for (k, v) in doc.fields {
             map.insert(k, v);
         }
 
-        // _id hozzáadása ONLY if not already present
+        // Add _id ONLY if not already present
         if !map.contains_key("_id") {
             map.insert("_id".to_string(), serde_json::to_value(&doc.id).unwrap());
         }

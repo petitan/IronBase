@@ -29,6 +29,16 @@ use self::schema::CompiledSchema;
 // Re-export the sealed RawOperations trait for crate-internal use
 pub(crate) use self::raw_operations::RawOperations;
 
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+/// Default capacity for the LRU query cache
+const QUERY_CACHE_CAPACITY: usize = 1000;
+
+/// Default batch size for streaming cursor operations
+const DEFAULT_CURSOR_BATCH_SIZE: usize = 100;
+
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
 pub struct InsertManyResult {
@@ -157,7 +167,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Create new collection (or get existing)
     pub fn new(name: String, storage: Arc<RwLock<S>>) -> Result<Self> {
-        // Collection létrehozása, ha nem létezik
+        // Create collection if it doesn't exist
         {
             let mut storage_guard = storage.write();
             if storage_guard.get_collection_meta(&name).is_none() {
@@ -334,7 +344,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             name,
             storage,
             indexes: Arc::new(RwLock::new(index_manager)),
-            query_cache: Arc::new(QueryCache::new(1000)), // LRU cache with 1000 query capacity
+            query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema: Arc::new(RwLock::new(compiled_schema)),
         })
     }
@@ -2256,7 +2266,7 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
             collection,
             doc_ids,
             position: 0,
-            batch_size: 100, // Default batch size
+            batch_size: DEFAULT_CURSOR_BATCH_SIZE,
         }
     }
 

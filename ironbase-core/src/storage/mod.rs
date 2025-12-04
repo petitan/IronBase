@@ -127,7 +127,7 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
-    /// Adatbázis megnyitása vagy létrehozása
+    /// Open or create database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let exists = path.as_ref().exists();
@@ -139,26 +139,25 @@ impl StorageEngine {
             .open(&path)?;
 
         let (header, collections) = if exists && file.metadata()?.len() > 0 {
-            // Meglévő adatbázis betöltése
+            // Load existing database
             Self::load_metadata(&mut file)?
         } else {
-            // Új adatbázis inicializálása
+            // Initialize new database
             let header = Header::default();
             let collections = HashMap::new();
             let _ = Self::write_metadata(&mut file, &header, &collections)?;
             (header, collections)
         };
 
-        // Memory-mapped fájl (ha elég kicsi a fájl)
+        // Memory-mapped file (if file is small enough)
         let mmap = if file.metadata()?.len() < 1_000_000_000 {
-            // 1GB alatt használjuk az mmap-et
-
+            // Use mmap for files under 1GB
             unsafe { MmapOptions::new().map_mut(&file).ok() }
         } else {
             None
         };
 
-        // WAL fájl megnyitása
+        // Open WAL file
         let wal_path = PathBuf::from(&path_str).with_extension("wal");
         let wal = WriteAheadLog::open(wal_path)?;
 
@@ -178,7 +177,7 @@ impl StorageEngine {
         Ok(storage)
     }
 
-    /// Collection létrehozása
+    /// Create a new collection
     pub fn create_collection(&mut self, name: &str) -> Result<()> {
         if self.collections.contains_key(name) {
             return Err(MongoLiteError::CollectionExists(name.to_string()));

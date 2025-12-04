@@ -11,7 +11,7 @@ impl StorageEngine {
     pub fn write_data(&mut self, data: &[u8]) -> Result<u64> {
         let offset = self.file.seek(SeekFrom::End(0))?;
 
-        // Méret + adat írása
+        // Write length + data
         let len = (data.len() as u32).to_le_bytes();
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
@@ -45,7 +45,7 @@ impl StorageEngine {
 
         self.file.seek(SeekFrom::Start(offset))?;
 
-        // Méret olvasása
+        // Read length
         let mut len_bytes = [0u8; 4];
         self.file.read_exact(&mut len_bytes)?;
         let len = u32::from_le_bytes(len_bytes) as usize;
@@ -66,7 +66,7 @@ impl StorageEngine {
             )));
         }
 
-        // Adat olvasása
+        // Read data
         let mut data = vec![0u8; len];
         self.file.read_exact(&mut data)?;
 

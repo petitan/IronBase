@@ -42,6 +42,34 @@ fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::Ind
     }
 }
 
+/// Extract DocumentId from a JSON Value's _id field
+///
+/// Handles Int, String, and ObjectId (24-char hex string) formats.
+/// Returns error if _id is missing or has invalid type.
+fn extract_doc_id(doc: &Value) -> Result<DocumentId> {
+    try_extract_doc_id(doc).ok_or_else(|| {
+        crate::error::MongoLiteError::InvalidQuery("Document missing _id".to_string())
+    })
+}
+
+/// Try to extract DocumentId from a JSON Value's _id field
+///
+/// Returns None if _id is missing or has invalid type.
+/// Used in loops where we want to skip invalid documents.
+fn try_extract_doc_id(doc: &Value) -> Option<DocumentId> {
+    match doc.get("_id") {
+        Some(Value::Number(n)) => Some(DocumentId::Int(n.as_i64().unwrap_or(0))),
+        Some(Value::String(s)) => {
+            if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                Some(DocumentId::ObjectId(s.clone()))
+            } else {
+                Some(DocumentId::String(s.clone()))
+            }
+        }
+        _ => None,
+    }
+}
+
 /// Pure Rust IronBase Database - language-independent
 ///
 /// Generic over Storage backend:
@@ -74,67 +102,10 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
 impl DatabaseCore<StorageEngine> {
     /// Open or create database with StorageEngine (production)
     ///
-    /// This method is StorageEngine-specific because it handles WAL recovery.
+    /// Uses Safe durability mode by default (like SQL databases).
+    /// For other modes, use `open_with_durability()`.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_str = path.as_ref().to_string_lossy().to_string();
-        let mut storage = StorageEngine::open(&path_str)?;
-
-        // Recover from WAL (includes both data and index changes)
-        let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
-
-        // NOTE: WAL recovery now uses write_document() which updates the catalog.
-        // The document_catalog is loaded from metadata by StorageEngine::open(),
-        // and recover_from_wal() properly updates it for any recovered operations.
-
-        // Create DatabaseCore instance with default Safe mode
-        let db = DatabaseCore {
-            storage: Arc::new(RwLock::new(storage)),
-            db_path: path_str,
-            next_tx_id: AtomicU64::new(1),
-            active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
-            durability_mode: DurabilityMode::default(), // Safe mode by default
-            batch_buffer: Arc::new(RwLock::new(Vec::new())),
-            unsafe_op_counter: AtomicU64::new(0),
-        };
-
-        // Apply recovered index changes to collections
-        // Group index changes by collection name
-        let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> =
-            HashMap::new();
-
-        for change in recovered_index_changes {
-            // Group by collection name (now properly included in RecoveredIndexChange)
-            changes_by_collection
-                .entry(change.collection.clone())
-                .or_default()
-                .push(change);
-        }
-
-        // Apply changes to each collection's indexes
-        for (collection_name, changes) in changes_by_collection {
-            // Get collection (creates if doesn't exist)
-            if let Ok(collection) = db.collection(&collection_name) {
-                for change in changes {
-                    // Apply the index change to the collection's indexes
-                    let mut indexes = collection.indexes.write();
-                    if let Some(btree_index) = indexes.get_btree_index_mut(&change.index_name) {
-                        // Convert transaction::IndexKey to index::IndexKey
-                        let index_key = convert_index_key(&change.key);
-
-                        match change.operation {
-                            crate::transaction::IndexOperation::Insert => {
-                                btree_index.insert(index_key, change.doc_id)?;
-                            }
-                            crate::transaction::IndexOperation::Delete => {
-                                btree_index.delete(&index_key, &change.doc_id)?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(db)
+        Self::open_with_durability(path, DurabilityMode::default())
     }
 
     /// Open or create database with explicit durability mode
@@ -519,22 +490,7 @@ impl DatabaseCore<StorageEngine> {
                 }
                 let old_doc = old_doc.unwrap();
 
-                // Extract doc_id from old document
-                let doc_id = match old_doc.get("_id") {
-                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                    Some(Value::String(s)) => {
-                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                            DocumentId::ObjectId(s.clone())
-                        } else {
-                            DocumentId::String(s.clone())
-                        }
-                    }
-                    _ => {
-                        return Err(crate::error::MongoLiteError::InvalidQuery(
-                            "Document missing _id".to_string(),
-                        ))
-                    }
-                };
+                let doc_id = extract_doc_id(&old_doc)?;
 
                 // 2. Begin auto-transaction
                 let mut auto_tx = self.begin_auto_transaction();
@@ -572,21 +528,7 @@ impl DatabaseCore<StorageEngine> {
                 }
                 let old_doc = old_doc.unwrap();
 
-                let doc_id = match old_doc.get("_id") {
-                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                    Some(Value::String(s)) => {
-                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                            DocumentId::ObjectId(s.clone())
-                        } else {
-                            DocumentId::String(s.clone())
-                        }
-                    }
-                    _ => {
-                        return Err(crate::error::MongoLiteError::InvalidQuery(
-                            "Document missing _id".to_string(),
-                        ))
-                    }
-                };
+                let doc_id = extract_doc_id(&old_doc)?;
 
                 let (matched, modified) = collection.update_one_raw(query, update)?;
 
@@ -648,21 +590,7 @@ impl DatabaseCore<StorageEngine> {
                 let old_doc = old_doc.unwrap();
 
                 // Extract doc_id
-                let doc_id = match old_doc.get("_id") {
-                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                    Some(Value::String(s)) => {
-                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                            DocumentId::ObjectId(s.clone())
-                        } else {
-                            DocumentId::String(s.clone())
-                        }
-                    }
-                    _ => {
-                        return Err(crate::error::MongoLiteError::InvalidQuery(
-                            "Document missing _id".to_string(),
-                        ))
-                    }
-                };
+                let doc_id = extract_doc_id(&old_doc)?;
 
                 // 2. Begin auto-transaction
                 let mut auto_tx = self.begin_auto_transaction();
@@ -694,21 +622,7 @@ impl DatabaseCore<StorageEngine> {
                 }
                 let old_doc = old_doc.unwrap();
 
-                let doc_id = match old_doc.get("_id") {
-                    Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                    Some(Value::String(s)) => {
-                        if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                            DocumentId::ObjectId(s.clone())
-                        } else {
-                            DocumentId::String(s.clone())
-                        }
-                    }
-                    _ => {
-                        return Err(crate::error::MongoLiteError::InvalidQuery(
-                            "Document missing _id".to_string(),
-                        ))
-                    }
-                };
+                let doc_id = extract_doc_id(&old_doc)?;
 
                 let deleted = collection.delete_one_raw(query)?;
 
@@ -895,17 +809,8 @@ impl DatabaseCore<StorageEngine> {
                 // 4. For each modified document, add WAL entry
                 if modified > 0 {
                     for old_doc in old_docs.iter() {
-                        // Extract doc_id
-                        let doc_id = match old_doc.get("_id") {
-                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                            Some(Value::String(s)) => {
-                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                                    DocumentId::ObjectId(s.clone())
-                                } else {
-                                    DocumentId::String(s.clone())
-                                }
-                            }
-                            _ => continue, // Skip docs without valid _id
+                        let Some(doc_id) = try_extract_doc_id(old_doc) else {
+                            continue; // Skip docs without valid _id
                         };
 
                         // Find the updated document

@@ -111,14 +111,14 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // Add _collection field for multi-collection isolation
         fields.insert("_collection".to_string(), Value::String(self.name.clone()));
 
-        // Dokumentum létrehozása
+        // Create document
         let doc = Document::new(doc_id.clone(), fields);
         self.validate_document(&doc)?;
 
         // Update indexes BEFORE writing to storage
         self.add_to_indexes(&doc)?;
 
-        // Szerializálás és írás - USE NEW write_document with catalog tracking
+        // Serialize and write - use write_document with catalog tracking
         let doc_json = doc.to_json()?;
         storage.write_document_raw(&self.name, &doc_id, doc_json.as_bytes())?;
         storage.adjust_live_count(&self.name, 1);
