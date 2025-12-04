@@ -297,7 +297,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 let original_document = document.clone();
 
                 // Apply update operators
-                let was_modified = self.apply_update_operators(&mut document, update_json)?;
+                let was_modified =
+                    super::update_operators::apply_update_operators(&mut document, update_json)?;
 
                 if was_modified {
                     // ✅ Ensure updated document has _collection before constraint check
@@ -408,7 +409,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             let original_document = document.clone();
 
             // Apply update operators
-            let was_modified = self.apply_update_operators(&mut document, update_json)?;
+            let was_modified =
+                super::update_operators::apply_update_operators(&mut document, update_json)?;
 
             if was_modified {
                 // ✅ Ensure updated document has _collection before constraint check
