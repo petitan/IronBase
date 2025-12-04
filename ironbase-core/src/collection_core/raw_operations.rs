@@ -251,40 +251,76 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
     /// Update one document (raw, no WAL) - use DatabaseCore::update_one for durability
     /// Returns (matched_count, modified_count)
+    ///
+    /// 🔒 ATOMIC UPDATE: This function holds a write lock for the entire read-modify-write cycle
+    /// to prevent lost updates under concurrent access. This is critical for $inc operations.
     fn update_one_raw(&self, query_json: &Value, update_json: &Value) -> Result<(u64, u64)> {
         let parsed_query = Query::from_json(query_json)?;
 
-        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
-        let docs_by_id = if let Some(query_obj) = query_json.as_object() {
-            if query_obj.len() == 1 && query_obj.contains_key("_id") {
-                if let Some(id_val) = query_obj.get("_id") {
-                    // Direct O(1) lookup using document_catalog (direct DocumentId conversion!)
-                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
-                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                            let mut single_doc_map = HashMap::new();
-                            single_doc_map.insert(doc_id, doc);
-                            single_doc_map
+        // 🔒 ATOMIC: Acquire write lock FIRST, before reading documents
+        // This prevents race conditions where two threads read the same value,
+        // both increment, and one overwrites the other's update (lost update anomaly).
+        let mut storage = self.storage.write();
+
+        // Clone catalog upfront to avoid borrow checker issues
+        // This is necessary because we need to hold the write lock while reading documents
+        let catalog = match storage.get_collection_meta(&self.name) {
+            Some(m) => m.document_catalog.clone(),
+            None => return Ok((0, 0)), // Collection doesn't exist
+        };
+
+        // Read documents WITHIN the write lock (inline from scan_documents_via_catalog)
+        let docs_by_id: HashMap<DocumentId, Value> = {
+            // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
+            if let Some(query_obj) = query_json.as_object() {
+                if query_obj.len() == 1 && query_obj.contains_key("_id") {
+                    if let Some(id_val) = query_obj.get("_id") {
+                        // Direct O(1) lookup using document_catalog
+                        if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                            if let Some(&offset) = catalog.get(&doc_id) {
+                                if let Ok(doc_bytes) = storage.read_data(offset) {
+                                    if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
+                                        // Skip tombstones
+                                        if !doc
+                                            .get("_tombstone")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false)
+                                        {
+                                            let mut map = HashMap::new();
+                                            map.insert(doc_id, doc);
+                                            map
+                                        } else {
+                                            HashMap::new()
+                                        }
+                                    } else {
+                                        HashMap::new()
+                                    }
+                                } else {
+                                    HashMap::new()
+                                }
+                            } else {
+                                HashMap::new()
+                            }
                         } else {
                             HashMap::new()
                         }
                     } else {
-                        HashMap::new()
+                        // Full scan using cloned catalog
+                        inline_scan_with_catalog(&mut *storage, &catalog)?
                     }
                 } else {
-                    self.scan_documents_via_catalog()?
+                    // Full scan using cloned catalog
+                    inline_scan_with_catalog(&mut *storage, &catalog)?
                 }
             } else {
-                // Fallback: Full scan using catalog iteration
-                self.scan_documents_via_catalog()?
+                // Full scan using cloned catalog
+                inline_scan_with_catalog(&mut *storage, &catalog)?
             }
-        } else {
-            self.scan_documents_via_catalog()?
         };
 
         // Find first matching and update (skip tombstones already filtered by catalog scan)
         let mut matched = 0u64;
         let mut modified = 0u64;
-        let mut storage = self.storage.write();
 
         for (_, doc) in docs_by_id {
             if matched > 0 {
@@ -313,17 +349,21 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                     // exclude_id = Some to allow updating same document's non-key fields
                     self.check_index_constraints(&document, Some(&document.id))?;
 
-                    // Release storage lock for index operations
-                    drop(storage);
+                    // 🔒 ATOMIC: Keep storage lock held during index operations!
+                    // Previously we dropped the lock here, but that created a race condition:
+                    // Thread A: reads doc (value=10), applies $inc (value=11), drops lock
+                    // Thread B: acquires lock, reads doc (value=10!), applies $inc (value=11)
+                    // Thread A: re-acquires lock, writes value=11
+                    // Thread B: writes value=11 (LOST UPDATE!)
+                    //
+                    // Index operations use their own lock (self.indexes), so we can safely
+                    // hold the storage lock while updating indexes.
 
-                    // 📤 REMOVE OLD DOCUMENT FROM INDEXES
+                    // 📤 REMOVE OLD DOCUMENT FROM INDEXES (uses self.indexes lock)
                     self.remove_from_indexes(&original_document)?;
 
-                    // 📥 ADD UPDATED DOCUMENT TO INDEXES
+                    // 📥 ADD UPDATED DOCUMENT TO INDEXES (uses self.indexes lock)
                     self.add_to_indexes(&document)?;
-
-                    // Re-acquire storage lock
-                    storage = self.storage.write();
 
                     // Mark old document as tombstone
                     let mut tombstone = doc.clone();
@@ -572,4 +612,33 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         Ok(deleted)
     }
+}
+
+/// Helper: Scan documents using a pre-cloned catalog and pre-held storage guard
+/// This enables atomic read-modify-write operations by keeping the lock held.
+///
+/// 🔒 ATOMIC: This function is designed to be called while holding a write lock,
+/// avoiding the read-then-write race condition that causes lost updates.
+fn inline_scan_with_catalog<S: Storage + RawStorage>(
+    storage: &mut S,
+    catalog: &HashMap<DocumentId, u64>,
+) -> Result<HashMap<DocumentId, Value>> {
+    let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::new();
+
+    for (doc_id, offset) in catalog {
+        if let Ok(doc_bytes) = storage.read_data(*offset) {
+            if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
+                // Skip tombstones (deleted documents)
+                if !doc
+                    .get("_tombstone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    docs_by_id.insert(doc_id.clone(), doc);
+                }
+            }
+        }
+    }
+
+    Ok(docs_by_id)
 }
