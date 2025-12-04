@@ -251,13 +251,10 @@ fn test_update_many_unique_constraint_violation() {
     );
 }
 
-/// BUG: update_many can bypass unique index constraint when updating multiple documents
-/// to the same NEW value. The constraint check passes for each document individually
-/// because the index isn't updated until after all checks complete.
-///
-/// This test should FAIL until the bug is fixed, demonstrating the issue.
+/// FIX #16: update_many now correctly detects duplicate values within a batch.
+/// The fix adds tracking of pending unique values and detects duplicates BEFORE
+/// index updates are applied.
 #[test]
-#[ignore] // Remove this when bug is fixed - test currently fails as expected
 fn test_update_many_creates_duplicates_in_unique_index_bug() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.mlite");
@@ -287,35 +284,39 @@ fn test_update_many_creates_duplicates_in_unique_index_bug() {
     fields3.insert("role".to_string(), json!("admin"));
     db.insert_one("users", fields3).unwrap();
 
-    // BUG: Try to update ALL admins to the SAME NEW code
-    // This should FAIL because it would create duplicates
-    // But currently it PASSES because each check doesn't see pending updates!
+    // FIX #16: Try to update ALL admins to the SAME NEW code
+    // This should FAIL because it would create duplicates within the batch
     let result = db.update_many(
         "users",
         &json!({"role": "admin"}),
         &json!({"$set": {"code": "SAME_CODE_FOR_ALL"}}),
     );
 
-    // This assertion currently FAILS - the update_many succeeds when it shouldn't!
+    // After fix: update_many correctly detects batch duplicates and fails
     assert!(
         result.is_err(),
-        "BUG: update_many to same NEW value should fail for unique index, \
-        but it succeeds creating duplicates! Result: {:?}",
+        "update_many to same NEW value should fail for unique index. Result: {:?}",
         result
     );
 
-    // If we get here, verify the database is in an inconsistent state
-    if result.is_ok() {
-        let docs = collection
-            .find(&json!({"code": "SAME_CODE_FOR_ALL"}))
-            .unwrap();
-        assert!(
-            docs.len() <= 1,
-            "BUG CONFIRMED: Found {} documents with same unique code! \
-            Unique index constraint was bypassed.",
-            docs.len()
-        );
-    }
+    // Verify error message mentions duplicate
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Duplicate key") || err_msg.contains("unique"),
+        "Error should mention duplicate key, got: {}",
+        err_msg
+    );
+
+    // Verify no documents were modified (atomic failure)
+    let alice = collection
+        .find_one(&json!({"name": "Alice"}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        alice.get("code").unwrap().as_str().unwrap(),
+        "CODE_A",
+        "Alice's code should remain unchanged"
+    );
 }
 
 #[test]

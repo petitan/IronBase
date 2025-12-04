@@ -354,6 +354,32 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         let mut index_updates: Vec<(Document, Document)> = Vec::new(); // (original, updated)
         let mut storage_writes: Vec<(DocumentId, Value, String)> = Vec::new(); // (id, tombstone, updated_json)
 
+        // 🔒 FIX #16: Track pending unique values to detect duplicates WITHIN batch
+        // This prevents update_many from bypassing unique constraints when updating
+        // multiple documents to the same value in a single batch operation.
+        use std::collections::HashSet;
+        let mut pending_unique_values: HashMap<String, HashSet<String>> = HashMap::new();
+
+        // Pre-collect unique index info (field -> index_name)
+        let unique_indexes: Vec<(String, String)> = {
+            let indexes = self.indexes.read();
+            let id_index_name = format!("{}_id", self.name);
+            indexes
+                .list_indexes()
+                .into_iter()
+                .filter(|name| *name != id_index_name)
+                .filter_map(|name| {
+                    indexes.get_btree_index(&name).and_then(|idx| {
+                        if idx.metadata.unique {
+                            Some((idx.metadata.field.clone(), name))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .collect()
+        };
+
         // 🚀 BATCH OPTIMIZATION: Read all documents in a single lock acquisition
         // Instead of N lock acquisitions for N documents, we only acquire 1 lock!
         let docs_by_id = self.batch_read_documents_by_ids(&doc_ids)?;
@@ -391,7 +417,26 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 // ✅ Ensure updated document has _collection before constraint check
                 document.set("_collection".to_string(), Value::String(self.name.clone()));
 
-                // 🔒 CHECK UNIQUE CONSTRAINTS BEFORE ANY CHANGES
+                // 🔒 FIX #16: Check for duplicates WITHIN the current batch
+                // This catches cases where multiple documents are updated to the same
+                // unique value in a single update_many operation.
+                for (field, index_name) in &unique_indexes {
+                    if let Some(field_value) = document.get(field) {
+                        // Use string representation as hash key for simplicity
+                        let value_key = field_value.to_string();
+                        let seen_set = pending_unique_values.entry(index_name.clone()).or_default();
+
+                        if !seen_set.insert(value_key.clone()) {
+                            // Value already seen in this batch → duplicate!
+                            return Err(MongoLiteError::IndexError(format!(
+                                "Duplicate key in batch: {} in field '{}' (unique index)",
+                                value_key, field
+                            )));
+                        }
+                    }
+                }
+
+                // 🔒 CHECK UNIQUE CONSTRAINTS against existing index
                 self.check_index_constraints(&document, Some(&document.id))?;
 
                 self.validate_document(&document)?;
