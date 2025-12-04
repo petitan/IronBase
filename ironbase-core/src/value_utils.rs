@@ -15,7 +15,7 @@ use std::cmp::Ordering;
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use serde_json::json;
 /// use ironbase_core::value_utils::get_nested_value;
 ///
@@ -53,7 +53,7 @@ pub fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use serde_json::json;
 /// use ironbase_core::value_utils::set_nested_value;
 ///
@@ -108,7 +108,7 @@ pub fn set_nested_value(doc: &mut Value, path: &str, value: Value) {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use serde_json::json;
 /// use std::cmp::Ordering;
 /// use ironbase_core::value_utils::compare_values;
@@ -143,7 +143,7 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use serde_json::json;
 /// use std::cmp::Ordering;
 /// use ironbase_core::value_utils::compare_values_with_none;
@@ -151,6 +151,7 @@ pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
 /// assert_eq!(compare_values_with_none(None, Some(&json!(5))), Ordering::Less);
 /// assert_eq!(compare_values_with_none(Some(&json!(10)), None), Ordering::Greater);
 /// ```
+#[allow(dead_code)] // Utility function for future use
 pub fn compare_values_with_none(a: Option<&Value>, b: Option<&Value>) -> Ordering {
     match (a, b) {
         (None, None) => Ordering::Equal,
@@ -172,7 +173,7 @@ pub fn compare_values_with_none(a: Option<&Value>, b: Option<&Value>) -> Orderin
 ///
 /// # Examples
 ///
-/// ```
+/// ```ignore
 /// use serde_json::json;
 /// use ironbase_core::value_utils::canonical_json_string;
 ///

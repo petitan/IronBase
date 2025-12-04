@@ -11,6 +11,7 @@ use crate::collection_core::{CollectionCore, RawOperations};
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use crate::error::Result;
+use crate::index::IndexManager;
 use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
 use serde_json::Value;
@@ -93,6 +94,10 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
 
     // NEW: Operation counter for Unsafe mode auto-checkpoint
     unsafe_op_counter: AtomicU64,
+
+    // Shared IndexManagers per collection (fixes stale index problem)
+    // Each collection shares its IndexManager across all CollectionCore instances
+    index_managers: Arc<RwLock<HashMap<String, Arc<RwLock<IndexManager>>>>>,
 }
 
 // ============================================================================
@@ -164,6 +169,7 @@ impl DatabaseCore<StorageEngine> {
             durability_mode: mode,
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
             unsafe_op_counter: AtomicU64::new(0),
+            index_managers: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Apply recovered index changes to collections
@@ -1091,6 +1097,7 @@ impl DatabaseCore<MemoryStorage> {
             durability_mode: DurabilityMode::default(),
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
             unsafe_op_counter: AtomicU64::new(0),
+            index_managers: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -1170,9 +1177,207 @@ impl DatabaseCore<MemoryStorage> {
 // ============================================================================
 
 impl<S: Storage + RawStorage> DatabaseCore<S> {
+    /// Get or create a shared IndexManager for a collection
+    ///
+    /// This method uses double-checked locking to ensure thread-safe creation
+    /// of IndexManagers while minimizing lock contention.
+    fn get_or_create_index_manager(&self, name: &str) -> Result<Arc<RwLock<IndexManager>>> {
+        // Fast path: read lock to check if already exists
+        {
+            let managers = self.index_managers.read();
+            if let Some(manager) = managers.get(name) {
+                return Ok(Arc::clone(manager));
+            }
+        }
+
+        // Slow path: create with write lock (double-checked)
+        let mut managers = self.index_managers.write();
+        if let Some(manager) = managers.get(name) {
+            return Ok(Arc::clone(manager));
+        }
+
+        // Initialize the IndexManager for this collection
+        let index_manager = self.initialize_index_manager(name)?;
+        let shared = Arc::new(RwLock::new(index_manager));
+        managers.insert(name.to_string(), Arc::clone(&shared));
+        Ok(shared)
+    }
+
+    /// Initialize an IndexManager for a collection (internal)
+    ///
+    /// This creates the _id index, loads persisted indexes, and rebuilds
+    /// all indexes from the document catalog.
+    fn initialize_index_manager(&self, name: &str) -> Result<IndexManager> {
+        use crate::index::IndexKey;
+        use crate::{log_debug, log_warn};
+
+        let mut index_manager = IndexManager::new();
+
+        // Create automatic _id index (unique)
+        let id_index_name = format!("{}_id", name);
+        index_manager.create_btree_index(id_index_name.clone(), "_id".to_string(), true)?;
+
+        // Ensure collection exists before loading metadata
+        {
+            let mut storage_guard = self.storage.write();
+            if storage_guard.get_collection_meta(name).is_none() {
+                storage_guard.create_collection(name)?;
+            }
+        }
+
+        // Load persisted indexes and schema
+        let storage_guard = self.storage.write();
+        let meta = storage_guard
+            .get_collection_meta(name)
+            .ok_or_else(|| crate::error::MongoLiteError::CollectionNotFound(name.to_string()))?;
+
+        let catalog = meta.document_catalog.clone();
+        let persisted_indexes = meta.indexes.clone();
+
+        log_debug!(
+            "Collection '{}' - catalog size: {}, persisted indexes: {}",
+            name,
+            catalog.len(),
+            persisted_indexes.len()
+        );
+
+        // Get db_path for .idx file loading
+        let db_path = storage_guard.get_file_path().to_string();
+
+        drop(storage_guard); // Release write lock before rebuilding
+
+        // Load persisted custom indexes (if any)
+        for index_meta in &persisted_indexes {
+            // Skip _id index (already created)
+            if index_meta.name == id_index_name {
+                continue;
+            }
+
+            // Try to load from .idx file first (for index structure/metadata)
+            if let Some(loaded_tree) =
+                crate::collection_core::try_load_index_from_file(&db_path, index_meta)
+            {
+                log_debug!(
+                    "Loaded index '{}' from .idx file (will rebuild from documents)",
+                    index_meta.name
+                );
+                index_manager.add_loaded_index(loaded_tree);
+            } else {
+                // Fallback: create empty index (will be rebuilt from documents)
+                log_debug!(
+                    "Creating index '{}' on field '{}' (will rebuild from documents)",
+                    index_meta.name,
+                    index_meta.field
+                );
+
+                index_manager.create_btree_index(
+                    index_meta.name.clone(),
+                    index_meta.field.clone(),
+                    index_meta.unique,
+                )?;
+            }
+        }
+
+        // Rebuild all indexes from document catalog
+        log_debug!(
+            "Starting index rebuild from {} catalog entries",
+            catalog.len()
+        );
+        let mut storage_guard = self.storage.write();
+        let mut rebuilt_count = 0;
+
+        for (_id_key, offset) in catalog.iter() {
+            // Read document from disk (absolute offset)
+            match storage_guard.read_document_at(name, *offset) {
+                Ok(doc_bytes) => match serde_json::from_slice::<Value>(&doc_bytes) {
+                    Ok(doc) => {
+                        // Skip tombstones
+                        if doc
+                            .get("_tombstone")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            continue;
+                        }
+
+                        // Rebuild ALL indexes
+                        if let Some(id_value) = doc.get("_id") {
+                            if let Ok(doc_id) =
+                                serde_json::from_value::<DocumentId>(id_value.clone())
+                            {
+                                // Rebuild _id index
+                                let index_key = IndexKey::from(id_value);
+                                if let Some(id_index) =
+                                    index_manager.get_btree_index_mut(&id_index_name)
+                                {
+                                    let _ = id_index.insert(index_key, doc_id.clone());
+                                }
+
+                                // Rebuild ALL custom indexes
+                                for index_meta in &persisted_indexes {
+                                    if index_meta.name == id_index_name {
+                                        continue;
+                                    }
+
+                                    if let Some(index) =
+                                        index_manager.get_btree_index_mut(&index_meta.name)
+                                    {
+                                        let key = index.extract_key(&doc);
+                                        // Check if all key components are Null
+                                        let is_all_null = match &key {
+                                            IndexKey::Null => true,
+                                            IndexKey::Compound(keys) => {
+                                                keys.iter().all(|k| matches!(k, IndexKey::Null))
+                                            }
+                                            _ => false,
+                                        };
+                                        // For unique indexes: include null keys (null is a value)
+                                        // For non-unique indexes: skip null keys (no query benefit)
+                                        if !is_all_null || index.metadata.unique {
+                                            let _ = index.insert(key, doc_id.clone());
+                                            rebuilt_count += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log_warn!(
+                            "Failed to parse document JSON during index rebuild: {:?}",
+                            e
+                        );
+                        continue;
+                    }
+                },
+                Err(e) => {
+                    log_warn!(
+                        "Failed to read document at offset during index rebuild: {:?}",
+                        e
+                    );
+                    continue;
+                }
+            }
+        }
+
+        log_debug!(
+            "Index rebuild completed - {} index entries rebuilt",
+            rebuilt_count
+        );
+
+        Ok(index_manager)
+    }
+
     /// Get collection (creates if doesn't exist)
+    ///
+    /// Uses shared IndexManager to fix stale index problem.
     pub fn collection(&self, name: &str) -> Result<CollectionCore<S>> {
-        CollectionCore::new(name.to_string(), Arc::clone(&self.storage))
+        let shared_indexes = self.get_or_create_index_manager(name)?;
+        CollectionCore::with_shared_indexes(
+            name.to_string(),
+            Arc::clone(&self.storage),
+            shared_indexes,
+        )
     }
 
     /// Set or clear JSON schema for a collection
@@ -1189,6 +1394,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
     /// Drop collection
     pub fn drop_collection(&self, name: &str) -> Result<()> {
+        // Remove shared IndexManager first
+        self.index_managers.write().remove(name);
+
         let mut storage = self.storage.write();
         storage.drop_collection(name)
     }

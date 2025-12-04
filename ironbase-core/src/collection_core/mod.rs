@@ -24,7 +24,8 @@ mod schema;
 mod update_operators;
 
 pub(crate) use self::constraints::BatchConstraintValidator;
-use self::index_persistence::{persist_index_to_disk, try_load_index_from_file};
+use self::index_persistence::persist_index_to_disk;
+pub(crate) use self::index_persistence::try_load_index_from_file;
 use self::schema::CompiledSchema;
 
 // Re-export the sealed RawOperations trait for crate-internal use
@@ -287,6 +288,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         }
 
                                         // Rebuild ALL custom indexes (always rebuild to ensure correctness)
+                                        // FIX #19: Use index.extract_key() for proper compound index support
                                         for index_meta in &persisted_indexes {
                                             if index_meta.name == id_index_name {
                                                 continue;
@@ -295,14 +297,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                             // The .idx file is only used as a fast path for initial loading,
                                             // but we still rebuild to catch any entries added after initial creation
 
-                                            // Use get_nested_value for dot notation support
-                                            if let Some(field_value) =
-                                                get_nested_value(&doc, &index_meta.field)
+                                            // FIX #19: Use extract_key() which handles compound indexes correctly
+                                            if let Some(index) =
+                                                index_manager.get_btree_index_mut(&index_meta.name)
                                             {
-                                                let key = IndexKey::from(field_value);
-                                                if let Some(index) = index_manager
-                                                    .get_btree_index_mut(&index_meta.name)
-                                                {
+                                                let key = index.extract_key(&doc);
+                                                // Check if all key components are Null
+                                                let is_all_null = match &key {
+                                                    IndexKey::Null => true,
+                                                    IndexKey::Compound(keys) => keys
+                                                        .iter()
+                                                        .all(|k| matches!(k, IndexKey::Null)),
+                                                    _ => false,
+                                                };
+                                                // For unique indexes: include null keys (null is a value)
+                                                // For non-unique indexes: skip null keys (no query benefit)
+                                                if !is_all_null || index.metadata.unique {
                                                     let _ = index.insert(key, doc_id.clone());
                                                     rebuilt_count += 1;
                                                 }
@@ -345,6 +355,46 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             name,
             storage,
             indexes: Arc::new(RwLock::new(index_manager)),
+            query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
+            schema: Arc::new(RwLock::new(compiled_schema)),
+        })
+    }
+
+    /// Create a collection with a shared IndexManager
+    ///
+    /// This constructor is used by DatabaseCore to share IndexManagers across
+    /// multiple CollectionCore instances, fixing the "stale index" problem.
+    pub(crate) fn with_shared_indexes(
+        name: String,
+        storage: Arc<RwLock<S>>,
+        indexes: Arc<RwLock<IndexManager>>,
+    ) -> Result<Self> {
+        // Ensure collection exists
+        {
+            let mut storage_guard = storage.write();
+            if storage_guard.get_collection_meta(&name).is_none() {
+                storage_guard.create_collection(&name)?;
+            }
+        }
+
+        // Load schema from metadata
+        let schema_definition = {
+            let storage_guard = storage.read();
+            storage_guard
+                .get_collection_meta(&name)
+                .and_then(|meta| meta.schema.clone())
+        };
+
+        let compiled_schema = if let Some(raw_schema) = schema_definition {
+            Some(Self::compile_schema(&raw_schema)?)
+        } else {
+            None
+        };
+
+        Ok(CollectionCore {
+            name,
+            storage,
+            indexes, // Shared!
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema: Arc::new(RwLock::new(compiled_schema)),
         })
@@ -839,11 +889,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Remove a document from all indexes
     /// Used during update and delete operations
+    ///
+    /// FIX #19: Refactored to use IndexManager.remove_document_from_indexes()
+    /// which properly handles compound indexes.
     fn remove_from_indexes(&self, doc: &Document) -> Result<()> {
         let mut indexes = self.indexes.write();
         let id_index_name = format!("{}_id", self.name);
 
-        // Remove from _id index
+        // Remove from _id index (handled separately due to DocumentId type)
         if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
             let id_key = match &doc.id {
                 DocumentId::Int(i) => IndexKey::Int(*i),
@@ -853,31 +906,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             id_index.delete(&id_key, &doc.id)?;
         }
 
-        // Remove from all other indexes
-        for index_name in indexes.list_indexes() {
-            if index_name == id_index_name {
-                continue; // Already handled
-            }
-
-            if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                let field = index.metadata.field.clone();
-                if let Some(field_value) = doc.get(&field) {
-                    let index_key = IndexKey::from(field_value);
-                    index.delete(&index_key, &doc.id)?;
-                }
-            }
-        }
+        // Remove from all other indexes - delegate to IndexManager
+        let doc_value =
+            serde_json::to_value(doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+        indexes.remove_document_from_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
 
         Ok(())
     }
 
     /// Add a document to all indexes (with unique constraint checking)
     /// Used during update operations after removing old values
+    ///
+    /// FIX #19: Refactored to use IndexManager.add_document_to_indexes()
+    /// which properly handles compound indexes.
     fn add_to_indexes(&self, doc: &Document) -> Result<()> {
         let mut indexes = self.indexes.write();
         let id_index_name = format!("{}_id", self.name);
 
-        // Add to _id index
+        // Add to _id index (handled separately due to DocumentId type)
         if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
             let id_key = match &doc.id {
                 DocumentId::Int(i) => IndexKey::Int(*i),
@@ -887,20 +933,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             id_index.insert(id_key, doc.id.clone())?;
         }
 
-        // Add to all other indexes
-        for index_name in indexes.list_indexes() {
-            if index_name == id_index_name {
-                continue; // Already handled
-            }
-
-            if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                let field = index.metadata.field.clone();
-                if let Some(field_value) = doc.get(&field) {
-                    let index_key = IndexKey::from(field_value);
-                    index.insert(index_key, doc.id.clone())?;
-                }
-            }
-        }
+        // Add to all other indexes - delegate to IndexManager
+        let doc_value =
+            serde_json::to_value(doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+        indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
 
         Ok(())
     }
@@ -993,6 +1029,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Batch add multiple documents to all indexes
     /// Single lock acquisition for performance - used by insert_many
+    ///
+    /// FIX #19: Refactored to use IndexManager.add_document_to_indexes()
+    /// which properly handles compound indexes.
     fn batch_add_to_indexes(&self, docs: &[Document]) -> Result<()> {
         if docs.is_empty() {
             return Ok(());
@@ -1002,7 +1041,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let id_index_name = format!("{}_id", self.name);
 
         for doc in docs {
-            // Add to _id index
+            // Add to _id index (handled separately due to DocumentId type)
             if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
                 let id_key = match &doc.id {
                     DocumentId::Int(i) => IndexKey::Int(*i),
@@ -1012,20 +1051,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 id_index.insert(id_key, doc.id.clone())?;
             }
 
-            // Add to all other indexes
-            for index_name in indexes.list_indexes() {
-                if index_name == id_index_name {
-                    continue; // Already handled
-                }
-
-                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                    let field = index.metadata.field.clone();
-                    if let Some(field_value) = doc.get(&field) {
-                        let index_key = IndexKey::from(field_value);
-                        index.insert(index_key, doc.id.clone())?;
-                    }
-                }
-            }
+            // Add to all other indexes - delegate to IndexManager
+            let doc_value = serde_json::to_value(doc)
+                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
         }
 
         Ok(())
@@ -1033,6 +1062,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Check if a document would violate unique constraints
     /// exclude_id: Optional document ID to exclude from check (for updates)
+    ///
+    /// FIX #19: Refactored to use IndexManager.check_unique_constraints()
+    /// which properly handles compound indexes.
     fn check_index_constraints(
         &self,
         doc: &Document,
@@ -1041,38 +1073,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let indexes = self.indexes.read();
         let id_index_name = format!("{}_id", self.name);
 
-        // Check all indexes (except _id which is handled separately)
-        for index_name in indexes.list_indexes() {
-            if index_name == id_index_name {
-                continue;
-            }
+        // Convert Document to Value for IndexManager
+        let doc_value =
+            serde_json::to_value(doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
 
-            if let Some(index) = indexes.get_btree_index(&index_name) {
-                // Only check unique indexes
-                if !index.metadata.unique {
-                    continue;
-                }
-
-                let field = &index.metadata.field;
-                if let Some(field_value) = doc.get(field) {
-                    let index_key = IndexKey::from(field_value);
-
-                    // Check if key already exists
-                    if let Some(existing_id) = index.search(&index_key) {
-                        // If exclude_id is provided, skip if it's the same document
-                        let is_same_doc = exclude_id == Some(&existing_id);
-                        if !is_same_doc {
-                            return Err(MongoLiteError::IndexError(format!(
-                                "Duplicate key: {:?} in field '{}' (unique index)",
-                                index_key, field
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
+        // Delegate to IndexManager - handles compound indexes correctly
+        indexes.check_unique_constraints(&doc_value, exclude_id, Some(&id_index_name))
     }
 
     // ========== QUERY OPTIMIZATION OPERATIONS ==========
@@ -1370,6 +1376,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     pub fn list_indexes(&self) -> Vec<String> {
         let indexes = self.indexes.read();
         indexes.list_indexes()
+    }
+
+    /// List all indexes with their prefix field (for QueryPlanner)
+    ///
+    /// Returns tuples of (index_name, first_field) - compound indexes only
+    /// return their FIRST field, as they can only be used for prefix queries.
+    pub fn list_indexes_with_prefix_field(&self) -> Vec<(String, String)> {
+        let indexes = self.indexes.read();
+        indexes.list_indexes_with_prefix_field()
     }
 
     // ========== TRANSACTION OPERATIONS ==========
@@ -1776,10 +1791,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let field = self.extract_field_from_index_name(hint_name);
             Some(self.create_plan_for_hint(query_json, hint_name, &field)?)
         } else {
+            // FIX #20: Use compound-index-aware query planning
+            // This ensures compound indexes are only used for prefix field queries
             let indexes = self.indexes.read();
-            let available_indexes = indexes.list_indexes();
+            let index_fields = indexes.list_indexes_with_prefix_field();
+
+            // Query planning with compound-index-aware field matching
+            // NOTE: FIX #21 stale index workaround removed - shared IndexManagers fix this
+            let plan_opt = QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
+                .map(|(_, plan)| plan);
+
             drop(indexes);
-            QueryPlanner::analyze_query(query_json, &available_indexes).map(|(_, plan)| plan)
+            plan_opt
         };
 
         let (doc_ids_vec, used_sort) = if let Some(plan) = plan {
@@ -1864,8 +1887,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     } else {
                         vec![]
                     }
-                }
-                QueryPlan::CollectionScan => vec![],
+                } // NOTE: CollectionScan match arm removed - QueryPlan no longer has this variant
             }
         };
 

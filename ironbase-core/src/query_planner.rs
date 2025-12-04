@@ -5,11 +5,10 @@ use crate::index::IndexKey;
 use serde_json::Value;
 
 /// Query plan - describes how to execute a query
+/// NOTE: CollectionScan variant was removed - analyze_query() returns None for full scan,
+/// and explain_query() handles None case by generating "CollectionScan" JSON directly.
 #[derive(Debug, Clone)]
 pub enum QueryPlan {
-    /// Full collection scan (no index used)
-    CollectionScan,
-
     /// Index scan for equality match
     IndexScan {
         index_name: String,
@@ -139,12 +138,138 @@ impl QueryPlanner {
     }
 
     /// Find an index for a given field
+    ///
+    /// DEPRECATED: This method has a bug with compound indexes - it matches
+    /// any index ending with _{field}, even if the field is not the first
+    /// (prefix) field of a compound index.
+    ///
+    /// Use find_index_for_field_v2 with index_fields parameter instead.
     fn find_index_for_field(field: &str, available_indexes: &[String]) -> Option<String> {
         // Look for index ending with _{field}
         available_indexes
             .iter()
             .find(|idx| idx.ends_with(&format!("_{}", field)))
             .cloned()
+    }
+
+    /// Find an index for a given field (v2 - compound index aware)
+    ///
+    /// Takes a list of (index_name, prefix_field) tuples where prefix_field is:
+    /// - The field name for single-field indexes
+    /// - The FIRST field for compound indexes (only prefix queries are supported!)
+    ///
+    /// This correctly handles compound indexes by only matching on their first field.
+    fn find_index_for_field_v2(field: &str, index_fields: &[(String, String)]) -> Option<String> {
+        index_fields
+            .iter()
+            .find(|(_, prefix_field)| prefix_field == field)
+            .map(|(index_name, _)| index_name.clone())
+    }
+
+    /// Analyze a query with compound-index-aware field matching (v2)
+    ///
+    /// This version takes (index_name, prefix_field) tuples to correctly handle
+    /// compound indexes by only using them for prefix field queries.
+    pub fn analyze_query_with_fields(
+        query_json: &Value,
+        index_fields: &[(String, String)],
+    ) -> Option<(String, QueryPlan)> {
+        // Check for simple equality query: { "field": value }
+        if let Value::Object(ref map) = query_json {
+            // First try range query analysis
+            if let Some((field, plan)) = Self::analyze_range_query_v2(query_json, index_fields) {
+                return Some((field, plan));
+            }
+
+            // Skip logical operators like $and, $or, $nor
+            if map.keys().any(|k| k.starts_with('$')) {
+                return None;
+            }
+
+            // Simple equality query: { "field": value }
+            if let Some((field, value)) = map.iter().next() {
+                // Skip if value contains operators (like {"age": {"$gt": 5}})
+                if let Value::Object(ref val_map) = value {
+                    if val_map.keys().any(|k| k.starts_with('$')) {
+                        return None;
+                    }
+                }
+
+                // Check if we have an index on this field (compound-aware!)
+                let index_name = Self::find_index_for_field_v2(field, index_fields)?;
+
+                let key = IndexKey::from(value);
+                return Some((
+                    field.clone(),
+                    QueryPlan::IndexScan {
+                        index_name,
+                        field: field.clone(),
+                        key,
+                    },
+                ));
+            }
+        }
+
+        None
+    }
+
+    /// Analyze query for range operators with compound-index-aware matching
+    fn analyze_range_query_v2(
+        query_json: &Value,
+        index_fields: &[(String, String)],
+    ) -> Option<(String, QueryPlan)> {
+        if let Value::Object(ref map) = query_json {
+            for (field, conditions) in map {
+                if field.starts_with('$') {
+                    continue; // Skip logical operators at root level
+                }
+
+                if let Value::Object(ref cond_map) = conditions {
+                    let has_gt = cond_map.contains_key("$gt");
+                    let has_gte = cond_map.contains_key("$gte");
+                    let has_lt = cond_map.contains_key("$lt");
+                    let has_lte = cond_map.contains_key("$lte");
+
+                    if has_gt || has_gte || has_lt || has_lte {
+                        // Compound-index-aware field matching
+                        let index_name = Self::find_index_for_field_v2(field, index_fields)?;
+
+                        let start = if has_gte {
+                            cond_map.get("$gte").map(IndexKey::from)
+                        } else if has_gt {
+                            cond_map.get("$gt").map(IndexKey::from)
+                        } else {
+                            None
+                        };
+
+                        let end = if has_lte {
+                            cond_map.get("$lte").map(IndexKey::from)
+                        } else if has_lt {
+                            cond_map.get("$lt").map(IndexKey::from)
+                        } else {
+                            None
+                        };
+
+                        let inclusive_start = has_gte || (!has_gt && !has_gte);
+                        let inclusive_end = has_lte || (!has_lt && !has_lte);
+
+                        return Some((
+                            field.clone(),
+                            QueryPlan::IndexRangeScan {
+                                index_name,
+                                field: field.clone(),
+                                start,
+                                end,
+                                inclusive_start,
+                                inclusive_end,
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Create a query plan description for explain output
@@ -191,16 +316,7 @@ impl QueryPlanner {
                         },
                         "estimatedCost": "O(log n + k)",
                     })
-                }
-                QueryPlan::CollectionScan => {
-                    json!({
-                        "queryPlan": "CollectionScan",
-                        "indexUsed": null,
-                        "stage": "FULL_SCAN",
-                        "reason": "No suitable index",
-                        "estimatedCost": "O(n)",
-                    })
-                }
+                } // NOTE: CollectionScan match arm removed - unreachable since analyze_query returns None for full scan
             }
         } else {
             // No index available

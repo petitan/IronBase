@@ -13,7 +13,8 @@ mod reader;
 mod recovery;
 mod writer;
 
-pub use entry::{WALEntry, WALEntryType, MAX_WAL_ENTRY_SIZE, WAL_HEADER_SIZE};
+// NOTE: MAX_WAL_ENTRY_SIZE and WAL_HEADER_SIZE are internal constants, not re-exported
+pub use entry::{WALEntry, WALEntryType};
 pub use reader::WALEntryIterator;
 pub use recovery::{CommittedTransaction, TransactionGrouper};
 pub use writer::WriteAheadLog;

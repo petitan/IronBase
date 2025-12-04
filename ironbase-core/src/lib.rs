@@ -27,25 +27,33 @@
 #![cfg_attr(test, allow(dead_code))]
 #![cfg_attr(test, allow(unused_variables))]
 
-pub mod aggregation;
-pub mod btree;
-pub mod catalog_serde;
+// ============================================================================
+// PUBLIC API MODULES - User-facing functionality
+// ============================================================================
 pub mod collection_core;
 pub mod database;
 pub mod document;
 pub mod durability;
 pub mod error;
 pub mod find_options;
-pub mod index;
-pub mod logging;
 pub mod query;
-pub mod query_cache;
-pub mod query_planner;
-pub mod recovery;
 pub mod storage;
 pub mod transaction;
-pub mod value_utils;
-pub mod wal;
+
+// ============================================================================
+// INTERNAL IMPLEMENTATION MODULES - Not part of public API
+// ============================================================================
+pub(crate) mod aggregation;
+// NOTE: btree.rs was removed - it was an alternative B+ tree implementation that was never integrated
+// The actual B+ tree implementation is in index.rs (BTreeNode, InternalNode, LeafNode)
+pub(crate) mod catalog_serde;
+pub(crate) mod index;
+pub(crate) mod logging;
+pub(crate) mod query_cache;
+pub(crate) mod query_planner;
+pub(crate) mod recovery;
+pub(crate) mod value_utils;
+pub(crate) mod wal;
 
 #[cfg(test)]
 mod test_auto_commit;

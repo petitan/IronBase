@@ -173,7 +173,7 @@ pub enum Accumulator {
     Max(String),
     First(String),
     Last(String),
-    Count,
+    // NOTE: Count variant was removed - use Sum(SumExpression::Constant(1)) instead ({"$sum": 1})
     Push(String),     // $push - collect all values into array
     AddToSet(String), // $addToSet - collect unique values into array
 }
@@ -964,8 +964,7 @@ impl Accumulator {
 
     fn compute(&self, docs: &[Value]) -> Result<Value> {
         match self {
-            Accumulator::Count => Ok(Value::from(docs.len() as i64)),
-
+            // NOTE: Count match arm removed - use Sum(SumExpression::Constant(1)) for counting
             Accumulator::Sum(expr) => match expr {
                 SumExpression::Constant(n) => {
                     Ok(Value::from((*n).saturating_mul(docs.len() as i64)))

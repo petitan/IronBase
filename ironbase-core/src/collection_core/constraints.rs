@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::error::{MongoLiteError, Result};
-use crate::index::IndexManager;
+use crate::index::{IndexKey, IndexManager};
 use crate::value_utils::get_nested_value;
 use serde_json::Value;
 
@@ -32,11 +32,15 @@ use serde_json::Value;
 ///     validator.check_and_track(&doc_as_json)?;  // Returns Err if duplicate
 /// }
 /// ```
+///
+/// FIX #19: Now properly handles compound unique indexes by tracking all field values
 pub struct BatchConstraintValidator {
-    /// Maps index_name -> Set of already-seen values (as JSON strings)
+    /// Maps index_name -> Set of already-seen values (as serialized key strings)
     pending_values: HashMap<String, HashSet<String>>,
-    /// List of (field_name, index_name) for unique indexes
-    unique_indexes: Vec<(String, String)>,
+    /// List of (fields, index_name) for unique indexes
+    /// For single-field indexes, fields will have one element
+    /// For compound indexes, fields will have multiple elements
+    unique_indexes: Vec<(Vec<String>, String)>,
 }
 
 impl BatchConstraintValidator {
@@ -44,15 +48,23 @@ impl BatchConstraintValidator {
     ///
     /// Automatically excludes the `_id` index (which is always unique but
     /// handled separately during document ID generation).
+    ///
+    /// FIX #19: Now stores all fields for compound indexes, not just the first field
     pub fn new(indexes: &IndexManager, _collection_name: &str) -> Self {
-        let unique_indexes: Vec<(String, String)> = indexes
+        let unique_indexes: Vec<(Vec<String>, String)> = indexes
             .list_indexes()
             .into_iter()
             .filter_map(|name| {
                 indexes.get_btree_index(&name).and_then(|idx| {
                     // Exclude _id field - handled separately during document ID generation
                     if idx.metadata.unique && idx.metadata.field != "_id" {
-                        Some((idx.metadata.field.clone(), name))
+                        // FIX #19: Use all fields for compound indexes
+                        let fields = if idx.metadata.is_compound() {
+                            idx.metadata.fields.clone()
+                        } else {
+                            vec![idx.metadata.field.clone()]
+                        };
+                        Some((fields, name))
                     } else {
                         None
                     }
@@ -79,20 +91,37 @@ impl BatchConstraintValidator {
     ///
     /// * `Ok(())` if the document is unique within the batch
     /// * `Err(MongoLiteError::IndexError)` if a duplicate is detected
+    ///
+    /// FIX #19: Now creates compound keys for compound unique indexes
     pub fn check_and_track(&mut self, doc: &Value) -> Result<()> {
-        for (field, index_name) in &self.unique_indexes {
-            // FIX #17: Use get_nested_value to support dot notation (e.g., "profile.code")
-            // Previously used doc.get(field) which only works for top-level fields
-            if let Some(field_value) = get_nested_value(doc, field) {
-                let value_key = field_value.to_string();
-                let seen_set = self.pending_values.entry(index_name.clone()).or_default();
+        for (fields, index_name) in &self.unique_indexes {
+            // FIX #19: Extract all field values and create a compound key representation
+            let key_values: Vec<IndexKey> = fields
+                .iter()
+                .map(|field| {
+                    get_nested_value(doc, field)
+                        .map(IndexKey::from)
+                        .unwrap_or(IndexKey::Null)
+                })
+                .collect();
 
-                if !seen_set.insert(value_key.clone()) {
-                    return Err(MongoLiteError::IndexError(format!(
-                        "Duplicate key in batch: {} in field '{}' (unique index)",
-                        value_key, field
-                    )));
-                }
+            // Skip if all values are Null (document doesn't have the indexed fields)
+            if key_values.iter().all(|k| matches!(k, IndexKey::Null)) {
+                continue;
+            }
+
+            // Create a serialized key for tracking
+            // For single-field indexes, format is just the value
+            // For compound indexes, format includes all values
+            let value_key = format!("{:?}", key_values);
+            let seen_set = self.pending_values.entry(index_name.clone()).or_default();
+
+            if !seen_set.insert(value_key.clone()) {
+                let fields_str = fields.join(", ");
+                return Err(MongoLiteError::IndexError(format!(
+                    "Duplicate key in batch: {:?} in field(s) '{}' (unique index)",
+                    key_values, fields_str
+                )));
             }
         }
         Ok(())
@@ -215,7 +244,8 @@ mod tests {
 
         // Should only track 'email', not '_id'
         assert_eq!(validator.unique_indexes.len(), 1);
-        assert_eq!(validator.unique_indexes[0].0, "email");
+        // FIX #19: unique_indexes now stores Vec<String> for compound index support
+        assert_eq!(validator.unique_indexes[0].0, vec!["email".to_string()]);
     }
 
     /// FIX #17: Test nested field unique index support (dot notation)
@@ -277,5 +307,79 @@ mod tests {
         // Duplicate deeply nested value
         let result = validator.check_and_track(&json!({"user": {"address": {"city": "NYC"}}}));
         assert!(result.is_err());
+    }
+
+    /// FIX #19: Test compound unique index support
+    #[test]
+    fn test_compound_unique_index() {
+        // Create compound unique index on (country, city)
+        let mut manager = IndexManager::new();
+        manager
+            .create_compound_index(
+                "test_location".to_string(),
+                vec!["country".to_string(), "city".to_string()],
+                true, // unique
+            )
+            .unwrap();
+
+        let mut validator = BatchConstraintValidator::new(&manager, "test");
+
+        // First document
+        assert!(validator
+            .check_and_track(&json!({"country": "USA", "city": "NYC"}))
+            .is_ok());
+
+        // Same country, different city - should succeed (different compound key)
+        assert!(validator
+            .check_and_track(&json!({"country": "USA", "city": "LA"}))
+            .is_ok());
+
+        // Different country, same city - should succeed (different compound key)
+        assert!(validator
+            .check_and_track(&json!({"country": "UK", "city": "NYC"}))
+            .is_ok());
+
+        // Duplicate compound key (same country AND city) - should FAIL
+        let result = validator.check_and_track(&json!({"country": "USA", "city": "NYC"}));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate key in batch"));
+    }
+
+    /// FIX #19: Test that compound index allows same single field values
+    /// if the compound key is different
+    #[test]
+    fn test_compound_index_partial_match_allowed() {
+        let mut manager = IndexManager::new();
+        manager
+            .create_compound_index(
+                "test_name_age".to_string(),
+                vec!["name".to_string(), "age".to_string()],
+                true,
+            )
+            .unwrap();
+
+        let mut validator = BatchConstraintValidator::new(&manager, "test");
+
+        // Same name, different ages - all should succeed
+        assert!(validator
+            .check_and_track(&json!({"name": "Alice", "age": 25}))
+            .is_ok());
+        assert!(validator
+            .check_and_track(&json!({"name": "Alice", "age": 30}))
+            .is_ok());
+        assert!(validator
+            .check_and_track(&json!({"name": "Alice", "age": 35}))
+            .is_ok());
+
+        // Same age, different names - all should succeed
+        assert!(validator
+            .check_and_track(&json!({"name": "Bob", "age": 25}))
+            .is_ok());
+        assert!(validator
+            .check_and_track(&json!({"name": "Charlie", "age": 25}))
+            .is_ok());
     }
 }

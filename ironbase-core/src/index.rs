@@ -1048,6 +1048,185 @@ impl IndexManager {
         names.sort();
         names
     }
+
+    /// List all indexes with their first field info (for QueryPlanner)
+    ///
+    /// Returns tuples of (index_name, first_field) where first_field is:
+    /// - The field name for single-field indexes
+    /// - EMPTY STRING for compound indexes (they cannot be used for simple equality queries!)
+    ///
+    /// Compound indexes require all fields in the query to be useful for point lookup.
+    /// For now, we disable compound index usage in QueryPlanner and rely on full scan.
+    /// Future: implement prefix range scan for compound indexes.
+    pub fn list_indexes_with_prefix_field(&self) -> Vec<(String, String)> {
+        let mut result: Vec<(String, String)> = Vec::new();
+
+        for (name, index) in &self.btree_indexes {
+            // For compound indexes, we currently don't support prefix queries
+            // Return empty string to prevent matching
+            // Future: implement compound prefix range scan
+            let first_field = if index.metadata.is_compound() {
+                // Skip compound indexes for now - they need range scan, not point lookup
+                String::new()
+            } else {
+                index.metadata.field.clone()
+            };
+            result.push((name.clone(), first_field));
+        }
+
+        // Legacy indexes are single-field only
+        for (name, index) in &self.legacy_indexes {
+            result.push((name.clone(), index.definition.field.clone()));
+        }
+
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+
+    // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========
+
+    /// Add a document to all indexes
+    ///
+    /// Properly handles both single-field and compound indexes using extract_key().
+    /// For unique indexes: includes null keys (MongoDB treats null as a value).
+    /// For non-unique indexes: skips null keys (no query benefit).
+    ///
+    /// # Arguments
+    /// * `doc` - The document as JSON Value
+    /// * `doc_id` - The document ID
+    /// * `exclude_index` - Optional index name to skip (e.g., "_id" index handled separately)
+    pub fn add_document_to_indexes(
+        &mut self,
+        doc: &serde_json::Value,
+        doc_id: &DocumentId,
+        exclude_index: Option<&str>,
+    ) -> Result<()> {
+        let index_names: Vec<String> = self.btree_indexes.keys().cloned().collect();
+
+        for index_name in index_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.btree_indexes.get_mut(&index_name) {
+                let index_key = index.extract_key(doc);
+                let is_null = Self::is_key_all_null(&index_key);
+
+                // For unique indexes: include null keys (null is a value, enforce uniqueness)
+                // For non-unique indexes: skip null keys (no query benefit)
+                if !is_null || index.metadata.unique {
+                    index.insert(index_key, doc_id.clone())?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Remove a document from all indexes
+    ///
+    /// Properly handles both single-field and compound indexes.
+    /// For unique indexes: removes null keys (they were inserted).
+    /// For non-unique indexes: skips null keys (they weren't inserted).
+    ///
+    /// # Arguments
+    /// * `doc` - The document as JSON Value
+    /// * `doc_id` - The document ID
+    /// * `exclude_index` - Optional index name to skip
+    pub fn remove_document_from_indexes(
+        &mut self,
+        doc: &serde_json::Value,
+        doc_id: &DocumentId,
+        exclude_index: Option<&str>,
+    ) -> Result<()> {
+        let index_names: Vec<String> = self.btree_indexes.keys().cloned().collect();
+
+        for index_name in index_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.btree_indexes.get_mut(&index_name) {
+                let index_key = index.extract_key(doc);
+                let is_null = Self::is_key_all_null(&index_key);
+
+                // For unique indexes: remove null keys (they were inserted)
+                // For non-unique indexes: skip null keys (they weren't inserted)
+                if !is_null || index.metadata.unique {
+                    index.delete(&index_key, doc_id)?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a document would violate unique constraints
+    ///
+    /// Checks all unique indexes to see if the document's values already exist.
+    /// Properly handles compound unique indexes.
+    /// MongoDB behavior: null is a value, so duplicate nulls are rejected.
+    ///
+    /// # Arguments
+    /// * `doc` - The document as JSON Value
+    /// * `exclude_doc_id` - Optional document ID to exclude (for updates)
+    /// * `exclude_index` - Optional index name to skip (e.g., "_id" handled separately)
+    pub fn check_unique_constraints(
+        &self,
+        doc: &serde_json::Value,
+        exclude_doc_id: Option<&DocumentId>,
+        exclude_index: Option<&str>,
+    ) -> Result<()> {
+        for (index_name, index) in &self.btree_indexes {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            // Only check unique indexes
+            if !index.metadata.unique {
+                continue;
+            }
+
+            let index_key = index.extract_key(doc);
+
+            // MongoDB behavior: null IS a value for unique constraint purposes
+            // Do NOT skip null keys - duplicate nulls should be rejected
+
+            // Check if key already exists
+            if let Some(existing_id) = index.search(&index_key) {
+                // Allow update to same document (exclude_doc_id matches)
+                if exclude_doc_id != Some(&existing_id) {
+                    // Format field names for error message
+                    let fields_str = if index.metadata.is_compound() {
+                        index.metadata.fields.join(", ")
+                    } else {
+                        index.metadata.field.clone()
+                    };
+                    return Err(MongoLiteError::IndexError(format!(
+                        "Duplicate key: {:?} in field(s) '{}' (unique index)",
+                        index_key, fields_str
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Helper: Check if an IndexKey is all Null
+    fn is_key_all_null(key: &IndexKey) -> bool {
+        match key {
+            IndexKey::Null => true,
+            IndexKey::Compound(keys) => keys.iter().all(|k| matches!(k, IndexKey::Null)),
+            _ => false,
+        }
+    }
 }
 
 impl Default for IndexManager {
@@ -1401,5 +1580,44 @@ mod tests {
             false,
         );
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod debug_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn debug_compound_index_search() {
+        let mut manager = IndexManager::new();
+
+        // Create compound index on (country, city)
+        manager
+            .create_compound_index(
+                "loc_idx".to_string(),
+                vec!["country".to_string(), "city".to_string()],
+                true,
+            )
+            .unwrap();
+
+        // Insert doc1: USA, NYC
+        let doc1 = json!({"country": "USA", "city": "NYC"});
+        manager
+            .add_document_to_indexes(&doc1, &DocumentId::Int(1), None)
+            .unwrap();
+
+        // Insert doc2: USA, LA
+        let doc2 = json!({"country": "USA", "city": "LA"});
+        manager
+            .add_document_to_indexes(&doc2, &DocumentId::Int(2), None)
+            .unwrap();
+
+        // Now check if doc with USA, NYC would violate unique constraint (excluding doc2)
+        let doc_new = json!({"country": "USA", "city": "NYC"});
+        let result = manager.check_unique_constraints(&doc_new, Some(&DocumentId::Int(2)), None);
+
+        println!("Result: {:?}", result);
+        assert!(result.is_err(), "Should find duplicate compound key!");
     }
 }

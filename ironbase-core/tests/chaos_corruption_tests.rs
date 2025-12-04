@@ -13,7 +13,7 @@ mod chaos_helpers;
 use chaos_helpers::*;
 use ironbase_core::error::MongoLiteError;
 use ironbase_core::storage::StorageEngine;
-use ironbase_core::wal::{WALEntry, WALEntryType, WriteAheadLog};
+use ironbase_core::{WALEntry, WALEntryType, WriteAheadLog};
 use serde_json::json;
 use tempfile::TempDir;
 

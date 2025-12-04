@@ -622,3 +622,259 @@ fn test_update_many_nested_field_creates_duplicates_in_unique_index_bug() {
         "Alice's nested code should remain unchanged"
     );
 }
+
+/// FIX #19: Test update_many works correctly with compound unique indexes
+///
+/// BUG #4: Previously, update_many returned matched_count=0 when a compound
+/// unique index existed because check_index_constraints only checked ONE field
+/// instead of the compound key.
+#[test]
+fn test_update_many_with_compound_unique_index_bug4() {
+    use std::collections::HashMap;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("locations").unwrap();
+
+    // Create compound unique index on (country, city)
+    let index_name = collection
+        .create_compound_index(vec!["country".to_string(), "city".to_string()], true)
+        .unwrap();
+    println!("Created compound index: {}", index_name);
+
+    // Insert documents with different compound keys
+    let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
+    doc1.insert("country".to_string(), json!("USA"));
+    doc1.insert("city".to_string(), json!("NYC"));
+    doc1.insert("population".to_string(), json!(8_000_000));
+    db.insert_one("locations", doc1).unwrap();
+
+    let mut doc2: HashMap<String, serde_json::Value> = HashMap::new();
+    doc2.insert("country".to_string(), json!("USA"));
+    doc2.insert("city".to_string(), json!("LA"));
+    doc2.insert("population".to_string(), json!(4_000_000));
+    db.insert_one("locations", doc2).unwrap();
+
+    let mut doc3: HashMap<String, serde_json::Value> = HashMap::new();
+    doc3.insert("country".to_string(), json!("UK"));
+    doc3.insert("city".to_string(), json!("London"));
+    doc3.insert("population".to_string(), json!(9_000_000));
+    db.insert_one("locations", doc3).unwrap();
+
+    // Test 1: update_many should work when NOT violating compound unique constraint
+    // Update all USA cities' population - this should succeed
+    let (matched, modified) = db
+        .update_many(
+            "locations",
+            &json!({"country": "USA"}),
+            &json!({"$inc": {"population": 100_000}}),
+        )
+        .unwrap();
+
+    assert_eq!(matched, 2, "Should match 2 USA locations");
+    assert_eq!(modified, 2, "Should modify 2 USA locations");
+
+    // Verify the update worked
+    let nyc = collection
+        .find_one(&json!({"city": "NYC"}))
+        .unwrap()
+        .unwrap();
+    assert_eq!(nyc.get("population").unwrap().as_i64().unwrap(), 8_100_000);
+
+    // Test 2: update_many should FAIL when trying to create duplicate compound key
+    // Try to change LA's city to NYC - this would create duplicate (USA, NYC)
+    let result = db.update_many(
+        "locations",
+        &json!({"city": "LA"}),
+        &json!({"$set": {"city": "NYC"}}),
+    );
+
+    assert!(
+        result.is_err(),
+        "Should fail: duplicate compound key (USA, NYC)"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Duplicate key") || err_msg.contains("unique index"),
+        "Error should mention duplicate key: {}",
+        err_msg
+    );
+
+    // Verify LA was not changed (atomic failure)
+    let la = collection.find_one(&json!({"city": "LA"})).unwrap();
+    assert!(
+        la.is_some(),
+        "LA should still exist (update should have failed atomically)"
+    );
+}
+
+/// FIX #19: Test insert_many with compound unique index
+#[test]
+fn test_insert_many_compound_unique_index_bug4() {
+    use std::collections::HashMap;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("products").unwrap();
+
+    // Create compound unique index on (category, sku)
+    collection
+        .create_compound_index(vec!["category".to_string(), "sku".to_string()], true)
+        .unwrap();
+
+    // Helper to create HashMap from JSON-like structure
+    fn make_doc(category: &str, sku: &str, name: &str) -> HashMap<String, serde_json::Value> {
+        let mut doc = HashMap::new();
+        doc.insert("category".to_string(), json!(category));
+        doc.insert("sku".to_string(), json!(sku));
+        doc.insert("name".to_string(), json!(name));
+        doc
+    }
+
+    // Test 1: insert_many with different compound keys should succeed
+    let result = db.insert_many(
+        "products",
+        vec![
+            make_doc("Electronics", "E001", "Phone"),
+            make_doc("Electronics", "E002", "Laptop"),
+            make_doc("Clothing", "E001", "Shirt"), // Same SKU but different category = OK
+        ],
+    );
+    assert!(result.is_ok(), "Different compound keys should succeed");
+    assert_eq!(result.unwrap().len(), 3, "Should insert 3 documents");
+
+    // Test 2: insert_many with duplicate compound key should fail atomically
+    let result = db.insert_many(
+        "products",
+        vec![
+            make_doc("Books", "B001", "Novel"),
+            make_doc("Books", "B001", "Magazine"), // Duplicate!
+        ],
+    );
+    assert!(
+        result.is_err(),
+        "Duplicate compound key in batch should fail"
+    );
+
+    // Verify atomic failure - neither document was inserted
+    let books = collection.find(&json!({"category": "Books"})).unwrap();
+    assert_eq!(
+        books.len(),
+        0,
+        "Atomic failure: no books should be inserted"
+    );
+}
+
+/// BUG #5: Unique index allows multiple null values
+/// MongoDB behavior: null IS a value, so unique constraint applies.
+/// Only ONE document with null/missing indexed field should be allowed.
+#[test]
+fn test_unique_index_null_values_bug5() {
+    use std::collections::HashMap;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Test 1: First document with explicit null - should succeed
+    let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
+    doc1.insert("name".to_string(), json!("Alice"));
+    doc1.insert("email".to_string(), json!(null));
+    let result1 = db.insert_one("users", doc1);
+    assert!(result1.is_ok(), "First null email should succeed");
+
+    // Test 2: Second document with explicit null - SHOULD FAIL (duplicate null)
+    let mut doc2: HashMap<String, serde_json::Value> = HashMap::new();
+    doc2.insert("name".to_string(), json!("Bob"));
+    doc2.insert("email".to_string(), json!(null));
+    let result2 = db.insert_one("users", doc2);
+    assert!(
+        result2.is_err(),
+        "BUG #5: Second null email should fail - null is a value in unique index! Result: {:?}",
+        result2
+    );
+
+    // Verify only one document exists
+    let count = collection.count_documents(&json!({})).unwrap();
+    assert_eq!(count, 1, "Only one document should exist");
+}
+
+/// BUG #5: Unique index allows multiple missing field values
+/// MongoDB behavior: missing field is treated as null for indexing purposes.
+/// Only ONE document with missing indexed field should be allowed.
+#[test]
+fn test_unique_index_missing_field_bug5() {
+    use std::collections::HashMap;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Test 1: First document with MISSING email field - should succeed
+    let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
+    doc1.insert("name".to_string(), json!("Alice"));
+    // Note: email field is NOT inserted (missing)
+    let result1 = db.insert_one("users", doc1);
+    assert!(result1.is_ok(), "First missing email should succeed");
+
+    // Test 2: Second document with MISSING email field - SHOULD FAIL
+    let mut doc2: HashMap<String, serde_json::Value> = HashMap::new();
+    doc2.insert("name".to_string(), json!("Bob"));
+    // Note: email field is NOT inserted (missing)
+    let result2 = db.insert_one("users", doc2);
+    assert!(
+        result2.is_err(),
+        "BUG #5: Second missing email should fail - missing = null in unique index! Result: {:?}",
+        result2
+    );
+
+    // Verify only one document exists
+    let count = collection.count_documents(&json!({})).unwrap();
+    assert_eq!(count, 1, "Only one document should exist");
+}
+
+/// BUG #5: null and missing should be equivalent in unique index
+#[test]
+fn test_unique_index_null_equals_missing_bug5() {
+    use std::collections::HashMap;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test.mlite");
+
+    let db = DatabaseCore::open(&db_path).unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email
+    collection.create_index("email".to_string(), true).unwrap();
+
+    // Insert document with explicit null
+    let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
+    doc1.insert("name".to_string(), json!("Alice"));
+    doc1.insert("email".to_string(), json!(null));
+    db.insert_one("users", doc1).unwrap();
+
+    // Try to insert document with MISSING email - should fail (null == missing)
+    let mut doc2: HashMap<String, serde_json::Value> = HashMap::new();
+    doc2.insert("name".to_string(), json!("Bob"));
+    // email is missing
+    let result = db.insert_one("users", doc2);
+    assert!(
+        result.is_err(),
+        "BUG #5: Missing email should conflict with null email! Result: {:?}",
+        result
+    );
+}
