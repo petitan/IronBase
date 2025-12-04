@@ -105,3 +105,20 @@ jobs:
               print('Windows file persistence test passed!')
           PYEOF
           python /tmp/test_persist.py
+
+      - name: Build MCP Server
+        run: cargo build --release -p mcp-ironbase-server
+
+      - name: Upload MCP Server artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-ironbase-server-windows
+          path: target/release/mcp-ironbase-server.exe
+          retention-days: 30
+
+      - name: Upload installer script
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: mcp-server/scripts/install.ps1
+          retention-days: 30
