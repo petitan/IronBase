@@ -688,10 +688,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Distinct values for a field
+    /// FIX #19: Now supports nested fields via get_nested_value (e.g., "address.city")
     pub fn distinct(&self, field: &str, query_json: &Value) -> Result<Vec<Value>> {
+        use crate::value_utils::get_nested_value;
+
         if let Some(doc_id) = Self::extract_id_query(query_json) {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                if let Some(value) = doc.get(field) {
+                if let Some(value) = get_nested_value(&doc, field) {
                     return Ok(vec![value.clone()]);
                 }
             }
@@ -730,7 +733,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             };
 
             if matches {
-                if let Some(field_value) = doc.get(field) {
+                if let Some(field_value) = get_nested_value(&doc, field) {
                     let value_key =
                         serde_json::to_string(field_value).unwrap_or_else(|_| "null".to_string());
 
@@ -1493,12 +1496,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let field_name = &btree_index.metadata.field;
 
                     // Get old and new values
-                    let old_value = old_doc.get(field_name);
-                    let new_value = if let Value::Object(ref map) = new_doc_for_tracking {
-                        map.get(field_name)
-                    } else {
-                        None
-                    };
+                    // FIX #19: Use get_nested_value to support dot notation (e.g., "profile.code")
+                    let old_value = crate::value_utils::get_nested_value(&old_doc, field_name);
+                    let new_value =
+                        crate::value_utils::get_nested_value(&new_doc_for_tracking, field_name);
 
                     // Delete old key if exists
                     if let Some(old_val) = old_value {
@@ -1577,7 +1578,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let field_name = &btree_index.metadata.field;
 
                     // Delete key from index if exists
-                    if let Some(old_val) = old_doc.get(field_name) {
+                    // FIX #19: Use get_nested_value to support dot notation (e.g., "profile.code")
+                    if let Some(old_val) =
+                        crate::value_utils::get_nested_value(&old_doc, field_name)
+                    {
                         let old_key = crate::transaction::IndexKey::from(old_val);
                         tx.add_index_change(
                             index_name.clone(),
