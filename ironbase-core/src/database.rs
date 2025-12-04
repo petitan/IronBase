@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::collection_core::{CollectionCore, RawOperations};
+use crate::collection_core::{BatchConstraintValidator, CollectionCore, RawOperations};
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use crate::error::Result;
@@ -759,6 +759,21 @@ impl DatabaseCore<StorageEngine> {
         match self.durability_mode {
             DurabilityMode::Safe => {
                 let collection = self.collection(collection_name)?;
+
+                // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
+                // This ensures atomic failure - either all documents insert or none.
+                {
+                    let indexes = collection.indexes.read();
+                    let mut batch_validator =
+                        BatchConstraintValidator::new(&indexes, collection_name);
+                    for document in &documents {
+                        let doc_value = serde_json::to_value(document).map_err(|e| {
+                            crate::error::MongoLiteError::Serialization(e.to_string())
+                        })?;
+                        batch_validator.check_and_track(&doc_value)?;
+                    }
+                }
+
                 let mut auto_tx = self.begin_auto_transaction();
                 let mut inserted_ids = Vec::with_capacity(documents.len());
 
@@ -793,6 +808,20 @@ impl DatabaseCore<StorageEngine> {
 
             DurabilityMode::Batch { .. } => {
                 let collection = self.collection(collection_name)?;
+
+                // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
+                {
+                    let indexes = collection.indexes.read();
+                    let mut batch_validator =
+                        BatchConstraintValidator::new(&indexes, collection_name);
+                    for document in &documents {
+                        let doc_value = serde_json::to_value(document).map_err(|e| {
+                            crate::error::MongoLiteError::Serialization(e.to_string())
+                        })?;
+                        batch_validator.check_and_track(&doc_value)?;
+                    }
+                }
+
                 let mut inserted_ids = Vec::with_capacity(documents.len());
 
                 for document in documents {
@@ -828,6 +857,20 @@ impl DatabaseCore<StorageEngine> {
                 auto_checkpoint_ops,
             } => {
                 let collection = self.collection(collection_name)?;
+
+                // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
+                {
+                    let indexes = collection.indexes.read();
+                    let mut batch_validator =
+                        BatchConstraintValidator::new(&indexes, collection_name);
+                    for document in &documents {
+                        let doc_value = serde_json::to_value(document).map_err(|e| {
+                            crate::error::MongoLiteError::Serialization(e.to_string())
+                        })?;
+                        batch_validator.check_and_track(&doc_value)?;
+                    }
+                }
+
                 let mut inserted_ids = Vec::with_capacity(documents.len());
 
                 for document in documents {

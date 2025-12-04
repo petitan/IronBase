@@ -442,8 +442,8 @@ fn test_update_one_changes_indexed_value() {
 
 /// BUG TEST: insert_many with duplicates WITHIN the batch should fail.
 /// This tests the same pattern as Issue #16, but for insert_many.
+/// Fixed by Issue #17 - BatchConstraintValidator now detects within-batch duplicates.
 #[test]
-#[ignore] // Remove #[ignore] after fixing the bug
 fn test_insert_many_duplicates_within_batch_bug() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("test.mlite");

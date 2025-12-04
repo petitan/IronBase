@@ -17,10 +17,12 @@ use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
 use crate::{log_debug, log_trace, log_warn};
 
+mod constraints;
 mod index_persistence;
 mod raw_operations;
 mod schema;
 
+pub(crate) use self::constraints::BatchConstraintValidator;
 use self::index_persistence::{persist_index_to_disk, try_load_index_from_file};
 use self::schema::CompiledSchema;
 
