@@ -15,11 +15,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use mcp_docjl::{
-    dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, service, shutdown,
+    dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, http_server, service,
     IronBaseAdapter, VERSION,
 };
 
@@ -115,7 +114,7 @@ async fn main() {
     }
 
     // Default: run HTTP server
-    run_http_server().await;
+    http_server::run_http_server().await;
 }
 
 fn print_help() {
@@ -370,152 +369,7 @@ fn create_error_response(code: i32, message: &str, id: Option<serde_json::Value>
 }
 
 // ============================================================
-// HTTP MODE (for testing/other clients)
-// ============================================================
-
-async fn run_http_server() {
-    run_http_server_internal(None).await;
-}
-
-/// Run HTTP server with an external shutdown receiver (used by Windows Service)
-#[cfg(windows)]
-pub async fn run_http_server_with_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
-    run_http_server_internal(Some(shutdown_rx)).await;
-}
-
-async fn run_http_server_internal(
-    #[allow(unused_variables)] external_shutdown: Option<std::sync::mpsc::Receiver<()>>,
-) {
-    use axum::{
-        extract::{Json, State},
-        http::StatusCode,
-        response::{IntoResponse, Response},
-        routing::{get, post},
-        Router,
-    };
-    use tokio::net::TcpListener;
-    use tracing::info;
-
-    // Initialize tracing
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
-
-    info!("Starting MCP IronBase Server v{} (HTTP mode)", VERSION);
-
-    // Load configuration
-    let config = load_config().expect("Failed to load configuration");
-    let host = config.host.clone();
-    let port = config.port;
-
-    // Initialize IronBase adapter
-    let adapter = Arc::new(
-        IronBaseAdapter::new(&config.database_path).expect("Failed to create IronBase adapter"),
-    );
-
-    let app_state = Arc::new(HttpAppState {
-        adapter: adapter.clone(),
-    });
-
-    // HTTP request handler
-    async fn http_handle_mcp_request(
-        State(state): State<Arc<HttpAppState>>,
-        Json(request): Json<McpRequest>,
-    ) -> Response {
-        match handle_request(&request, &state.adapter) {
-            Some(response) => (StatusCode::OK, Json(response)).into_response(),
-            None => {
-                // Notification - no response body per JSON-RPC spec
-                // Return 204 No Content for HTTP
-                StatusCode::NO_CONTENT.into_response()
-            }
-        }
-    }
-
-    async fn health_check() -> impl IntoResponse {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "version": VERSION
-            })),
-        )
-    }
-
-    let app = Router::new()
-        .route("/mcp", post(http_handle_mcp_request))
-        .route("/health", get(health_check))
-        .with_state(app_state);
-
-    let addr = format!("{}:{}", host, port);
-    let listener = TcpListener::bind(&addr)
-        .await
-        .expect("Failed to bind address");
-
-    info!("Server listening on {}", addr);
-
-    // Create shutdown future based on source
-    #[cfg(windows)]
-    let shutdown_future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-        if let Some(rx) = external_shutdown {
-            Box::pin(async move {
-                // Wait for signal from Windows SCM
-                let _ = tokio::task::spawn_blocking(move || rx.recv()).await;
-            })
-        } else {
-            Box::pin(shutdown::shutdown_signal())
-        };
-
-    #[cfg(not(windows))]
-    let shutdown_future = shutdown::shutdown_signal();
-
-    // Run server with graceful shutdown
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_future)
-        .await
-        .expect("Server error");
-
-    // Graceful shutdown: checkpoint database
-    info!("Shutting down gracefully...");
-    if let Err(e) = adapter.checkpoint() {
-        tracing::error!("Error checkpointing database: {}", e);
-    }
-    info!("Server stopped");
-}
-
-struct HttpAppState {
-    adapter: Arc<IronBaseAdapter>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct Config {
-    host: String,
-    port: u16,
-    database_path: PathBuf,
-}
-
-fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
-    let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
-
-    if std::path::Path::new(&config_path).exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        let config: Config =
-            toml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
-        Ok(config)
-    } else {
-        Ok(Config {
-            host: "0.0.0.0".to_string(),
-            port: 8080,
-            database_path: PathBuf::from("ironbase_data.mlite"),
-        })
-    }
-}
-
-// ============================================================
-// Shared Types
+// Shared Types (for stdio mode)
 // ============================================================
 
 #[derive(Debug, Deserialize)]

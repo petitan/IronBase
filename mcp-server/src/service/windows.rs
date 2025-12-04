@@ -225,7 +225,7 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
     let server_handle = std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
         rt.block_on(async {
-            crate::run_http_server_with_shutdown(shutdown_rx).await;
+            crate::http_server::run_http_server_with_shutdown(shutdown_rx).await;
         });
     });
 

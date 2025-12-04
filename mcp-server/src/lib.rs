@@ -2,6 +2,7 @@
 
 pub mod adapter;
 pub mod error;
+pub mod http_server;
 pub mod prompts;
 pub mod service;
 pub mod shutdown;

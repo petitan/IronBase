@@ -1,8 +1,0 @@
-# MCP IronBase Server Configuration
-
-# Server settings
-host = "0.0.0.0"
-port = 8080
-
-# Database path
-database_path = "./ironbase_data.mlite"
