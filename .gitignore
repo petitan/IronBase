@@ -37,3 +37,6 @@ test_*.mlite
 examples/data/*.db
 examples/data/*.mlite
 mongolite-core/*.mlite
+
+# Proptest regressions
+**/proptest-regressions/

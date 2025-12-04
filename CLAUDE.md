@@ -23,7 +23,7 @@ pip install maturin
 maturin develop              # Development build with Python bindings
 
 # Testing
-cargo test -p ironbase-core                    # All Rust tests (554+)
+cargo test -p ironbase-core                    # All Rust tests (744+)
 cargo test -p ironbase-core -- test_name       # Single test by name
 cargo test -p ironbase-core -- --nocapture     # Tests with stdout
 just run-dev-checks                            # Full CI: fmt + clippy + tests
@@ -71,6 +71,7 @@ MongoLite/
 - `DatabaseCore::open(path)` - File-based storage (production)
 - `DatabaseCore::<MemoryStorage>::open_memory()` - In-memory (testing, 10-100x faster)
 - Durability modes: Safe (auto-commit), Batch, Unsafe
+- Shared IndexManager per collection (Arc<RwLock>) - prevents stale index state
 
 **collection_core/mod.rs** - All CRUD and query operations:
 - insert_one/many, find/find_one/find_with_options, update_one/many, delete_one/many
@@ -102,11 +103,12 @@ MongoLite/
 - **metadata.rs** - Metadata flush/load with dynamic offset (v2+ format)
 - **compaction.rs** - Garbage collection for tombstones
 
-**index.rs + btree.rs** - B+ tree indexing:
+**index.rs** - B+ tree indexing (IndexManager + BPlusTree):
 - Single-field indexes: `create_index("field", unique)`
 - Compound indexes: `create_compound_index(["field1", "field2"], unique)`
 - Automatic query optimization with index selection
 - explain() and find_with_hint() for query planning
+- Unique indexes enforce constraint on null/missing values (MongoDB behavior)
 
 **transaction.rs + wal.rs** - ACD transactions:
 - Write-Ahead Log with CRC32 checksums
@@ -243,7 +245,7 @@ curl -X POST http://127.0.0.1:8080/mcp \
 ## Testing Strategy
 
 - **Test first** approach always
-- Rust unit tests: `cargo test -p ironbase-core` (554+ tests)
+- Rust unit tests: `cargo test -p ironbase-core` (744+ tests)
 - Property tests: proptest in `ironbase-core/tests/property_tests.rs`
 - Integration tests: `ironbase-core/tests/`
 - Python tests: `test_*.py`, `run_all_tests.py`
