@@ -119,21 +119,21 @@ impl From<&serde_json::Value> for IndexKey {
 
 /// B+ Tree Node types
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum BTreeNode {
+pub(crate) enum BTreeNode {
     Internal(InternalNode),
     Leaf(LeafNode),
 }
 
 /// Internal node (non-leaf) - contains routing keys
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InternalNode {
+pub(crate) struct InternalNode {
     pub keys: Vec<IndexKey>,
     pub children_offsets: Vec<u64>,
 }
 
 /// Leaf node - contains actual data pointers
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LeafNode {
+pub(crate) struct LeafNode {
     pub keys: Vec<IndexKey>,
     pub document_ids: Vec<DocumentId>,
     pub next_leaf_offset: u64, // File offset to next leaf node (0 = none)
