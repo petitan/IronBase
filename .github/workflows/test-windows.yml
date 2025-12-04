@@ -109,16 +109,25 @@ jobs:
       - name: Build MCP Server
         run: cargo build --release -p mcp-ironbase-server
 
-      - name: Upload MCP Server artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: mcp-ironbase-server-windows
-          path: target/release/mcp-ironbase-server.exe
-          retention-days: 30
+      - name: Prepare Windows release package
+        shell: bash
+        run: |
+          mkdir -p release-windows
+          cp target/release/mcp-ironbase-server.exe release-windows/
+          cp mcp-server/scripts/install.ps1 release-windows/
+          echo "IronBase MCP Server for Windows" > release-windows/README.txt
+          echo "" >> release-windows/README.txt
+          echo "Installation:" >> release-windows/README.txt
+          echo "  1. Run PowerShell as Administrator" >> release-windows/README.txt
+          echo "  2. cd to this folder" >> release-windows/README.txt
+          echo "  3. Run: .\\install.ps1" >> release-windows/README.txt
+          echo "" >> release-windows/README.txt
+          echo "Uninstall:" >> release-windows/README.txt
+          echo "  .\\install.ps1 -Uninstall" >> release-windows/README.txt
 
-      - name: Upload installer script
+      - name: Upload Windows release package
         uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
-          path: mcp-server/scripts/install.ps1
+          name: ironbase-mcp-server-windows
+          path: release-windows/
           retention-days: 30

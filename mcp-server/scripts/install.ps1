@@ -44,18 +44,31 @@ function Install-IronBase {
         exit 1
     }
 
-    # Find the executable
+    # Find the executable - check multiple locations
     $ScriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
-    $SourceExe = Join-Path $ScriptDir "..\target\release\$ExeName"
+    $SearchPaths = @(
+        (Join-Path $ScriptDir $ExeName),                           # Same folder as script
+        (Join-Path (Get-Location) $ExeName),                       # Current directory
+        (Join-Path $ScriptDir "..\target\release\$ExeName"),       # Dev build path
+        ".\target\release\$ExeName"                                # Alt dev path
+    )
 
-    if (-not (Test-Path $SourceExe)) {
-        # Try relative to current directory
-        $SourceExe = ".\target\release\$ExeName"
+    $SourceExe = $null
+    foreach ($path in $SearchPaths) {
+        if (Test-Path $path) {
+            $SourceExe = (Resolve-Path $path).Path
+            break
+        }
     }
 
-    if (-not (Test-Path $SourceExe)) {
+    if (-not $SourceExe) {
         Write-Host "ERROR: Cannot find $ExeName" -ForegroundColor Red
-        Write-Host "Please build the project first: cargo build --release" -ForegroundColor Yellow
+        Write-Host "Searched locations:" -ForegroundColor Yellow
+        foreach ($path in $SearchPaths) {
+            Write-Host "  - $path" -ForegroundColor Yellow
+        }
+        Write-Host ""
+        Write-Host "Please place $ExeName in the same folder as this script." -ForegroundColor Yellow
         exit 1
     }
 
