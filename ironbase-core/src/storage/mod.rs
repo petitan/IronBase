@@ -48,14 +48,14 @@ pub const RESERVED_METADATA_SIZE: u64 = 10 * 1024 * 1024; // 10MB reserved for m
 pub const HEADER_SIZE: u64 = 256; // Fixed header size
 pub const DATA_START_OFFSET: u64 = HEADER_SIZE + RESERVED_METADATA_SIZE; // Documents start here
 
-/// Adatbázis fájl fejléc
+/// Database file header
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Header {
     pub magic: [u8; 8],        // "MONGOLTE"
-    pub version: u32,          // Verzió szám (2 = dynamic metadata)
-    pub page_size: u32,        // Oldal méret (default: 4KB)
-    pub collection_count: u32, // Collection-ök száma
-    pub free_list_head: u64,   // Szabad blokkok lista kezdete
+    pub version: u32,          // Version number (2 = dynamic metadata)
+    pub page_size: u32,        // Page size (default: 4KB)
+    pub collection_count: u32, // Number of collections
+    pub free_list_head: u64,   // Free blocks list head
     #[serde(default)]
     pub index_section_offset: u64, // Index metadata section offset (0 = none)
 
@@ -81,16 +81,16 @@ impl Default for Header {
     }
 }
 
-/// Collection metaadatok
+/// Collection metadata
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CollectionMeta {
     pub name: String,
     pub document_count: u64,
     #[serde(default)]
     pub live_document_count: u64,
-    pub data_offset: u64,  // Adatok kezdő pozíciója
-    pub index_offset: u64, // Indexek kezdő pozíciója
-    pub last_id: u64,      // Utolsó _id
+    pub data_offset: u64,  // Data start position
+    pub index_offset: u64, // Index start position
+    pub last_id: u64,      // Last _id
 
     /// Document catalog: DocumentId -> file offset mapping
     /// This enables persistent document storage and fast retrieval
@@ -115,7 +115,7 @@ pub struct IndexRecord {
     pub index_metadata: crate::index::IndexMetadata,
 }
 
-/// Storage engine - fájl alapú tárolás
+/// Storage engine - file-based storage
 pub struct StorageEngine {
     file: File,
     mmap: Option<MmapMut>,
@@ -209,7 +209,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Collection törlése
+    /// Drop collection
     pub fn drop_collection(&mut self, name: &str) -> Result<()> {
         if !self.collections.contains_key(name) {
             return Err(MongoLiteError::CollectionNotFound(name.to_string()));
@@ -224,23 +224,23 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Collection-ök listája
+    /// List all collections
     pub fn list_collections(&self) -> Vec<String> {
         self.collections.keys().cloned().collect()
     }
 
-    /// Collection metaadatok lekérése (immutable)
+    /// Get collection metadata (immutable)
     pub fn get_collection_meta(&self, name: &str) -> Option<&CollectionMeta> {
         self.collections.get(name)
     }
 
-    /// Collection metaadatok lekérése (mutable)
+    /// Get collection metadata (mutable)
     /// Metadata changes are persisted only when flush() is called (typically on database close)
     pub fn get_collection_meta_mut(&mut self, name: &str) -> Option<&mut CollectionMeta> {
         self.collections.get_mut(name)
     }
 
-    /// Flush - változások lemezre írása (beleértve a metadata-t is)
+    /// Flush changes to disk (including metadata)
     pub fn flush(&mut self) -> Result<()> {
         // Flush metadata to disk with proper convergence
         self.flush_metadata()?;
@@ -272,7 +272,7 @@ impl StorageEngine {
         Ok(())
     }
 
-    /// Statisztikák
+    /// Get database statistics
     pub fn stats(&self) -> serde_json::Value {
         serde_json::json!({
             "file_path": self.file_path,
@@ -792,7 +792,7 @@ impl StorageEngine {
     }
 }
 
-// Automatikus bezárás
+// Automatic cleanup on drop
 impl Drop for StorageEngine {
     fn drop(&mut self) {
         let _ = self.flush();

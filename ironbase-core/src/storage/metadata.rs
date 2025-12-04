@@ -101,7 +101,7 @@ impl StorageEngine {
     ) -> Result<u64> {
         writer.seek(SeekFrom::Start(0))?;
 
-        // Header kiírása
+        // Write header
         let mut header_bytes =
             bincode::serialize(header).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
         if header_bytes.len() < super::HEADER_SIZE as usize {
@@ -109,9 +109,9 @@ impl StorageEngine {
         }
         writer.write_all(&header_bytes)?;
 
-        // Collection metaadatok kiírása
-        // FONTOS: JSON serialization használja a custom catalog_serde modult,
-        // ami megőrzi a DocumentId típusinformációt [type_tag, value, offset] formátumban
+        // Write collection metadata
+        // IMPORTANT: JSON serialization uses custom catalog_serde module,
+        // which preserves DocumentId type info in [type_tag, value, offset] format
         for meta in collections.values() {
             let meta_bytes = serde_json::to_vec(meta)?;
             let len = (meta_bytes.len() as u32).to_le_bytes();
@@ -119,7 +119,7 @@ impl StorageEngine {
             writer.write_all(&meta_bytes)?;
         }
 
-        // Jelenlegi pozíció = metadat szakasz vége
+        // Current position = end of metadata section
         let metadata_end = writer.stream_position()?;
 
         Ok(metadata_end)
