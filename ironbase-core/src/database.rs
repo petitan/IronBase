@@ -48,27 +48,9 @@ fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::Ind
 /// Handles Int, String, and ObjectId (24-char hex string) formats.
 /// Returns error if _id is missing or has invalid type.
 fn extract_doc_id(doc: &Value) -> Result<DocumentId> {
-    try_extract_doc_id(doc).ok_or_else(|| {
+    DocumentId::try_from_value(doc).ok_or_else(|| {
         crate::error::MongoLiteError::InvalidQuery("Document missing _id".to_string())
     })
-}
-
-/// Try to extract DocumentId from a JSON Value's _id field
-///
-/// Returns None if _id is missing or has invalid type.
-/// Used in loops where we want to skip invalid documents.
-fn try_extract_doc_id(doc: &Value) -> Option<DocumentId> {
-    match doc.get("_id") {
-        Some(Value::Number(n)) => Some(DocumentId::Int(n.as_i64().unwrap_or(0))),
-        Some(Value::String(s)) => {
-            if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                Some(DocumentId::ObjectId(s.clone()))
-            } else {
-                Some(DocumentId::String(s.clone()))
-            }
-        }
-        _ => None,
-    }
 }
 
 /// Pure Rust IronBase Database - language-independent
@@ -400,7 +382,11 @@ impl DatabaseCore<StorageEngine> {
                 // IMPORTANT: WAL must contain the FULL document with _id and _collection
                 // so that recovery can rebuild the catalog correctly
                 let mut doc_with_metadata = document.clone();
-                doc_with_metadata.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                doc_with_metadata.insert(
+                    "_id".to_string(),
+                    serde_json::to_value(&doc_id)
+                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?,
+                );
                 doc_with_metadata.insert(
                     "_collection".to_string(),
                     Value::String(collection_name.to_string()),
@@ -431,7 +417,11 @@ impl DatabaseCore<StorageEngine> {
                 // 2. Add to batch buffer
                 // IMPORTANT: WAL must contain the FULL document with _id and _collection
                 let mut doc_with_metadata = document.clone();
-                doc_with_metadata.insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                doc_with_metadata.insert(
+                    "_id".to_string(),
+                    serde_json::to_value(&doc_id)
+                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?,
+                );
                 doc_with_metadata.insert(
                     "_collection".to_string(),
                     Value::String(collection_name.to_string()),
@@ -692,8 +682,12 @@ impl DatabaseCore<StorageEngine> {
 
                     // Add full document to WAL
                     let mut doc_with_metadata = document.clone();
-                    doc_with_metadata
-                        .insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                    doc_with_metadata.insert(
+                        "_id".to_string(),
+                        serde_json::to_value(&doc_id).map_err(|e| {
+                            crate::error::MongoLiteError::Serialization(e.to_string())
+                        })?,
+                    );
                     doc_with_metadata.insert(
                         "_collection".to_string(),
                         Value::String(collection_name.to_string()),
@@ -728,8 +722,12 @@ impl DatabaseCore<StorageEngine> {
                     let doc_id = collection.insert_one_raw(document.clone())?;
 
                     let mut doc_with_metadata = document.clone();
-                    doc_with_metadata
-                        .insert("_id".to_string(), serde_json::to_value(&doc_id).unwrap());
+                    doc_with_metadata.insert(
+                        "_id".to_string(),
+                        serde_json::to_value(&doc_id).map_err(|e| {
+                            crate::error::MongoLiteError::Serialization(e.to_string())
+                        })?,
+                    );
                     doc_with_metadata.insert(
                         "_collection".to_string(),
                         Value::String(collection_name.to_string()),
@@ -815,7 +813,7 @@ impl DatabaseCore<StorageEngine> {
                 // 4. For each modified document, add WAL entry
                 if modified > 0 {
                     for old_doc in old_docs.iter() {
-                        let Some(doc_id) = try_extract_doc_id(old_doc) else {
+                        let Some(doc_id) = DocumentId::try_from_value(old_doc) else {
                             continue; // Skip docs without valid _id
                         };
 
@@ -1203,13 +1201,143 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         Ok(shared)
     }
 
+    /// Load persisted custom indexes from metadata/files
+    fn load_persisted_indexes(
+        index_manager: &mut IndexManager,
+        persisted_indexes: &[crate::index::IndexMetadata],
+        id_index_name: &str,
+        db_path: &str,
+    ) -> Result<()> {
+        use crate::log_debug;
+
+        for index_meta in persisted_indexes {
+            // Skip _id index (already created)
+            if index_meta.name == id_index_name {
+                continue;
+            }
+
+            // Try to load from .idx file first
+            if let Some(loaded_tree) =
+                crate::collection_core::try_load_index_from_file(db_path, index_meta)
+            {
+                log_debug!(
+                    "Loaded index '{}' from .idx file (will rebuild from documents)",
+                    index_meta.name
+                );
+                index_manager.add_loaded_index(loaded_tree);
+            } else {
+                // Fallback: create empty index
+                log_debug!(
+                    "Creating index '{}' on field '{}' (will rebuild from documents)",
+                    index_meta.name,
+                    index_meta.field
+                );
+                index_manager.create_btree_index(
+                    index_meta.name.clone(),
+                    index_meta.field.clone(),
+                    index_meta.unique,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild all indexes from document catalog
+    fn rebuild_indexes_from_catalog<S2: Storage + RawStorage>(
+        index_manager: &mut IndexManager,
+        storage: &mut S2,
+        collection_name: &str,
+        catalog: &std::collections::HashMap<DocumentId, u64>,
+        persisted_indexes: &[crate::index::IndexMetadata],
+        id_index_name: &str,
+    ) -> Result<u64> {
+        use crate::index::IndexKey;
+        use crate::log_warn;
+
+        let mut rebuilt_count = 0u64;
+
+        for (_id_key, offset) in catalog.iter() {
+            // Read document from disk
+            let doc_bytes = match storage.read_document_at(collection_name, *offset) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    log_warn!(
+                        "Failed to read document at offset during index rebuild: {:?}",
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // Parse JSON
+            let doc: Value = match serde_json::from_slice(&doc_bytes) {
+                Ok(d) => d,
+                Err(e) => {
+                    log_warn!(
+                        "Failed to parse document JSON during index rebuild: {:?}",
+                        e
+                    );
+                    continue;
+                }
+            };
+
+            // Skip tombstones
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            // Extract _id
+            let Some(id_value) = doc.get("_id") else {
+                continue;
+            };
+            let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_value.clone()) else {
+                continue;
+            };
+
+            // Rebuild _id index
+            let index_key = IndexKey::from(id_value);
+            if let Some(id_index) = index_manager.get_btree_index_mut(id_index_name) {
+                let _ = id_index.insert(index_key, doc_id.clone());
+            }
+
+            // Rebuild custom indexes
+            for index_meta in persisted_indexes {
+                if index_meta.name == id_index_name {
+                    continue;
+                }
+
+                let Some(index) = index_manager.get_btree_index_mut(&index_meta.name) else {
+                    continue;
+                };
+
+                let key = index.extract_key(&doc);
+                let is_all_null = match &key {
+                    IndexKey::Null => true,
+                    IndexKey::Compound(keys) => keys.iter().all(|k| matches!(k, IndexKey::Null)),
+                    _ => false,
+                };
+
+                // Include null keys for unique indexes, skip for non-unique
+                if !is_all_null || index.metadata.unique {
+                    let _ = index.insert(key, doc_id.clone());
+                    rebuilt_count += 1;
+                }
+            }
+        }
+
+        Ok(rebuilt_count)
+    }
+
     /// Initialize an IndexManager for a collection (internal)
     ///
     /// This creates the _id index, loads persisted indexes, and rebuilds
     /// all indexes from the document catalog.
     fn initialize_index_manager(&self, name: &str) -> Result<IndexManager> {
-        use crate::index::IndexKey;
-        use crate::{log_debug, log_warn};
+        use crate::log_debug;
 
         let mut index_manager = IndexManager::new();
 
@@ -1246,119 +1374,28 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         drop(storage_guard); // Release write lock before rebuilding
 
-        // Load persisted custom indexes (if any)
-        for index_meta in &persisted_indexes {
-            // Skip _id index (already created)
-            if index_meta.name == id_index_name {
-                continue;
-            }
+        // Load persisted custom indexes (delegated to helper)
+        Self::load_persisted_indexes(
+            &mut index_manager,
+            &persisted_indexes,
+            &id_index_name,
+            &db_path,
+        )?;
 
-            // Try to load from .idx file first (for index structure/metadata)
-            if let Some(loaded_tree) =
-                crate::collection_core::try_load_index_from_file(&db_path, index_meta)
-            {
-                log_debug!(
-                    "Loaded index '{}' from .idx file (will rebuild from documents)",
-                    index_meta.name
-                );
-                index_manager.add_loaded_index(loaded_tree);
-            } else {
-                // Fallback: create empty index (will be rebuilt from documents)
-                log_debug!(
-                    "Creating index '{}' on field '{}' (will rebuild from documents)",
-                    index_meta.name,
-                    index_meta.field
-                );
-
-                index_manager.create_btree_index(
-                    index_meta.name.clone(),
-                    index_meta.field.clone(),
-                    index_meta.unique,
-                )?;
-            }
-        }
-
-        // Rebuild all indexes from document catalog
+        // Rebuild all indexes from document catalog (delegated to helper)
         log_debug!(
             "Starting index rebuild from {} catalog entries",
             catalog.len()
         );
         let mut storage_guard = self.storage.write();
-        let mut rebuilt_count = 0;
-
-        for (_id_key, offset) in catalog.iter() {
-            // Read document from disk (absolute offset)
-            match storage_guard.read_document_at(name, *offset) {
-                Ok(doc_bytes) => match serde_json::from_slice::<Value>(&doc_bytes) {
-                    Ok(doc) => {
-                        // Skip tombstones
-                        if doc
-                            .get("_tombstone")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            continue;
-                        }
-
-                        // Rebuild ALL indexes
-                        if let Some(id_value) = doc.get("_id") {
-                            if let Ok(doc_id) =
-                                serde_json::from_value::<DocumentId>(id_value.clone())
-                            {
-                                // Rebuild _id index
-                                let index_key = IndexKey::from(id_value);
-                                if let Some(id_index) =
-                                    index_manager.get_btree_index_mut(&id_index_name)
-                                {
-                                    let _ = id_index.insert(index_key, doc_id.clone());
-                                }
-
-                                // Rebuild ALL custom indexes
-                                for index_meta in &persisted_indexes {
-                                    if index_meta.name == id_index_name {
-                                        continue;
-                                    }
-
-                                    if let Some(index) =
-                                        index_manager.get_btree_index_mut(&index_meta.name)
-                                    {
-                                        let key = index.extract_key(&doc);
-                                        // Check if all key components are Null
-                                        let is_all_null = match &key {
-                                            IndexKey::Null => true,
-                                            IndexKey::Compound(keys) => {
-                                                keys.iter().all(|k| matches!(k, IndexKey::Null))
-                                            }
-                                            _ => false,
-                                        };
-                                        // For unique indexes: include null keys (null is a value)
-                                        // For non-unique indexes: skip null keys (no query benefit)
-                                        if !is_all_null || index.metadata.unique {
-                                            let _ = index.insert(key, doc_id.clone());
-                                            rebuilt_count += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log_warn!(
-                            "Failed to parse document JSON during index rebuild: {:?}",
-                            e
-                        );
-                        continue;
-                    }
-                },
-                Err(e) => {
-                    log_warn!(
-                        "Failed to read document at offset during index rebuild: {:?}",
-                        e
-                    );
-                    continue;
-                }
-            }
-        }
+        let rebuilt_count = Self::rebuild_indexes_from_catalog(
+            &mut index_manager,
+            &mut *storage_guard,
+            name,
+            &catalog,
+            &persisted_indexes,
+            &id_index_name,
+        )?;
 
         log_debug!(
             "Index rebuild completed - {} index entries rebuilt",

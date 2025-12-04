@@ -108,32 +108,9 @@ impl OperationReplay {
 
     /// Extract DocumentId from a document Value
     fn extract_doc_id(doc: &serde_json::Value) -> Result<DocumentId> {
-        let id_value = doc
-            .get("_id")
-            .ok_or_else(|| MongoLiteError::Serialization("Missing _id in document".into()))?;
-
-        match id_value {
-            serde_json::Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    Ok(DocumentId::Int(i))
-                } else {
-                    Err(MongoLiteError::Serialization(
-                        "Invalid _id number type".into(),
-                    ))
-                }
-            }
-            serde_json::Value::String(s) => {
-                // Check if it looks like an ObjectId (24 hex chars)
-                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                    Ok(DocumentId::ObjectId(s.clone()))
-                } else {
-                    Ok(DocumentId::String(s.clone()))
-                }
-            }
-            _ => Err(MongoLiteError::Serialization(
-                "Invalid _id type (must be number or string)".into(),
-            )),
-        }
+        DocumentId::try_from_value(doc).ok_or_else(|| {
+            MongoLiteError::Serialization("Missing or invalid _id in document".into())
+        })
     }
 }
 

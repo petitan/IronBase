@@ -35,6 +35,24 @@ impl DocumentId {
     pub fn new_object_id() -> Self {
         DocumentId::ObjectId(Uuid::new_v4().to_string())
     }
+
+    /// Try to extract DocumentId from a JSON Value's _id field
+    ///
+    /// Returns None if _id is missing or has invalid type.
+    /// Used in loops where we want to skip invalid documents.
+    pub fn try_from_value(doc: &Value) -> Option<DocumentId> {
+        match doc.get("_id") {
+            Some(Value::Number(n)) => Some(DocumentId::Int(n.as_i64().unwrap_or(0))),
+            Some(Value::String(s)) => {
+                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+                    Some(DocumentId::ObjectId(s.clone()))
+                } else {
+                    Some(DocumentId::String(s.clone()))
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 impl Document {

@@ -23,6 +23,40 @@ use crate::storage::{RawStorage, Storage};
 
 use super::{BatchConstraintValidator, CollectionCore, InsertManyResult};
 
+/// Helper: Check if document is a tombstone
+#[inline]
+fn is_tombstone(doc: &Value) -> bool {
+    doc.get("_tombstone")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Helper: Direct _id lookup optimization (O(1) instead of full scan)
+/// Returns Some(map) if query is `{_id: <value>}`, None otherwise (fallback to scan)
+fn try_direct_id_lookup<S: Storage + RawStorage>(
+    storage: &mut S,
+    catalog: &HashMap<DocumentId, u64>,
+    query_json: &Value,
+) -> Option<HashMap<DocumentId, Value>> {
+    let query_obj = query_json.as_object()?;
+    if query_obj.len() != 1 || !query_obj.contains_key("_id") {
+        return None;
+    }
+    let id_val = query_obj.get("_id")?;
+    let doc_id: DocumentId = serde_json::from_value(id_val.clone()).ok()?;
+    let &offset = catalog.get(&doc_id)?;
+    let doc_bytes = storage.read_data(offset).ok()?;
+    let doc: Value = serde_json::from_slice(&doc_bytes).ok()?;
+
+    if is_tombstone(&doc) {
+        return Some(HashMap::new());
+    }
+
+    let mut map = HashMap::new();
+    map.insert(doc_id, doc);
+    Some(map)
+}
+
 /// Private module that seals the trait
 mod sealed {
     use crate::storage::{RawStorage, Storage};
@@ -269,54 +303,13 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             None => return Ok((0, 0)), // Collection doesn't exist
         };
 
-        // Read documents WITHIN the write lock (inline from scan_documents_via_catalog)
-        let docs_by_id: HashMap<DocumentId, Value> = {
-            // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
-            if let Some(query_obj) = query_json.as_object() {
-                if query_obj.len() == 1 && query_obj.contains_key("_id") {
-                    if let Some(id_val) = query_obj.get("_id") {
-                        // Direct O(1) lookup using document_catalog
-                        if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
-                            if let Some(&offset) = catalog.get(&doc_id) {
-                                if let Ok(doc_bytes) = storage.read_data(offset) {
-                                    if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
-                                        // Skip tombstones
-                                        if !doc
-                                            .get("_tombstone")
-                                            .and_then(|v| v.as_bool())
-                                            .unwrap_or(false)
-                                        {
-                                            let mut map = HashMap::new();
-                                            map.insert(doc_id, doc);
-                                            map
-                                        } else {
-                                            HashMap::new()
-                                        }
-                                    } else {
-                                        HashMap::new()
-                                    }
-                                } else {
-                                    HashMap::new()
-                                }
-                            } else {
-                                HashMap::new()
-                            }
-                        } else {
-                            HashMap::new()
-                        }
-                    } else {
-                        // Full scan using cloned catalog
-                        inline_scan_with_catalog(&mut *storage, &catalog)?
-                    }
-                } else {
-                    // Full scan using cloned catalog
-                    inline_scan_with_catalog(&mut *storage, &catalog)?
-                }
-            } else {
-                // Full scan using cloned catalog
-                inline_scan_with_catalog(&mut *storage, &catalog)?
-            }
-        };
+        // Read documents WITHIN the write lock
+        // OPTIMIZATION: O(1) lookup for _id queries, fallback to full scan
+        let docs_by_id: HashMap<DocumentId, Value> =
+            match try_direct_id_lookup(&mut *storage, &catalog, query_json) {
+                Some(map) => map,
+                None => inline_scan_with_catalog(&mut *storage, &catalog)?,
+            };
 
         // Find first matching and update (skip tombstones already filtered by catalog scan)
         let mut matched = 0u64;
@@ -436,11 +429,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             };
 
             // Skip tombstones (deleted documents)
-            if doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
+            if is_tombstone(&doc) {
                 continue;
             }
 

@@ -615,17 +615,10 @@ impl BPlusTree {
                         }
                     }
                 }
-                BTreeNode::Internal(internal) => {
-                    let child_index = internal.keys.partition_point(|k| k <= start);
-                    if child_index < internal.children_offsets.len() {
-                        // Load child node from file or memory (not implemented for persistent tree)
-                        // For now, fallback to scanning entire tree in memory
-                        for child_idx in child_index..internal.children_offsets.len() {
-                            // TODO: load child node properly (currently unsupported)
-                            // This is a placeholder to keep compiler happy
-                            let _child_offset = internal.children_offsets[child_idx];
-                        }
-                    }
+                BTreeNode::Internal(_) => {
+                    // NOTE: Multi-level B+ tree traversal not implemented
+                    // Range scans only work on single-level (leaf-only) trees
+                    // This is safe because insert() currently only creates leaf nodes
                 }
             }
         }

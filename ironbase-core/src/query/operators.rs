@@ -40,6 +40,17 @@ use std::sync::{Arc, Mutex};
 /// Maximum number of compiled regex patterns to cache (prevents memory bloat)
 const REGEX_CACHE_CAPACITY: usize = 100;
 
+// BSON type codes (MongoDB specification)
+// https://www.mongodb.com/docs/manual/reference/bson-types/
+const BSON_TYPE_DOUBLE: i64 = 1;
+const BSON_TYPE_STRING: i64 = 2;
+const BSON_TYPE_OBJECT: i64 = 3;
+const BSON_TYPE_ARRAY: i64 = 4;
+const BSON_TYPE_BOOL: i64 = 8;
+const BSON_TYPE_NULL: i64 = 10;
+const BSON_TYPE_INT32: i64 = 16;
+const BSON_TYPE_INT64: i64 = 18;
+
 lazy_static! {
     /// Global cache for compiled regex patterns
     /// Key format: "pattern:options"
@@ -736,14 +747,14 @@ impl OperatorMatcher for TypeOperator {
                 } else if let Value::Number(n) = filter_value {
                     // BSON type numbers (simplified, MongoDB has more)
                     match n.as_i64() {
-                        Some(1) => "double",
-                        Some(2) => "string",
-                        Some(3) => "object",
-                        Some(4) => "array",
-                        Some(8) => "bool",
-                        Some(10) => "null",
-                        Some(16) => "int",
-                        Some(18) => "long",
+                        Some(BSON_TYPE_DOUBLE) => "double",
+                        Some(BSON_TYPE_STRING) => "string",
+                        Some(BSON_TYPE_OBJECT) => "object",
+                        Some(BSON_TYPE_ARRAY) => "array",
+                        Some(BSON_TYPE_BOOL) => "bool",
+                        Some(BSON_TYPE_NULL) => "null",
+                        Some(BSON_TYPE_INT32) => "int",
+                        Some(BSON_TYPE_INT64) => "long",
                         _ => {
                             return Err(MongoLiteError::InvalidQuery(format!(
                                 "Unknown BSON type number: {}",
