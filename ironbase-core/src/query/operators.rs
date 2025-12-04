@@ -37,13 +37,15 @@ use std::sync::{Arc, Mutex};
 // REGEX WITH OPTIONS SUPPORT (Full regex crate implementation)
 // ============================================================================
 
+/// Maximum number of compiled regex patterns to cache (prevents memory bloat)
+const REGEX_CACHE_CAPACITY: usize = 100;
+
 lazy_static! {
     /// Global cache for compiled regex patterns
-    /// LRU with 100 entry limit to prevent memory bloat
     /// Key format: "pattern:options"
     /// Uses Arc<Regex> for cheap cloning (reference count increment only)
     static ref REGEX_CACHE: Mutex<LruCache<String, Arc<Regex>>> =
-        Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap()));
+        Mutex::new(LruCache::new(NonZeroUsize::new(REGEX_CACHE_CAPACITY).unwrap()));
 }
 
 /// Build regex pattern string with MongoDB-style options
