@@ -12,7 +12,11 @@ static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 fn create_test_db(name: &str) -> (DatabaseCore<StorageEngine>, String) {
     let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
-    let db_path = format!("/tmp/test_collection_{}_{}.mlite", name, counter);
+    let temp_dir = std::env::temp_dir();
+    let db_path = temp_dir
+        .join(format!("test_collection_{}_{}.mlite", name, counter))
+        .to_string_lossy()
+        .to_string();
 
     // Cleanup previous test files
     let _ = std::fs::remove_file(&db_path);
