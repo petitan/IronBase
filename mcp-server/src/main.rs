@@ -82,6 +82,22 @@ async fn main() {
                 run_stdio_server();
                 return;
             }
+            "--service" => {
+                // Windows Service mode - called by SCM
+                #[cfg(windows)]
+                {
+                    if let Err(e) = service::windows::run_as_service() {
+                        eprintln!("Service error: {}", e);
+                        std::process::exit(1);
+                    }
+                    std::process::exit(0);
+                }
+                #[cfg(not(windows))]
+                {
+                    eprintln!("--service flag is only available on Windows");
+                    std::process::exit(1);
+                }
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -358,6 +374,18 @@ fn create_error_response(code: i32, message: &str, id: Option<serde_json::Value>
 // ============================================================
 
 async fn run_http_server() {
+    run_http_server_internal(None).await;
+}
+
+/// Run HTTP server with an external shutdown receiver (used by Windows Service)
+#[cfg(windows)]
+pub async fn run_http_server_with_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
+    run_http_server_internal(Some(shutdown_rx)).await;
+}
+
+async fn run_http_server_internal(
+    #[allow(unused_variables)] external_shutdown: Option<std::sync::mpsc::Receiver<()>>,
+) {
     use axum::{
         extract::{Json, State},
         http::StatusCode,
@@ -369,12 +397,12 @@ async fn run_http_server() {
     use tracing::info;
 
     // Initialize tracing
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
-        .init();
+        .try_init();
 
     info!("Starting MCP IronBase Server v{} (HTTP mode)", VERSION);
 
@@ -429,9 +457,24 @@ async fn run_http_server() {
 
     info!("Server listening on {}", addr);
 
+    // Create shutdown future based on source
+    #[cfg(windows)]
+    let shutdown_future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
+        if let Some(rx) = external_shutdown {
+            Box::pin(async move {
+                // Wait for signal from Windows SCM
+                let _ = tokio::task::spawn_blocking(move || rx.recv()).await;
+            })
+        } else {
+            Box::pin(shutdown::shutdown_signal())
+        };
+
+    #[cfg(not(windows))]
+    let shutdown_future = shutdown::shutdown_signal();
+
     // Run server with graceful shutdown
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown::shutdown_signal())
+        .with_graceful_shutdown(shutdown_future)
         .await
         .expect("Server error");
 

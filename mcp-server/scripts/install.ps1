@@ -12,9 +12,8 @@ param(
 $ErrorActionPreference = "Stop"
 
 # Configuration
-$ServiceName = "IronBase"
+$ServiceName = "IronBaseService"
 $DisplayName = "IronBase MCP Server"
-$Description = "IronBase Document Database MCP Server - provides document storage via Model Context Protocol"
 $InstallDir = "$env:ProgramFiles\IronBase"
 $DataDir = "$env:ProgramData\IronBase"
 $ExeName = "mcp-ironbase-server.exe"
@@ -35,14 +34,6 @@ if (-not (Test-Administrator)) {
 function Install-IronBase {
     Write-Host "=== IronBase MCP Server Installation ===" -ForegroundColor Cyan
     Write-Host ""
-
-    # Check if service already exists
-    $existingService = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($existingService) {
-        Write-Host "Service '$ServiceName' already exists." -ForegroundColor Yellow
-        Write-Host "Use -Uninstall to remove it first, or stop the service and update the executable." -ForegroundColor Yellow
-        exit 1
-    }
 
     # Find the executable - check multiple locations
     $ScriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
@@ -84,10 +75,11 @@ function Install-IronBase {
     Write-Host "Copying executable to $InstallDir..." -ForegroundColor White
     Copy-Item -Path $SourceExe -Destination "$InstallDir\$ExeName" -Force
 
-    # Create default config
+    # Create default config (use forward slashes for TOML compatibility)
     $ConfigPath = "$DataDir\config.toml"
     if (-not (Test-Path $ConfigPath)) {
         Write-Host "Creating default configuration..." -ForegroundColor White
+        $DataDirForward = $DataDir -replace '\\', '/'
         @"
 # IronBase MCP Server Configuration
 
@@ -96,7 +88,7 @@ host = "0.0.0.0"
 port = 8080
 
 [database]
-path = "$($DataDir.Replace('\', '\\'))\\data.mlite"
+path = "$DataDirForward/data.mlite"
 
 [logging]
 level = "info"
@@ -106,21 +98,18 @@ level = "info"
     # Set environment variables for the service
     $ExePath = "$InstallDir\$ExeName"
 
-    # Create the Windows service
-    Write-Host "Creating Windows service..." -ForegroundColor White
-    $binPath = "`"$ExePath`""
+    # Install the service using the binary's install command
+    Write-Host "Installing Windows service..." -ForegroundColor White
 
-    sc.exe create $ServiceName binPath= $binPath start= auto DisplayName= $DisplayName
-    sc.exe description $ServiceName $Description
-    sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000
+    # Set environment variables before install
+    $env:IRONBASE_PATH = "$DataDir\data.mlite"
+    $env:MCP_CONFIG = $ConfigPath
 
-    # Set service environment
-    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
-    $envValue = @(
-        "IRONBASE_PATH=$DataDir\data.mlite",
-        "MCP_CONFIG=$ConfigPath"
-    )
-    Set-ItemProperty -Path $regPath -Name "Environment" -Value $envValue -Type MultiString
+    & $ExePath install
+
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Service installation failed. You can still run the server manually." -ForegroundColor Yellow
+    }
 
     Write-Host ""
     Write-Host "=== Installation Complete ===" -ForegroundColor Green
@@ -134,38 +123,30 @@ level = "info"
     Write-Host "  Start service:   sc start $ServiceName" -ForegroundColor White
     Write-Host "  Stop service:    sc stop $ServiceName" -ForegroundColor White
     Write-Host "  Check status:    sc query $ServiceName" -ForegroundColor White
-    Write-Host "  View logs:       Get-EventLog -LogName Application -Source $ServiceName" -ForegroundColor White
     Write-Host ""
-    Write-Host "Or use the built-in commands:" -ForegroundColor Cyan
-    Write-Host "  $ExePath start" -ForegroundColor White
-    Write-Host "  $ExePath stop" -ForegroundColor White
-    Write-Host "  $ExePath status" -ForegroundColor White
+    Write-Host "Or run manually:" -ForegroundColor Cyan
+    Write-Host "  $ExePath" -ForegroundColor White
+    Write-Host ""
+    Write-Host "For Claude Desktop (stdio mode):" -ForegroundColor Cyan
+    Write-Host "  $ExePath --stdio" -ForegroundColor White
 }
 
 function Uninstall-IronBase {
     Write-Host "=== IronBase MCP Server Uninstallation ===" -ForegroundColor Cyan
     Write-Host ""
 
-    # Stop the service if running
-    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($service) {
-        if ($service.Status -eq 'Running') {
-            Write-Host "Stopping service..." -ForegroundColor White
-            Stop-Service -Name $ServiceName -Force
-            Start-Sleep -Seconds 2
-        }
+    $ExePath = "$InstallDir\$ExeName"
 
-        # Delete the service
-        Write-Host "Removing service..." -ForegroundColor White
-        sc.exe delete $ServiceName
-    } else {
-        Write-Host "Service '$ServiceName' not found." -ForegroundColor Yellow
+    # Uninstall the service using the binary's uninstall command
+    if (Test-Path $ExePath) {
+        Write-Host "Uninstalling service..." -ForegroundColor White
+        & $ExePath uninstall
     }
 
     # Remove executable (but keep data)
-    if (Test-Path "$InstallDir\$ExeName") {
+    if (Test-Path $ExePath) {
         Write-Host "Removing executable..." -ForegroundColor White
-        Remove-Item -Path "$InstallDir\$ExeName" -Force
+        Remove-Item -Path $ExePath -Force
     }
 
     # Remove install directory if empty

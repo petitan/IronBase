@@ -1,153 +1,261 @@
 // Windows Service Module
 //
-// Implements Windows Service management using sc.exe commands.
-// For full Windows Service integration, the windows-service crate is available.
+// Implements proper Windows Service integration using windows-service crate.
+// The service responds to Windows Service Control Manager (SCM) commands.
+
+#[cfg(windows)]
+use std::ffi::OsString;
+#[cfg(windows)]
+use std::sync::mpsc;
+#[cfg(windows)]
+use std::time::Duration;
+#[cfg(windows)]
+use windows_service::{
+    define_windows_service,
+    service::{
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
+        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+    },
+    service_control_handler::{self, ServiceControlHandlerResult},
+    service_dispatcher,
+    service_manager::{ServiceManager, ServiceManagerAccess},
+};
 
 use super::{ServiceResult, SERVICE_DESCRIPTION, SERVICE_DISPLAY_NAME, SERVICE_NAME};
-use std::process::Command;
+
+#[cfg(windows)]
+const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
 /// Install the Windows Service
 pub fn install_service() -> ServiceResult<()> {
-    let exe_path = std::env::current_exe()?;
+    #[cfg(windows)]
+    {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
 
-    // Create service using sc.exe
-    let output = Command::new("sc")
-        .args([
-            "create",
-            SERVICE_NAME,
-            &format!("binPath= \"{}\"", exe_path.display()),
-            "start= auto",
-            &format!("DisplayName= \"{}\"", SERVICE_DISPLAY_NAME),
-        ])
-        .output()?;
+        let exe_path = std::env::current_exe()?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("already exists") {
-            println!("Service already installed, updating...");
-            // Update existing service
-            Command::new("sc")
-                .args([
-                    "config",
-                    SERVICE_NAME,
-                    &format!("binPath= \"{}\"", exe_path.display()),
-                ])
-                .output()?;
-        } else {
-            return Err(format!("Failed to create service: {}", stderr).into());
-        }
+        let service_info = ServiceInfo {
+            name: OsString::from(SERVICE_NAME),
+            display_name: OsString::from(SERVICE_DISPLAY_NAME),
+            service_type: SERVICE_TYPE,
+            start_type: ServiceStartType::AutoStart,
+            error_control: ServiceErrorControl::Normal,
+            executable_path: exe_path.clone(),
+            launch_arguments: vec![OsString::from("--service")],
+            dependencies: vec![],
+            account_name: None, // LocalSystem
+            account_password: None,
+        };
+
+        let service = manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG)?;
+
+        // Set description
+        service.set_description(SERVICE_DESCRIPTION)?;
+
+        println!("Windows Service '{}' installed successfully!", SERVICE_NAME);
+        println!("  Display Name: {}", SERVICE_DISPLAY_NAME);
+        println!("  Executable: {}", exe_path.display());
+        println!();
+        println!("To start: sc start {}", SERVICE_NAME);
+        println!("To stop:  sc stop {}", SERVICE_NAME);
+        println!("To check: sc query {}", SERVICE_NAME);
+
+        Ok(())
     }
 
-    // Set service description
-    Command::new("sc")
-        .args(["description", SERVICE_NAME, SERVICE_DESCRIPTION])
-        .output()?;
-
-    // Set failure recovery: restart after 60 seconds on failure
-    Command::new("sc")
-        .args([
-            "failure",
-            SERVICE_NAME,
-            "reset= 86400",
-            "actions= restart/60000/restart/60000/restart/60000",
-        ])
-        .output()?;
-
-    println!("Windows Service '{}' installed successfully!", SERVICE_NAME);
-    println!("  Display Name: {}", SERVICE_DISPLAY_NAME);
-    println!("  Executable: {}", exe_path.display());
-    println!();
-    println!("To start: sc start {}", SERVICE_NAME);
-    println!("Or use: {} start", exe_path.display());
-
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Err("Windows service management is only available on Windows".into())
+    }
 }
 
 /// Uninstall the Windows Service
 pub fn uninstall_service() -> ServiceResult<()> {
-    // Stop service first (ignore errors if not running)
-    let _ = Command::new("sc").args(["stop", SERVICE_NAME]).output();
+    #[cfg(windows)]
+    {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
-    // Wait a moment for service to stop
-    std::thread::sleep(std::time::Duration::from_secs(2));
+        let service = manager.open_service(
+            SERVICE_NAME,
+            ServiceAccess::STOP | ServiceAccess::DELETE | ServiceAccess::QUERY_STATUS,
+        )?;
 
-    // Delete service
-    let output = Command::new("sc")
-        .args(["delete", SERVICE_NAME])
-        .output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !stderr.contains("does not exist") {
-            return Err(format!("Failed to delete service: {}", stderr).into());
+        // Stop service if running
+        let status = service.query_status()?;
+        if status.current_state != ServiceState::Stopped {
+            service.stop()?;
+            // Wait for service to stop
+            std::thread::sleep(Duration::from_secs(3));
         }
+
+        service.delete()?;
+
+        println!("Windows Service '{}' uninstalled successfully!", SERVICE_NAME);
+
+        Ok(())
     }
 
-    println!("Windows Service '{}' uninstalled successfully!", SERVICE_NAME);
-
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Err("Windows service management is only available on Windows".into())
+    }
 }
 
 /// Start the Windows Service
 pub fn start_service() -> ServiceResult<()> {
-    let output = Command::new("sc")
-        .args(["start", SERVICE_NAME])
-        .output()?;
+    #[cfg(windows)]
+    {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("already running") {
-            println!("Service is already running.");
-            return Ok(());
-        }
-        return Err(format!("Failed to start service: {}", stderr).into());
+        let service = manager.open_service(SERVICE_NAME, ServiceAccess::START)?;
+        service.start(&[OsString::from("")])?;
+
+        println!("Service '{}' started.", SERVICE_NAME);
+        Ok(())
     }
 
-    println!("Service '{}' started.", SERVICE_NAME);
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Err("Windows service management is only available on Windows".into())
+    }
 }
 
 /// Stop the Windows Service
 pub fn stop_service() -> ServiceResult<()> {
-    let output = Command::new("sc")
-        .args(["stop", SERVICE_NAME])
-        .output()?;
+    #[cfg(windows)]
+    {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("not started") || stderr.contains("not been started") {
-            println!("Service is not running.");
-            return Ok(());
-        }
-        return Err(format!("Failed to stop service: {}", stderr).into());
+        let service = manager.open_service(SERVICE_NAME, ServiceAccess::STOP)?;
+        service.stop()?;
+
+        println!("Service '{}' stopped.", SERVICE_NAME);
+        Ok(())
     }
 
-    println!("Service '{}' stopped.", SERVICE_NAME);
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        Err("Windows service management is only available on Windows".into())
+    }
 }
 
 /// Get service status
 pub fn status_service() -> ServiceResult<String> {
-    let output = Command::new("sc")
-        .args(["query", SERVICE_NAME])
-        .output()?;
+    #[cfg(windows)]
+    {
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
-    if !output.status.success() {
-        return Ok("Not installed".to_string());
+        match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
+            Ok(service) => {
+                let status = service.query_status()?;
+                match status.current_state {
+                    ServiceState::Running => Ok("Running".to_string()),
+                    ServiceState::Stopped => Ok("Stopped".to_string()),
+                    ServiceState::StartPending => Ok("Start Pending".to_string()),
+                    ServiceState::StopPending => Ok("Stop Pending".to_string()),
+                    ServiceState::ContinuePending => Ok("Continue Pending".to_string()),
+                    ServiceState::PausePending => Ok("Pause Pending".to_string()),
+                    ServiceState::Paused => Ok("Paused".to_string()),
+                }
+            }
+            Err(_) => Ok("Not installed".to_string()),
+        }
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-
-    // Parse state from sc query output
-    if stdout.contains("RUNNING") {
-        Ok("Running".to_string())
-    } else if stdout.contains("STOPPED") {
-        Ok("Stopped".to_string())
-    } else if stdout.contains("PENDING") {
-        Ok("Pending".to_string())
-    } else {
-        Ok("Unknown".to_string())
+    #[cfg(not(windows))]
+    {
+        Err("Windows service management is only available on Windows".into())
     }
+}
+
+// ============================================================================
+// Windows Service Entry Point
+// ============================================================================
+
+#[cfg(windows)]
+define_windows_service!(ffi_service_main, service_main);
+
+/// This is called by Windows SCM when the service is started
+#[cfg(windows)]
+fn service_main(arguments: Vec<OsString>) {
+    if let Err(e) = run_service(arguments) {
+        eprintln!("Service error: {}", e);
+    }
+}
+
+#[cfg(windows)]
+fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
+    // Create a channel to receive stop events
+    let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+    // Create service control handler
+    let shutdown_tx_clone = shutdown_tx.clone();
+    let event_handler = move |control_event| -> ServiceControlHandlerResult {
+        match control_event {
+            ServiceControl::Stop | ServiceControl::Shutdown => {
+                let _ = shutdown_tx_clone.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    };
+
+    // Register service control handler
+    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+
+    // Report service as running
+    status_handle.set_service_status(ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    // Run the actual server
+    // We use a separate thread for the async runtime
+    let server_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async {
+            crate::run_http_server_with_shutdown(shutdown_rx).await;
+        });
+    });
+
+    // Wait for the server to finish
+    let _ = server_handle.join();
+
+    // Report service as stopped
+    status_handle.set_service_status(ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    })?;
+
+    Ok(())
+}
+
+/// Start as Windows service (called from main when --service flag is present)
+#[cfg(windows)]
+pub fn run_as_service() -> ServiceResult<()> {
+    service_dispatcher::start(SERVICE_NAME, ffi_service_main)?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn run_as_service() -> ServiceResult<()> {
+    Err("Windows service mode is only available on Windows".into())
 }
 
 #[cfg(test)]
