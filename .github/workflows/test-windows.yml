@@ -50,7 +50,7 @@ jobs:
           # Create temporary database
           with tempfile.TemporaryDirectory() as tmpdir:
               db_path = os.path.join(tmpdir, 'test.mlite')
-              db = MongoLite(db_path)
+              db = IronBase(db_path)
 
               # Test CRUD operations
               collection = db.collection('test')
@@ -65,7 +65,7 @@ jobs:
               # Test update
               update_result = collection.update_one(
                   {'msg': 'Windows test'},
-                  {'\$set': {'value': 100}}
+                  {'$set': {'value': 100}}
               )
               assert update_result['modified_count'] == 1
 
@@ -87,13 +87,13 @@ jobs:
               db_path = os.path.join(tmpdir, 'persist.mlite')
 
               # Write data
-              db = MongoLite(db_path)
+              db = IronBase(db_path)
               coll = db.collection('persist')
               coll.insert_one({'msg': 'persistence test'})
               del db  # Close database
 
               # Reopen and verify
-              db = MongoLite(db_path)
+              db = IronBase(db_path)
               coll = db.collection('persist')
               doc = coll.find_one({})
               assert doc is not None
