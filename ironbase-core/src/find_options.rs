@@ -160,21 +160,25 @@ fn type_priority(val: &Value) -> u8 {
 }
 
 /// Apply limit and skip to documents
+///
+/// 🚀 OPTIMIZED: Uses into_iter() to move elements instead of cloning.
+/// The owned Vec is consumed and elements are transferred, not copied.
 pub fn apply_limit_skip(docs: Vec<Value>, limit: Option<usize>, skip: Option<usize>) -> Vec<Value> {
     let skip_count = skip.unwrap_or(0);
 
+    // Early return for edge case (avoids iterator overhead)
     if skip_count >= docs.len() {
         return Vec::new();
     }
 
-    let start = skip_count;
-    let end = if let Some(limit_count) = limit {
-        (start + limit_count).min(docs.len())
-    } else {
-        docs.len()
-    };
+    // Move elements via into_iter() - zero-copy for individual Values
+    let iter = docs.into_iter().skip(skip_count);
 
-    docs[start..end].to_vec()
+    if let Some(limit_count) = limit {
+        iter.take(limit_count).collect()
+    } else {
+        iter.collect()
+    }
 }
 
 #[cfg(test)]
