@@ -85,6 +85,8 @@ jobs:
           from ironbase import IronBase
           import tempfile
           import os
+          import gc
+          import time
 
           with tempfile.TemporaryDirectory() as tmpdir:
               db_path = os.path.join(tmpdir, 'persist.mlite')
@@ -94,6 +96,8 @@ jobs:
               coll = db.collection('persist')
               coll.insert_one({'msg': 'persistence test'})
               del db  # Close database
+              gc.collect()  # Force garbage collection to ensure proper cleanup
+              time.sleep(0.5)  # Give Windows time to release file handles
 
               # Reopen and verify
               db = IronBase(db_path)
