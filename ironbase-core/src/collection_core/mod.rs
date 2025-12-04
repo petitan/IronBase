@@ -387,6 +387,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .and_then(|meta| meta.schema.clone())
     }
 
+    // ========== BATCH VALIDATION ==========
+
+    /// Validate batch of documents for unique constraint violations within the batch
+    ///
+    /// This is a pre-insert validation step that catches duplicates BEFORE any
+    /// documents are written. Used by DatabaseCore::insert_many for atomic failure.
+    pub(crate) fn validate_batch_constraints(
+        &self,
+        documents: &[HashMap<String, Value>],
+    ) -> Result<()> {
+        let indexes = self.indexes.read();
+        let mut batch_validator = BatchConstraintValidator::new(&indexes, &self.name);
+        for document in documents {
+            let doc_value = serde_json::to_value(document)
+                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            batch_validator.check_and_track(&doc_value)?;
+        }
+        Ok(())
+    }
+
     // ========== QUERY OPERATIONS ==========
 
     /// Find documents matching query
