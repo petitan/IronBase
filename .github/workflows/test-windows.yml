@@ -43,7 +43,7 @@ jobs:
       - name: Basic functionality test
         shell: bash
         run: |
-          python -c "
+          cat > /tmp/test_basic.py << 'PYEOF'
           from ironbase import IronBase
           import tempfile
           import os
@@ -74,13 +74,14 @@ jobs:
               delete_result = collection.delete_one({'msg': 'Windows test'})
               assert delete_result['deleted_count'] == 1
 
-              print('✓ All Windows functionality tests passed!')
-          "
+              print('All Windows functionality tests passed!')
+          PYEOF
+          python /tmp/test_basic.py
 
       - name: Test file persistence
         shell: bash
         run: |
-          python -c "
+          cat > /tmp/test_persist.py << 'PYEOF'
           from ironbase import IronBase
           import tempfile
           import os
@@ -101,5 +102,6 @@ jobs:
               assert doc is not None
               assert doc['msg'] == 'persistence test'
 
-              print('✓ Windows file persistence test passed!')
-          "
+              print('Windows file persistence test passed!')
+          PYEOF
+          python /tmp/test_persist.py
