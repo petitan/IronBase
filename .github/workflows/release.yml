@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'  # Triggers on v1.0.0, v1.2.3, etc.
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build MCP Server (Windows)
+        run: |
+          cd mcp-server
+          cargo build --release
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-ironbase-server-windows
+          path: mcp-server/target/release/mcp-ironbase-server.exe
+
+  build-linux:
+    name: Build Linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build MCP Server (Linux)
+        run: |
+          cd mcp-server
+          cargo build --release
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-ironbase-server-linux
+          path: mcp-server/target/release/mcp-ironbase-server
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build MCP Server (macOS)
+        run: |
+          cd mcp-server
+          cargo build --release
+
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-ironbase-server-macos
+          path: mcp-server/target/release/mcp-ironbase-server
+
+  create-release:
+    name: Create Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+
+          # Windows
+          cp artifacts/mcp-ironbase-server-windows/mcp-ironbase-server.exe \
+             release-assets/mcp-ironbase-server-windows.exe
+
+          # Linux
+          cp artifacts/mcp-ironbase-server-linux/mcp-ironbase-server \
+             release-assets/mcp-ironbase-server-linux
+          chmod +x release-assets/mcp-ironbase-server-linux
+
+          # macOS
+          cp artifacts/mcp-ironbase-server-macos/mcp-ironbase-server \
+             release-assets/mcp-ironbase-server-macos
+          chmod +x release-assets/mcp-ironbase-server-macos
+
+          # Copy installer scripts
+          cp mcp-server/scripts/install.ps1 release-assets/
+          cp mcp-server/scripts/install.sh release-assets/
+          chmod +x release-assets/install.sh
+
+          ls -la release-assets/
+
+      - name: Get version from tag
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: IronBase MCP Server ${{ steps.get_version.outputs.VERSION }}
+          draft: false
+          prerelease: ${{ contains(github.ref, '-alpha') || contains(github.ref, '-beta') || contains(github.ref, '-rc') }}
+          generate_release_notes: true
+          files: |
+            release-assets/mcp-ironbase-server-windows.exe
+            release-assets/mcp-ironbase-server-linux
+            release-assets/mcp-ironbase-server-macos
+            release-assets/install.ps1
+            release-assets/install.sh
+          body: |
+            ## IronBase MCP Server ${{ steps.get_version.outputs.VERSION }}
+
+            ### Downloads
+
+            | Platform | File | Install |
+            |----------|------|---------|
+            | Windows | `mcp-ironbase-server-windows.exe` | `.\install.ps1` |
+            | Linux | `mcp-ironbase-server-linux` | `sudo ./install.sh` |
+            | macOS | `mcp-ironbase-server-macos` | `sudo ./install.sh` |
+
+            ### Quick Install (Windows)
+
+            ```powershell
+            # Download and run installer (as Administrator)
+            irm https://github.com/petitan/IronBase/releases/latest/download/install.ps1 | iex
+            ```
+
+            ### Quick Install (Linux/macOS)
+
+            ```bash
+            # Download and run installer
+            curl -sSL https://github.com/petitan/IronBase/releases/latest/download/install.sh | sudo bash
+            ```
+
+            ### Manual Installation
+
+            1. Download the appropriate binary for your platform
+            2. Run `./mcp-ironbase-server install` (as admin/root)
+            3. Start the service: `sc start IronBaseService` (Windows) or `systemctl start ironbase` (Linux)
