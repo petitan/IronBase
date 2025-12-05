@@ -20,6 +20,8 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
 
     if std::path::Path::new(&config_path).exists() {
         let content = std::fs::read_to_string(&config_path)?;
+        // Normalize Windows CRLF to LF for TOML parsing
+        let content = content.replace("\r\n", "\n");
         let toml_config: TomlConfig =
             toml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
         Ok(Config {
