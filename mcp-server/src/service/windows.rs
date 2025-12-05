@@ -30,10 +30,24 @@ const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 pub fn install_service() -> ServiceResult<()> {
     #[cfg(windows)]
     {
-        let manager =
-            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)?;
-
         let exe_path = std::env::current_exe()?;
+
+        // First check if service already exists
+        let manager_read =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+
+        if let Ok(_existing) =
+            manager_read.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+        {
+            println!("Service '{}' already exists.", SERVICE_NAME);
+            println!("Use 'uninstall' first if you want to reinstall.");
+            return Ok(());
+        }
+
+        // Service doesn't exist, create it
+        let manager =
+            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CREATE_SERVICE)
+                .map_err(|e| format!("Failed to connect to Service Manager: {}", e))?;
 
         let service_info = ServiceInfo {
             name: OsString::from(SERVICE_NAME),
@@ -48,10 +62,14 @@ pub fn install_service() -> ServiceResult<()> {
             account_password: None,
         };
 
-        let service = manager.create_service(&service_info, ServiceAccess::CHANGE_CONFIG)?;
+        let service = manager
+            .create_service(&service_info, ServiceAccess::CHANGE_CONFIG)
+            .map_err(|e| format!("Failed to create service: {} (Are you running as Administrator?)", e))?;
 
         // Set description
-        service.set_description(SERVICE_DESCRIPTION)?;
+        service
+            .set_description(SERVICE_DESCRIPTION)
+            .map_err(|e| format!("Failed to set service description: {}", e))?;
 
         println!("Windows Service '{}' installed successfully!", SERVICE_NAME);
         println!("  Display Name: {}", SERVICE_DISPLAY_NAME);

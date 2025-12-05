@@ -1,9 +1,10 @@
 # IronBase MCP Server Windows Installer
-# Run as Administrator: powershell -ExecutionPolicy Bypass -File install.ps1
+# Supports both Admin and non-Admin installation
 #
 # Usage:
-#   .\install.ps1              # Install service (auto-downloads if needed)
-#   .\install.ps1 -Uninstall   # Uninstall service
+#   irm https://github.com/petitan/IronBase/releases/latest/download/install.ps1 | iex
+#   .\install.ps1              # Install (auto-downloads if needed)
+#   .\install.ps1 -Uninstall   # Uninstall
 #   .\install.ps1 -NoDownload  # Install without auto-download
 
 param(
@@ -15,27 +16,32 @@ $ErrorActionPreference = "Stop"
 
 # Configuration
 $ServiceName = "IronBaseService"
-$DisplayName = "IronBase MCP Server"
-$InstallDir = "$env:ProgramFiles\IronBase"
-$DataDir = "$env:ProgramData\IronBase"
 $ExeName = "mcp-ironbase-server.exe"
 
 # GitHub Release Configuration
 $GitHubRepo = "petitan/IronBase"
 $GitHubApiUrl = "https://api.github.com/repos/$GitHubRepo/releases/latest"
-$ArtifactName = "mcp-ironbase-server-windows"
 
 # Check for admin privileges
 function Test-Administrator {
-    $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    try {
+        $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch {
+        return $false
+    }
 }
 
-if (-not (Test-Administrator)) {
-    Write-Host "ERROR: This script requires Administrator privileges." -ForegroundColor Red
-    Write-Host "Please run PowerShell as Administrator and try again." -ForegroundColor Yellow
-    exit 1
+$IsAdmin = Test-Administrator
+
+# Set paths based on admin status
+if ($IsAdmin) {
+    $InstallDir = "$env:ProgramFiles\IronBase"
+    $DataDir = "$env:ProgramData\IronBase"
+} else {
+    $InstallDir = "$env:LOCALAPPDATA\IronBase"
+    $DataDir = "$env:LOCALAPPDATA\IronBase\data"
 }
 
 # Download latest release from GitHub
@@ -45,7 +51,6 @@ function Get-LatestRelease {
     Write-Host "Checking for latest release from GitHub..." -ForegroundColor Cyan
 
     try {
-        # Get latest release info
         $releaseInfo = Invoke-RestMethod -Uri $GitHubApiUrl -Headers @{
             "Accept" = "application/vnd.github.v3+json"
             "User-Agent" = "IronBase-Installer"
@@ -60,50 +65,56 @@ function Get-LatestRelease {
         } | Select-Object -First 1
 
         if (-not $asset) {
-            # Try to find any .exe asset
             $asset = $releaseInfo.assets | Where-Object { $_.name -like "*.exe" } | Select-Object -First 1
         }
 
         if (-not $asset) {
-            Write-Host "No Windows executable found in release assets." -ForegroundColor Yellow
-            Write-Host "Available assets:" -ForegroundColor Yellow
-            $releaseInfo.assets | ForEach-Object { Write-Host "  - $($_.name)" -ForegroundColor Yellow }
+            Write-Host "No Windows executable found in release." -ForegroundColor Yellow
             return $false
         }
 
         Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB, 2)) MB)..." -ForegroundColor White
 
-        # Download the asset
-        $downloadUrl = $asset.browser_download_url
-        Invoke-WebRequest -Uri $downloadUrl -OutFile $DestPath -UseBasicParsing
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $DestPath -UseBasicParsing
 
         if (Test-Path $DestPath) {
-            Write-Host "Downloaded successfully to $DestPath" -ForegroundColor Green
+            Write-Host "Downloaded successfully!" -ForegroundColor Green
             return $true
         }
     }
     catch {
-        Write-Host "Failed to download from GitHub: $_" -ForegroundColor Red
+        Write-Host "Failed to download: $_" -ForegroundColor Red
     }
 
     return $false
 }
 
 function Install-IronBase {
-    Write-Host "=== IronBase MCP Server Installation ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  IronBase MCP Server Installation" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
 
-    # Find the executable - check multiple locations
+    if ($IsAdmin) {
+        Write-Host "Mode: Administrator (with Windows Service)" -ForegroundColor Green
+    } else {
+        Write-Host "Mode: User (without Windows Service)" -ForegroundColor Yellow
+    }
+    Write-Host ""
+
+    # Find the executable
     $ScriptDir = if ($MyInvocation.PSCommandPath) {
         Split-Path -Parent $MyInvocation.PSCommandPath
     } else {
         Get-Location
     }
+
     $SearchPaths = @(
-        (Join-Path $ScriptDir $ExeName),                           # Same folder as script
-        (Join-Path (Get-Location) $ExeName),                       # Current directory
-        (Join-Path $ScriptDir "..\target\release\$ExeName"),       # Dev build path
-        ".\target\release\$ExeName"                                # Alt dev path
+        (Join-Path $ScriptDir $ExeName),
+        (Join-Path (Get-Location) $ExeName),
+        (Join-Path $ScriptDir "..\target\release\$ExeName"),
+        ".\target\release\$ExeName"
     )
 
     $SourceExe = $null
@@ -117,21 +128,11 @@ function Install-IronBase {
     if (-not $SourceExe) {
         if ($NoDownload) {
             Write-Host "ERROR: Cannot find $ExeName" -ForegroundColor Red
-            Write-Host "Searched locations:" -ForegroundColor Yellow
-            foreach ($path in $SearchPaths) {
-                Write-Host "  - $path" -ForegroundColor Yellow
-            }
-            Write-Host ""
-            Write-Host "Please place $ExeName in the same folder as this script." -ForegroundColor Yellow
-            Write-Host "Or run without -NoDownload to auto-download from GitHub." -ForegroundColor Yellow
             exit 1
         }
 
-        # Try to download from GitHub
-        Write-Host "Executable not found locally. Attempting to download from GitHub..." -ForegroundColor Yellow
-        Write-Host ""
+        Write-Host "Downloading from GitHub..." -ForegroundColor Yellow
 
-        # Create temp directory for download
         $TempDir = Join-Path $env:TEMP "IronBase-Install"
         New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
         $TempExe = Join-Path $TempDir $ExeName
@@ -140,33 +141,26 @@ function Install-IronBase {
             $SourceExe = $TempExe
         }
         else {
-            Write-Host ""
-            Write-Host "ERROR: Could not download or find $ExeName" -ForegroundColor Red
-            Write-Host ""
-            Write-Host "Options:" -ForegroundColor Yellow
-            Write-Host "  1. Download manually from: https://github.com/$GitHubRepo/releases" -ForegroundColor White
-            Write-Host "  2. Build from source: cargo build --release" -ForegroundColor White
-            Write-Host "  3. Place $ExeName in the same folder as this script" -ForegroundColor White
+            Write-Host "ERROR: Could not download $ExeName" -ForegroundColor Red
+            Write-Host "Download manually: https://github.com/$GitHubRepo/releases" -ForegroundColor Yellow
             exit 1
         }
     }
-
-    Write-Host "Source executable: $SourceExe" -ForegroundColor Green
 
     # Create directories
     Write-Host "Creating directories..." -ForegroundColor White
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-    New-Item -ItemType Directory -Force -Path "$DataDir\logs" | Out-Null
 
     # Copy executable
-    Write-Host "Copying executable to $InstallDir..." -ForegroundColor White
-    Copy-Item -Path $SourceExe -Destination "$InstallDir\$ExeName" -Force
+    $ExePath = "$InstallDir\$ExeName"
+    Write-Host "Installing to: $InstallDir" -ForegroundColor White
+    Copy-Item -Path $SourceExe -Destination $ExePath -Force
 
-    # Create default config (use forward slashes for TOML compatibility)
+    # Create config
     $ConfigPath = "$DataDir\config.toml"
     if (-not (Test-Path $ConfigPath)) {
-        Write-Host "Creating default configuration..." -ForegroundColor White
+        Write-Host "Creating configuration..." -ForegroundColor White
         $DataDirForward = $DataDir -replace '\\', '/'
         @"
 # IronBase MCP Server Configuration
@@ -180,76 +174,97 @@ path = "$DataDirForward/data.mlite"
 
 [logging]
 level = "info"
-"@ | Set-Content -Path $ConfigPath
+"@ | Set-Content -Path $ConfigPath -Encoding UTF8
     }
 
-    # Set environment variables for the service
-    $ExePath = "$InstallDir\$ExeName"
+    # Install service only if admin
+    $ServiceInstalled = $false
+    if ($IsAdmin) {
+        Write-Host "Installing Windows service..." -ForegroundColor White
+        $env:IRONBASE_PATH = "$DataDir\data.mlite"
+        $env:MCP_CONFIG = $ConfigPath
 
-    # Install the service using the binary's install command
-    Write-Host "Installing Windows service..." -ForegroundColor White
-
-    # Set environment variables before install
-    $env:IRONBASE_PATH = "$DataDir\data.mlite"
-    $env:MCP_CONFIG = $ConfigPath
-
-    & $ExePath install
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "Service installation failed. You can still run the server manually." -ForegroundColor Yellow
+        & $ExePath install 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $ServiceInstalled = $true
+        }
     }
 
+    # Output
     Write-Host ""
-    Write-Host "=== Installation Complete ===" -ForegroundColor Green
+    Write-Host "========================================" -ForegroundColor Green
+    Write-Host "  Installation Complete!" -ForegroundColor Green
+    Write-Host "========================================" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Service Name:    $ServiceName" -ForegroundColor White
-    Write-Host "Install Dir:     $InstallDir" -ForegroundColor White
-    Write-Host "Data Dir:        $DataDir" -ForegroundColor White
-    Write-Host "Config File:     $ConfigPath" -ForegroundColor White
+    Write-Host "Install Dir:  $InstallDir" -ForegroundColor White
+    Write-Host "Data Dir:     $DataDir" -ForegroundColor White
+    Write-Host "Config:       $ConfigPath" -ForegroundColor White
     Write-Host ""
-    Write-Host "Commands:" -ForegroundColor Cyan
-    Write-Host "  Start service:   sc start $ServiceName" -ForegroundColor White
-    Write-Host "  Stop service:    sc stop $ServiceName" -ForegroundColor White
-    Write-Host "  Check status:    sc query $ServiceName" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Or run manually:" -ForegroundColor Cyan
+
+    if ($ServiceInstalled) {
+        Write-Host "Windows Service: INSTALLED" -ForegroundColor Green
+        Write-Host ""
+        Write-Host "Start service:  sc start $ServiceName" -ForegroundColor Cyan
+        Write-Host "Stop service:   sc stop $ServiceName" -ForegroundColor Cyan
+        Write-Host ""
+    } else {
+        Write-Host "Windows Service: NOT INSTALLED" -ForegroundColor Yellow
+        if (-not $IsAdmin) {
+            Write-Host "(Run as Administrator to install service)" -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
+
+    Write-Host "Run manually (HTTP mode):" -ForegroundColor Cyan
     Write-Host "  $ExePath" -ForegroundColor White
     Write-Host ""
     Write-Host "For Claude Desktop (stdio mode):" -ForegroundColor Cyan
     Write-Host "  $ExePath --stdio" -ForegroundColor White
+    Write-Host ""
+
+    # Claude Desktop config hint
+    Write-Host "Claude Desktop config (~\AppData\Roaming\Claude\claude_desktop_config.json):" -ForegroundColor DarkGray
+    $EscapedPath = $ExePath -replace '\\', '\\\\'
+    Write-Host @"
+{
+  "mcpServers": {
+    "ironbase": {
+      "command": "$EscapedPath",
+      "args": ["--stdio"]
+    }
+  }
+}
+"@ -ForegroundColor DarkGray
 }
 
 function Uninstall-IronBase {
-    Write-Host "=== IronBase MCP Server Uninstallation ===" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  IronBase MCP Server Uninstallation" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
 
     $ExePath = "$InstallDir\$ExeName"
 
-    # Uninstall the service using the binary's uninstall command
-    if (Test-Path $ExePath) {
-        Write-Host "Uninstalling service..." -ForegroundColor White
-        & $ExePath uninstall
+    if ($IsAdmin -and (Test-Path $ExePath)) {
+        Write-Host "Removing Windows service..." -ForegroundColor White
+        & $ExePath uninstall 2>$null
     }
 
-    # Remove executable (but keep data)
     if (Test-Path $ExePath) {
         Write-Host "Removing executable..." -ForegroundColor White
         Remove-Item -Path $ExePath -Force
     }
 
-    # Remove install directory if empty
-    if ((Test-Path $InstallDir) -and ((Get-ChildItem $InstallDir | Measure-Object).Count -eq 0)) {
-        Remove-Item -Path $InstallDir -Force
+    if ((Test-Path $InstallDir) -and ((Get-ChildItem $InstallDir -ErrorAction SilentlyContinue | Measure-Object).Count -eq 0)) {
+        Remove-Item -Path $InstallDir -Force -ErrorAction SilentlyContinue
     }
 
     Write-Host ""
-    Write-Host "=== Uninstallation Complete ===" -ForegroundColor Green
+    Write-Host "Uninstallation complete!" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Note: Configuration and data files were preserved:" -ForegroundColor Yellow
-    Write-Host "  Config: $DataDir\config.toml" -ForegroundColor White
-    Write-Host "  Data:   $DataDir\data.mlite" -ForegroundColor White
-    Write-Host ""
-    Write-Host "To completely remove all data, delete: $DataDir" -ForegroundColor Yellow
+    Write-Host "Data preserved at: $DataDir" -ForegroundColor Yellow
+    Write-Host "To remove all data: Remove-Item -Recurse '$DataDir'" -ForegroundColor DarkGray
 }
 
 # Main
