@@ -4,10 +4,12 @@
 # Usage:
 #   irm https://github.com/petitan/IronBase/releases/latest/download/install.ps1 | iex
 #   .\install.ps1              # Install (auto-downloads if needed)
+#   .\install.ps1 -Update      # Update running service to latest version
 #   .\install.ps1 -Uninstall   # Uninstall
 #   .\install.ps1 -NoDownload  # Install without auto-download
 
 param(
+    [switch]$Update,
     [switch]$Uninstall,
     [switch]$NoDownload
 )
@@ -237,6 +239,108 @@ level = "info"
 "@ -ForegroundColor DarkGray
 }
 
+function Update-IronBase {
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  IronBase MCP Server Update" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    if (-not $IsAdmin) {
+        Write-Host "ERROR: Update requires Administrator privileges" -ForegroundColor Red
+        Write-Host "Run PowerShell as Administrator" -ForegroundColor Yellow
+        exit 1
+    }
+
+    $ExePath = "$InstallDir\$ExeName"
+
+    # Check if installed
+    if (-not (Test-Path $ExePath)) {
+        Write-Host "IronBase not installed at $InstallDir" -ForegroundColor Yellow
+        Write-Host "Running full installation instead..." -ForegroundColor White
+        Install-IronBase
+        return
+    }
+
+    # Get current version
+    $CurrentVersion = "unknown"
+    try {
+        $CurrentVersion = & $ExePath --version 2>$null
+        if (-not $CurrentVersion) { $CurrentVersion = "unknown" }
+    } catch {}
+    Write-Host "Current version: $CurrentVersion" -ForegroundColor White
+
+    # Check if service is running
+    $ServiceRunning = $false
+    $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($Service -and $Service.Status -eq "Running") {
+        $ServiceRunning = $true
+        Write-Host "Stopping service..." -ForegroundColor Yellow
+        Stop-Service -Name $ServiceName -Force
+        Start-Sleep -Seconds 2
+    }
+
+    # Download latest
+    Write-Host ""
+    $TempDir = Join-Path $env:TEMP "IronBase-Update"
+    New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+    $TempExe = Join-Path $TempDir $ExeName
+
+    if (-not (Get-LatestRelease -DestPath $TempExe)) {
+        Write-Host "ERROR: Failed to download latest version" -ForegroundColor Red
+        if ($ServiceRunning) {
+            Write-Host "Restarting service with old version..." -ForegroundColor Yellow
+            Start-Service -Name $ServiceName
+        }
+        exit 1
+    }
+
+    # Backup old exe
+    $BackupPath = "$ExePath.backup"
+    Write-Host "Backing up current version..." -ForegroundColor White
+    Copy-Item -Path $ExePath -Destination $BackupPath -Force
+
+    # Copy new exe
+    Write-Host "Installing new version..." -ForegroundColor White
+    Copy-Item -Path $TempExe -Destination $ExePath -Force
+
+    # Get new version
+    $NewVersion = "unknown"
+    try {
+        $NewVersion = & $ExePath --version 2>$null
+        if (-not $NewVersion) { $NewVersion = "unknown" }
+    } catch {}
+
+    # Restart service if it was running
+    if ($ServiceRunning) {
+        Write-Host "Starting service..." -ForegroundColor Green
+        Start-Service -Name $ServiceName
+        Start-Sleep -Seconds 1
+        $Service = Get-Service -Name $ServiceName
+        if ($Service.Status -eq "Running") {
+            Write-Host "Service started successfully!" -ForegroundColor Green
+        } else {
+            Write-Host "WARNING: Service failed to start!" -ForegroundColor Red
+            Write-Host "Restoring backup..." -ForegroundColor Yellow
+            Copy-Item -Path $BackupPath -Destination $ExePath -Force
+            Start-Service -Name $ServiceName
+        }
+    }
+
+    # Cleanup
+    Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -Path $BackupPath -Force -ErrorAction SilentlyContinue
+
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Green
+    Write-Host "  Update Complete!" -ForegroundColor Green
+    Write-Host "========================================" -ForegroundColor Green
+    Write-Host ""
+    Write-Host "Previous: $CurrentVersion" -ForegroundColor White
+    Write-Host "Current:  $NewVersion" -ForegroundColor Green
+    Write-Host ""
+}
+
 function Uninstall-IronBase {
     Write-Host ""
     Write-Host "========================================" -ForegroundColor Cyan
@@ -268,7 +372,9 @@ function Uninstall-IronBase {
 }
 
 # Main
-if ($Uninstall) {
+if ($Update) {
+    Update-IronBase
+} elseif ($Uninstall) {
     Uninstall-IronBase
 } else {
     Install-IronBase
