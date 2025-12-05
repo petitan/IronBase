@@ -1,13 +1,18 @@
 # MCP DOCJL Server Configuration
 
+[server]
 host = "127.0.0.1"
 port = 8080
+# Max request body size (supports: B, KB, MB, GB)
+# Default: 1GB - suitable for batch operations with large attachments
+max_body_size = "1GB"
 
+[database]
 # Path to IronBase database file
-ironbase_path = "./docjl_storage.mlite"
+path = "./docjl_storage.mlite"
 
-# Path to audit log
-audit_log_path = "./audit.log"
+# Path to audit log (optional)
+# audit_log_path = "./audit.log"
 
 # Require authentication (set to false for development)
 require_auth = true
