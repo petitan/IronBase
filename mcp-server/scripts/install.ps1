@@ -2,11 +2,13 @@
 # Run as Administrator: powershell -ExecutionPolicy Bypass -File install.ps1
 #
 # Usage:
-#   .\install.ps1              # Install service
+#   .\install.ps1              # Install service (auto-downloads if needed)
 #   .\install.ps1 -Uninstall   # Uninstall service
+#   .\install.ps1 -NoDownload  # Install without auto-download
 
 param(
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$NoDownload
 )
 
 $ErrorActionPreference = "Stop"
@@ -17,6 +19,11 @@ $DisplayName = "IronBase MCP Server"
 $InstallDir = "$env:ProgramFiles\IronBase"
 $DataDir = "$env:ProgramData\IronBase"
 $ExeName = "mcp-ironbase-server.exe"
+
+# GitHub Release Configuration
+$GitHubRepo = "petitan/IronBase"
+$GitHubApiUrl = "https://api.github.com/repos/$GitHubRepo/releases/latest"
+$ArtifactName = "mcp-ironbase-server-windows"
 
 # Check for admin privileges
 function Test-Administrator {
@@ -29,6 +36,57 @@ if (-not (Test-Administrator)) {
     Write-Host "ERROR: This script requires Administrator privileges." -ForegroundColor Red
     Write-Host "Please run PowerShell as Administrator and try again." -ForegroundColor Yellow
     exit 1
+}
+
+# Download latest release from GitHub
+function Get-LatestRelease {
+    param([string]$DestPath)
+
+    Write-Host "Checking for latest release from GitHub..." -ForegroundColor Cyan
+
+    try {
+        # Get latest release info
+        $releaseInfo = Invoke-RestMethod -Uri $GitHubApiUrl -Headers @{
+            "Accept" = "application/vnd.github.v3+json"
+            "User-Agent" = "IronBase-Installer"
+        }
+
+        $version = $releaseInfo.tag_name
+        Write-Host "Latest version: $version" -ForegroundColor Green
+
+        # Find the Windows exe asset
+        $asset = $releaseInfo.assets | Where-Object {
+            $_.name -like "*windows*.exe" -or $_.name -eq $ExeName
+        } | Select-Object -First 1
+
+        if (-not $asset) {
+            # Try to find any .exe asset
+            $asset = $releaseInfo.assets | Where-Object { $_.name -like "*.exe" } | Select-Object -First 1
+        }
+
+        if (-not $asset) {
+            Write-Host "No Windows executable found in release assets." -ForegroundColor Yellow
+            Write-Host "Available assets:" -ForegroundColor Yellow
+            $releaseInfo.assets | ForEach-Object { Write-Host "  - $($_.name)" -ForegroundColor Yellow }
+            return $false
+        }
+
+        Write-Host "Downloading $($asset.name) ($([math]::Round($asset.size / 1MB, 2)) MB)..." -ForegroundColor White
+
+        # Download the asset
+        $downloadUrl = $asset.browser_download_url
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $DestPath -UseBasicParsing
+
+        if (Test-Path $DestPath) {
+            Write-Host "Downloaded successfully to $DestPath" -ForegroundColor Green
+            return $true
+        }
+    }
+    catch {
+        Write-Host "Failed to download from GitHub: $_" -ForegroundColor Red
+    }
+
+    return $false
 }
 
 function Install-IronBase {
@@ -53,14 +111,40 @@ function Install-IronBase {
     }
 
     if (-not $SourceExe) {
-        Write-Host "ERROR: Cannot find $ExeName" -ForegroundColor Red
-        Write-Host "Searched locations:" -ForegroundColor Yellow
-        foreach ($path in $SearchPaths) {
-            Write-Host "  - $path" -ForegroundColor Yellow
+        if ($NoDownload) {
+            Write-Host "ERROR: Cannot find $ExeName" -ForegroundColor Red
+            Write-Host "Searched locations:" -ForegroundColor Yellow
+            foreach ($path in $SearchPaths) {
+                Write-Host "  - $path" -ForegroundColor Yellow
+            }
+            Write-Host ""
+            Write-Host "Please place $ExeName in the same folder as this script." -ForegroundColor Yellow
+            Write-Host "Or run without -NoDownload to auto-download from GitHub." -ForegroundColor Yellow
+            exit 1
         }
+
+        # Try to download from GitHub
+        Write-Host "Executable not found locally. Attempting to download from GitHub..." -ForegroundColor Yellow
         Write-Host ""
-        Write-Host "Please place $ExeName in the same folder as this script." -ForegroundColor Yellow
-        exit 1
+
+        # Create temp directory for download
+        $TempDir = Join-Path $env:TEMP "IronBase-Install"
+        New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+        $TempExe = Join-Path $TempDir $ExeName
+
+        if (Get-LatestRelease -DestPath $TempExe) {
+            $SourceExe = $TempExe
+        }
+        else {
+            Write-Host ""
+            Write-Host "ERROR: Could not download or find $ExeName" -ForegroundColor Red
+            Write-Host ""
+            Write-Host "Options:" -ForegroundColor Yellow
+            Write-Host "  1. Download manually from: https://github.com/$GitHubRepo/releases" -ForegroundColor White
+            Write-Host "  2. Build from source: cargo build --release" -ForegroundColor White
+            Write-Host "  3. Place $ExeName in the same folder as this script" -ForegroundColor White
+            exit 1
+        }
     }
 
     Write-Host "Source executable: $SourceExe" -ForegroundColor Green
