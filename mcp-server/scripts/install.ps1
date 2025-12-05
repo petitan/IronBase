@@ -94,7 +94,11 @@ function Install-IronBase {
     Write-Host ""
 
     # Find the executable - check multiple locations
-    $ScriptDir = Split-Path -Parent $MyInvocation.PSCommandPath
+    $ScriptDir = if ($MyInvocation.PSCommandPath) {
+        Split-Path -Parent $MyInvocation.PSCommandPath
+    } else {
+        Get-Location
+    }
     $SearchPaths = @(
         (Join-Path $ScriptDir $ExeName),                           # Same folder as script
         (Join-Path (Get-Location) $ExeName),                       # Current directory
