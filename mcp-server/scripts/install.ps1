@@ -170,6 +170,9 @@ function Install-IronBase {
 [server]
 host = "0.0.0.0"
 port = 8080
+# Max request body size (supports: B, KB, MB, GB)
+# Default: 1GB - suitable for batch operations with large attachments
+max_body_size = "1GB"
 
 [database]
 path = "$DataDirForward/data.mlite"
