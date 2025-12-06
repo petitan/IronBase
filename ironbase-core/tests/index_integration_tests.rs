@@ -878,3 +878,131 @@ fn test_unique_index_null_equals_missing_bug5() {
         result
     );
 }
+
+/// Test compound index prefix query uses index instead of full scan
+#[test]
+fn test_compound_index_prefix_query() {
+    use ironbase_core::storage::MemoryStorage;
+    use std::collections::HashMap;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let collection = db.collection("users").unwrap();
+
+    // Insert test data using HashMap
+    db.insert_many(
+        "users",
+        vec![
+            HashMap::from([
+                ("country".to_string(), json!("HU")),
+                ("city".to_string(), json!("Budapest")),
+                ("name".to_string(), json!("Alice")),
+            ]),
+            HashMap::from([
+                ("country".to_string(), json!("HU")),
+                ("city".to_string(), json!("Debrecen")),
+                ("name".to_string(), json!("Bob")),
+            ]),
+            HashMap::from([
+                ("country".to_string(), json!("US")),
+                ("city".to_string(), json!("LA")),
+                ("name".to_string(), json!("Charlie")),
+            ]),
+            HashMap::from([
+                ("country".to_string(), json!("US")),
+                ("city".to_string(), json!("NYC")),
+                ("name".to_string(), json!("Dave")),
+            ]),
+            HashMap::from([
+                ("country".to_string(), json!("US")),
+                ("city".to_string(), json!("SF")),
+                ("name".to_string(), json!("Eve")),
+            ]),
+            HashMap::from([
+                ("country".to_string(), json!("DE")),
+                ("city".to_string(), json!("Berlin")),
+                ("name".to_string(), json!("Frank")),
+            ]),
+        ],
+    )
+    .unwrap();
+
+    // Create compound index on (country, city)
+    let index_name = collection
+        .create_compound_index(vec!["country".to_string(), "city".to_string()], false)
+        .unwrap();
+    assert_eq!(index_name, "users_country_city");
+
+    // Query by prefix (first field only) - should use index
+    let results = collection.find(&json!({"country": "US"})).unwrap();
+    assert_eq!(results.len(), 3, "Should find 3 US entries");
+
+    // Verify the correct documents were found
+    let names: Vec<&str> = results
+        .iter()
+        .map(|d| d.get("name").unwrap().as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"Charlie"));
+    assert!(names.contains(&"Dave"));
+    assert!(names.contains(&"Eve"));
+
+    // Query for HU - should find 2
+    let results = collection.find(&json!({"country": "HU"})).unwrap();
+    assert_eq!(results.len(), 2, "Should find 2 HU entries");
+
+    // Query for DE - should find 1
+    let results = collection.find(&json!({"country": "DE"})).unwrap();
+    assert_eq!(results.len(), 1, "Should find 1 DE entry");
+
+    // Query for non-existent country - should find 0
+    let results = collection.find(&json!({"country": "FR"})).unwrap();
+    assert_eq!(results.len(), 0, "Should find 0 FR entries");
+}
+
+/// Test compound index prefix query explain shows index usage
+#[test]
+fn test_compound_index_prefix_query_explain() {
+    use ironbase_core::storage::MemoryStorage;
+    use std::collections::HashMap;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let collection = db.collection("locations").unwrap();
+
+    // Insert test data using HashMap
+    db.insert_many(
+        "locations",
+        vec![
+            HashMap::from([
+                ("country".to_string(), json!("HU")),
+                ("city".to_string(), json!("Budapest")),
+            ]),
+            HashMap::from([
+                ("country".to_string(), json!("US")),
+                ("city".to_string(), json!("NYC")),
+            ]),
+        ],
+    )
+    .unwrap();
+
+    // Create compound index
+    collection
+        .create_compound_index(vec!["country".to_string(), "city".to_string()], false)
+        .unwrap();
+
+    // Check explain output - should show IndexScan, not CollectionScan
+    let explain = collection.explain(&json!({"country": "HU"})).unwrap();
+    let explain_str = explain.to_string();
+
+    // Should use index
+    assert!(
+        explain_str.contains("IndexScan") || explain_str.contains("indexUsed"),
+        "Compound prefix query should use index. Explain: {}",
+        explain_str
+    );
+
+    // Should NOT be a collection scan
+    assert!(
+        !explain_str.contains("CollectionScan") || explain_str.contains("indexUsed"),
+        "Should not fall back to CollectionScan. Explain: {}",
+        explain_str
+    );
+}

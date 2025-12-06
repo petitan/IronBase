@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! Storage trait (unified interface)
-//!   ├── FileStorage (production, wraps StorageEngine)
+//!   ├── StorageEngine (production, file-based .mlite)
 //!   ├── MemoryStorage (testing, in-memory HashMap)
 //!   └── Future: S3Storage, RedisStorage, etc.
 //! ```
@@ -29,14 +29,14 @@ use std::path::Path;
 ///
 /// # Implementations
 ///
-/// - **FileStorage**: Production storage backed by .mlite files
+/// - **StorageEngine**: Production storage backed by .mlite files
 /// - **MemoryStorage**: Fast in-memory storage for testing
 ///
 /// # Examples
 ///
 /// ```ignore
 /// // File-based storage (production)
-/// let storage = FileStorage::open("data.mlite")?;
+/// let storage = StorageEngine::open("data.mlite")?;
 ///
 /// // Memory storage (testing)
 /// let storage = MemoryStorage::new();
@@ -82,7 +82,7 @@ pub trait Storage: Send + Sync {
     ///
     /// # Performance
     ///
-    /// - FileStorage: Memory-mapped sequential scan (requires mut for file I/O)
+    /// - StorageEngine: Memory-mapped sequential scan (requires mut for file I/O)
     /// - MemoryStorage: Iterator over Vec
     ///
     /// # Note
@@ -119,7 +119,7 @@ pub trait Storage: Send + Sync {
 
     /// Flush any pending writes to persistent storage
     ///
-    /// For FileStorage, this writes metadata to disk.
+    /// For StorageEngine, this writes metadata to disk.
     /// For MemoryStorage, this is a no-op.
     fn flush(&mut self) -> Result<()>;
 

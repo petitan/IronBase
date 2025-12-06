@@ -2855,4 +2855,160 @@ mod tests {
         let filter3 = json!({"name": {"$fuzzy": {"value": "xyz", "threshold": 0.5}}});
         assert!(!matches_filter(&doc, &filter3).unwrap());
     }
+
+    // ========================================================================
+    // FUZZY OPERATOR WITH NESTED DOCUMENTS TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_fuzzy_nested_field_simple() {
+        // Document with nested structure
+        let doc = create_test_document(
+            1,
+            vec![(
+                "user",
+                json!({
+                    "name": "John Smith",
+                    "profile": {
+                        "bio": "Software engineer"
+                    }
+                }),
+            )],
+        );
+
+        // Fuzzy search on nested field
+        let filter = json!({"user.name": {"$fuzzy": "jon smith"}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+
+        // Fuzzy search on deeply nested field
+        let filter2 = json!({"user.profile.bio": {"$fuzzy": "software enginer"}}); // typo
+        assert!(matches_filter(&doc, &filter2).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_nested_field_extended_form() {
+        let doc = create_test_document(
+            1,
+            vec![(
+                "contact",
+                json!({
+                    "email": "john.smith@example.com",
+                    "address": {
+                        "city": "New York"
+                    }
+                }),
+            )],
+        );
+
+        // Extended form with algorithm on nested field
+        // "New York" vs "new york" - case insensitive comparison
+        let filter = json!({
+            "contact.address.city": {
+                "$fuzzy": {
+                    "value": "new york",
+                    "algorithm": "jaro_winkler",
+                    "threshold": 0.8
+                }
+            }
+        });
+        assert!(matches_filter(&doc, &filter).unwrap());
+
+        // Jaro-Winkler on email field
+        let filter2 = json!({
+            "contact.email": {
+                "$fuzzy": {
+                    "value": "john.smth@example.com",  // missing 'i'
+                    "algorithm": "jaro_winkler",
+                    "threshold": 0.85
+                }
+            }
+        });
+        assert!(matches_filter(&doc, &filter2).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_nested_field_no_match() {
+        let doc = create_test_document(
+            1,
+            vec![(
+                "company",
+                json!({
+                    "name": "Acme Corporation"
+                }),
+            )],
+        );
+
+        // Very different string should not match
+        let filter = json!({"company.name": {"$fuzzy": "xyz technologies"}});
+        assert!(!matches_filter(&doc, &filter).unwrap());
+
+        // Non-existent nested path should not match
+        let filter2 = json!({"company.location.city": {"$fuzzy": "test"}});
+        assert!(!matches_filter(&doc, &filter2).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_nested_combined_with_other_operators() {
+        let doc = create_test_document(
+            1,
+            vec![
+                (
+                    "user",
+                    json!({
+                        "name": "John Smith",
+                        "age": 30
+                    }),
+                ),
+                ("status", json!("active")),
+            ],
+        );
+
+        // Combine fuzzy with $and and other operators
+        let filter = json!({
+            "$and": [
+                {"user.name": {"$fuzzy": "jon smith"}},
+                {"user.age": {"$gte": 25}},
+                {"status": "active"}
+            ]
+        });
+        assert!(matches_filter(&doc, &filter).unwrap());
+
+        // Combine fuzzy with $or
+        let filter2 = json!({
+            "$or": [
+                {"user.name": {"$fuzzy": "jane doe"}},  // no match
+                {"user.name": {"$fuzzy": "john smth"}}  // match
+            ]
+        });
+        assert!(matches_filter(&doc, &filter2).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_nested_three_levels_deep() {
+        let doc = create_test_document(
+            1,
+            vec![(
+                "organization",
+                json!({
+                    "department": {
+                        "team": {
+                            "leader": "Elizabeth Johnson"
+                        }
+                    }
+                }),
+            )],
+        );
+
+        // Fuzzy on 4-level deep field
+        let filter = json!({
+            "organization.department.team.leader": {
+                "$fuzzy": {
+                    "value": "elisabeth johnsen",  // typos
+                    "algorithm": "levenshtein",
+                    "threshold": 0.75
+                }
+            }
+        });
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
 }

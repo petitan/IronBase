@@ -15,14 +15,14 @@ Written in Rust with Python and C# bindings. Single-file, zero-configuration, se
 | Category | Features |
 |----------|----------|
 | **Core** | MongoDB-compatible API, Single-file storage, Zero-config, Embedded |
-| **Query** | 18 operators: comparison, logical, element, array, regex |
+| **Query** | 21 operators: comparison, logical, element, array, regex, fuzzy |
 | **Update** | 7 operators: `$set`, `$inc`, `$unset`, `$push`, `$pull`, `$addToSet`, `$pop` |
 | **Aggregation** | 6 stages + 6 accumulators with dot notation support |
-| **Indexing** | B+ tree indexes, compound indexes, explain(), hint() |
+| **Indexing** | B+ tree indexes, compound indexes, fuzzy indexes, explain(), hint() |
 | **Durability** | ACD transactions, WAL, crash recovery, 3 durability modes |
 | **Performance** | ~1M+ inserts/sec, O(log n) index lookups |
 | **Languages** | Rust, Python (PyO3), C# (.NET 8) |
-| **Testing** | 554+ tests, property-based testing, fuzz testing |
+| **Testing** | 744+ tests, property-based testing, fuzz testing |
 
 ## Quick Start
 
@@ -169,6 +169,29 @@ cargo build --release -p ironbase-core
 |----------|-------------|---------|
 | `$regex` | Regex match | `{"name": {"$regex": "^A"}}` |
 
+### Fuzzy Text Search
+| Operator | Description | Example |
+|----------|-------------|---------|
+| `$fuzzy` | Fuzzy match | `{"name": {"$fuzzy": "john"}}` |
+| `$fuzzy` | With options | `{"name": {"$fuzzy": {"value": "john", "threshold": 0.8}}}` |
+
+```python
+# Simple fuzzy search (default: Jaro-Winkler, threshold: 0.8)
+users.find({"name": {"$fuzzy": "john"}})
+
+# With algorithm selection
+users.find({"name": {"$fuzzy": {
+    "value": "john",
+    "algorithm": "levenshtein",  # jaro_winkler | levenshtein | damerau_levenshtein
+    "threshold": 0.7
+}}})
+
+# Algorithms:
+# - jaro_winkler (default): Fastest, good for names
+# - levenshtein: Most accurate, character-by-character distance
+# - damerau_levenshtein: Best for typos and OCR errors
+```
+
 ### Dot Notation (Nested Fields)
 ```python
 # Query nested fields
@@ -219,6 +242,11 @@ users.find({}, sort=[("city", 1), ("age", -1)])  # Multi-field
 
 # Pagination
 users.find({}, skip=20, limit=10)  # Page 3 (20 skip, 10 per page)
+
+# Pagination with total count (for "Showing 1-10 of 100 results" UI)
+result = users.find({}, limit=10, skip=0, include_total=True)
+print(f"Showing {len(result['documents'])} of {result['total']} results")
+# Result: {"documents": [...], "total": 100}
 
 # Combined
 users.find(
@@ -297,6 +325,10 @@ users.create_index("email", unique=True)
 users.create_index("age")
 users.create_compound_index(["country", "city"])
 
+# Create fuzzy text index (accelerates $fuzzy queries)
+users.create_fuzzy_index("name")  # default: jaro_winkler, threshold: 0.8
+users.create_fuzzy_index("email", algorithm="levenshtein", threshold=0.7)
+
 # List indexes
 print(users.list_indexes())  # ['users_id', 'users_email', 'users_age', ...]
 
@@ -311,6 +343,15 @@ results = users.find_with_hint({"age": 25}, "users_age")
 # Drop index
 users.drop_index("users_age")
 ```
+
+### Index Types
+
+| Type | Description | Use Case |
+|------|-------------|----------|
+| **Single Field** | B+ tree on one field | Equality, range queries |
+| **Compound** | B+ tree on multiple fields | Multi-field queries |
+| **Unique** | Enforces uniqueness | Email, username |
+| **Fuzzy** | Text similarity index | Name search, typo tolerance |
 
 See [INDEXES.md](INDEXES.md) for detailed documentation.
 
@@ -492,15 +533,18 @@ just run-dev-checks  # fmt + clippy + tests
 - No cursors with server-side state (client-side only)
 - No replication or sharding
 - Single-writer model
-- No geospatial or full-text indexes (planned)
+- No geospatial indexes (planned)
+- No full-text search with stemming (use `$fuzzy` for similarity matching)
 
 ## Documentation
 
 - [AGGREGATION.md](AGGREGATION.md) - Aggregation pipeline guide
 - [INDEXES.md](INDEXES.md) - Indexing guide
+- [BUILD.md](BUILD.md) - Build guide (Hungarian) / [BUILD_EN.md](BUILD_EN.md) (English)
 - [DESIGN_AUTO_COMMIT.md](DESIGN_AUTO_COMMIT.md) - Durability design
 - [INDEX_CONSISTENCY.md](INDEX_CONSISTENCY.md) - Index consistency guarantees
 - [IronBase.NET/README.md](IronBase.NET/README.md) - C# documentation
+- [docs/hu/README.md](docs/hu/README.md) - Hungarian documentation
 
 ## License
 

@@ -58,10 +58,6 @@ fn extract_doc_id(doc: &Value) -> Result<DocumentId> {
 /// Generic over Storage backend:
 /// - `DatabaseCore<StorageEngine>` - Production file-based storage (default)
 /// - `DatabaseCore<MemoryStorage>` - Fast in-memory storage for testing
-///
-/// # Future TODO
-/// - FileStorage needs full refactor for better trait compliance
-/// - WAL recovery currently StorageEngine-specific
 pub struct DatabaseCore<S: Storage + RawStorage> {
     storage: Arc<RwLock<S>>,
     db_path: String,
@@ -1256,6 +1252,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         let mut rebuilt_count = 0u64;
 
+        // Pre-collect fuzzy index info to avoid repeated lookups in the loop
+        let fuzzy_info: Vec<_> = index_manager
+            .list_fuzzy_indexes()
+            .iter()
+            .map(|idx| (idx.metadata.name.clone(), idx.metadata.field.clone()))
+            .collect();
+
         for (_id_key, offset) in catalog.iter() {
             // Read document from disk
             let doc_bytes = match storage.read_document_at(collection_name, *offset) {
@@ -1327,6 +1330,18 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     rebuilt_count += 1;
                 }
             }
+
+            // Rebuild fuzzy indexes (using pre-collected info from outside the loop)
+            for (index_name, field) in &fuzzy_info {
+                if let Some(value) = crate::value_utils::get_nested_value(&doc, field) {
+                    if let Some(s) = value.as_str() {
+                        if let Some(index) = index_manager.get_fuzzy_index_mut(index_name) {
+                            index.insert(s, doc_id.clone());
+                            rebuilt_count += 1;
+                        }
+                    }
+                }
+            }
         }
 
         Ok(rebuilt_count)
@@ -1361,12 +1376,14 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         let catalog = meta.document_catalog.clone();
         let persisted_indexes = meta.indexes.clone();
+        let persisted_fuzzy_indexes = meta.fuzzy_indexes.clone();
 
         log_debug!(
-            "Collection '{}' - catalog size: {}, persisted indexes: {}",
+            "Collection '{}' - catalog size: {}, persisted indexes: {}, fuzzy indexes: {}",
             name,
             catalog.len(),
-            persisted_indexes.len()
+            persisted_indexes.len(),
+            persisted_fuzzy_indexes.len()
         );
 
         // Get db_path for .idx file loading
@@ -1381,6 +1398,22 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             &id_index_name,
             &db_path,
         )?;
+
+        // Create fuzzy indexes from persisted metadata (data will be rebuilt from documents)
+        for fuzzy_meta in &persisted_fuzzy_indexes {
+            if let Err(e) = index_manager.create_fuzzy_index(
+                fuzzy_meta.name.clone(),
+                fuzzy_meta.field.clone(),
+                fuzzy_meta.algorithm,
+                fuzzy_meta.threshold,
+            ) {
+                log_debug!(
+                    "Warning: Failed to recreate fuzzy index '{}': {}",
+                    fuzzy_meta.name,
+                    e
+                );
+            }
+        }
 
         // Rebuild all indexes from document catalog (delegated to helper)
         log_debug!(

@@ -162,5 +162,36 @@ namespace IronBase
         {
             return new FilterDefinition<T>($"{{\"$not\": {filter.ToJson()}}}");
         }
+
+        /// <summary>
+        /// Recursive descent wildcard operator ($**).
+        /// Matches a field at any depth in the document structure.
+        /// </summary>
+        /// <param name="field">Field name to search for at any depth</param>
+        /// <param name="value">Value to match</param>
+        /// <returns>Filter definition for recursive field search</returns>
+        /// <example>
+        /// // Find documents where any "status" field (at any depth) equals "active"
+        /// var filter = Builders&lt;T&gt;.Filter.RecursiveWildcard("status", "active");
+        /// </example>
+        public FilterDefinition<T> RecursiveWildcard(string field, object? value)
+        {
+            var json = $"{{\"$**.{field}\": {JsonSerializer.Serialize(value)}}}";
+            return new FilterDefinition<T>(json);
+        }
+
+        /// <summary>
+        /// Recursive descent wildcard operator with comparison.
+        /// Matches a field at any depth in the document structure.
+        /// </summary>
+        /// <param name="field">Field name to search for at any depth</param>
+        /// <param name="comparisonOperator">MongoDB comparison operator (e.g., "$gt", "$regex")</param>
+        /// <param name="value">Value for the comparison</param>
+        /// <returns>Filter definition for recursive field search with comparison</returns>
+        public FilterDefinition<T> RecursiveWildcard(string field, string comparisonOperator, object? value)
+        {
+            var json = $"{{\"$**.{field}\": {{\"{comparisonOperator}\": {JsonSerializer.Serialize(value)}}}}}";
+            return new FilterDefinition<T>(json);
+        }
     }
 }

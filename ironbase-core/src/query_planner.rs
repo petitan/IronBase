@@ -1,7 +1,7 @@
 // src/query_planner.rs
 // Query planner and optimizer - index selection
 
-use crate::index::IndexKey;
+use crate::index::{IndexKey, IndexPrefixInfo};
 use serde_json::Value;
 
 /// Query plan - describes how to execute a query
@@ -14,6 +14,8 @@ pub enum QueryPlan {
         index_name: String,
         field: String,
         key: IndexKey,
+        /// If true, this is a compound index prefix query - use range scan internally
+        is_compound: bool,
     },
 
     /// Index range scan
@@ -69,6 +71,7 @@ impl QueryPlanner {
                         index_name,
                         field: field.clone(),
                         key,
+                        is_compound: false, // Legacy method doesn't know about compound indexes
                     },
                 ));
             }
@@ -154,25 +157,29 @@ impl QueryPlanner {
 
     /// Find an index for a given field (v2 - compound index aware)
     ///
-    /// Takes a list of (index_name, prefix_field) tuples where prefix_field is:
-    /// - The field name for single-field indexes
-    /// - The FIRST field for compound indexes (only prefix queries are supported!)
+    /// Takes a list of IndexPrefixInfo containing:
+    /// - index_name: The index name
+    /// - prefix_field: The first field (for compound) or only field (for single)
+    /// - is_compound: Whether this is a compound index
     ///
-    /// This correctly handles compound indexes by only matching on their first field.
-    fn find_index_for_field_v2(field: &str, index_fields: &[(String, String)]) -> Option<String> {
+    /// Returns (index_name, is_compound) if found.
+    fn find_index_for_field_v2(
+        field: &str,
+        index_fields: &[IndexPrefixInfo],
+    ) -> Option<(String, bool)> {
         index_fields
             .iter()
-            .find(|(_, prefix_field)| prefix_field == field)
-            .map(|(index_name, _)| index_name.clone())
+            .find(|info| info.prefix_field == field)
+            .map(|info| (info.index_name.clone(), info.is_compound))
     }
 
     /// Analyze a query with compound-index-aware field matching (v2)
     ///
-    /// This version takes (index_name, prefix_field) tuples to correctly handle
-    /// compound indexes by only using them for prefix field queries.
+    /// This version takes IndexPrefixInfo to correctly handle compound indexes
+    /// by using them for prefix field queries with range scans.
     pub fn analyze_query_with_fields(
         query_json: &Value,
-        index_fields: &[(String, String)],
+        index_fields: &[IndexPrefixInfo],
     ) -> Option<(String, QueryPlan)> {
         // Check for simple equality query: { "field": value }
         if let Value::Object(ref map) = query_json {
@@ -196,7 +203,7 @@ impl QueryPlanner {
                 }
 
                 // Check if we have an index on this field (compound-aware!)
-                let index_name = Self::find_index_for_field_v2(field, index_fields)?;
+                let (index_name, is_compound) = Self::find_index_for_field_v2(field, index_fields)?;
 
                 let key = IndexKey::from(value);
                 return Some((
@@ -205,6 +212,7 @@ impl QueryPlanner {
                         index_name,
                         field: field.clone(),
                         key,
+                        is_compound,
                     },
                 ));
             }
@@ -216,7 +224,7 @@ impl QueryPlanner {
     /// Analyze query for range operators with compound-index-aware matching
     fn analyze_range_query_v2(
         query_json: &Value,
-        index_fields: &[(String, String)],
+        index_fields: &[IndexPrefixInfo],
     ) -> Option<(String, QueryPlan)> {
         if let Value::Object(ref map) = query_json {
             for (field, conditions) in map {
@@ -231,8 +239,9 @@ impl QueryPlanner {
                     let has_lte = cond_map.contains_key("$lte");
 
                     if has_gt || has_gte || has_lt || has_lte {
-                        // Compound-index-aware field matching
-                        let index_name = Self::find_index_for_field_v2(field, index_fields)?;
+                        // Compound-index-aware field matching (we only need the index name for range queries)
+                        let (index_name, _is_compound) =
+                            Self::find_index_for_field_v2(field, index_fields)?;
 
                         let start = if has_gte {
                             cond_map.get("$gte").map(IndexKey::from)
@@ -353,6 +362,7 @@ mod tests {
                 index_name,
                 field,
                 key,
+                ..
             } => {
                 assert_eq!(index_name, "users_age");
                 assert_eq!(field, "age");

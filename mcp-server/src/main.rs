@@ -15,6 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use mcp_docjl::{
@@ -125,8 +126,56 @@ fn print_help() {
     println!("    --version   Show version");
     println!();
     println!("ENVIRONMENT:");
-    println!("    IRONBASE_PATH   Database file path (default: ironbase_data.mlite)");
+    println!("    IRONBASE_PATH   Database file path");
+    println!("                    Default (Windows): %LOCALAPPDATA%\\IronBase\\data\\ironbase_data.mlite");
+    println!("                    Default (Linux):   /var/lib/ironbase/ironbase_data.mlite");
+    println!("                    Default (macOS):   /usr/local/var/ironbase/ironbase_data.mlite");
     println!("    MCP_CONFIG      Config file path (default: config.toml)");
+}
+
+// ============================================================
+// PLATFORM-SPECIFIC DEFAULT DATABASE PATH
+// ============================================================
+
+/// Get the default database path for the current platform.
+/// - Windows: %LOCALAPPDATA%\IronBase\data\ironbase_data.mlite
+/// - Linux: /var/lib/ironbase/ironbase_data.mlite
+/// - macOS: /usr/local/var/ironbase/ironbase_data.mlite
+fn get_default_db_path() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            let mut path = PathBuf::from(local_app_data);
+            path.push("IronBase");
+            path.push("data");
+            // Create directory if it doesn't exist
+            let _ = std::fs::create_dir_all(&path);
+            path.push("ironbase_data.mlite");
+            return path.to_string_lossy().to_string();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let path = PathBuf::from("/usr/local/var/ironbase/ironbase_data.mlite");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        return path.to_string_lossy().to_string();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let path = PathBuf::from("/var/lib/ironbase/ironbase_data.mlite");
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        return path.to_string_lossy().to_string();
+    }
+
+    // Fallback for other platforms
+    #[allow(unreachable_code)]
+    "ironbase_data.mlite".to_string()
 }
 
 // ============================================================
@@ -137,9 +186,8 @@ fn run_stdio_server() {
     // Stderr for logging (stdout is for MCP protocol)
     eprintln!("MCP IronBase Server v{} (stdio mode)", VERSION);
 
-    // Get database path from env or use default
-    let db_path =
-        std::env::var("IRONBASE_PATH").unwrap_or_else(|_| "ironbase_data.mlite".to_string());
+    // Get database path from env or use platform-specific default
+    let db_path = std::env::var("IRONBASE_PATH").unwrap_or_else(|_| get_default_db_path());
 
     eprintln!("Database path: {}", db_path);
 

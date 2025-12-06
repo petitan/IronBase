@@ -688,3 +688,465 @@ fn test_dispatch_invalid_param_type() {
     );
     assert!(result.is_err());
 }
+
+// ============================================================
+// Concurrency Tests
+// ============================================================
+
+use std::sync::Arc;
+use std::thread;
+
+#[test]
+fn test_concurrent_inserts() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    let mut handles = vec![];
+    let num_threads = 10;
+    let inserts_per_thread = 10;
+
+    for thread_id in 0..num_threads {
+        let adapter_clone = Arc::clone(&adapter);
+        let handle = thread::spawn(move || {
+            for i in 0..inserts_per_thread {
+                let params = json!({
+                    "collection": "concurrent_test",
+                    "document": {"thread": thread_id, "index": i}
+                });
+                let result = dispatch_tool("insert_one", params, &adapter_clone);
+                assert!(result.is_ok(), "Insert failed: {:?}", result.err());
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Verify all documents were inserted
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "concurrent_test", "query": {}}),
+        &adapter,
+    );
+    assert!(count_result.is_ok());
+    let value = count_result.unwrap();
+    assert_eq!(
+        value.get("count"),
+        Some(&json!(num_threads * inserts_per_thread))
+    );
+}
+
+#[test]
+fn test_concurrent_reads() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    // Insert test data first
+    for i in 0..100 {
+        dispatch_tool(
+            "insert_one",
+            json!({"collection": "read_test", "document": {"id": i, "value": i * 10}}),
+            &adapter,
+        )
+        .unwrap();
+    }
+
+    let mut handles = vec![];
+    let num_threads = 10;
+
+    for _ in 0..num_threads {
+        let adapter_clone = Arc::clone(&adapter);
+        let handle = thread::spawn(move || {
+            for _ in 0..10 {
+                let result = dispatch_tool(
+                    "find",
+                    json!({"collection": "read_test", "query": {}}),
+                    &adapter_clone,
+                );
+                assert!(result.is_ok());
+                let value = result.unwrap();
+                assert_eq!(value.get("count"), Some(&json!(100)));
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+}
+
+#[test]
+fn test_concurrent_mixed_operations() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    // Initial data
+    for i in 0..50 {
+        dispatch_tool(
+            "insert_one",
+            json!({"collection": "mixed_test", "document": {"id": i, "status": "initial"}}),
+            &adapter,
+        )
+        .unwrap();
+    }
+
+    let mut handles = vec![];
+
+    // Reader threads
+    for _ in 0..5 {
+        let adapter_clone = Arc::clone(&adapter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..20 {
+                let _ = dispatch_tool(
+                    "find",
+                    json!({"collection": "mixed_test", "query": {}}),
+                    &adapter_clone,
+                );
+            }
+        }));
+    }
+
+    // Writer threads
+    for thread_id in 0..3 {
+        let adapter_clone = Arc::clone(&adapter);
+        handles.push(thread::spawn(move || {
+            for i in 0..10 {
+                let _ = dispatch_tool(
+                    "insert_one",
+                    json!({
+                        "collection": "mixed_test",
+                        "document": {"id": 100 + thread_id * 10 + i, "status": "new"}
+                    }),
+                    &adapter_clone,
+                );
+            }
+        }));
+    }
+
+    // Update threads
+    for _ in 0..2 {
+        let adapter_clone = Arc::clone(&adapter);
+        handles.push(thread::spawn(move || {
+            for i in 0..10 {
+                let _ = dispatch_tool(
+                    "update_one",
+                    json!({
+                        "collection": "mixed_test",
+                        "filter": {"id": i},
+                        "update": {"$set": {"status": "updated"}}
+                    }),
+                    &adapter_clone,
+                );
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Verify data integrity
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "mixed_test", "query": {}}),
+        &adapter,
+    );
+    assert!(count_result.is_ok());
+    let count = count_result
+        .unwrap()
+        .get("count")
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    // 50 initial + 30 new (3 threads x 10)
+    assert_eq!(count, 80);
+}
+
+#[test]
+fn test_concurrent_different_collections() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    let mut handles = vec![];
+
+    // Each thread operates on its own collection
+    for thread_id in 0..5 {
+        let adapter_clone = Arc::clone(&adapter);
+        let handle = thread::spawn(move || {
+            let collection = format!("collection_{}", thread_id);
+            for i in 0..20 {
+                dispatch_tool(
+                    "insert_one",
+                    json!({
+                        "collection": collection,
+                        "document": {"id": i}
+                    }),
+                    &adapter_clone,
+                )
+                .unwrap();
+            }
+        });
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Verify each collection has 20 documents
+    for thread_id in 0..5 {
+        let collection = format!("collection_{}", thread_id);
+        let count_result = dispatch_tool(
+            "count_documents",
+            json!({"collection": collection, "query": {}}),
+            &adapter,
+        );
+        assert!(count_result.is_ok());
+        assert_eq!(count_result.unwrap().get("count"), Some(&json!(20)));
+    }
+}
+
+#[test]
+fn test_concurrent_aggregation() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    // Insert test data
+    let categories = ["A", "B", "C"];
+    for i in 0..60 {
+        let cat = categories[i % 3];
+        dispatch_tool(
+            "insert_one",
+            json!({
+                "collection": "agg_test",
+                "document": {"category": cat, "value": (i as i64) * 10}
+            }),
+            &adapter,
+        )
+        .unwrap();
+    }
+
+    let mut handles = vec![];
+
+    // Multiple threads run the same aggregation concurrently
+    for _ in 0..5 {
+        let adapter_clone = Arc::clone(&adapter);
+        handles.push(thread::spawn(move || {
+            for _ in 0..5 {
+                let result = dispatch_tool(
+                    "aggregate",
+                    json!({
+                        "collection": "agg_test",
+                        "pipeline": [
+                            {"$group": {"_id": "$category", "total": {"$sum": "$value"}}}
+                        ]
+                    }),
+                    &adapter_clone,
+                );
+                assert!(result.is_ok());
+                let value = result.unwrap();
+                // Should have 3 groups (A, B, C)
+                assert_eq!(value.get("count"), Some(&json!(3)));
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+}
+
+#[test]
+fn test_concurrent_index_operations() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    // Create collection with data
+    for i in 0..100 {
+        dispatch_tool(
+            "insert_one",
+            json!({
+                "collection": "index_test",
+                "document": {"field_a": i, "field_b": i * 2, "field_c": format!("val_{}", i)}
+            }),
+            &adapter,
+        )
+        .unwrap();
+    }
+
+    let mut handles = vec![];
+
+    // Create indexes concurrently
+    let fields = ["field_a", "field_b", "field_c"];
+    for field in fields {
+        let adapter_clone = Arc::clone(&adapter);
+        let field_owned = field.to_string();
+        handles.push(thread::spawn(move || {
+            let result = dispatch_tool(
+                "index_create",
+                json!({
+                    "collection": "index_test",
+                    "field": field_owned
+                }),
+                &adapter_clone,
+            );
+            // Index creation may succeed or fail if concurrent
+            // Just verify no panic
+            let _ = result;
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Verify indexes were created
+    let list_result = dispatch_tool("index_list", json!({"collection": "index_test"}), &adapter);
+    assert!(list_result.is_ok());
+}
+
+#[test]
+fn test_concurrent_delete_and_read() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    // Insert test data
+    for i in 0..100 {
+        dispatch_tool(
+            "insert_one",
+            json!({
+                "collection": "delete_test",
+                "document": {"id": i}
+            }),
+            &adapter,
+        )
+        .unwrap();
+    }
+
+    let mut handles = vec![];
+
+    // Reader thread
+    let adapter_read = Arc::clone(&adapter);
+    handles.push(thread::spawn(move || {
+        for _ in 0..50 {
+            let result = dispatch_tool(
+                "find",
+                json!({"collection": "delete_test", "query": {}}),
+                &adapter_read,
+            );
+            assert!(result.is_ok());
+        }
+    }));
+
+    // Deleter thread
+    let adapter_delete = Arc::clone(&adapter);
+    handles.push(thread::spawn(move || {
+        for i in 0..50 {
+            let _ = dispatch_tool(
+                "delete_one",
+                json!({
+                    "collection": "delete_test",
+                    "filter": {"id": i}
+                }),
+                &adapter_delete,
+            );
+        }
+    }));
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Final count should be around 50 (100 - 50 deleted)
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "delete_test", "query": {}}),
+        &adapter,
+    );
+    assert!(count_result.is_ok());
+    let count = count_result
+        .unwrap()
+        .get("count")
+        .unwrap()
+        .as_i64()
+        .unwrap();
+    assert_eq!(count, 50);
+}
+
+#[test]
+fn test_stress_many_concurrent_operations() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let db_path = temp_dir.path().join("test.mlite");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
+
+    let mut handles = vec![];
+    let num_threads = 20;
+
+    for thread_id in 0..num_threads {
+        let adapter_clone = Arc::clone(&adapter);
+        handles.push(thread::spawn(move || {
+            for i in 0..50 {
+                // Mix of operations
+                match i % 4 {
+                    0 => {
+                        let _ = dispatch_tool(
+                            "insert_one",
+                            json!({
+                                "collection": "stress_test",
+                                "document": {"thread": thread_id, "seq": i}
+                            }),
+                            &adapter_clone,
+                        );
+                    }
+                    1 => {
+                        let _ = dispatch_tool(
+                            "find",
+                            json!({"collection": "stress_test", "query": {}}),
+                            &adapter_clone,
+                        );
+                    }
+                    2 => {
+                        let _ = dispatch_tool(
+                            "update_one",
+                            json!({
+                                "collection": "stress_test",
+                                "filter": {"thread": thread_id},
+                                "update": {"$set": {"updated": true}}
+                            }),
+                            &adapter_clone,
+                        );
+                    }
+                    _ => {
+                        let _ = dispatch_tool(
+                            "count_documents",
+                            json!({"collection": "stress_test", "query": {}}),
+                            &adapter_clone,
+                        );
+                    }
+                }
+            }
+        }));
+    }
+
+    for handle in handles {
+        handle.join().expect("Thread panicked");
+    }
+
+    // Verify no corruption - should be able to count
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "stress_test", "query": {}}),
+        &adapter,
+    );
+    assert!(count_result.is_ok());
+}

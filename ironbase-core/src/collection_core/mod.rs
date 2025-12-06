@@ -816,6 +816,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         index_name: &str,
         field: &str,
     ) -> Result<QueryPlan> {
+        // Check if the hinted index is compound
+        let is_compound = {
+            let indexes = self.indexes.read();
+            indexes
+                .get_btree_index(index_name)
+                .map(|idx| idx.metadata.is_compound())
+                .unwrap_or(false)
+        };
+
         // Parse the query to understand what we're looking for
         if let Value::Object(ref map) = query_json {
             // Check if querying this field
@@ -862,6 +871,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     index_name: index_name.to_string(),
                     field: field.to_string(),
                     key,
+                    is_compound,
                 });
             }
         }
@@ -1360,11 +1370,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         drop(indexes); // Release lock
 
-        // Remove from persisted metadata
+        // Remove from persisted metadata (both B+ tree and fuzzy indexes)
         {
             let mut storage = self.storage.write();
             if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                // Remove from B+ tree indexes
                 meta.indexes.retain(|idx| idx.name != index_name);
+                // Remove from fuzzy indexes
+                meta.fuzzy_indexes.retain(|idx| idx.name != index_name);
                 storage.flush()?;
             }
         }
@@ -1409,23 +1422,47 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<String> {
         let index_name = format!("{}_{}_fuzzy", self.name, field);
 
-        let mut indexes = self.indexes.write();
-        indexes.create_fuzzy_index(index_name.clone(), field.clone(), algorithm, threshold)?;
-        drop(indexes);
+        // Step 1: Create the fuzzy index in IndexManager
+        {
+            let mut indexes = self.indexes.write();
+            indexes.create_fuzzy_index(index_name.clone(), field.clone(), algorithm, threshold)?;
+        }
 
-        // Populate index with existing documents
+        // Step 2: Scan existing documents (requires storage lock internally)
         let docs_by_id = self.scan_documents_via_catalog()?;
 
-        // Re-acquire write lock and populate index
-        let mut indexes = self.indexes.write();
-        if let Some(index) = indexes.get_fuzzy_index_mut(&index_name) {
-            for (doc_id, doc) in &docs_by_id {
-                if let Some(value) = get_nested_value(doc, &field) {
-                    if let Some(s) = value.as_str() {
-                        index.insert(s, doc_id.clone());
+        // Step 3: Populate index with existing documents AND get metadata for persistence
+        let metadata = {
+            let mut indexes = self.indexes.write();
+            if let Some(index) = indexes.get_fuzzy_index_mut(&index_name) {
+                for (doc_id, doc) in &docs_by_id {
+                    if let Some(value) = get_nested_value(doc, &field) {
+                        if let Some(s) = value.as_str() {
+                            index.insert(s, doc_id.clone());
+                        }
                     }
                 }
             }
+            // Get metadata while we still have the lock (avoids extra read lock)
+            indexes
+                .get_fuzzy_index(&index_name)
+                .map(|idx| idx.metadata.clone())
+        };
+
+        // Step 4: Persist metadata to storage (if index was created successfully)
+        if let Some(metadata) = metadata {
+            let mut storage = self.storage.write();
+            if let Some(collection_meta) = storage.get_collection_meta_mut(&self.name) {
+                // Avoid duplicates
+                if !collection_meta
+                    .fuzzy_indexes
+                    .iter()
+                    .any(|m| m.name == metadata.name)
+                {
+                    collection_meta.fuzzy_indexes.push(metadata);
+                }
+            }
+            storage.flush()?;
         }
 
         Ok(index_name)
@@ -1886,9 +1923,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             Some(self.create_plan_for_hint(query_json, hint_name, &field)?)
         } else {
             // FIX #20: Use compound-index-aware query planning
-            // This ensures compound indexes are only used for prefix field queries
+            // This ensures compound indexes are used for prefix field queries with range scans
             let indexes = self.indexes.read();
-            let index_fields = indexes.list_indexes_with_prefix_field();
+            let index_fields = indexes.list_indexes_with_compound_info();
 
             // Query planning with compound-index-aware field matching
             // NOTE: FIX #21 stale index workaround removed - shared IndexManagers fix this
@@ -1921,8 +1958,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         continue;
                     }
                     doc_ids.push(doc_id.clone());
+                    // MongoDB compatibility: limit(0) means "no limit"
                     if let Some(limit_count) = limit {
-                        if doc_ids.len() >= limit_count {
+                        if limit_count > 0 && doc_ids.len() >= limit_count {
                             break;
                         }
                     }
@@ -1955,10 +1993,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 QueryPlan::IndexScan {
                     ref index_name,
                     ref key,
+                    is_compound,
                     ..
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
-                        index.range_scan(key, key, true, true)
+                        if is_compound {
+                            // Compound index prefix query: use range scan with compound bounds
+                            let (start, end) = index.build_prefix_range(key.clone());
+                            index.range_scan(&start, &end, true, true)
+                        } else {
+                            // Single-field index: point lookup
+                            index.range_scan(key, key, true, true)
+                        }
                     } else {
                         vec![]
                     }
@@ -2011,8 +2057,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     }
 
                     results.push(doc_id.clone());
+                    // MongoDB compatibility: limit(0) means "no limit"
                     if let Some(limit_count) = limit {
-                        if results.len() >= limit_count {
+                        if limit_count > 0 && results.len() >= limit_count {
                             break;
                         }
                     }

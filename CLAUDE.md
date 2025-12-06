@@ -9,11 +9,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Key Stats:**
 - 744+ tests passing (unit + integration + doctest)
 - Python (PyO3), C# (.NET 8), Rust APIs
-- 19 query operators, 7 update operators
+- 21 query operators (including $fuzzy), 7 update operators
 - Full aggregation pipeline with dot notation
-- B+ tree indexing with compound index support
+- B+ tree indexing with compound index and fuzzy index support
 - LRU query cache with collection-level invalidation
 - MCP server for AI assistant integration (HTTP + stdio modes)
+- Fuzzy text search with Jaro-Winkler, Levenshtein, Damerau-Levenshtein algorithms
 
 ## Build and Development Commands
 
@@ -144,12 +145,13 @@ MongoLite/
 
 ## Implemented Features
 
-### Query Operators (19)
+### Query Operators (21)
 - **Comparison**: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
 - **Logical**: $and, $or, $not, $nor
 - **Element**: $exists, $type
 - **Array**: $all, $elemMatch, $size
 - **String**: $regex
+- **Fuzzy**: $fuzzy (Jaro-Winkler, Levenshtein, Damerau-Levenshtein algorithms)
 - **Wildcard**: $** (recursive descent - finds field at any depth)
 
 ### Update Operators (7)
@@ -162,8 +164,8 @@ MongoLite/
 - **Dot notation**: Full support everywhere
 
 ### Other Features
-- FindOptions: projection, sort, limit, skip (all with dot notation)
-- B+ tree indexes: single-field, compound, unique
+- FindOptions: projection, sort, limit, skip, include_total (all with dot notation)
+- B+ tree indexes: single-field, compound, unique, fuzzy
 - Query planning: explain(), find_with_hint()
 - ACD transactions with WAL
 - Durability modes: Safe/Batch/Unsafe
@@ -171,6 +173,7 @@ MongoLite/
 - Cursor/streaming for large results
 - JSON schema validation
 - Storage compaction
+- Fuzzy text search with configurable algorithms and thresholds
 
 ## Development Guidelines
 
@@ -228,6 +231,8 @@ cd mcp-server && cargo build --release
 - `delete_one`, `delete_many` - Delete documents
 - `aggregate` - Run aggregation pipelines
 - `create_index`, `drop_index` - Index management
+- `index_create_fuzzy` - Create fuzzy text indexes
+- `fuzzy_search` - Execute fuzzy text queries
 - `schema_get`, `schema_set` - JSON schema validation
 - `db_stats` - Database statistics
 
@@ -290,6 +295,22 @@ collection.create_compound_index(
     vec!["country".to_string(), "city".to_string()],
     false  // unique
 )?;
+```
+
+### $fuzzy Operator (Fuzzy Text Search)
+```rust
+// Simple fuzzy search (default: jaro_winkler, threshold: 0.8)
+coll.find(&json!({"name": {"$fuzzy": "john"}}))?;
+
+// With options
+coll.find(&json!({"name": {"$fuzzy": {
+    "value": "john",
+    "algorithm": "levenshtein",  // jaro_winkler | levenshtein | damerau_levenshtein
+    "threshold": 0.7
+}}}))?;
+
+// Create fuzzy index for faster queries
+coll.create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.8)?;
 ```
 
 ### $** Wildcard Operator (Recursive Descent)

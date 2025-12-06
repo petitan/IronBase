@@ -1,6 +1,8 @@
-# ironbase - Build és Telepítési Útmutató
+# IronBase - Build és Telepítési Útmutató
 
-## 🔧 Előfeltételek
+[English version](BUILD_EN.md)
+
+## Előfeltételek
 
 ### 1. Rust Telepítése
 

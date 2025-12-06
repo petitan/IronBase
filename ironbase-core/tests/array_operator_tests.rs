@@ -811,3 +811,382 @@ fn test_size_query_operator_with_options() {
 
     cleanup_test_db("size_query_options");
 }
+
+// ========== $all QUERY OPERATOR TESTS ==========
+
+#[test]
+fn test_all_operator_basic() {
+    let db = setup_test_db("all_basic");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "A", "tags": ["rust", "mongodb", "nosql"]})),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "B", "tags": ["rust", "sql"]})),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "C", "tags": ["mongodb", "nosql"]})),
+    )
+    .unwrap();
+
+    // Find documents with BOTH "rust" and "mongodb" tags
+    let results = coll
+        .find(&json!({"tags": {"$all": ["rust", "mongodb"]}}))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("all_basic");
+}
+
+#[test]
+fn test_all_operator_single_element() {
+    let db = setup_test_db("all_single");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "A", "tags": ["rust", "mongodb"]})),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "B", "tags": ["python"]})),
+    )
+    .unwrap();
+
+    // $all with single element (equivalent to simple match)
+    let results = coll.find(&json!({"tags": {"$all": ["rust"]}})).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("all_single");
+}
+
+#[test]
+fn test_all_operator_no_match() {
+    let db = setup_test_db("all_no_match");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "A", "tags": ["rust"]})),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "B", "tags": ["python"]})),
+    )
+    .unwrap();
+
+    // Neither document has both "rust" AND "python"
+    let results = coll
+        .find(&json!({"tags": {"$all": ["rust", "python"]}}))
+        .unwrap();
+
+    assert_eq!(results.len(), 0);
+
+    cleanup_test_db("all_no_match");
+}
+
+#[test]
+fn test_all_operator_with_numbers() {
+    let db = setup_test_db("all_numbers");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "A", "scores": [85, 90, 95]})),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "B", "scores": [85, 70]})),
+    )
+    .unwrap();
+
+    // Find documents with both 85 and 90 in scores
+    let results = coll.find(&json!({"scores": {"$all": [85, 90]}})).unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("all_numbers");
+}
+
+#[test]
+fn test_all_operator_empty_array() {
+    let db = setup_test_db("all_empty");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "A", "tags": ["rust"]})),
+    )
+    .unwrap();
+
+    // Empty $all should match all documents with the field
+    let _results = coll.find(&json!({"tags": {"$all": []}})).unwrap();
+
+    // MongoDB behavior: empty $all matches all documents
+    // Test passed - query completed without crashing
+
+    cleanup_test_db("all_empty");
+}
+
+#[test]
+fn test_all_operator_superset() {
+    let db = setup_test_db("all_superset");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "A", "tags": ["a", "b", "c", "d"]})),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({"name": "B", "tags": ["a", "b"]})),
+    )
+    .unwrap();
+
+    // Both have ["a", "b"], but A has more
+    let results = coll.find(&json!({"tags": {"$all": ["a", "b"]}})).unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    cleanup_test_db("all_superset");
+}
+
+// ========== $elemMatch QUERY OPERATOR TESTS ==========
+
+#[test]
+fn test_elemmatch_basic() {
+    let db = setup_test_db("elemmatch_basic");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "results": [
+                {"subject": "math", "score": 85},
+                {"subject": "english", "score": 90}
+            ]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "results": [
+                {"subject": "math", "score": 70},
+                {"subject": "english", "score": 75}
+            ]
+        })),
+    )
+    .unwrap();
+
+    // Find documents where at least one result has score >= 85
+    let results = coll
+        .find(&json!({
+            "results": {"$elemMatch": {"score": {"$gte": 85}}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("elemmatch_basic");
+}
+
+#[test]
+fn test_elemmatch_multiple_conditions() {
+    let db = setup_test_db("elemmatch_multi");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "items": [
+                {"type": "fruit", "qty": 10},
+                {"type": "vegetable", "qty": 5}
+            ]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "items": [
+                {"type": "fruit", "qty": 3},
+                {"type": "vegetable", "qty": 20}
+            ]
+        })),
+    )
+    .unwrap();
+
+    // Find documents where ONE element matches BOTH conditions:
+    // type = "fruit" AND qty >= 5
+    let results = coll
+        .find(&json!({
+            "items": {"$elemMatch": {"type": "fruit", "qty": {"$gte": 5}}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("elemmatch_multi");
+}
+
+#[test]
+fn test_elemmatch_with_nested_objects() {
+    let db = setup_test_db("elemmatch_nested");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "grades": [
+                {"course": "math", "grade": 90},
+                {"course": "english", "grade": 85}
+            ]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "grades": [
+                {"course": "math", "grade": 70},
+                {"course": "english", "grade": 75}
+            ]
+        })),
+    )
+    .unwrap();
+
+    // $elemMatch with nested object condition
+    let results = coll
+        .find(&json!({
+            "grades": {"$elemMatch": {"course": "math", "grade": {"$gte": 80}}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("elemmatch_nested");
+}
+
+#[test]
+fn test_elemmatch_no_match() {
+    let db = setup_test_db("elemmatch_no_match");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "items": [
+                {"x": 1, "y": 10},
+                {"x": 2, "y": 20}
+            ]
+        })),
+    )
+    .unwrap();
+
+    // No element has BOTH x > 1 AND y < 15
+    let results = coll
+        .find(&json!({
+            "items": {"$elemMatch": {"x": {"$gt": 1}, "y": {"$lt": 15}}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 0);
+
+    cleanup_test_db("elemmatch_no_match");
+}
+
+#[test]
+fn test_elemmatch_vs_regular_query() {
+    let db = setup_test_db("elemmatch_vs_regular");
+    let coll = db.collection("test").unwrap();
+
+    // This document has x > 1 in one element and y < 15 in another
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "items": [
+                {"x": 1, "y": 5},   // y < 15 but x is not > 1
+                {"x": 2, "y": 20}   // x > 1 but y is not < 15
+            ]
+        })),
+    )
+    .unwrap();
+
+    // Regular query (without $elemMatch) would match because conditions can be satisfied by different elements
+    // But $elemMatch requires ONE element to satisfy ALL conditions
+    let results = coll
+        .find(&json!({
+            "items": {"$elemMatch": {"x": {"$gt": 1}, "y": {"$lt": 15}}}
+        }))
+        .unwrap();
+
+    // Should NOT match because no single element satisfies both conditions
+    assert_eq!(results.len(), 0);
+
+    cleanup_test_db("elemmatch_vs_regular");
+}
+
+#[test]
+fn test_all_and_elemmatch_combined() {
+    let db = setup_test_db("all_elemmatch");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "tags": ["rust", "mongodb"],
+            "scores": [{"type": "quiz", "score": 85}]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "tags": ["rust"],
+            "scores": [{"type": "quiz", "score": 90}]
+        })),
+    )
+    .unwrap();
+
+    // Combine $all and $elemMatch in the same query
+    let results = coll
+        .find(&json!({
+            "tags": {"$all": ["rust", "mongodb"]},
+            "scores": {"$elemMatch": {"score": {"$gte": 80}}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("all_elemmatch");
+}

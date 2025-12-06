@@ -2,7 +2,6 @@
 // Storage engine module
 
 mod compaction;
-pub mod file_storage; // NEW: FileStorage wrapper
 mod io;
 pub mod memory_storage; // NEW: MemoryStorage for testing
 pub mod metadata; // Make metadata public for CollectionMeta
@@ -28,7 +27,6 @@ pub(crate) use traits::RawStorage;
 pub use traits::{CompactableStorage, IndexableStorage, Storage};
 
 // Re-export storage implementations
-pub use file_storage::FileStorage;
 pub use memory_storage::MemoryStorage;
 
 /// Recovered index change from WAL (for higher-level replay)
@@ -99,9 +97,14 @@ pub struct CollectionMeta {
     #[serde(default, with = "crate::catalog_serde")]
     pub document_catalog: HashMap<crate::document::DocumentId, u64>,
 
-    /// Persisted index metadata for this collection
+    /// Persisted index metadata for this collection (B+ tree indexes)
     #[serde(default)]
     pub indexes: Vec<crate::index::IndexMetadata>,
+
+    /// Persisted fuzzy index metadata for this collection
+    /// Note: Only metadata is persisted, index data is rebuilt from documents on load
+    #[serde(default)]
+    pub fuzzy_indexes: Vec<crate::index::FuzzyIndexMetadata>,
 
     /// Optional JSON schema for validation
     #[serde(default)]
@@ -193,6 +196,7 @@ impl StorageEngine {
             last_id: 0,
             document_catalog: HashMap::new(), // Initialize empty catalog
             indexes: Vec::new(),              // Initialize empty index list
+            fuzzy_indexes: Vec::new(),        // Initialize empty fuzzy index list
             schema: None,
         };
 
@@ -735,6 +739,7 @@ impl StorageEngine {
                                     last_id: 0,
                                     document_catalog: HashMap::new(),
                                     indexes: Vec::new(),
+                                    fuzzy_indexes: Vec::new(),
                                     schema: None,
                                 });
 

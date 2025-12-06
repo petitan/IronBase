@@ -174,8 +174,13 @@ pub fn apply_limit_skip(docs: Vec<Value>, limit: Option<usize>, skip: Option<usi
     // Move elements via into_iter() - zero-copy for individual Values
     let iter = docs.into_iter().skip(skip_count);
 
+    // MongoDB compatibility: limit(0) means "no limit"
     if let Some(limit_count) = limit {
-        iter.take(limit_count).collect()
+        if limit_count > 0 {
+            iter.take(limit_count).collect()
+        } else {
+            iter.collect()
+        }
     } else {
         iter.collect()
     }

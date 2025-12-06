@@ -10,6 +10,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Full GitHub publication readiness (CONTRIBUTING, CODE_OF_CONDUCT, SECURITY)
 - CI/CD workflows for all platforms
+- **Compound Index Prefix Queries**: Queries on first field of compound index now use index
+  - `{"country": "HU"}` uses `(country, city)` compound index via range scan
+  - New `IndexKey::MaxKey` sentinel for upper bounds
+  - `build_prefix_range()` method for compound prefix bounds
+  - `IndexPrefixInfo` struct for QueryPlanner compound awareness
+
+### Removed
+- **FileStorage**: Removed deprecated wrapper around StorageEngine
+  - Was redundant layer with no added functionality
+  - Use `StorageEngine` directly instead
+
+## [1.0.5] - 2025-12-06
+
+### Added
+- **Fuzzy Text Search**: New `$fuzzy` query operator with multiple algorithms
+  - Jaro-Winkler (default, fastest)
+  - Levenshtein (most accurate)
+  - Damerau-Levenshtein (best for typos/OCR)
+  - Configurable similarity threshold (0.0-1.0)
+- **Fuzzy Indexes**: `create_fuzzy_index()` for optimized fuzzy searches
+  - Accelerates `$fuzzy` queries with pre-computed similarity
+  - Supports all three algorithms
+  - Configurable threshold per index
+- **Pagination Enhancement**: `include_total` parameter for FindOptions
+  - Returns total document count alongside results
+  - Enables "Showing 1-10 of 100 results" UI patterns
+- **MCP Tools**: New fuzzy search tools
+  - `fuzzy_search` - Execute fuzzy text queries
+  - `index_create_fuzzy` - Create fuzzy text indexes
+- **MCP Server Improvements**
+  - Configurable max body size with human-readable format
+  - `-Update` switch for easy service updates (Windows)
+  - Improved Windows install experience
+  - CRLF to LF normalization in config parsing
+
+### Fixed
+- Windows configuration file line ending issues
 
 ## [0.3.0] - 2025-01-XX
 
@@ -89,7 +126,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WAL (Write-Ahead Log) for crash recovery
 - MIT License
 
-[Unreleased]: https://github.com/petitan/IronBase/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/petitan/IronBase/compare/v1.0.5...HEAD
+[1.0.5]: https://github.com/petitan/IronBase/compare/v0.3.0...v1.0.5
 [0.3.0]: https://github.com/petitan/IronBase/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/petitan/IronBase/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/petitan/IronBase/releases/tag/v0.1.0

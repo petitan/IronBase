@@ -27,7 +27,7 @@ use std::collections::HashMap;
 ///
 /// # Performance
 ///
-/// - **10-100x faster** than FileStorage
+/// - **10-100x faster** than StorageEngine
 /// - No file I/O overhead
 /// - No persistence (data lost when dropped)
 ///
@@ -206,6 +206,7 @@ impl Storage for MemoryStorage {
             last_id: 0,
             document_catalog: HashMap::new(),
             indexes: Vec::new(),
+            fuzzy_indexes: Vec::new(),
             schema: None,
         };
 

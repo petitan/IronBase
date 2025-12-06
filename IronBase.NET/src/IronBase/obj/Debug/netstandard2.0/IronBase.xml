@@ -1,0 +1,1607 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>IronBase</name>
+    </assembly>
+    <members>
+        <member name="T:IronBase.DurabilityMode">
+            <summary>
+            Durability mode for database operations.
+            </summary>
+        </member>
+        <member name="F:IronBase.DurabilityMode.Safe">
+            <summary>
+            Every operation is immediately committed (safest, slowest).
+            </summary>
+        </member>
+        <member name="F:IronBase.DurabilityMode.Batch">
+            <summary>
+            Operations are batched and committed periodically.
+            </summary>
+        </member>
+        <member name="F:IronBase.DurabilityMode.Unsafe">
+            <summary>
+            No automatic commits (fastest, requires manual checkpoint).
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseClient">
+            <summary>
+            Main entry point for IronBase.
+            Represents a connection to an IronBase database file.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.#ctor(System.String)">
+            <summary>
+            Open or create a database at the specified path.
+            </summary>
+            <param name="path">Path to the database file (.mlite)</param>
+        </member>
+        <member name="M:IronBase.IronBaseClient.#ctor(System.String,IronBase.DurabilityMode,System.UInt32)">
+            <summary>
+            Open or create a database with specific durability settings.
+            </summary>
+            <param name="path">Path to the database file (.mlite)</param>
+            <param name="durability">Durability mode</param>
+            <param name="batchSize">Batch size for Batch mode (ignored for other modes)</param>
+        </member>
+        <member name="P:IronBase.IronBaseClient.Path">
+            <summary>
+            Get the database path.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.GetDatabase">
+            <summary>
+            Get the default database.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.GetCollection``1(System.String)">
+            <summary>
+            Get a collection directly (convenience method).
+            </summary>
+            <typeparam name="T">Document type</typeparam>
+            <param name="name">Collection name</param>
+        </member>
+        <member name="M:IronBase.IronBaseClient.ListCollections">
+            <summary>
+            List all collections.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.DropCollection(System.String)">
+            <summary>
+            Drop a collection.
+            </summary>
+            <param name="name">Collection name</param>
+        </member>
+        <member name="M:IronBase.IronBaseClient.Flush">
+            <summary>
+            Flush all pending data to disk.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.Checkpoint">
+            <summary>
+            Checkpoint (clear WAL without flushing metadata).
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.GetStats">
+            <summary>
+            Get database statistics.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.Compact">
+            <summary>
+            Compact the database (remove tombstones).
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.BeginTransaction">
+            <summary>
+            Begin a new transaction.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.CommitTransaction(System.UInt64)">
+            <summary>
+            Commit a transaction.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.RollbackTransaction(System.UInt64)">
+            <summary>
+            Rollback a transaction.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseClient.InsertOneTx``1(System.String,``0,System.UInt64)">
+            <summary>
+            Insert one document within a transaction.
+            </summary>
+            <param name="collectionName">Collection name</param>
+            <param name="document">Document to insert</param>
+            <param name="txId">Transaction ID from BeginTransaction()</param>
+            <returns>Insert result with the inserted ID</returns>
+            <example>
+            var txId = client.BeginTransaction();
+            try
+            {
+                client.InsertOneTx("users", new User { Name = "Alice" }, txId);
+                client.InsertOneTx("logs", new Log { Action = "created user" }, txId);
+                client.CommitTransaction(txId);
+            }
+            catch
+            {
+                client.RollbackTransaction(txId);
+                throw;
+            }
+            </example>
+        </member>
+        <member name="M:IronBase.IronBaseClient.UpdateOneTx(System.String,System.String,System.String,System.UInt64)">
+            <summary>
+            Update one document within a transaction.
+            </summary>
+            <param name="collectionName">Collection name</param>
+            <param name="filterJson">Query filter as JSON</param>
+            <param name="newDocJson">New document content (full replacement)</param>
+            <param name="txId">Transaction ID</param>
+        </member>
+        <member name="M:IronBase.IronBaseClient.DeleteOneTx(System.String,System.String,System.UInt64)">
+            <summary>
+            Delete one document within a transaction.
+            </summary>
+            <param name="collectionName">Collection name</param>
+            <param name="filterJson">Query filter as JSON</param>
+            <param name="txId">Transaction ID</param>
+        </member>
+        <member name="M:IronBase.IronBaseClient.SetCollectionSchema(System.String,System.String)">
+             <summary>
+             Set or clear JSON schema for a collection.
+             Documents that don't match the schema will be rejected on insert/update.
+             </summary>
+             <param name="collectionName">Collection name</param>
+             <param name="schemaJson">JSON schema definition (null to clear)</param>
+             <example>
+             // Set schema for users collection
+             client.SetCollectionSchema("users", @"{
+                 ""type"": ""object"",
+                 ""properties"": {
+                     ""name"": {""type"": ""string""},
+                     ""age"": {""type"": ""integer"", ""minimum"": 0}
+                 },
+                 ""required"": [""name""]
+             }");
+            
+             // Clear schema
+             client.SetCollectionSchema("users", null);
+             </example>
+        </member>
+        <member name="M:IronBase.IronBaseClient.GetCollectionSchema(System.String)">
+            <summary>
+            Get the JSON schema for a collection.
+            </summary>
+            <param name="collectionName">Collection name</param>
+            <returns>JSON schema string if set, null otherwise</returns>
+            <example>
+            var schema = client.GetCollectionSchema("users");
+            if (schema != null)
+            {
+                Console.WriteLine($"Schema: {schema}");
+            }
+            </example>
+        </member>
+        <member name="M:IronBase.IronBaseClient.SetLogLevel(System.String)">
+            <summary>
+            Set the global log level.
+            </summary>
+            <param name="level">One of: ERROR, WARN, INFO, DEBUG, TRACE</param>
+            <example>
+            IronBaseClient.SetLogLevel("DEBUG");  // Enable debug logging
+            IronBaseClient.SetLogLevel("WARN");   // Default level
+            </example>
+        </member>
+        <member name="M:IronBase.IronBaseClient.GetLogLevel">
+            <summary>
+            Get the current global log level.
+            </summary>
+            <returns>Current log level (ERROR, WARN, INFO, DEBUG, or TRACE)</returns>
+        </member>
+        <member name="M:IronBase.IronBaseClient.GetVersion">
+            <summary>
+            Get the native library version.
+            </summary>
+        </member>
+        <member name="T:IronBase.CompactionResult">
+            <summary>
+            Result of a compaction operation.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseCollection`1">
+            <summary>
+            Represents a collection of documents.
+            Provides MongoDB-like CRUD operations.
+            </summary>
+            <typeparam name="T">Document type</typeparam>
+        </member>
+        <member name="P:IronBase.IronBaseCollection`1.Name">
+            <summary>
+            Collection name.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.InsertOne(`0)">
+            <summary>
+            Insert one document.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.InsertMany(System.Collections.Generic.IEnumerable{`0})">
+            <summary>
+            Insert many documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.Find(IronBase.FilterDefinition{`0})">
+            <summary>
+            Find all documents matching a filter.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.Find(System.String)">
+            <summary>
+            Find all documents matching a JSON filter string.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.FindOne(IronBase.FilterDefinition{`0})">
+            <summary>
+            Find one document matching a filter.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.Find(IronBase.FilterDefinition{`0},IronBase.FindOptions)">
+            <summary>
+            Find documents with options (projection, sort, limit, skip).
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.UpdateOne(IronBase.FilterDefinition{`0},IronBase.UpdateDefinition{`0})">
+            <summary>
+            Update one document.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.UpdateMany(IronBase.FilterDefinition{`0},IronBase.UpdateDefinition{`0})">
+            <summary>
+            Update many documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.DeleteOne(IronBase.FilterDefinition{`0})">
+            <summary>
+            Delete one document.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.DeleteMany(IronBase.FilterDefinition{`0})">
+            <summary>
+            Delete many documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.CountDocuments(IronBase.FilterDefinition{`0})">
+            <summary>
+            Count documents matching a filter.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.Distinct``1(System.String,IronBase.FilterDefinition{`0})">
+            <summary>
+            Get distinct values for a field.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.CreateIndex(System.String,System.Boolean)">
+            <summary>
+            Create an index.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.CreateCompoundIndex(System.Collections.Generic.IEnumerable{System.String},System.Boolean)">
+            <summary>
+            Create a compound index.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.DropIndex(System.String)">
+            <summary>
+            Drop an index.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.ListIndexes">
+            <summary>
+            List all indexes.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.Explain(IronBase.FilterDefinition{`0})">
+            <summary>
+            Explain query execution plan.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.Aggregate``1(System.String)">
+            <summary>
+            Execute an aggregation pipeline.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.Aggregate``1(System.Collections.Generic.IEnumerable{IronBase.BsonDocument})">
+            <summary>
+            Execute an aggregation pipeline with BsonDocument stages.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.FindCursor(IronBase.FilterDefinition{`0},System.UInt32)">
+             <summary>
+             Create a cursor for streaming through large result sets.
+             More memory efficient than Find() for large collections.
+             </summary>
+             <param name="filter">Query filter (null for all documents)</param>
+             <param name="batchSize">Number of documents per batch</param>
+             <returns>Cursor for iterating through results</returns>
+             <example>
+             // Process 1 million documents without loading all into memory
+             using var cursor = collection.FindCursor(null, 500);
+            
+             // Iterate one at a time
+             foreach (var doc in cursor)
+             {
+                 Process(doc);
+             }
+            
+             // Or process in batches
+             cursor.Rewind();
+             while (!cursor.IsFinished)
+             {
+                 var batch = cursor.NextBatch();
+                 foreach (var doc in batch)
+                     Process(doc);
+             }
+             </example>
+        </member>
+        <member name="M:IronBase.IronBaseCollection`1.FindCursor(System.String,System.UInt32)">
+            <summary>
+            Create a cursor with JSON filter string.
+            </summary>
+        </member>
+        <member name="T:IronBase.FindOptions">
+            <summary>
+            Options for find operations.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseCursor`1">
+            <summary>
+            Cursor for streaming through large query result sets.
+            Provides memory-efficient iteration over documents.
+            </summary>
+            <typeparam name="T">Document type</typeparam>
+        </member>
+        <member name="M:IronBase.IronBaseCursor`1.Next">
+            <summary>
+            Get the next document, or null if exhausted.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCursor`1.NextBatch">
+            <summary>
+            Get the next batch of documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCursor`1.NextChunk(System.UInt32)">
+            <summary>
+            Get a specific chunk of documents.
+            </summary>
+        </member>
+        <member name="P:IronBase.IronBaseCursor`1.Remaining">
+            <summary>
+            Get remaining document count.
+            </summary>
+        </member>
+        <member name="P:IronBase.IronBaseCursor`1.Total">
+            <summary>
+            Get total document count.
+            </summary>
+        </member>
+        <member name="P:IronBase.IronBaseCursor`1.Position">
+            <summary>
+            Get current position.
+            </summary>
+        </member>
+        <member name="P:IronBase.IronBaseCursor`1.IsFinished">
+            <summary>
+            Check if cursor is exhausted.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCursor`1.Rewind">
+            <summary>
+            Reset cursor to the beginning.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCursor`1.Skip(System.UInt64)">
+            <summary>
+            Skip the next N documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCursor`1.CollectAll">
+            <summary>
+            Collect all remaining documents into a list.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseCursor`1.Take(System.UInt32)">
+            <summary>
+            Take the next N documents.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseDatabase">
+            <summary>
+            Represents an IronBase database.
+            Provides access to collections.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseDatabase.GetCollection``1(System.String)">
+            <summary>
+            Get or create a typed collection.
+            </summary>
+            <typeparam name="T">Document type</typeparam>
+            <param name="name">Collection name</param>
+        </member>
+        <member name="M:IronBase.IronBaseDatabase.GetCollection(System.String)">
+            <summary>
+            Get or create a dynamic collection (BsonDocument).
+            </summary>
+            <param name="name">Collection name</param>
+        </member>
+        <member name="M:IronBase.IronBaseDatabase.ListCollections">
+            <summary>
+            List all collections.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseDatabase.DropCollection(System.String)">
+            <summary>
+            Drop a collection.
+            </summary>
+        </member>
+        <member name="P:IronBase.IronBaseDatabase.Client">
+            <summary>
+            Get the parent client.
+            </summary>
+        </member>
+        <member name="T:IronBase.BsonDocument">
+            <summary>
+            A dynamic document that can hold any JSON-compatible data.
+            Similar to MongoDB's BsonDocument.
+            </summary>
+        </member>
+        <member name="P:IronBase.BsonDocument.Item(System.String)">
+            <summary>
+            Get or set a value by key.
+            Returns primitive types (string, int, double, bool) when the underlying value is a JsonElement.
+            </summary>
+        </member>
+        <member name="M:IronBase.BsonDocument.GetValue``1(System.String)">
+            <summary>
+            Get a value as a specific type.
+            </summary>
+        </member>
+        <member name="M:IronBase.BsonDocument.GetDocument(System.String)">
+            <summary>
+            Get a nested document.
+            </summary>
+        </member>
+        <member name="M:IronBase.BsonDocument.Add(System.String,System.Object)">
+            <summary>
+            Add a key-value pair and return this document (for chaining).
+            </summary>
+        </member>
+        <member name="M:IronBase.BsonDocument.Contains(System.String)">
+            <summary>
+            Check if the document contains a key.
+            </summary>
+        </member>
+        <member name="M:IronBase.BsonDocument.ToJson">
+            <summary>
+            Convert to JSON string.
+            </summary>
+        </member>
+        <member name="M:IronBase.BsonDocument.Parse(System.String)">
+            <summary>
+            Parse a BsonDocument from JSON string.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseException">
+            <summary>
+            Base exception for all IronBase errors.
+            </summary>
+        </member>
+        <member name="P:IronBase.IronBaseException.ErrorCode">
+            <summary>
+            Native error code.
+            </summary>
+        </member>
+        <member name="M:IronBase.IronBaseException.FromErrorCode(System.Int32,System.String)">
+            <summary>
+            Create an appropriate exception from a native error code.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseArgumentException">
+            <summary>
+            Thrown when a null or invalid argument is passed.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseInvalidHandleException">
+            <summary>
+            Thrown when using an invalid or closed handle.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseIOException">
+            <summary>
+            Thrown on I/O errors (file system, etc.).
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseSerializationException">
+            <summary>
+            Thrown on serialization/deserialization errors.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseCollectionNotFoundException">
+            <summary>
+            Thrown when a collection is not found.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseCollectionExistsException">
+            <summary>
+            Thrown when trying to create a collection that already exists.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseDocumentNotFoundException">
+            <summary>
+            Thrown when a document is not found.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseQueryException">
+            <summary>
+            Thrown on invalid query syntax.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseCorruptionException">
+            <summary>
+            Thrown when database corruption is detected.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseIndexException">
+            <summary>
+            Thrown on index operation errors.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseAggregationException">
+            <summary>
+            Thrown on aggregation pipeline errors.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseSchemaException">
+            <summary>
+            Thrown on schema validation errors.
+            </summary>
+        </member>
+        <member name="T:IronBase.IronBaseTransactionException">
+            <summary>
+            Thrown on transaction errors.
+            </summary>
+        </member>
+        <member name="T:IronBase.Interop.CollectionHandle">
+            <summary>
+            SafeHandle wrapper for native collection handle.
+            Ensures proper cleanup of native resources.
+            </summary>
+        </member>
+        <member name="T:IronBase.Interop.DatabaseHandle">
+            <summary>
+            SafeHandle wrapper for native database handle.
+            Ensures proper cleanup of native resources.
+            </summary>
+        </member>
+        <member name="T:IronBase.Interop.NativeHelper">
+            <summary>
+            Helper methods for native interop.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeHelper.ToUtf8(System.String)">
+            <summary>
+            Convert a managed string to a null-terminated UTF-8 byte array.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeHelper.PtrToStringUtf8(System.Byte*)">
+            <summary>
+            Convert a native UTF-8 string pointer to a managed string.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeHelper.PtrToStringUtf8AndFree(System.Byte*)">
+            <summary>
+            Convert a native UTF-8 string pointer to a managed string and free the native memory.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeHelper.GetLastError">
+            <summary>
+            Get the last error message from the native library.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeHelper.IsSuccess(System.Int32)">
+            <summary>
+            Check if an error code indicates success.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeHelper.ThrowIfError(System.Int32)">
+            <summary>
+            Throw an exception if the error code indicates failure.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_get_last_error">
+             <summary>
+              Get the last error message
+            
+              Returns a pointer to a null-terminated UTF-8 string.
+              The pointer is valid until the next FFI call on the same thread.
+              Returns null if no error has occurred.
+            
+              # Safety
+              The returned pointer must not be freed by the caller.
+              The pointer is only valid until the next FFI call on the same thread.
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_clear_error">
+             <summary>
+              Clear the last error message
+            
+              Call this before a sequence of operations if you want to check
+              for errors after the sequence.
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_has_error">
+             <summary>
+              Check if an error occurred
+            
+              Returns 1 if there is an error message, 0 otherwise.
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_open(System.Byte*,IronBase.Interop.DatabaseHandle**)">
+             <summary>
+              Open a database file
+            
+              # Parameters
+              - `path`: Path to the database file (UTF-8 null-terminated string)
+              - `out_handle`: Pointer to receive the database handle
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure (check `ironbase_get_last_error()` for details)
+            
+              # Safety
+              - `path` must be a valid null-terminated UTF-8 string
+              - `out_handle` must be a valid pointer to a DbHandle
+              - The returned handle must be closed with `ironbase_close()`
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_open_with_durability(System.Byte*,System.Int32,System.UInt32,IronBase.Interop.DatabaseHandle**)">
+             <summary>
+              Open a database file with specific durability mode
+            
+              # Parameters
+              - `path`: Path to the database file (UTF-8 null-terminated string)
+              - `durability_mode`: 0=Safe, 1=Batch, 2=Unsafe
+              - `batch_size`: Batch size for Batch mode (ignored for other modes)
+              - `out_handle`: Pointer to receive the database handle
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_close(IronBase.Interop.DatabaseHandle*)">
+             <summary>
+              Close a database handle
+            
+              This flushes all pending data and releases resources.
+              After this call, the handle is invalid and must not be used.
+            
+              # Parameters
+              - `handle`: The database handle to close
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+            
+              # Safety
+              - The handle must have been created by `ironbase_open()`
+              - The handle must not be used after this call
+              - It is safe to call with a null handle (no-op)
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_flush(IronBase.Interop.DatabaseHandle*)">
+             <summary>
+              Flush all pending data to disk
+            
+              # Parameters
+              - `handle`: The database handle
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_checkpoint(IronBase.Interop.DatabaseHandle*)">
+             <summary>
+              Checkpoint the database (clear WAL)
+            
+              # Parameters
+              - `handle`: The database handle
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_stats(IronBase.Interop.DatabaseHandle*)">
+             <summary>
+              Get database statistics as JSON
+            
+              # Parameters
+              - `handle`: The database handle
+            
+              # Returns
+              - Pointer to a JSON string (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_path(IronBase.Interop.DatabaseHandle*)">
+             <summary>
+              Get the database file path
+            
+              # Parameters
+              - `handle`: The database handle
+            
+              # Returns
+              - Pointer to the path string (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_compact(IronBase.Interop.DatabaseHandle*,System.Byte**)">
+             <summary>
+              Compact the database (remove tombstones)
+            
+              # Parameters
+              - `handle`: The database handle
+              - `out_stats`: Pointer to receive compaction stats JSON (optional, can be null)
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_list_collections(IronBase.Interop.DatabaseHandle*)">
+             <summary>
+              List all collections in the database
+            
+              # Parameters
+              - `handle`: The database handle
+            
+              # Returns
+              - JSON array of collection names (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_drop_collection(IronBase.Interop.DatabaseHandle*,System.Byte*)">
+             <summary>
+              Drop a collection from the database
+            
+              # Parameters
+              - `handle`: The database handle
+              - `name`: Collection name (UTF-8 null-terminated string)
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_collection(IronBase.Interop.DatabaseHandle*,System.Byte*,IronBase.Interop.CollectionHandle**)">
+             <summary>
+              Get or create a collection
+            
+              # Parameters
+              - `db_handle`: The database handle
+              - `name`: Collection name (UTF-8 null-terminated string)
+              - `out_handle`: Pointer to receive the collection handle
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+            
+              # Safety
+              - The returned handle must be released with `ironbase_collection_release()`
+              - The database handle must remain valid while the collection handle is in use
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_collection_release(IronBase.Interop.CollectionHandle*)">
+             <summary>
+              Release a collection handle
+            
+              # Parameters
+              - `handle`: The collection handle to release
+            
+              # Safety
+              - The handle must have been created by `ironbase_collection()`
+              - The handle must not be used after this call
+              - It is safe to call with a null handle (no-op)
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_collection_name(IronBase.Interop.CollectionHandle*)">
+             <summary>
+              Get the collection name
+            
+              # Parameters
+              - `handle`: The collection handle
+            
+              # Returns
+              - Pointer to the name string (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_count_documents(IronBase.Interop.CollectionHandle*,System.Byte*,System.UInt64*)">
+             <summary>
+              Count documents in the collection
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string (use "{}" for all documents)
+              - `out_count`: Pointer to receive the count
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_distinct(IronBase.Interop.CollectionHandle*,System.Byte*,System.Byte*)">
+             <summary>
+              Get distinct values for a field
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `field`: Field name (UTF-8 null-terminated string)
+              - `query_json`: Query filter as JSON string (use "{}" for all documents)
+            
+              # Returns
+              - JSON array of distinct values (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_insert_one(IronBase.Interop.CollectionHandle*,System.Byte*,System.Byte**)">
+             <summary>
+              Insert one document
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `document_json`: Document as JSON string
+              - `out_id`: Pointer to receive the inserted ID as JSON string
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_insert_many(IronBase.Interop.CollectionHandle*,System.Byte*,System.Byte**)">
+             <summary>
+              Insert many documents
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `documents_json`: JSON array of documents
+              - `out_result`: Pointer to receive result JSON (inserted_count, inserted_ids)
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_find(IronBase.Interop.CollectionHandle*,System.Byte*)">
+             <summary>
+              Find documents
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+            
+              # Returns
+              - JSON array of documents (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_find_one(IronBase.Interop.CollectionHandle*,System.Byte*)">
+             <summary>
+              Find one document
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+            
+              # Returns
+              - JSON document (caller must free with `ironbase_free_string()`)
+              - Null if not found or on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_find_with_options(IronBase.Interop.CollectionHandle*,System.Byte*,System.Byte*)">
+             <summary>
+              Find documents with options (projection, sort, limit, skip)
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+              - `options_json`: Options as JSON: {"projection": {...}, "sort": [[field, 1/-1], ...], "limit": n, "skip": n}
+            
+              # Returns
+              - JSON array of documents (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_update_one(IronBase.Interop.CollectionHandle*,System.Byte*,System.Byte*,System.UInt64*,System.UInt64*)">
+             <summary>
+              Update one document
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+              - `update_json`: Update operations as JSON string
+              - `out_matched`: Pointer to receive matched count
+              - `out_modified`: Pointer to receive modified count
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_update_many(IronBase.Interop.CollectionHandle*,System.Byte*,System.Byte*,System.UInt64*,System.UInt64*)">
+             <summary>
+              Update many documents
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+              - `update_json`: Update operations as JSON string
+              - `out_matched`: Pointer to receive matched count
+              - `out_modified`: Pointer to receive modified count
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_delete_one(IronBase.Interop.CollectionHandle*,System.Byte*,System.UInt64*)">
+             <summary>
+              Delete one document
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+              - `out_deleted`: Pointer to receive deleted count
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_delete_many(IronBase.Interop.CollectionHandle*,System.Byte*,System.UInt64*)">
+             <summary>
+              Delete many documents
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+              - `out_deleted`: Pointer to receive deleted count
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_create_index(IronBase.Interop.CollectionHandle*,System.Byte*,System.Int32,System.Byte**)">
+             <summary>
+              Create an index on a field
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `field`: Field name to index (UTF-8 null-terminated string)
+              - `unique`: Whether the index enforces uniqueness (1 = unique, 0 = not unique)
+              - `out_name`: Pointer to receive the index name (optional)
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_create_compound_index(IronBase.Interop.CollectionHandle*,System.Byte*,System.Int32,System.Byte**)">
+             <summary>
+              Create a compound index on multiple fields
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `fields_json`: JSON array of field names (e.g., ["country", "city"])
+              - `unique`: Whether the index enforces uniqueness
+              - `out_name`: Pointer to receive the index name (optional)
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_drop_index(IronBase.Interop.CollectionHandle*,System.Byte*)">
+             <summary>
+              Drop an index
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `index_name`: Index name to drop (UTF-8 null-terminated string)
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_list_indexes(IronBase.Interop.CollectionHandle*)">
+             <summary>
+              List all indexes in a collection
+            
+              # Parameters
+              - `handle`: The collection handle
+            
+              # Returns
+              - JSON array of index names (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_explain(IronBase.Interop.CollectionHandle*,System.Byte*)">
+             <summary>
+              Explain query execution plan
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+            
+              # Returns
+              - JSON query plan (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_find_with_hint(IronBase.Interop.CollectionHandle*,System.Byte*,System.Byte*)">
+             <summary>
+              Find documents with index hint
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `query_json`: Query filter as JSON string
+              - `hint`: Index name to use
+            
+              # Returns
+              - JSON array of documents (caller must free with `ironbase_free_string()`)
+              - Null on error
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_aggregate(IronBase.Interop.CollectionHandle*,System.Byte*)">
+             <summary>
+              Execute an aggregation pipeline
+            
+              # Parameters
+              - `handle`: The collection handle
+              - `pipeline_json`: Aggregation pipeline as JSON array
+            
+              # Returns
+              - JSON array of results (caller must free with `ironbase_free_string()`)
+              - Null on error
+            
+              # Example Pipeline
+              ```json
+              [
+                {"$match": {"age": {"$gte": 18}}},
+                {"$group": {"_id": "$city", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": 10}
+              ]
+              ```
+            
+              # Supported Stages
+              - `$match` - Filter documents
+              - `$group` - Group and aggregate
+              - `$project` - Reshape documents
+              - `$sort` - Sort results
+              - `$limit` - Limit result count
+              - `$skip` - Skip documents
+            
+              # Supported Accumulators (in $group)
+              - `$sum` - Sum values
+              - `$avg` - Average values
+              - `$min` - Minimum value
+              - `$max` - Maximum value
+              - `$first` - First value
+              - `$last` - Last value
+              - `$count` - Count documents
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_begin_transaction(IronBase.Interop.DatabaseHandle*,System.UInt64*)">
+             <summary>
+              Begin a new transaction
+            
+              # Parameters
+              - `handle`: The database handle
+              - `out_tx_id`: Pointer to receive the transaction ID
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+            
+              # Usage
+              ```c
+              uint64_t tx_id;
+              ironbase_begin_transaction(db, &amp;tx_id);
+              // ... perform operations with tx_id ...
+              ironbase_commit(db, tx_id);
+              // or ironbase_rollback(db, tx_id);
+              ```
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_commit(IronBase.Interop.DatabaseHandle*,System.UInt64)">
+             <summary>
+              Commit a transaction
+            
+              Applies all buffered operations atomically.
+            
+              # Parameters
+              - `handle`: The database handle
+              - `tx_id`: The transaction ID from `ironbase_begin_transaction()`
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_rollback(IronBase.Interop.DatabaseHandle*,System.UInt64)">
+             <summary>
+              Rollback a transaction
+            
+              Discards all buffered operations.
+            
+              # Parameters
+              - `handle`: The database handle
+              - `tx_id`: The transaction ID from `ironbase_begin_transaction()`
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_insert_one_tx(IronBase.Interop.DatabaseHandle*,System.Byte*,System.Byte*,System.UInt64,System.Byte**)">
+             <summary>
+              Insert one document within a transaction
+            
+              # Parameters
+              - `handle`: The database handle
+              - `collection_name`: Collection name
+              - `document_json`: Document as JSON string
+              - `tx_id`: Transaction ID
+              - `out_id`: Pointer to receive the inserted ID as JSON string
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_update_one_tx(IronBase.Interop.DatabaseHandle*,System.Byte*,System.Byte*,System.Byte*,System.UInt64,System.UInt64*,System.UInt64*)">
+             <summary>
+              Update one document within a transaction
+            
+              # Parameters
+              - `handle`: The database handle
+              - `collection_name`: Collection name
+              - `query_json`: Query filter as JSON string
+              - `new_doc_json`: New document content (full replacement)
+              - `tx_id`: Transaction ID
+              - `out_matched`: Pointer to receive matched count
+              - `out_modified`: Pointer to receive modified count
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_delete_one_tx(IronBase.Interop.DatabaseHandle*,System.Byte*,System.Byte*,System.UInt64,System.UInt64*)">
+             <summary>
+              Delete one document within a transaction
+            
+              # Parameters
+              - `handle`: The database handle
+              - `collection_name`: Collection name
+              - `query_json`: Query filter as JSON string
+              - `tx_id`: Transaction ID
+              - `out_deleted`: Pointer to receive deleted count
+            
+              # Returns
+              - `IronBaseErrorCode::Success` (0) on success
+              - Error code on failure
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_free_string(System.Byte*)">
+             <summary>
+              Free a string allocated by the FFI layer
+            
+              This must be called for any string returned by `ironbase_*` functions
+              that return `*mut c_char` (except error messages from `ironbase_get_last_error()`).
+            
+              # Parameters
+              - `ptr`: Pointer to the string to free
+            
+              # Safety
+              - The pointer must have been allocated by an `ironbase_*` function
+              - The pointer must not be used after this call
+              - It is safe to call with a null pointer (no-op)
+            
+              # Example (C#)
+              ```csharp
+              IntPtr jsonPtr = NativeMethods.ironbase_find(handle, queryPtr);
+              try {
+                  string json = Marshal.PtrToStringUTF8(jsonPtr);
+                  // ... use json ...
+              } finally {
+                  NativeMethods.ironbase_free_string(jsonPtr);
+              }
+              ```
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_version">
+             <summary>
+              Get the version of the IronBase FFI library
+            
+              # Returns
+              - Version string (caller must free with `ironbase_free_string()`)
+             </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_create_cursor(IronBase.Interop.CollectionHandle*,System.Byte*,System.UInt32,IronBase.Interop.CursorHandle**)">
+            <summary>
+            Create a cursor for streaming through query results.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_next(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Get the next document from cursor.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_next_batch(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Get the next batch of documents from cursor.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_next_chunk(IronBase.Interop.CursorHandle*,System.UInt32)">
+            <summary>
+            Get a specific chunk of documents from cursor.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_remaining(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Get remaining document count.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_total(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Get total document count.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_position(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Get current position.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_is_finished(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Check if cursor is exhausted.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_rewind(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Reset cursor to the beginning.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_skip(IronBase.Interop.CursorHandle*,System.UInt64)">
+            <summary>
+            Skip the next N documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_collect_all(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Collect all remaining documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_cursor_release(IronBase.Interop.CursorHandle*)">
+            <summary>
+            Release a cursor handle.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_set_collection_schema(IronBase.Interop.DatabaseHandle*,System.Byte*,System.Byte*)">
+            <summary>
+            Set or clear JSON schema for a collection.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_get_collection_schema(IronBase.Interop.DatabaseHandle*,System.Byte*)">
+            <summary>
+            Get JSON schema for a collection. Returns null if no schema is set.
+            Caller must free the returned pointer with ironbase_free_string.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_set_log_level(System.Byte*)">
+            <summary>
+            Set the global log level.
+            </summary>
+        </member>
+        <member name="M:IronBase.Interop.NativeMethods.ironbase_get_log_level">
+            <summary>
+            Get the current global log level.
+            </summary>
+        </member>
+        <member name="T:IronBase.Builders`1">
+            <summary>
+            Static factory for creating filter, update, and other definitions.
+            Similar to MongoDB's Builders class.
+            </summary>
+            <typeparam name="T">Document type</typeparam>
+        </member>
+        <member name="P:IronBase.Builders`1.Filter">
+            <summary>
+            Get the filter builder.
+            </summary>
+        </member>
+        <member name="P:IronBase.Builders`1.Update">
+            <summary>
+            Get the update builder.
+            </summary>
+        </member>
+        <member name="T:IronBase.FilterDefinition`1">
+            <summary>
+            Represents a query filter.
+            Can be constructed from JSON or using the Builders API.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinition`1.op_Implicit(System.String)~IronBase.FilterDefinition{`0}">
+            <summary>
+            Create a filter from a JSON string.
+            </summary>
+        </member>
+        <member name="P:IronBase.FilterDefinition`1.Empty">
+            <summary>
+            Create an empty filter (matches all documents).
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinition`1.ToJson">
+            <summary>
+            Get the JSON representation.
+            </summary>
+        </member>
+        <member name="T:IronBase.FilterDefinitionBuilder`1">
+            <summary>
+            Builder for creating filter definitions.
+            </summary>
+        </member>
+        <member name="P:IronBase.FilterDefinitionBuilder`1.Empty">
+            <summary>
+            Match all documents.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Eq(System.String,System.Object)">
+            <summary>
+            Equality comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Ne(System.String,System.Object)">
+            <summary>
+            Not equal comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Gt(System.String,System.Object)">
+            <summary>
+            Greater than comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Gte(System.String,System.Object)">
+            <summary>
+            Greater than or equal comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Lt(System.String,System.Object)">
+            <summary>
+            Less than comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Lte(System.String,System.Object)">
+            <summary>
+            Less than or equal comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.In(System.String,System.Object[])">
+            <summary>
+            In array comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Nin(System.String,System.Object[])">
+            <summary>
+            Not in array comparison.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Exists(System.String,System.Boolean)">
+            <summary>
+            Field exists check.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Regex(System.String,System.String)">
+            <summary>
+            Regex match.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.And(IronBase.FilterDefinition{`0}[])">
+            <summary>
+            Logical AND.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Or(IronBase.FilterDefinition{`0}[])">
+            <summary>
+            Logical OR.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.Not(IronBase.FilterDefinition{`0})">
+            <summary>
+            Logical NOT.
+            </summary>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.RecursiveWildcard(System.String,System.Object)">
+            <summary>
+            Recursive descent wildcard operator ($**).
+            Matches a field at any depth in the document structure.
+            </summary>
+            <param name="field">Field name to search for at any depth</param>
+            <param name="value">Value to match</param>
+            <returns>Filter definition for recursive field search</returns>
+            <example>
+            // Find documents where any "status" field (at any depth) equals "active"
+            var filter = Builders&lt;T&gt;.Filter.RecursiveWildcard("status", "active");
+            </example>
+        </member>
+        <member name="M:IronBase.FilterDefinitionBuilder`1.RecursiveWildcard(System.String,System.String,System.Object)">
+            <summary>
+            Recursive descent wildcard operator with comparison.
+            Matches a field at any depth in the document structure.
+            </summary>
+            <param name="field">Field name to search for at any depth</param>
+            <param name="comparisonOperator">MongoDB comparison operator (e.g., "$gt", "$regex")</param>
+            <param name="value">Value for the comparison</param>
+            <returns>Filter definition for recursive field search with comparison</returns>
+        </member>
+        <member name="T:IronBase.UpdateDefinition`1">
+            <summary>
+            Represents an update operation.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinition`1.op_Implicit(System.String)~IronBase.UpdateDefinition{`0}">
+            <summary>
+            Create an update from a JSON string.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinition`1.ToJson">
+            <summary>
+            Get the JSON representation.
+            </summary>
+        </member>
+        <member name="T:IronBase.UpdateDefinitionBuilder`1">
+            <summary>
+            Builder for creating update definitions.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Set(System.String,System.Object)">
+            <summary>
+            Set a field value.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Set(System.Collections.Generic.IDictionary{System.String,System.Object})">
+            <summary>
+            Set multiple field values.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Unset(System.String)">
+            <summary>
+            Unset (remove) a field.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Inc(System.String,System.Int64)">
+            <summary>
+            Increment a numeric field.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Inc(System.String,System.Double)">
+            <summary>
+            Increment a numeric field (double).
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Push(System.String,System.Object)">
+            <summary>
+            Push a value to an array field.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Pull(System.String,System.Object)">
+            <summary>
+            Pull (remove) a value from an array field.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.AddToSet(System.String,System.Object)">
+            <summary>
+            Add a value to an array only if it doesn't exist.
+            </summary>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Pop(System.String,System.Int32)">
+            <summary>
+            Pop first or last element from an array.
+            </summary>
+            <param name="field">Field name</param>
+            <param name="position">1 = last, -1 = first</param>
+        </member>
+        <member name="M:IronBase.UpdateDefinitionBuilder`1.Combine(IronBase.UpdateDefinition{`0}[])">
+            <summary>
+            Combine multiple update operations.
+            </summary>
+        </member>
+        <member name="T:IronBase.InsertOneResult">
+            <summary>
+            Result of an insert operation.
+            </summary>
+        </member>
+        <member name="P:IronBase.InsertOneResult.Acknowledged">
+            <summary>
+            Whether the operation was acknowledged.
+            </summary>
+        </member>
+        <member name="P:IronBase.InsertOneResult.InsertedId">
+            <summary>
+            The ID of the inserted document (as JSON string).
+            </summary>
+        </member>
+        <member name="T:IronBase.InsertManyResult">
+            <summary>
+            Result of an insert many operation.
+            </summary>
+        </member>
+        <member name="P:IronBase.InsertManyResult.Acknowledged">
+            <summary>
+            Whether the operation was acknowledged.
+            </summary>
+        </member>
+        <member name="P:IronBase.InsertManyResult.InsertedCount">
+            <summary>
+            Number of documents inserted.
+            </summary>
+        </member>
+        <member name="P:IronBase.InsertManyResult.InsertedIds">
+            <summary>
+            IDs of inserted documents (as JSON strings).
+            </summary>
+        </member>
+        <member name="T:IronBase.UpdateResult">
+            <summary>
+            Result of an update operation.
+            </summary>
+        </member>
+        <member name="P:IronBase.UpdateResult.Acknowledged">
+            <summary>
+            Whether the operation was acknowledged.
+            </summary>
+        </member>
+        <member name="P:IronBase.UpdateResult.MatchedCount">
+            <summary>
+            Number of documents matched.
+            </summary>
+        </member>
+        <member name="P:IronBase.UpdateResult.ModifiedCount">
+            <summary>
+            Number of documents modified.
+            </summary>
+        </member>
+        <member name="T:IronBase.DeleteResult">
+            <summary>
+            Result of a delete operation.
+            </summary>
+        </member>
+        <member name="P:IronBase.DeleteResult.Acknowledged">
+            <summary>
+            Whether the operation was acknowledged.
+            </summary>
+        </member>
+        <member name="P:IronBase.DeleteResult.DeletedCount">
+            <summary>
+            Number of documents deleted.
+            </summary>
+        </member>
+    </members>
+</doc>

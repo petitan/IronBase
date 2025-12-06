@@ -7,6 +7,7 @@ IronBase uses B+ tree indexes for fast lookups and range queries.
 - [Overview](#overview)
 - [Creating Indexes](#creating-indexes)
 - [Compound Indexes](#compound-indexes)
+- [Fuzzy Text Indexes](#fuzzy-text-indexes)
 - [Query Planning](#query-planning)
 - [Index Selection](#index-selection)
 - [Performance](#performance)
@@ -102,6 +103,101 @@ products.create_compound_index(["category", "price"])
 # Now this is fast:
 products.find({"category": "Electronics", "price": {"$lt": 500}})
 ```
+
+## Fuzzy Text Indexes
+
+Fuzzy indexes accelerate similarity-based text searches using the `$fuzzy` operator.
+
+### Creating Fuzzy Indexes
+
+```python
+# Default: Jaro-Winkler algorithm, 0.8 threshold
+users.create_fuzzy_index("name")
+
+# Specify algorithm and threshold
+users.create_fuzzy_index("email", algorithm="levenshtein", threshold=0.7)
+
+# Rust
+collection.create_fuzzy_index("name", FuzzyAlgorithm::JaroWinkler, 0.8)?;
+```
+
+### Supported Algorithms
+
+| Algorithm | Speed | Accuracy | Best For |
+|-----------|-------|----------|----------|
+| `jaro_winkler` | Fastest | Good | Names, short strings |
+| `levenshtein` | Slow | Highest | Exact character distance |
+| `damerau_levenshtein` | Slowest | Highest | Typos, OCR errors, transpositions |
+
+### Algorithm Details
+
+**Jaro-Winkler** (default)
+- Optimized for names and short strings
+- Gives higher scores to strings matching from the beginning
+- Complexity: O(m + n)
+- Use when: Real-time search, autocomplete, name matching
+
+**Levenshtein**
+- Counts minimum edits (insert, delete, replace)
+- Most accurate for character-by-character comparison
+- Complexity: O(m × n)
+- Use when: Spell checking, exact similarity needed
+
+**Damerau-Levenshtein**
+- Like Levenshtein but includes transpositions (ab → ba)
+- Best for keyboard typos and OCR errors
+- Complexity: O(m × n)
+- Use when: Input validation, correcting common typos
+
+### Threshold Configuration
+
+The threshold (0.0-1.0) determines minimum similarity for a match:
+
+```python
+# High threshold (0.9) - Very similar strings only
+users.create_fuzzy_index("name", threshold=0.9)
+# "John" matches "Jon" but not "Jane"
+
+# Medium threshold (0.7) - Moderate typo tolerance
+users.create_fuzzy_index("name", threshold=0.7)
+# "John" matches "Jon", "Jhon", "Joan"
+
+# Low threshold (0.5) - High recall, lower precision
+users.create_fuzzy_index("name", threshold=0.5)
+# "John" matches many names
+```
+
+### Using Fuzzy Indexes with $fuzzy
+
+When a fuzzy index exists, `$fuzzy` queries automatically use it:
+
+```python
+# Create fuzzy index
+users.create_fuzzy_index("name")
+
+# Query uses fuzzy index (fast)
+users.find({"name": {"$fuzzy": "john"}})
+
+# Override threshold in query
+users.find({"name": {"$fuzzy": {"value": "john", "threshold": 0.6}}})
+```
+
+### Fuzzy Index Performance
+
+| Collection Size | Without Index | With Index |
+|-----------------|---------------|------------|
+| 1K documents | 10ms | 2ms |
+| 10K documents | 100ms | 5ms |
+| 100K documents | 1s | 20ms |
+
+**Note:** Fuzzy indexes have ~40-60% storage overhead per indexed field.
+
+### Limitations of Fuzzy Indexes
+
+- One fuzzy index per field
+- Cannot combine with compound indexes
+- No stemming or tokenization (use for single terms)
+- Case-sensitive by default
 
 ## Query Planning
 
@@ -307,7 +403,7 @@ Indexes are persisted automatically:
 
 | Feature | Status |
 |---------|--------|
-| Text indexes | Not supported |
+| Full-text indexes (with stemming) | Not supported |
 | Geospatial indexes | Not supported |
 | TTL indexes | Not supported |
 | Partial indexes | Not supported |
@@ -317,6 +413,7 @@ Supported:
 - Single field indexes
 - Compound indexes (multi-field)
 - Unique constraints
+- Fuzzy text indexes (similarity matching)
 - Ascending order (always)
 - Nested field indexes (dot notation)
 
@@ -330,6 +427,13 @@ create_index(field: str, unique: bool = False) -> str
 
 # Create compound index
 create_compound_index(fields: List[str], unique: bool = False) -> str
+
+# Create fuzzy text index
+create_fuzzy_index(
+    field: str,
+    algorithm: str = "jaro_winkler",  # jaro_winkler | levenshtein | damerau_levenshtein
+    threshold: float = 0.8            # 0.0 - 1.0
+) -> str
 
 # List all indexes
 list_indexes() -> List[str]

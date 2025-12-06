@@ -16,6 +16,10 @@ pub const NODE_PAGE_SIZE: usize = 4096; // 4KB pages
 const NODE_TYPE_INTERNAL: u8 = 0;
 const NODE_TYPE_LEAF: u8 = 1;
 
+/// Maximum keys per node before split is triggered
+/// With 4KB pages and typical key sizes, 32-64 keys is reasonable
+const MAX_KEYS_PER_NODE: usize = 64;
+
 /// Index key - supported types for indexing
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IndexKey {
@@ -26,6 +30,8 @@ pub enum IndexKey {
     String(String),
     /// Compound key for multi-field indexes (e.g., ["country", "city"])
     Compound(Vec<IndexKey>),
+    /// Sentinel value for "greater than everything" - used for range scan upper bounds
+    MaxKey,
 }
 
 /// OrderedFloat wrapper for f64 to enable Ord
@@ -70,7 +76,13 @@ impl PartialOrd for IndexKey {
 impl Ord for IndexKey {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use IndexKey::*;
+        // Ordering: Null < Bool < Int < Float < String < Compound < MaxKey
         match (self, other) {
+            // MaxKey is greater than everything (except itself)
+            (MaxKey, MaxKey) => std::cmp::Ordering::Equal,
+            (MaxKey, _) => std::cmp::Ordering::Greater,
+            (_, MaxKey) => std::cmp::Ordering::Less,
+
             (Null, Null) => std::cmp::Ordering::Equal,
             (Null, _) => std::cmp::Ordering::Less,
             (_, Null) => std::cmp::Ordering::Greater,
@@ -139,6 +151,19 @@ impl From<serde_json::Value> for IndexKey {
     }
 }
 
+/// Index prefix information for QueryPlanner (compound index aware)
+#[derive(Debug, Clone)]
+pub struct IndexPrefixInfo {
+    /// Index name
+    pub index_name: String,
+    /// First (prefix) field name - used for matching queries
+    pub prefix_field: String,
+    /// Whether this is a compound index
+    pub is_compound: bool,
+    /// Total number of fields in the index
+    pub num_fields: usize,
+}
+
 /// B+ Tree Node types
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum BTreeNode {
@@ -146,18 +171,31 @@ pub(crate) enum BTreeNode {
     Leaf(LeafNode),
 }
 
-/// Internal node (non-leaf) - contains routing keys
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Default for BTreeNode {
+    fn default() -> Self {
+        BTreeNode::Leaf(LeafNode::default())
+    }
+}
+
+/// Internal node (non-leaf) - contains routing keys and child pointers
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct InternalNode {
     pub keys: Vec<IndexKey>,
+    /// In-memory children (used during tree operations)
+    /// Note: Box is intentional for recursive B+ tree structure ownership semantics
+    #[serde(skip)]
+    #[allow(clippy::vec_box)]
+    pub children: Vec<Box<BTreeNode>>,
+    /// File offsets for persisted children (used for disk-based trees)
     pub children_offsets: Vec<u64>,
 }
 
 /// Leaf node - contains actual data pointers
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub(crate) struct LeafNode {
     pub keys: Vec<IndexKey>,
     pub document_ids: Vec<DocumentId>,
+    #[serde(default)]
     pub next_leaf_offset: u64, // File offset to next leaf node (0 = none)
 }
 
@@ -295,52 +333,16 @@ impl BPlusTree {
         match node {
             BTreeNode::Internal(internal) => {
                 // Find which child to descend into
-                let _child_index = self.find_child_index(&internal.keys, key);
+                let child_index = self.find_child_index(&internal.keys, key);
 
-                // IMPLEMENTATION PLAN: B+ Tree Child Loading
-                //
-                // Current state: Always returns None for internal nodes
-                // Impact: NO correctness bug - index.search() is never called in codebase!
-                //         grep "index.search" → 0 matches
-                //         All queries use full scans (see collection_core.rs:1406)
-                //
-                // Architecture exists:
-                // - InternalNode.children_offsets: Vec<u64> contains file offsets
-                // - Persistence layer ready (prepare/commit two-phase pattern)
-                // - Node serialization works (serde JSON for metadata, bincode for nodes)
-                //
-                // Implementation steps (when index-based queries are added):
-                //
-                // 1. Load child node from disk:
-                //    let child_offset = internal.children_offsets[child_index];
-                //    let child_node = self.load_node_from_disk(child_offset)?;
-                //
-                // 2. Implement load_node_from_disk():
-                //    fn load_node_from_disk(&self, offset: u64) -> Result<BTreeNode> {
-                //        // Read node page (4KB) from index file at offset
-                //        // Deserialize using bincode (not JSON - performance!)
-                //        // Cache in memory (LRU cache, ~1000 nodes = 4MB)
-                //    }
-                //
-                // 3. Recursive descent:
-                //    return self.search_in_node(&child_node, key);
-                //
-                // 4. Add node caching:
-                //    - LRU cache: HashMap<u64, Arc<BTreeNode>> with capacity limit
-                //    - Eviction policy: least recently used when cache full
-                //    - Thread-safe: RwLock for concurrent reads
-                //
-                // Performance considerations:
-                // - Tree height = log_32(n) → 650K docs = 4 levels
-                // - Without cache: 4 disk seeks per lookup (~40ms HDD, ~0.4ms SSD)
-                // - With cache (90% hit rate): ~0.04ms average
-                //
-                // Prerequisites before implementing:
-                // - Wire up Collection.find() to use indexes (query optimizer)
-                // - Add index selection heuristics (see IMPLEMENTATION_QUERY_OPTIMIZER.md)
-                // - Implement range scans (leaf node sibling pointers)
-
-                None // Returns None until index-based queries are implemented
+                // Use in-memory children if available
+                if child_index < internal.children.len() {
+                    self.search_in_node(&internal.children[child_index], key)
+                } else {
+                    // No in-memory children - would need to load from disk
+                    // This path is for file-based persistence (not yet implemented)
+                    None
+                }
             }
             BTreeNode::Leaf(leaf) => {
                 // Binary search in leaf
@@ -353,6 +355,7 @@ impl BPlusTree {
     }
 
     /// Insert key-value pair into index
+    /// Handles automatic node splitting when nodes become too large
     pub fn insert(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
         // Check unique constraint
         if self.metadata.unique && self.search(&key).is_some() {
@@ -362,23 +365,146 @@ impl BPlusTree {
             )));
         }
 
-        // For now, simplified insert into leaf
-        // Full implementation would handle splits and internal nodes
-        if let BTreeNode::Leaf(ref mut leaf) = *self.root {
-            let insert_pos = leaf.keys.binary_search(&key).unwrap_or_else(|pos| pos);
-            leaf.keys.insert(insert_pos, key);
-            leaf.document_ids.insert(insert_pos, doc_id);
-            self.metadata.num_keys += 1;
+        self.insert_unchecked(key, doc_id)
+    }
+
+    /// Insert without unique constraint check (used by build_from_sorted after pre-check)
+    fn insert_unchecked(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
+        // Perform recursive insert directly on root (mutates in place)
+        let split_result = Self::insert_into_node(&mut self.root, key, doc_id)?;
+
+        // Handle split at root level - need to promote to new root
+        if let Some((separator, right_child)) = split_result {
+            // Take current root and wrap it as left child of new root
+            let old_root = std::mem::take(&mut self.root);
+
+            // Create new root with the split result
+            self.root = Box::new(BTreeNode::Internal(InternalNode {
+                keys: vec![separator],
+                children: vec![old_root, right_child],
+                children_offsets: Vec::new(),
+            }));
+            self.metadata.tree_height += 1;
         }
 
+        self.metadata.num_keys += 1;
         Ok(())
     }
 
-    /// 🚀 BULK LOAD: Build index from pre-sorted entries in O(n) time
+    /// Recursively insert into a node (mutates in place)
+    /// Returns an optional split result (separator key, new right sibling) if node was split
+    fn insert_into_node(
+        node: &mut Box<BTreeNode>,
+        key: IndexKey,
+        doc_id: DocumentId,
+    ) -> Result<Option<(IndexKey, Box<BTreeNode>)>> {
+        match &mut **node {
+            BTreeNode::Leaf(leaf) => {
+                // Insert into leaf
+                let insert_pos = leaf.keys.binary_search(&key).unwrap_or_else(|pos| pos);
+                leaf.keys.insert(insert_pos, key);
+                leaf.document_ids.insert(insert_pos, doc_id);
+
+                // Check if split is needed
+                if leaf.keys.len() > MAX_KEYS_PER_NODE {
+                    Ok(Some(Self::split_leaf(leaf)))
+                } else {
+                    Ok(None)
+                }
+            }
+            BTreeNode::Internal(internal) => {
+                // Find which child to descend into
+                // B+ tree convention: left child has keys < separator, right child has keys >= separator
+                let child_idx = match internal.keys.binary_search(&key) {
+                    Ok(pos) => pos + 1, // Key equals separator: go to right child
+                    Err(pos) => pos,    // Key less than separator: go to left child
+                };
+
+                // Get the child (must exist for internal nodes)
+                if child_idx >= internal.children.len() {
+                    return Err(MongoLiteError::IndexError(
+                        "Internal node has no children".to_string(),
+                    ));
+                }
+
+                // Recursive insert (mutates child in place)
+                let child_split =
+                    Self::insert_into_node(&mut internal.children[child_idx], key, doc_id)?;
+
+                // Handle child split
+                if let Some((separator, right_child)) = child_split {
+                    // Insert separator and new child into this internal node
+                    internal.keys.insert(child_idx, separator);
+                    internal.children.insert(child_idx + 1, right_child);
+
+                    // Check if this internal node needs to split
+                    if internal.keys.len() > MAX_KEYS_PER_NODE {
+                        Ok(Some(Self::split_internal(internal)))
+                    } else {
+                        Ok(None)
+                    }
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Split a leaf node, returning (separator key, new right leaf)
+    fn split_leaf(leaf: &mut LeafNode) -> (IndexKey, Box<BTreeNode>) {
+        let mid = leaf.keys.len() / 2;
+
+        // Split keys and document_ids at midpoint
+        let right_keys = leaf.keys.split_off(mid);
+        let right_doc_ids = leaf.document_ids.split_off(mid);
+
+        // Separator is the first key of the right leaf
+        let separator = right_keys[0].clone();
+
+        // Create new right leaf
+        let right_leaf = BTreeNode::Leaf(LeafNode {
+            keys: right_keys,
+            document_ids: right_doc_ids,
+            next_leaf_offset: leaf.next_leaf_offset, // Right leaf inherits next pointer
+        });
+
+        // Update left leaf's next pointer (would point to right leaf in file-based impl)
+        // For in-memory, we don't need this, but keep consistent
+        leaf.next_leaf_offset = 0;
+
+        (separator, Box::new(right_leaf))
+    }
+
+    /// Split an internal node, returning (separator key, new right internal)
+    fn split_internal(internal: &mut InternalNode) -> (IndexKey, Box<BTreeNode>) {
+        let mid = internal.keys.len() / 2;
+
+        // The middle key becomes the separator (promoted to parent)
+        let separator = internal.keys.remove(mid);
+
+        // Split keys and children
+        let right_keys = internal.keys.split_off(mid);
+        let right_children = internal.children.split_off(mid + 1);
+        let right_offsets = if internal.children_offsets.len() > mid + 1 {
+            internal.children_offsets.split_off(mid + 1)
+        } else {
+            Vec::new()
+        };
+
+        // Create new right internal node
+        let right_internal = BTreeNode::Internal(InternalNode {
+            keys: right_keys,
+            children: right_children,
+            children_offsets: right_offsets,
+        });
+
+        (separator, Box::new(right_internal))
+    }
+
+    /// Build index from pre-sorted entries with automatic splitting
     ///
-    /// This is MUCH faster than repeated insert() calls:
-    /// - insert() is O(n) per call due to Vec::insert() → O(n²) total for n docs
-    /// - build_from_sorted() is O(n) total - just assigns the vectors
+    /// Uses the insert() method for each entry, which handles automatic node
+    /// splitting. This is O(n log n) but guarantees correct B+ tree structure.
     ///
     /// # Arguments
     /// * `entries` - MUST be sorted by key in ascending order
@@ -404,36 +530,56 @@ impl BPlusTree {
             }
         }
 
-        // Separate keys and document_ids - O(n)
-        let (keys, document_ids): (Vec<IndexKey>, Vec<DocumentId>) = entries.into_iter().unzip();
-
-        // Replace the leaf node's vectors directly - O(1) pointer swap
-        if let BTreeNode::Leaf(ref mut leaf) = *self.root {
-            self.metadata.num_keys = keys.len() as u64;
-            leaf.keys = keys;
-            leaf.document_ids = document_ids;
+        // Insert each entry using insert_unchecked (skips per-entry unique check)
+        // Unique constraint was already validated above in O(n) for sorted data
+        for (key, doc_id) in entries {
+            self.insert_unchecked(key, doc_id)?;
         }
 
         Ok(())
     }
 
     /// Delete key-document pair from index
+    /// Supports multi-level B+ trees by recursively finding the leaf
     pub fn delete(&mut self, key: &IndexKey, doc_id: &DocumentId) -> Result<()> {
-        // For now, simplified delete from leaf
-        // Full implementation would handle merges and internal nodes
-        if let BTreeNode::Leaf(ref mut leaf) = *self.root {
-            // Find the key position
-            if let Ok(pos) = leaf.keys.binary_search(key) {
-                // Verify this is the correct document ID
-                if &leaf.document_ids[pos] == doc_id {
-                    leaf.keys.remove(pos);
-                    leaf.document_ids.remove(pos);
-                    self.metadata.num_keys -= 1;
+        let deleted = Self::delete_from_node(&mut self.root, key, doc_id);
+        if deleted {
+            self.metadata.num_keys -= 1;
+        }
+        Ok(())
+    }
+
+    /// Recursively delete from a node, returns true if deletion occurred
+    fn delete_from_node(node: &mut Box<BTreeNode>, key: &IndexKey, doc_id: &DocumentId) -> bool {
+        match **node {
+            BTreeNode::Leaf(ref mut leaf) => {
+                // Find the key position in leaf
+                if let Ok(pos) = leaf.keys.binary_search(key) {
+                    // Verify this is the correct document ID
+                    if &leaf.document_ids[pos] == doc_id {
+                        leaf.keys.remove(pos);
+                        leaf.document_ids.remove(pos);
+                        return true;
+                    }
                 }
+                false
+            }
+            BTreeNode::Internal(ref mut internal) => {
+                // Find which child might contain the key
+                // B+ tree convention: left child has keys < separator, right child has keys >= separator
+                let child_idx = match internal.keys.binary_search(key) {
+                    Ok(pos) => pos + 1, // Key equals separator: go to right child
+                    Err(pos) => pos,    // Key less than separator: go to left child
+                };
+
+                if child_idx < internal.children.len() {
+                    Self::delete_from_node(&mut internal.children[child_idx], key, doc_id)
+                } else {
+                    false
+                }
+                // Note: Full B+ tree implementation would handle underflow and merges here
             }
         }
-
-        Ok(())
     }
 
     /// 🚀 BATCH OPTIMIZATION: Get all entries from the index as a Vec
@@ -461,15 +607,14 @@ impl BPlusTree {
                     results.push((key.clone(), doc_id.clone()));
                 }
             }
-            BTreeNode::Internal(_internal) => {
-                // For Internal nodes, children are stored as file offsets.
-                // Without a file handle, we cannot traverse children.
-                //
-                // NOTE: In practice, this branch is rarely hit because:
-                // 1. apply_batch_updates() rebuilds the tree as a single Leaf via build_from_sorted
-                // 2. For multi-level persistent trees, use get_all_entries_with_file() instead
-                //
-                // For now, return empty results for this node (caller should handle this case)
+            BTreeNode::Internal(internal) => {
+                // Use in-memory children if available
+                if !internal.children.is_empty() {
+                    for child in &internal.children {
+                        self.collect_entries_recursive(child, results);
+                    }
+                }
+                // If no in-memory children, would need file handle (use get_all_entries_with_file)
             }
         }
     }
@@ -578,11 +723,16 @@ impl BPlusTree {
     }
 
     /// Find child index for key in internal node
+    /// B+ tree convention: left child has keys < separator, right child has keys >= separator
     fn find_child_index(&self, keys: &[IndexKey], key: &IndexKey) -> usize {
-        keys.binary_search(key).unwrap_or_else(|pos| pos)
+        match keys.binary_search(key) {
+            Ok(pos) => pos + 1, // Key equals separator: go to right child (keys >= separator)
+            Err(pos) => pos,    // Key less than separator: go to left child (keys < separator)
+        }
     }
 
     /// Range scan: find all keys between start and end
+    /// Supports multi-level B+ trees by recursively traversing internal nodes
     pub fn range_scan(
         &self,
         start: &IndexKey,
@@ -590,7 +740,7 @@ impl BPlusTree {
         inclusive_start: bool,
         inclusive_end: bool,
     ) -> Vec<DocumentId> {
-        fn collect_leaf(
+        fn collect_range(
             node: &BTreeNode,
             start: &IndexKey,
             end: &IndexKey,
@@ -616,16 +766,32 @@ impl BPlusTree {
                         }
                     }
                 }
-                BTreeNode::Internal(_) => {
-                    // NOTE: Multi-level B+ tree traversal not implemented
-                    // Range scans only work on single-level (leaf-only) trees
-                    // This is safe because insert() currently only creates leaf nodes
+                BTreeNode::Internal(internal) => {
+                    // Find which children might contain keys in the range
+                    // We need to check all children whose key range overlaps [start, end]
+                    for (i, child) in internal.children.iter().enumerate() {
+                        // Determine if this child could contain keys in range
+                        let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
+                        let child_max_might_match =
+                            i >= internal.keys.len() || &internal.keys[i] >= start;
+
+                        if child_min_might_match && child_max_might_match {
+                            collect_range(
+                                child,
+                                start,
+                                end,
+                                inclusive_start,
+                                inclusive_end,
+                                results,
+                            );
+                        }
+                    }
                 }
             }
         }
 
         let mut results = Vec::new();
-        collect_leaf(
+        collect_range(
             &self.root,
             start,
             end,
@@ -634,6 +800,45 @@ impl BPlusTree {
             &mut results,
         );
         results
+    }
+
+    /// Build range bounds for compound index prefix query
+    ///
+    /// For a compound index on (country, city) with query `{"country": "US"}`:
+    /// - Returns start: `Compound([String("US"), Null])`
+    /// - Returns end: `Compound([String("US"), MaxKey])`
+    ///
+    /// This allows range_scan to find all entries where the first field matches.
+    ///
+    /// # Arguments
+    /// * `prefix_value` - The value for the first field (e.g., `IndexKey::String("US")`)
+    ///
+    /// # Returns
+    /// A tuple of (start_key, end_key) for use with `range_scan()`
+    pub fn build_prefix_range(&self, prefix_value: IndexKey) -> (IndexKey, IndexKey) {
+        let num_fields = self.metadata.fields.len();
+
+        if num_fields <= 1 {
+            // Single-field index: just return the prefix value as both bounds
+            return (prefix_value.clone(), prefix_value);
+        }
+
+        // Build start key: prefix + Nulls for remaining fields
+        let mut start_parts = vec![prefix_value.clone()];
+        for _ in 1..num_fields {
+            start_parts.push(IndexKey::Null);
+        }
+
+        // Build end key: prefix + MaxKeys for remaining fields
+        let mut end_parts = vec![prefix_value];
+        for _ in 1..num_fields {
+            end_parts.push(IndexKey::MaxKey);
+        }
+
+        (
+            IndexKey::Compound(start_parts),
+            IndexKey::Compound(end_parts),
+        )
     }
 
     /// Get index size (number of keys)
@@ -734,25 +939,28 @@ impl BPlusTree {
     }
 
     /// Save node and children recursively
+    /// Saves in-memory children first, then saves the parent with updated offsets
     fn save_node_recursive(&mut self, file: &mut File, node: &BTreeNode) -> Result<u64> {
         match node {
             BTreeNode::Internal(internal) => {
-                // First, save all children and collect their offsets
+                // First, recursively save all in-memory children and collect their offsets
                 let mut saved_offsets = Vec::new();
-                for &child_offset in &internal.children_offsets {
-                    if child_offset == 0 {
-                        // This is a placeholder, skip
-                        saved_offsets.push(0);
-                        continue;
+
+                if !internal.children.is_empty() {
+                    // Save in-memory children
+                    for child in &internal.children {
+                        let child_offset = self.save_node_recursive(file, child)?;
+                        saved_offsets.push(child_offset);
                     }
-                    // In a real implementation, we'd load the child node here
-                    // For now, just preserve the offset
-                    saved_offsets.push(child_offset);
+                } else {
+                    // No in-memory children - preserve existing offsets
+                    saved_offsets = internal.children_offsets.clone();
                 }
 
                 // Create new internal node with updated offsets
                 let updated_node = BTreeNode::Internal(InternalNode {
                     keys: internal.keys.clone(),
+                    children: Vec::new(), // Children not serialized (serde skip)
                     children_offsets: saved_offsets,
                 });
 
@@ -767,14 +975,32 @@ impl BPlusTree {
     }
 
     /// Load tree from file given root offset
+    /// Recursively loads all children into memory for full tree traversal support
     pub fn load_from_file(file: &mut File, metadata: IndexMetadata) -> Result<Self> {
         // Note: offset 0 is valid (start of file), so we don't check for it
         // An empty file would fail on load_node instead
 
-        // Load root node
-        let root = Box::new(Self::load_node(file, metadata.root_offset)?);
+        // Load root node recursively (includes all children)
+        let root = Box::new(Self::load_node_recursive(file, metadata.root_offset)?);
 
         Ok(BPlusTree { root, metadata })
+    }
+
+    /// Load a node and all its children recursively
+    fn load_node_recursive(file: &mut File, offset: u64) -> Result<BTreeNode> {
+        let mut node = Self::load_node(file, offset)?;
+
+        // If internal node, recursively load all children
+        if let BTreeNode::Internal(ref mut internal) = node {
+            let mut children = Vec::new();
+            for &child_offset in &internal.children_offsets {
+                let child = Self::load_node_recursive(file, child_offset)?;
+                children.push(Box::new(child));
+            }
+            internal.children = children;
+        }
+
+        Ok(node)
     }
 
     /// Two-Phase Commit: Phase 1 - Prepare changes to a temporary file
@@ -1246,33 +1472,58 @@ impl IndexManager {
     ///
     /// Returns tuples of (index_name, first_field) where first_field is:
     /// - The field name for single-field indexes
-    /// - EMPTY STRING for compound indexes (they cannot be used for simple equality queries!)
+    /// - The FIRST field for compound indexes (enables prefix queries!)
     ///
-    /// Compound indexes require all fields in the query to be useful for point lookup.
-    /// For now, we disable compound index usage in QueryPlanner and rely on full scan.
-    /// Future: implement prefix range scan for compound indexes.
+    /// For compound indexes, prefix queries use range scans internally.
     pub fn list_indexes_with_prefix_field(&self) -> Vec<(String, String)> {
-        let mut result: Vec<(String, String)> = Vec::new();
+        self.list_indexes_with_compound_info()
+            .into_iter()
+            .map(|info| (info.index_name, info.prefix_field))
+            .collect()
+    }
+
+    /// List all indexes with full compound index information (for QueryPlanner v2)
+    ///
+    /// Returns `IndexPrefixInfo` for each index, including:
+    /// - Single-field indexes: `is_compound = false`, `num_fields = 1`
+    /// - Compound indexes: `is_compound = true`, `num_fields > 1`
+    ///
+    /// Compound indexes can be used for prefix queries via range scans.
+    pub fn list_indexes_with_compound_info(&self) -> Vec<IndexPrefixInfo> {
+        let mut result: Vec<IndexPrefixInfo> = Vec::new();
 
         for (name, index) in &self.btree_indexes {
-            // For compound indexes, we currently don't support prefix queries
-            // Return empty string to prevent matching
-            // Future: implement compound prefix range scan
-            let first_field = if index.metadata.is_compound() {
-                // Skip compound indexes for now - they need range scan, not point lookup
-                String::new()
+            let is_compound = index.metadata.is_compound();
+            let prefix_field = if is_compound {
+                // For compound indexes, return the first field to enable prefix queries
+                index.metadata.fields.first().cloned().unwrap_or_default()
             } else {
                 index.metadata.field.clone()
             };
-            result.push((name.clone(), first_field));
+            let num_fields = if is_compound {
+                index.metadata.fields.len()
+            } else {
+                1
+            };
+            result.push(IndexPrefixInfo {
+                index_name: name.clone(),
+                prefix_field,
+                is_compound,
+                num_fields,
+            });
         }
 
         // Legacy indexes are single-field only
         for (name, index) in &self.legacy_indexes {
-            result.push((name.clone(), index.definition.field.clone()));
+            result.push(IndexPrefixInfo {
+                index_name: name.clone(),
+                prefix_field: index.definition.field.clone(),
+                is_compound: false,
+                num_fields: 1,
+            });
         }
 
-        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result.sort_by(|a, b| a.index_name.cmp(&b.index_name));
         result
     }
 
@@ -2149,5 +2400,313 @@ mod fuzzy_tests {
         if !results.is_empty() {
             assert_eq!(results[0].0, DocumentId::Int(1));
         }
+    }
+}
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+
+    /// Test that inserting more than MAX_KEYS_PER_NODE triggers a split
+    /// and increases tree height
+    #[test]
+    fn test_btree_insert_triggers_split() {
+        let mut tree = BPlusTree::new("test_idx".to_string(), "field".to_string(), false);
+
+        // Initial height should be 1 (just root leaf)
+        assert_eq!(tree.metadata.tree_height, 1);
+
+        // Insert MAX_KEYS_PER_NODE + 1 elements to trigger split
+        for i in 0..=MAX_KEYS_PER_NODE {
+            tree.insert(IndexKey::Int(i as i64), DocumentId::Int(i as i64))
+                .unwrap();
+        }
+
+        // After split, tree height should be 2
+        assert_eq!(
+            tree.metadata.tree_height, 2,
+            "Tree height should increase to 2 after split"
+        );
+
+        // Verify all elements are still searchable
+        for i in 0..=MAX_KEYS_PER_NODE {
+            assert_eq!(
+                tree.search(&IndexKey::Int(i as i64)),
+                Some(DocumentId::Int(i as i64)),
+                "Element {} should be found after split",
+                i
+            );
+        }
+    }
+
+    /// Test bulk loading a large dataset (10,000 entries)
+    #[test]
+    fn test_btree_bulk_load_large_dataset() {
+        let mut tree = BPlusTree::new("large_idx".to_string(), "id".to_string(), false);
+
+        let entries: Vec<_> = (0..10000)
+            .map(|i| (IndexKey::Int(i), DocumentId::Int(i)))
+            .collect();
+
+        tree.build_from_sorted(entries, false).unwrap();
+
+        // Verify count
+        assert_eq!(tree.metadata.num_keys, 10000);
+
+        // Verify tree has multiple levels
+        assert!(
+            tree.metadata.tree_height > 1,
+            "Large dataset should create multi-level tree"
+        );
+
+        // Verify random samples are searchable
+        assert_eq!(
+            tree.search(&IndexKey::Int(0)),
+            Some(DocumentId::Int(0)),
+            "First element should be found"
+        );
+        assert_eq!(
+            tree.search(&IndexKey::Int(5000)),
+            Some(DocumentId::Int(5000)),
+            "Middle element should be found"
+        );
+        assert_eq!(
+            tree.search(&IndexKey::Int(9999)),
+            Some(DocumentId::Int(9999)),
+            "Last element should be found"
+        );
+
+        // Verify range scan works on multi-level tree
+        let results = tree.range_scan(&IndexKey::Int(100), &IndexKey::Int(200), true, false);
+        assert_eq!(results.len(), 100, "Range scan should return 100 elements");
+    }
+
+    /// Test that multiple splits create correct tree structure
+    #[test]
+    fn test_btree_multiple_splits() {
+        let mut tree = BPlusTree::new("multi_split_idx".to_string(), "x".to_string(), false);
+
+        // Insert enough elements to cause multiple levels of splits
+        // With MAX_KEYS_PER_NODE = 64, we need > 64^2 = 4096 for 3 levels
+        for i in 0..5000 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+
+        // Verify tree height is at least 3
+        assert!(
+            tree.metadata.tree_height >= 3,
+            "5000 elements should create tree with height >= 3, got {}",
+            tree.metadata.tree_height
+        );
+
+        // Verify all elements are searchable
+        for i in (0..5000).step_by(100) {
+            assert_eq!(
+                tree.search(&IndexKey::Int(i)),
+                Some(DocumentId::Int(i)),
+                "Element {} should be found in multi-level tree",
+                i
+            );
+        }
+    }
+
+    /// Test persistence of multi-level tree
+    #[test]
+    fn test_btree_multilevel_persistence() {
+        use std::fs::OpenOptions;
+
+        let temp_path = "test_multilevel_persist.tmp";
+
+        // Create and populate multi-level tree
+        let mut tree = BPlusTree::new("persist_idx".to_string(), "id".to_string(), false);
+
+        for i in 0..500 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+
+        let original_height = tree.metadata.tree_height;
+        assert!(original_height > 1, "Should have multi-level tree");
+
+        // Save tree to file
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(temp_path)
+            .unwrap();
+
+        tree.save_to_file(&mut file).unwrap();
+
+        // Load tree from file
+        let metadata_clone = tree.metadata.clone();
+        let loaded_tree = BPlusTree::load_from_file(&mut file, metadata_clone).unwrap();
+
+        // Verify tree structure preserved
+        assert_eq!(
+            loaded_tree.metadata.tree_height, original_height,
+            "Tree height should be preserved after load"
+        );
+        assert_eq!(
+            loaded_tree.metadata.num_keys, 500,
+            "Key count should be preserved"
+        );
+
+        // Verify search still works on loaded tree
+        assert_eq!(
+            loaded_tree.search(&IndexKey::Int(0)),
+            Some(DocumentId::Int(0))
+        );
+        assert_eq!(
+            loaded_tree.search(&IndexKey::Int(250)),
+            Some(DocumentId::Int(250))
+        );
+        assert_eq!(
+            loaded_tree.search(&IndexKey::Int(499)),
+            Some(DocumentId::Int(499))
+        );
+
+        // Cleanup
+        std::fs::remove_file(temp_path).ok();
+    }
+}
+
+#[cfg(test)]
+mod compound_prefix_tests {
+    use super::*;
+
+    /// Test MaxKey ordering - it should be greater than everything
+    #[test]
+    fn test_maxkey_ordering() {
+        assert!(IndexKey::MaxKey > IndexKey::Null);
+        assert!(IndexKey::MaxKey > IndexKey::Bool(true));
+        assert!(IndexKey::MaxKey > IndexKey::Int(i64::MAX));
+        assert!(IndexKey::MaxKey > IndexKey::Float(OrderedFloat(f64::MAX)));
+        assert!(IndexKey::MaxKey > IndexKey::String("zzzzz".to_string()));
+        assert!(IndexKey::MaxKey > IndexKey::Compound(vec![IndexKey::String("z".to_string())]));
+        assert_eq!(IndexKey::MaxKey, IndexKey::MaxKey);
+    }
+
+    /// Test build_prefix_range for compound indexes
+    #[test]
+    fn test_build_prefix_range() {
+        // Create compound index on (country, city)
+        let tree = BPlusTree::new_compound(
+            "users_country_city".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            false,
+        );
+
+        // Build prefix range for country = "US"
+        let prefix = IndexKey::String("US".to_string());
+        let (start, end) = tree.build_prefix_range(prefix);
+
+        // Verify start: Compound(["US", Null])
+        if let IndexKey::Compound(ref parts) = start {
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0], IndexKey::String("US".to_string()));
+            assert_eq!(parts[1], IndexKey::Null);
+        } else {
+            panic!("Expected Compound key for start");
+        }
+
+        // Verify end: Compound(["US", MaxKey])
+        if let IndexKey::Compound(ref parts) = end {
+            assert_eq!(parts.len(), 2);
+            assert_eq!(parts[0], IndexKey::String("US".to_string()));
+            assert_eq!(parts[1], IndexKey::MaxKey);
+        } else {
+            panic!("Expected Compound key for end");
+        }
+    }
+
+    /// Test compound index prefix query via range scan
+    #[test]
+    fn test_compound_prefix_query_range_scan() {
+        let mut tree = BPlusTree::new_compound(
+            "users_country_city".to_string(),
+            vec!["country".to_string(), "city".to_string()],
+            false,
+        );
+
+        // Insert data: US cities and HU cities
+        let data = vec![
+            ("HU", "Budapest", 1),
+            ("HU", "Debrecen", 2),
+            ("US", "LA", 3),
+            ("US", "NYC", 4),
+            ("US", "SF", 5),
+        ];
+
+        for (country, city, id) in &data {
+            let key = IndexKey::Compound(vec![
+                IndexKey::String(country.to_string()),
+                IndexKey::String(city.to_string()),
+            ]);
+            tree.insert(key, DocumentId::Int(*id)).unwrap();
+        }
+
+        // Query: prefix = "US" (should find LA, NYC, SF)
+        let prefix = IndexKey::String("US".to_string());
+        let (start, end) = tree.build_prefix_range(prefix);
+        let results = tree.range_scan(&start, &end, true, true);
+
+        assert_eq!(results.len(), 3, "Should find 3 US cities");
+        assert!(results.contains(&DocumentId::Int(3)));
+        assert!(results.contains(&DocumentId::Int(4)));
+        assert!(results.contains(&DocumentId::Int(5)));
+
+        // Query: prefix = "HU" (should find Budapest, Debrecen)
+        let prefix = IndexKey::String("HU".to_string());
+        let (start, end) = tree.build_prefix_range(prefix);
+        let results = tree.range_scan(&start, &end, true, true);
+
+        assert_eq!(results.len(), 2, "Should find 2 HU cities");
+        assert!(results.contains(&DocumentId::Int(1)));
+        assert!(results.contains(&DocumentId::Int(2)));
+
+        // Query: prefix = "DE" (should find nothing)
+        let prefix = IndexKey::String("DE".to_string());
+        let (start, end) = tree.build_prefix_range(prefix);
+        let results = tree.range_scan(&start, &end, true, true);
+
+        assert_eq!(results.len(), 0, "Should find no DE cities");
+    }
+
+    /// Test IndexPrefixInfo for compound indexes
+    #[test]
+    fn test_index_prefix_info_compound() {
+        let mut manager = IndexManager::new();
+
+        // Create single-field index
+        manager
+            .create_btree_index("users_age".to_string(), "age".to_string(), false)
+            .unwrap();
+
+        // Create compound index
+        manager
+            .create_compound_index(
+                "users_country_city".to_string(),
+                vec!["country".to_string(), "city".to_string()],
+                false,
+            )
+            .unwrap();
+
+        let infos = manager.list_indexes_with_compound_info();
+
+        // Find single-field index
+        let age_info = infos.iter().find(|i| i.index_name == "users_age").unwrap();
+        assert_eq!(age_info.prefix_field, "age");
+        assert!(!age_info.is_compound);
+        assert_eq!(age_info.num_fields, 1);
+
+        // Find compound index
+        let compound_info = infos
+            .iter()
+            .find(|i| i.index_name == "users_country_city")
+            .unwrap();
+        assert_eq!(compound_info.prefix_field, "country");
+        assert!(compound_info.is_compound);
+        assert_eq!(compound_info.num_fields, 2);
     }
 }
