@@ -32,6 +32,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
+use strsim::{damerau_levenshtein, jaro_winkler, normalized_levenshtein};
 
 // ============================================================================
 // REGEX WITH OPTIONS SUPPORT (Full regex crate implementation)
@@ -716,6 +717,172 @@ impl OperatorMatcher for RegexOperator {
     }
 }
 
+// ============================================================================
+// FUZZY TEXT SEARCH OPERATORS
+// ============================================================================
+
+/// Default threshold for fuzzy matching (0.0-1.0 scale)
+const DEFAULT_FUZZY_THRESHOLD: f64 = 0.8;
+
+/// Supported fuzzy matching algorithms
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FuzzyAlgorithm {
+    /// Jaro-Winkler similarity - fast, good for names and short strings
+    JaroWinkler,
+    /// Levenshtein distance (normalized) - most accurate for edit distance
+    Levenshtein,
+    /// Damerau-Levenshtein - like Levenshtein but treats transpositions as single edits
+    DamerauLevenshtein,
+}
+
+impl FuzzyAlgorithm {
+    /// Calculate similarity between two strings (returns 0.0-1.0)
+    fn similarity(&self, a: &str, b: &str) -> f64 {
+        match self {
+            FuzzyAlgorithm::JaroWinkler => jaro_winkler(a, b),
+            FuzzyAlgorithm::Levenshtein => normalized_levenshtein(a, b),
+            FuzzyAlgorithm::DamerauLevenshtein => {
+                // Normalize Damerau-Levenshtein distance to 0.0-1.0
+                let max_len = a.len().max(b.len());
+                if max_len == 0 {
+                    return 1.0; // Both empty strings are identical
+                }
+                let distance = damerau_levenshtein(a, b);
+                1.0 - (distance as f64 / max_len as f64)
+            }
+        }
+    }
+
+    /// Parse algorithm name from string
+    fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "jaro_winkler" | "jarowinkler" | "jaro-winkler" => Ok(FuzzyAlgorithm::JaroWinkler),
+            "levenshtein" => Ok(FuzzyAlgorithm::Levenshtein),
+            "damerau_levenshtein" | "damerau-levenshtein" | "dameraulevenshtein" => {
+                Ok(FuzzyAlgorithm::DamerauLevenshtein)
+            }
+            _ => Err(MongoLiteError::InvalidQuery(format!(
+                "Unknown fuzzy algorithm: '{}'. Supported: jaro_winkler, levenshtein, damerau_levenshtein",
+                s
+            ))),
+        }
+    }
+}
+
+/// $fuzzy operator: Matches strings using fuzzy similarity algorithms
+///
+/// # Syntax
+///
+/// Simple form (uses Jaro-Winkler with 0.8 threshold):
+/// ```json
+/// { "name": { "$fuzzy": "john" } }
+/// ```
+///
+/// Extended form with options:
+/// ```json
+/// { "name": { "$fuzzy": { "value": "john", "algorithm": "levenshtein", "threshold": 0.7 } } }
+/// ```
+///
+/// # Supported Algorithms
+///
+/// - `jaro_winkler` (default): Fast, good for names and short strings
+/// - `levenshtein`: Most accurate for edit distance
+/// - `damerau_levenshtein`: Treats transpositions (e.g., "teh" → "the") as single edits
+///
+/// # Threshold
+///
+/// A value between 0.0 and 1.0. Documents with similarity >= threshold match.
+/// Default is 0.8 (80% similarity required).
+///
+/// # Complexity: CC = 6
+pub struct FuzzyOperator;
+
+impl OperatorMatcher for FuzzyOperator {
+    fn name(&self) -> &'static str {
+        "$fuzzy"
+    }
+
+    fn matches(
+        &self,
+        doc_value: Option<&Value>,
+        filter_value: &Value,
+        _document: Option<&Document>,
+    ) -> Result<bool> {
+        // Parse filter value to get search term, algorithm, and threshold
+        let (search_term, algorithm, threshold) = parse_fuzzy_filter(filter_value)?;
+
+        match doc_value {
+            None => Ok(false),
+            Some(Value::String(s)) => {
+                let similarity = algorithm.similarity(s, &search_term);
+                Ok(similarity >= threshold)
+            }
+            Some(Value::Array(arr)) => {
+                // Check if any string element in the array matches
+                for elem in arr {
+                    if let Value::String(s) = elem {
+                        let similarity = algorithm.similarity(s, &search_term);
+                        if similarity >= threshold {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            Some(_) => Ok(false), // Not a string or array
+        }
+    }
+}
+
+/// Parse $fuzzy filter value into (search_term, algorithm, threshold)
+fn parse_fuzzy_filter(filter_value: &Value) -> Result<(String, FuzzyAlgorithm, f64)> {
+    match filter_value {
+        // Simple form: { "$fuzzy": "search_term" }
+        Value::String(s) => Ok((
+            s.clone(),
+            FuzzyAlgorithm::JaroWinkler,
+            DEFAULT_FUZZY_THRESHOLD,
+        )),
+
+        // Extended form: { "$fuzzy": { "value": "search_term", "algorithm": "...", "threshold": 0.8 } }
+        Value::Object(obj) => {
+            let value = obj
+                .get("value")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    MongoLiteError::InvalidQuery(
+                        "$fuzzy object form requires 'value' field with string".to_string(),
+                    )
+                })?
+                .to_string();
+
+            let algorithm = match obj.get("algorithm").and_then(|v| v.as_str()) {
+                Some(algo_str) => FuzzyAlgorithm::from_str(algo_str)?,
+                None => FuzzyAlgorithm::JaroWinkler,
+            };
+
+            let threshold = obj
+                .get("threshold")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(DEFAULT_FUZZY_THRESHOLD);
+
+            // Validate threshold
+            if !(0.0..=1.0).contains(&threshold) {
+                return Err(MongoLiteError::InvalidQuery(format!(
+                    "$fuzzy threshold must be between 0.0 and 1.0, got {}",
+                    threshold
+                )));
+            }
+
+            Ok((value, algorithm, threshold))
+        }
+
+        _ => Err(MongoLiteError::InvalidQuery(
+            "$fuzzy operator requires a string or object with 'value' field".to_string(),
+        )),
+    }
+}
+
 /// $type operator: Selects documents where the value of a field is of the specified BSON type
 ///
 /// # MongoDB Spec
@@ -1158,6 +1325,9 @@ lazy_static! {
 
         // Regex operators
         registry.insert("$regex", Box::new(RegexOperator));
+
+        // Fuzzy text search operators
+        registry.insert("$fuzzy", Box::new(FuzzyOperator));
 
         // Logical operators
         registry.insert("$and", Box::new(AndOperator));
@@ -2091,8 +2261,9 @@ mod tests {
         assert!(OPERATOR_REGISTRY.contains_key("$elemMatch"));
         assert!(OPERATOR_REGISTRY.contains_key("$type"));
         assert!(OPERATOR_REGISTRY.contains_key("$regex"));
+        assert!(OPERATOR_REGISTRY.contains_key("$fuzzy"));
         assert!(OPERATOR_REGISTRY.contains_key("$expr"));
-        assert_eq!(OPERATOR_REGISTRY.len(), 19); // Total operators implemented (18 + $expr)
+        assert_eq!(OPERATOR_REGISTRY.len(), 20); // Total operators implemented (19 + $fuzzy)
     }
 
     #[test]
@@ -2539,5 +2710,149 @@ mod tests {
         assert!(matches_filter(&doc1, &filter).unwrap()); // Alice starts with A
         assert!(matches_filter(&doc2, &filter).unwrap()); // Bob starts with B
         assert!(matches_filter(&doc3, &filter).unwrap()); // Charlie starts with C
+    }
+
+    // ========================================================================
+    // FUZZY OPERATOR TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_fuzzy_operator_simple_form() {
+        let op = FuzzyOperator;
+
+        // Exact match should pass
+        assert!(op
+            .matches(Some(&json!("john")), &json!("john"), None)
+            .unwrap());
+
+        // Similar strings should pass (jaro_winkler default)
+        assert!(op
+            .matches(Some(&json!("john")), &json!("jon"), None)
+            .unwrap());
+        assert!(op
+            .matches(Some(&json!("john")), &json!("johnn"), None)
+            .unwrap());
+
+        // Very different strings should fail
+        assert!(!op
+            .matches(Some(&json!("john")), &json!("xyz"), None)
+            .unwrap());
+
+        // None value should fail
+        assert!(!op.matches(None, &json!("john"), None).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_operator_extended_form() {
+        let op = FuzzyOperator;
+
+        // Extended form with explicit algorithm
+        let filter = json!({"value": "john", "algorithm": "jaro_winkler", "threshold": 0.8});
+        assert!(op.matches(Some(&json!("john")), &filter, None).unwrap());
+        assert!(op.matches(Some(&json!("jon")), &filter, None).unwrap());
+
+        // Lower threshold allows more matches
+        let filter_low = json!({"value": "john", "threshold": 0.5});
+        assert!(op.matches(Some(&json!("jane")), &filter_low, None).unwrap());
+
+        // Higher threshold is stricter
+        let filter_high = json!({"value": "john", "threshold": 0.95});
+        assert!(op
+            .matches(Some(&json!("john")), &filter_high, None)
+            .unwrap());
+        assert!(!op.matches(Some(&json!("jon")), &filter_high, None).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_operator_algorithms() {
+        let op = FuzzyOperator;
+
+        // Levenshtein
+        let filter_lev = json!({"value": "john", "algorithm": "levenshtein", "threshold": 0.7});
+        assert!(op.matches(Some(&json!("john")), &filter_lev, None).unwrap());
+        assert!(op.matches(Some(&json!("jon")), &filter_lev, None).unwrap());
+
+        // Damerau-Levenshtein (good for transpositions)
+        let filter_dl =
+            json!({"value": "the", "algorithm": "damerau_levenshtein", "threshold": 0.6});
+        assert!(op.matches(Some(&json!("teh")), &filter_dl, None).unwrap()); // transposition
+    }
+
+    #[test]
+    fn test_fuzzy_operator_array_matching() {
+        let op = FuzzyOperator;
+
+        // Array should match if any element is similar
+        let arr = json!(["alice", "bob", "charlie"]);
+        assert!(op.matches(Some(&arr), &json!("bob"), None).unwrap());
+        assert!(op.matches(Some(&arr), &json!("bobb"), None).unwrap()); // fuzzy match
+        assert!(!op.matches(Some(&arr), &json!("xyz"), None).unwrap());
+    }
+
+    #[test]
+    fn test_fuzzy_operator_invalid_filter() {
+        let op = FuzzyOperator;
+
+        // Invalid filter types
+        assert!(op.matches(Some(&json!("john")), &json!(123), None).is_err());
+
+        // Object without value field
+        assert!(op
+            .matches(Some(&json!("john")), &json!({"threshold": 0.8}), None)
+            .is_err());
+
+        // Invalid threshold
+        assert!(op
+            .matches(
+                Some(&json!("john")),
+                &json!({"value": "john", "threshold": 1.5}),
+                None
+            )
+            .is_err());
+
+        // Invalid algorithm
+        assert!(op
+            .matches(
+                Some(&json!("john")),
+                &json!({"value": "john", "algorithm": "unknown"}),
+                None
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn test_fuzzy_algorithm_similarity() {
+        // Test Jaro-Winkler
+        let jw = FuzzyAlgorithm::JaroWinkler;
+        assert!(jw.similarity("john", "john") > 0.99);
+        assert!(jw.similarity("john", "jon") > 0.85);
+        assert!(jw.similarity("john", "johnny") > 0.8);
+
+        // Test Levenshtein
+        let lev = FuzzyAlgorithm::Levenshtein;
+        assert!(lev.similarity("john", "john") > 0.99);
+        assert!(lev.similarity("john", "jon") > 0.7);
+
+        // Test Damerau-Levenshtein
+        let dl = FuzzyAlgorithm::DamerauLevenshtein;
+        assert!(dl.similarity("the", "teh") > 0.6); // transposition
+        assert!(dl.similarity("abc", "abc") > 0.99);
+    }
+
+    #[test]
+    fn test_fuzzy_with_document_filter() {
+        let doc = create_test_document(1, vec![("name", json!("John"))]);
+
+        // Simple form - exact case should match
+        let filter = json!({"name": {"$fuzzy": "john"}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+
+        // Extended form with lower threshold
+        let filter2 = json!({"name": {"$fuzzy": {"value": "jon", "threshold": 0.7}}});
+        assert!(matches_filter(&doc, &filter2).unwrap());
+
+        // No match with very different string
+        let filter3 = json!({"name": {"$fuzzy": {"value": "xyz", "threshold": 0.5}}});
+        assert!(!matches_filter(&doc, &filter3).unwrap());
     }
 }

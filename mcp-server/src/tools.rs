@@ -165,6 +165,41 @@ pub fn get_tools_list() -> Value {
                 }
             },
             {
+                "name": "fuzzy_search",
+                "description": "Find documents using fuzzy text matching. Useful for typo-tolerant search, name matching, and approximate string matching.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "field": {
+                            "type": "string",
+                            "description": "Field name to search in"
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "Search term to match approximately"
+                        },
+                        "algorithm": {
+                            "type": "string",
+                            "description": "Fuzzy algorithm: 'jaro_winkler' (default, fast), 'levenshtein' (accurate), 'damerau_levenshtein' (handles transpositions)",
+                            "enum": ["jaro_winkler", "levenshtein", "damerau_levenshtein"]
+                        },
+                        "threshold": {
+                            "type": "number",
+                            "description": "Similarity threshold 0.0-1.0. Default 0.8 means 80% similarity required."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of documents to return"
+                        }
+                    },
+                    "required": ["collection", "field", "value"]
+                }
+            },
+            {
                 "name": "update_one",
                 "description": "Update a single document matching the filter",
                 "inputSchema": {
@@ -447,6 +482,37 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
             let query = params.get("query").cloned().unwrap_or(json!({}));
             let document = adapter.find_one(&collection, query)?;
             Ok(json!({"document": document}))
+        }
+        "fuzzy_search" => {
+            let collection = get_string(&params, "collection")?;
+            let field = get_string(&params, "field")?;
+            let value = get_string(&params, "value")?;
+
+            // Build $fuzzy query
+            let fuzzy_filter = if params.get("algorithm").is_some() || params.get("threshold").is_some() {
+                let mut fuzzy_obj = json!({"value": value});
+                if let Some(algo) = params.get("algorithm").and_then(|v| v.as_str()) {
+                    fuzzy_obj["algorithm"] = json!(algo);
+                }
+                if let Some(threshold) = params.get("threshold").and_then(|v| v.as_f64()) {
+                    fuzzy_obj["threshold"] = json!(threshold);
+                }
+                fuzzy_obj
+            } else {
+                json!(value)
+            };
+
+            let query = json!({ field: { "$fuzzy": fuzzy_filter } });
+
+            let options = FindOptions {
+                projection: None,
+                sort: None,
+                limit: params.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
+                skip: None,
+            };
+
+            let documents = adapter.find(&collection, query, options)?;
+            Ok(json!({"documents": documents, "count": documents.len()}))
         }
         "update_one" => {
             let collection = get_string(&params, "collection")?;
