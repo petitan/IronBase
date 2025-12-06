@@ -171,7 +171,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "fuzzy_search",
-                "description": "Find documents using fuzzy text matching. Useful for typo-tolerant search, name matching, and approximate string matching.",
+                "description": "Find documents using fuzzy text index (REQUIRES index_create_fuzzy first!). Returns documents with similarity scores, sorted by relevance. Useful for typo-tolerant search, name matching, and approximate string matching.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -181,27 +181,27 @@ pub fn get_tools_list() -> Value {
                         },
                         "field": {
                             "type": "string",
-                            "description": "Field name to search in"
+                            "description": "Field name to search in (must have fuzzy index)"
                         },
-                        "value": {
+                        "query": {
                             "type": "string",
                             "description": "Search term to match approximately"
                         },
                         "algorithm": {
                             "type": "string",
-                            "description": "Fuzzy algorithm: 'jaro_winkler' (default, fast), 'levenshtein' (accurate), 'damerau_levenshtein' (handles transpositions)",
+                            "description": "Override fuzzy algorithm: 'jaro_winkler' (default, fast), 'levenshtein' (accurate), 'damerau_levenshtein' (handles transpositions)",
                             "enum": ["jaro_winkler", "levenshtein", "damerau_levenshtein"]
                         },
                         "threshold": {
                             "type": "number",
-                            "description": "Similarity threshold 0.0-1.0. Default 0.8 means 80% similarity required."
+                            "description": "Override similarity threshold 0.0-1.0. Default uses index threshold."
                         },
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of documents to return"
                         }
                     },
-                    "required": ["collection", "field", "value"]
+                    "required": ["collection", "field", "query"]
                 }
             },
             {
@@ -415,6 +415,65 @@ pub fn get_tools_list() -> Value {
                     "required": ["collection", "field"]
                 }
             },
+            {
+                "name": "index_drop",
+                "description": "Drop (delete) an index from a collection",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "index_name": {
+                            "type": "string",
+                            "description": "Name of the index to drop (use index_list to see available indexes)"
+                        }
+                    },
+                    "required": ["collection", "index_name"]
+                }
+            },
+            // Query Analysis
+            {
+                "name": "explain",
+                "description": "Explain query execution plan. Shows whether an index is used and the query strategy.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "query": {
+                            "type": "object",
+                            "description": "Query to analyze"
+                        }
+                    },
+                    "required": ["collection", "query"]
+                }
+            },
+            {
+                "name": "find_with_hint",
+                "description": "Find documents using a specific index (forces index usage)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "query": {
+                            "type": "object",
+                            "description": "Query filter"
+                        },
+                        "hint": {
+                            "type": "string",
+                            "description": "Index name to use (from index_list)"
+                        }
+                    },
+                    "required": ["collection", "query", "hint"]
+                }
+            },
             // Schema Management
             {
                 "name": "schema_set",
@@ -532,38 +591,34 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
         "fuzzy_search" => {
             let collection = get_string(&params, "collection")?;
             let field = get_string(&params, "field")?;
-            let value = get_string(&params, "value")?;
+            let query = get_string(&params, "query")?;
+            let threshold = params.get("threshold").and_then(|v| v.as_f64());
+            let algorithm = params.get("algorithm").and_then(|v| v.as_str());
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
 
-            // Build $fuzzy query
-            let fuzzy_filter =
-                if params.get("algorithm").is_some() || params.get("threshold").is_some() {
-                    let mut fuzzy_obj = json!({"value": value});
-                    if let Some(algo) = params.get("algorithm").and_then(|v| v.as_str()) {
-                        fuzzy_obj["algorithm"] = json!(algo);
-                    }
-                    if let Some(threshold) = params.get("threshold").and_then(|v| v.as_f64()) {
-                        fuzzy_obj["threshold"] = json!(threshold);
-                    }
-                    fuzzy_obj
-                } else {
-                    json!(value)
-                };
+            // Use the real fuzzy search with index
+            let mut results = adapter.fuzzy_search(&collection, &field, &query, threshold, algorithm)?;
 
-            let query = json!({ field: { "$fuzzy": fuzzy_filter } });
+            // Apply limit if specified
+            if let Some(lim) = limit {
+                results.truncate(lim);
+            }
 
-            let options = FindOptions {
-                projection: None,
-                sort: None,
-                limit: params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize),
-                skip: None,
-                include_total: false,
-            };
+            // Format results with scores
+            let documents: Vec<Value> = results
+                .into_iter()
+                .map(|(doc, score)| {
+                    json!({
+                        "document": doc,
+                        "score": score
+                    })
+                })
+                .collect();
 
-            let result = adapter.find(&collection, query, options)?;
-            Ok(json!({"documents": result.documents, "count": result.documents.len()}))
+            Ok(json!({"results": documents, "count": documents.len()}))
         }
         "update_one" => {
             let collection = get_string(&params, "collection")?;
@@ -668,6 +723,27 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
                 "algorithm": algorithm,
                 "threshold": threshold
             }))
+        }
+        "index_drop" => {
+            let collection = get_string(&params, "collection")?;
+            let index_name = get_string(&params, "index_name")?;
+            adapter.drop_index(&collection, &index_name)?;
+            Ok(json!({"success": true, "dropped": index_name}))
+        }
+
+        // Query Analysis
+        "explain" => {
+            let collection = get_string(&params, "collection")?;
+            let query = params.get("query").cloned().unwrap_or(json!({}));
+            let plan = adapter.explain(&collection, query)?;
+            Ok(json!({"plan": plan}))
+        }
+        "find_with_hint" => {
+            let collection = get_string(&params, "collection")?;
+            let query = params.get("query").cloned().unwrap_or(json!({}));
+            let hint = get_string(&params, "hint")?;
+            let documents = adapter.find_with_hint(&collection, query, &hint)?;
+            Ok(json!({"documents": documents, "count": documents.len()}))
         }
 
         // Schema Management

@@ -303,12 +303,33 @@ impl IronBaseAdapter {
         Ok(indexes)
     }
 
+    /// Drop an index
+    pub fn drop_index(&self, collection: &str, index_name: &str) -> Result<()> {
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        coll.drop_index(index_name)?;
+        Ok(())
+    }
+
     /// Explain query execution plan
     pub fn explain(&self, collection: &str, query: Value) -> Result<Value> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
         let plan = coll.explain(&query)?;
         Ok(plan)
+    }
+
+    /// Find documents with index hint
+    pub fn find_with_hint(
+        &self,
+        collection: &str,
+        query: Value,
+        hint: &str,
+    ) -> Result<Vec<Value>> {
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        let documents = coll.find_with_hint(&query, hint)?;
+        Ok(documents)
     }
 
     /// Create a fuzzy text index
@@ -331,6 +352,29 @@ impl IronBaseAdapter {
         let coll = db.collection(collection)?;
         let name = coll.create_fuzzy_index(field.to_string(), algo, threshold)?;
         Ok(name)
+    }
+
+    /// Fuzzy search using the fuzzy index (returns documents with similarity scores)
+    pub fn fuzzy_search(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        threshold: Option<f64>,
+        algorithm: Option<&str>,
+    ) -> Result<Vec<(Value, f64)>> {
+        use ironbase_core::FuzzyAlgorithm;
+
+        let algo = algorithm.map(|a| match a {
+            "levenshtein" => FuzzyAlgorithm::Levenshtein,
+            "damerau_levenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
+            _ => FuzzyAlgorithm::JaroWinkler,
+        });
+
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        let results = coll.fuzzy_search(field, query, threshold, algo)?;
+        Ok(results)
     }
 
     // ============================================================
