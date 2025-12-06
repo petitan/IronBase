@@ -7,12 +7,27 @@
 #   .\install.ps1 -Update      # Update running service to latest version
 #   .\install.ps1 -Uninstall   # Uninstall
 #   .\install.ps1 -NoDownload  # Install without auto-download
+#
+# One-liner update (via environment variable):
+#   $env:IRONBASE_ACTION='update'; irm https://github.com/petitan/IronBase/releases/latest/download/install.ps1 | iex
+#
+# Auto-update: If already installed, running without parameters will update automatically.
 
 param(
     [switch]$Update,
     [switch]$Uninstall,
     [switch]$NoDownload
 )
+
+# Support environment variable for iex one-liners
+if ($env:IRONBASE_ACTION) {
+    switch ($env:IRONBASE_ACTION.ToLower()) {
+        "update" { $Update = $true }
+        "uninstall" { $Uninstall = $true }
+    }
+    # Clear to avoid affecting subsequent runs
+    $env:IRONBASE_ACTION = $null
+}
 
 $ErrorActionPreference = "Stop"
 
@@ -273,14 +288,35 @@ function Update-IronBase {
     } catch {}
     Write-Host "Current version: $CurrentVersion" -ForegroundColor White
 
-    # Check if service is running
+    # Check if service is running and stop it
     $ServiceRunning = $false
     $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($Service -and $Service.Status -eq "Running") {
         $ServiceRunning = $true
         Write-Host "Stopping service..." -ForegroundColor Yellow
         Stop-Service -Name $ServiceName -Force
-        Start-Sleep -Seconds 2
+
+        # Wait for service to fully stop (max 30 seconds)
+        $timeout = 30
+        $waited = 0
+        while ($waited -lt $timeout) {
+            Start-Sleep -Seconds 1
+            $waited++
+            $Service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            if ($Service.Status -eq "Stopped") {
+                Write-Host "Service stopped." -ForegroundColor Green
+                break
+            }
+            if ($waited % 5 -eq 0) {
+                Write-Host "  Waiting for service to stop... ($waited s)" -ForegroundColor DarkGray
+            }
+        }
+
+        if ($Service.Status -ne "Stopped") {
+            Write-Host "WARNING: Service did not stop gracefully. Killing process..." -ForegroundColor Yellow
+            Get-Process -Name "mcp-ironbase-server" -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+        }
     }
 
     # Download latest
@@ -380,5 +416,14 @@ if ($Update) {
 } elseif ($Uninstall) {
     Uninstall-IronBase
 } else {
-    Install-IronBase
+    # Auto-detect: if already installed, switch to update mode
+    $ExistingExe = "$InstallDir\$ExeName"
+    if (Test-Path $ExistingExe) {
+        Write-Host ""
+        Write-Host "IronBase is already installed at: $InstallDir" -ForegroundColor Cyan
+        Write-Host "Switching to update mode..." -ForegroundColor Cyan
+        Update-IronBase
+    } else {
+        Install-IronBase
+    }
 }
