@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use strsim::{damerau_levenshtein, jaro_winkler, normalized_levenshtein};
 
 // Node page constants (for file-based persistence)
-pub const NODE_PAGE_SIZE: usize = 4096; // 4KB pages
+pub const NODE_PAGE_SIZE: usize = 16384; // 16KB pages - supports long keys
 const NODE_TYPE_INTERNAL: u8 = 0;
 const NODE_TYPE_LEAF: u8 = 1;
 
 /// Maximum keys per node before split is triggered
-/// With 4KB pages and typical key sizes, 32-64 keys is reasonable
-const MAX_KEYS_PER_NODE: usize = 64;
+/// With 16KB pages, we can handle more keys per node
+const MAX_KEYS_PER_NODE: usize = 128;
 
 /// Index key - supported types for indexing
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -391,6 +391,36 @@ impl BPlusTree {
         Ok(())
     }
 
+    /// Estimate serialized size of a node (approximate, for early split detection)
+    fn estimate_node_size(node: &BTreeNode) -> usize {
+        match node {
+            BTreeNode::Leaf(leaf) => {
+                let key_sizes: usize = leaf.keys.iter().map(Self::estimate_key_size).sum();
+                let doc_id_overhead = leaf.document_ids.len() * 20;
+                50 + key_sizes + doc_id_overhead
+            }
+            BTreeNode::Internal(internal) => {
+                let key_sizes: usize = internal.keys.iter().map(Self::estimate_key_size).sum();
+                50 + key_sizes + internal.children.len() * 100
+            }
+        }
+    }
+
+    /// Estimate serialized size of a key
+    fn estimate_key_size(key: &IndexKey) -> usize {
+        match key {
+            IndexKey::Null => 4,
+            IndexKey::Bool(_) => 5,
+            IndexKey::Int(_) => 20,
+            IndexKey::Float(_) => 20,
+            IndexKey::String(s) => s.len() + 10,
+            IndexKey::Compound(keys) => {
+                keys.iter().map(Self::estimate_key_size).sum::<usize>() + 10
+            }
+            IndexKey::MaxKey => 10,
+        }
+    }
+
     /// Recursively insert into a node (mutates in place)
     /// Returns an optional split result (separator key, new right sibling) if node was split
     fn insert_into_node(
@@ -405,8 +435,12 @@ impl BPlusTree {
                 leaf.keys.insert(insert_pos, key);
                 leaf.document_ids.insert(insert_pos, doc_id);
 
-                // Check if split is needed
-                if leaf.keys.len() > MAX_KEYS_PER_NODE {
+                // Check if split is needed (by count OR by size for long keys)
+                let needs_split = leaf.keys.len() > MAX_KEYS_PER_NODE
+                    || Self::estimate_node_size(&BTreeNode::Leaf(leaf.clone()))
+                        > NODE_PAGE_SIZE - 200;
+
+                if needs_split {
                     Ok(Some(Self::split_leaf(leaf)))
                 } else {
                     Ok(None)
@@ -437,8 +471,12 @@ impl BPlusTree {
                     internal.keys.insert(child_idx, separator);
                     internal.children.insert(child_idx + 1, right_child);
 
-                    // Check if this internal node needs to split
-                    if internal.keys.len() > MAX_KEYS_PER_NODE {
+                    // Check if this internal node needs to split (by count OR by size)
+                    let needs_split = internal.keys.len() > MAX_KEYS_PER_NODE
+                        || Self::estimate_node_size(&BTreeNode::Internal(internal.clone()))
+                            > NODE_PAGE_SIZE - 200;
+
+                    if needs_split {
                         Ok(Some(Self::split_internal(internal)))
                     } else {
                         Ok(None)
@@ -2487,20 +2525,20 @@ mod split_tests {
         let mut tree = BPlusTree::new("multi_split_idx".to_string(), "x".to_string(), false);
 
         // Insert enough elements to cause multiple levels of splits
-        // With MAX_KEYS_PER_NODE = 64, we need > 64^2 = 4096 for 3 levels
-        for i in 0..5000 {
+        // With MAX_KEYS_PER_NODE = 128, we need > 128^2 = 16384 for 3 levels
+        for i in 0..20000 {
             tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
         }
 
         // Verify tree height is at least 3
         assert!(
             tree.metadata.tree_height >= 3,
-            "5000 elements should create tree with height >= 3, got {}",
+            "20000 elements should create tree with height >= 3, got {}",
             tree.metadata.tree_height
         );
 
         // Verify all elements are searchable
-        for i in (0..5000).step_by(100) {
+        for i in (0..20000).step_by(100) {
             assert_eq!(
                 tree.search(&IndexKey::Int(i)),
                 Some(DocumentId::Int(i)),
