@@ -12,13 +12,13 @@ use std::path::PathBuf;
 use strsim::{damerau_levenshtein, jaro_winkler, normalized_levenshtein};
 
 // Node page constants (for file-based persistence)
-pub const NODE_PAGE_SIZE: usize = 16384; // 16KB pages - supports longer keys like message_id
+pub const NODE_PAGE_SIZE: usize = 4096; // 4KB pages
 const NODE_TYPE_INTERNAL: u8 = 0;
 const NODE_TYPE_LEAF: u8 = 1;
 
 /// Maximum keys per node before split is triggered
-/// With 16KB pages we can store more keys per node
-const MAX_KEYS_PER_NODE: usize = 128;
+/// With 4KB pages and typical key sizes, 32-64 keys is reasonable
+const MAX_KEYS_PER_NODE: usize = 64;
 
 /// Index key - supported types for indexing
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
