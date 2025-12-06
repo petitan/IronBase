@@ -114,7 +114,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "find",
-                "description": "Find documents matching a query with optional projection, sort, limit, skip",
+                "description": "Find documents matching a query with optional projection, sort, limit, skip, and total count",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -141,6 +141,11 @@ pub fn get_tools_list() -> Value {
                         "skip": {
                             "type": "integer",
                             "description": "Number of documents to skip (for pagination)"
+                        },
+                        "include_total": {
+                            "type": "boolean",
+                            "description": "If true, also return total count of matching documents (before limit/skip). Useful for pagination UI.",
+                            "default": false
                         }
                     },
                     "required": ["collection", "query"]
@@ -491,6 +496,10 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
         "find" => {
             let collection = get_string(&params, "collection")?;
             let query = params.get("query").cloned().unwrap_or(json!({}));
+            let include_total = params
+                .get("include_total")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let options = FindOptions {
                 projection: params.get("projection").cloned(),
                 sort: params.get("sort").cloned(),
@@ -502,9 +511,17 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
                     .get("skip")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize),
+                include_total,
             };
-            let documents = adapter.find(&collection, query, options)?;
-            Ok(json!({"documents": documents, "count": documents.len()}))
+            let result = adapter.find(&collection, query, options)?;
+            let mut response = json!({
+                "documents": result.documents,
+                "count": result.documents.len()
+            });
+            if let Some(total) = result.total {
+                response["total"] = json!(total);
+            }
+            Ok(response)
         }
         "find_one" => {
             let collection = get_string(&params, "collection")?;
@@ -518,30 +535,35 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
             let value = get_string(&params, "value")?;
 
             // Build $fuzzy query
-            let fuzzy_filter = if params.get("algorithm").is_some() || params.get("threshold").is_some() {
-                let mut fuzzy_obj = json!({"value": value});
-                if let Some(algo) = params.get("algorithm").and_then(|v| v.as_str()) {
-                    fuzzy_obj["algorithm"] = json!(algo);
-                }
-                if let Some(threshold) = params.get("threshold").and_then(|v| v.as_f64()) {
-                    fuzzy_obj["threshold"] = json!(threshold);
-                }
-                fuzzy_obj
-            } else {
-                json!(value)
-            };
+            let fuzzy_filter =
+                if params.get("algorithm").is_some() || params.get("threshold").is_some() {
+                    let mut fuzzy_obj = json!({"value": value});
+                    if let Some(algo) = params.get("algorithm").and_then(|v| v.as_str()) {
+                        fuzzy_obj["algorithm"] = json!(algo);
+                    }
+                    if let Some(threshold) = params.get("threshold").and_then(|v| v.as_f64()) {
+                        fuzzy_obj["threshold"] = json!(threshold);
+                    }
+                    fuzzy_obj
+                } else {
+                    json!(value)
+                };
 
             let query = json!({ field: { "$fuzzy": fuzzy_filter } });
 
             let options = FindOptions {
                 projection: None,
                 sort: None,
-                limit: params.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize),
+                limit: params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as usize),
                 skip: None,
+                include_total: false,
             };
 
-            let documents = adapter.find(&collection, query, options)?;
-            Ok(json!({"documents": documents, "count": documents.len()}))
+            let result = adapter.find(&collection, query, options)?;
+            Ok(json!({"documents": result.documents, "count": result.documents.len()}))
         }
         "update_one" => {
             let collection = get_string(&params, "collection")?;

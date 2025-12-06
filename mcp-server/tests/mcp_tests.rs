@@ -294,6 +294,88 @@ fn test_dispatch_find_with_options() {
 }
 
 #[test]
+fn test_dispatch_find_with_include_total() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Insert multiple documents
+    dispatch_tool(
+        "insert_many",
+        json!({
+            "collection": "users",
+            "documents": [
+                {"name": "Alice", "age": 30},
+                {"name": "Bob", "age": 25},
+                {"name": "Carol", "age": 35},
+                {"name": "Dave", "age": 28},
+                {"name": "Eve", "age": 32}
+            ]
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    // Find with limit and include_total for pagination
+    let result = dispatch_tool(
+        "find",
+        json!({
+            "collection": "users",
+            "query": {},
+            "limit": 2,
+            "skip": 1,
+            "include_total": true
+        }),
+        &adapter,
+    );
+    assert!(result.is_ok());
+    let value = result.unwrap();
+
+    // count = returned documents (2)
+    assert_eq!(value.get("count"), Some(&json!(2)));
+
+    // total = all matching documents before limit/skip (5)
+    assert_eq!(value.get("total"), Some(&json!(5)));
+}
+
+#[test]
+fn test_dispatch_find_without_include_total() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Insert documents
+    dispatch_tool(
+        "insert_many",
+        json!({
+            "collection": "users",
+            "documents": [
+                {"name": "Alice", "age": 30},
+                {"name": "Bob", "age": 25},
+                {"name": "Carol", "age": 35}
+            ]
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    // Find without include_total (default behavior)
+    let result = dispatch_tool(
+        "find",
+        json!({
+            "collection": "users",
+            "query": {},
+            "limit": 2
+        }),
+        &adapter,
+    );
+    assert!(result.is_ok());
+    let value = result.unwrap();
+
+    // count should be present
+    assert_eq!(value.get("count"), Some(&json!(2)));
+
+    // total should NOT be present when include_total is false/missing
+    assert!(value.get("total").is_none());
+}
+
+#[test]
 fn test_dispatch_find_one() {
     let (adapter, _temp) = create_test_adapter();
 

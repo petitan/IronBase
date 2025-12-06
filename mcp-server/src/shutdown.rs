@@ -85,10 +85,7 @@ mod tests {
         });
 
         // Should receive shutdown signal
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx.recv()
-        ).await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv()).await;
 
         assert!(result.is_ok());
     }
@@ -105,10 +102,7 @@ mod tests {
         });
 
         // Subscriber should also receive shutdown signal
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(100),
-            rx2.recv()
-        ).await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), rx2.recv()).await;
 
         assert!(result.is_ok());
     }

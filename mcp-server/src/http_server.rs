@@ -48,7 +48,12 @@ fn parse_size(s: &str) -> Result<usize, String> {
         "KB" | "K" => 1024,
         "MB" | "M" => 1024 * 1024,
         "GB" | "G" => 1024 * 1024 * 1024,
-        _ => return Err(format!("Unknown size suffix: '{}'. Use B, KB, MB, or GB", suffix)),
+        _ => {
+            return Err(format!(
+                "Unknown size suffix: '{}'. Use B, KB, MB, or GB",
+                suffix
+            ))
+        }
     };
 
     Ok((number * multiplier as f64) as usize)
@@ -103,8 +108,8 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
         })
     } else {
         // Check for IRONBASE_PATH env var
-        let db_path = std::env::var("IRONBASE_PATH")
-            .unwrap_or_else(|_| "ironbase_data.mlite".to_string());
+        let db_path =
+            std::env::var("IRONBASE_PATH").unwrap_or_else(|_| "ironbase_data.mlite".to_string());
         Ok(Config {
             host: "0.0.0.0".to_string(),
             port: 8080,
@@ -219,7 +224,11 @@ async fn run_http_server_internal(
         .await
         .expect("Failed to bind address");
 
-    info!("Server listening on {} (max body size: {})", addr, format_size(max_body_size));
+    info!(
+        "Server listening on {} (max body size: {})",
+        addr,
+        format_size(max_body_size)
+    );
 
     // Create shutdown future based on source
     #[cfg(windows)]
@@ -508,8 +517,14 @@ mod tests {
 
     #[test]
     fn test_parse_size_fractional() {
-        assert_eq!(parse_size("1.5GB").unwrap(), (1.5 * 1024.0 * 1024.0 * 1024.0) as usize);
-        assert_eq!(parse_size("0.5MB").unwrap(), (0.5 * 1024.0 * 1024.0) as usize);
+        assert_eq!(
+            parse_size("1.5GB").unwrap(),
+            (1.5 * 1024.0 * 1024.0 * 1024.0) as usize
+        );
+        assert_eq!(
+            parse_size("0.5MB").unwrap(),
+            (0.5 * 1024.0 * 1024.0) as usize
+        );
     }
 
     #[test]

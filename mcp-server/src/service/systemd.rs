@@ -75,7 +75,14 @@ pub fn install_systemd() -> ServiceResult<()> {
 
     // Create ironbase user if it doesn't exist
     let _ = Command::new("useradd")
-        .args(["-r", "-s", "/bin/false", "-d", "/var/lib/ironbase", "ironbase"])
+        .args([
+            "-r",
+            "-s",
+            "/bin/false",
+            "-d",
+            "/var/lib/ironbase",
+            "ironbase",
+        ])
         .output();
 
     // Create directories
@@ -120,24 +127,31 @@ level = "info"
         .output()?;
 
     // Reload systemd
-    Command::new("systemctl")
-        .args(["daemon-reload"])
-        .output()?;
+    Command::new("systemctl").args(["daemon-reload"]).output()?;
 
     // Enable service
     Command::new("systemctl")
         .args(["enable", SYSTEMD_SERVICE_NAME])
         .output()?;
 
-    println!("systemd service '{}' installed successfully!", SYSTEMD_SERVICE_NAME);
+    println!(
+        "systemd service '{}' installed successfully!",
+        SYSTEMD_SERVICE_NAME
+    );
     println!("  Service file: {}", SYSTEMD_SERVICE_PATH);
     println!("  Executable: {}", exe_path.display());
     println!("  Config: /etc/ironbase/config.toml");
     println!("  Data: /var/lib/ironbase/");
     println!();
     println!("To start: sudo systemctl start {}", SYSTEMD_SERVICE_NAME);
-    println!("To check status: sudo systemctl status {}", SYSTEMD_SERVICE_NAME);
-    println!("To view logs: sudo journalctl -u {} -f", SYSTEMD_SERVICE_NAME);
+    println!(
+        "To check status: sudo systemctl status {}",
+        SYSTEMD_SERVICE_NAME
+    );
+    println!(
+        "To view logs: sudo journalctl -u {} -f",
+        SYSTEMD_SERVICE_NAME
+    );
 
     Ok(())
 }
@@ -164,9 +178,7 @@ pub fn uninstall_systemd() -> ServiceResult<()> {
     }
 
     // Reload systemd
-    Command::new("systemctl")
-        .args(["daemon-reload"])
-        .output()?;
+    Command::new("systemctl").args(["daemon-reload"]).output()?;
 
     println!("systemd service '{}' uninstalled.", SYSTEMD_SERVICE_NAME);
     println!("Note: Configuration and data files were preserved.");

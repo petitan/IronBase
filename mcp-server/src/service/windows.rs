@@ -36,8 +36,7 @@ pub fn install_service() -> ServiceResult<()> {
         let manager_read =
             ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
-        if let Ok(_existing) =
-            manager_read.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
+        if let Ok(_existing) = manager_read.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS)
         {
             println!("Service '{}' already exists.", SERVICE_NAME);
             println!("Use 'uninstall' first if you want to reinstall.");
@@ -64,7 +63,12 @@ pub fn install_service() -> ServiceResult<()> {
 
         let service = manager
             .create_service(&service_info, ServiceAccess::CHANGE_CONFIG)
-            .map_err(|e| format!("Failed to create service: {} (Are you running as Administrator?)", e))?;
+            .map_err(|e| {
+                format!(
+                    "Failed to create service: {} (Are you running as Administrator?)",
+                    e
+                )
+            })?;
 
         // Set description
         service
@@ -92,8 +96,7 @@ pub fn install_service() -> ServiceResult<()> {
 pub fn uninstall_service() -> ServiceResult<()> {
     #[cfg(windows)]
     {
-        let manager =
-            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
         let service = manager.open_service(
             SERVICE_NAME,
@@ -110,7 +113,10 @@ pub fn uninstall_service() -> ServiceResult<()> {
 
         service.delete()?;
 
-        println!("Windows Service '{}' uninstalled successfully!", SERVICE_NAME);
+        println!(
+            "Windows Service '{}' uninstalled successfully!",
+            SERVICE_NAME
+        );
 
         Ok(())
     }
@@ -125,8 +131,7 @@ pub fn uninstall_service() -> ServiceResult<()> {
 pub fn start_service() -> ServiceResult<()> {
     #[cfg(windows)]
     {
-        let manager =
-            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
         let service = manager.open_service(SERVICE_NAME, ServiceAccess::START)?;
         service.start(&[OsString::from("")])?;
@@ -145,8 +150,7 @@ pub fn start_service() -> ServiceResult<()> {
 pub fn stop_service() -> ServiceResult<()> {
     #[cfg(windows)]
     {
-        let manager =
-            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
         let service = manager.open_service(SERVICE_NAME, ServiceAccess::STOP)?;
         service.stop()?;
@@ -165,8 +169,7 @@ pub fn stop_service() -> ServiceResult<()> {
 pub fn status_service() -> ServiceResult<String> {
     #[cfg(windows)]
     {
-        let manager =
-            ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
+        let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)?;
 
         match manager.open_service(SERVICE_NAME, ServiceAccess::QUERY_STATUS) {
             Ok(service) => {

@@ -119,7 +119,10 @@ level = "info"
         .args(["root:wheel", LAUNCHD_PLIST_PATH])
         .output()?;
 
-    println!("launchd service '{}' installed successfully!", LAUNCHD_LABEL);
+    println!(
+        "launchd service '{}' installed successfully!",
+        LAUNCHD_LABEL
+    );
     println!("  Plist: {}", LAUNCHD_PLIST_PATH);
     println!("  Executable: {}", exe_path.display());
     println!("  Config: /usr/local/etc/ironbase/config.toml");
@@ -203,9 +206,7 @@ pub fn stop_launchd() -> ServiceResult<()> {
 
 /// Get service status
 pub fn status_launchd() -> ServiceResult<String> {
-    let output = Command::new("launchctl")
-        .args(["list"])
-        .output()?;
+    let output = Command::new("launchctl").args(["list"]).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
 

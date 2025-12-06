@@ -29,54 +29,44 @@ async fn main() {
     // Handle service commands
     if args.len() > 1 {
         match args[1].as_str() {
-            "install" => {
-                match service::install() {
-                    Ok(()) => std::process::exit(0),
-                    Err(e) => {
-                        eprintln!("Error installing service: {}", e);
-                        std::process::exit(1);
-                    }
+            "install" => match service::install() {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Error installing service: {}", e);
+                    std::process::exit(1);
                 }
-            }
-            "uninstall" => {
-                match service::uninstall() {
-                    Ok(()) => std::process::exit(0),
-                    Err(e) => {
-                        eprintln!("Error uninstalling service: {}", e);
-                        std::process::exit(1);
-                    }
+            },
+            "uninstall" => match service::uninstall() {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Error uninstalling service: {}", e);
+                    std::process::exit(1);
                 }
-            }
-            "start" => {
-                match service::start() {
-                    Ok(()) => std::process::exit(0),
-                    Err(e) => {
-                        eprintln!("Error starting service: {}", e);
-                        std::process::exit(1);
-                    }
+            },
+            "start" => match service::start() {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Error starting service: {}", e);
+                    std::process::exit(1);
                 }
-            }
-            "stop" => {
-                match service::stop() {
-                    Ok(()) => std::process::exit(0),
-                    Err(e) => {
-                        eprintln!("Error stopping service: {}", e);
-                        std::process::exit(1);
-                    }
+            },
+            "stop" => match service::stop() {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("Error stopping service: {}", e);
+                    std::process::exit(1);
                 }
-            }
-            "status" => {
-                match service::status() {
-                    Ok(status) => {
-                        println!("Service status: {}", status);
-                        std::process::exit(0);
-                    }
-                    Err(e) => {
-                        eprintln!("Error checking status: {}", e);
-                        std::process::exit(1);
-                    }
+            },
+            "status" => match service::status() {
+                Ok(status) => {
+                    println!("Service status: {}", status);
+                    std::process::exit(0);
                 }
-            }
+                Err(e) => {
+                    eprintln!("Error checking status: {}", e);
+                    std::process::exit(1);
+                }
+            },
             "--stdio" => {
                 run_stdio_server();
                 return;

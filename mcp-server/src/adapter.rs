@@ -15,6 +15,17 @@ pub struct FindOptions {
     pub sort: Option<Value>,
     pub limit: Option<usize>,
     pub skip: Option<usize>,
+    /// If true, also return the total count of matching documents (before limit/skip)
+    /// Useful for pagination UI ("Showing 1-10 of 100 results")
+    pub include_total: bool,
+}
+
+/// Find result with optional total count
+#[derive(Debug)]
+pub struct FindResult {
+    pub documents: Vec<Value>,
+    /// Total count of matching documents (only populated if include_total was true)
+    pub total: Option<usize>,
 }
 
 /// Update result
@@ -123,9 +134,16 @@ impl IronBaseAdapter {
     }
 
     /// Find documents
-    pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<Vec<Value>> {
+    pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
+
+        // Get total count before limit/skip if requested
+        let total = if options.include_total {
+            Some(coll.count_documents(&query)? as usize)
+        } else {
+            None
+        };
 
         // Convert to IronBase FindOptions
         let ironbase_options = ironbase_core::FindOptions {
@@ -166,8 +184,8 @@ impl IronBaseAdapter {
             skip: options.skip,
         };
 
-        let results = coll.find_with_options(&query, ironbase_options)?;
-        Ok(results)
+        let documents = coll.find_with_options(&query, ironbase_options)?;
+        Ok(FindResult { documents, total })
     }
 
     /// Find a single document
