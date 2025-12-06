@@ -293,6 +293,28 @@ impl IronBaseAdapter {
         Ok(plan)
     }
 
+    /// Create a fuzzy text index
+    pub fn create_fuzzy_index(
+        &self,
+        collection: &str,
+        field: &str,
+        algorithm: &str,
+        threshold: f64,
+    ) -> Result<String> {
+        use ironbase_core::FuzzyAlgorithm;
+
+        let algo = match algorithm {
+            "levenshtein" => FuzzyAlgorithm::Levenshtein,
+            "damerau_levenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
+            _ => FuzzyAlgorithm::JaroWinkler, // default
+        };
+
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        let name = coll.create_fuzzy_index(field.to_string(), algo, threshold)?;
+        Ok(name)
+    }
+
     // ============================================================
     // Schema Management
     // ============================================================

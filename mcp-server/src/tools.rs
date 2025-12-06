@@ -381,6 +381,35 @@ pub fn get_tools_list() -> Value {
                     "required": ["collection"]
                 }
             },
+            {
+                "name": "index_create_fuzzy",
+                "description": "Create a fuzzy text index for similarity-based search",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "field": {
+                            "type": "string",
+                            "description": "Field name to index for fuzzy search"
+                        },
+                        "algorithm": {
+                            "type": "string",
+                            "description": "Similarity algorithm: jaro_winkler (default, fast), levenshtein (accurate), damerau_levenshtein (good for typos)",
+                            "enum": ["jaro_winkler", "levenshtein", "damerau_levenshtein"],
+                            "default": "jaro_winkler"
+                        },
+                        "threshold": {
+                            "type": "number",
+                            "description": "Minimum similarity threshold 0.0-1.0 (default: 0.8)",
+                            "default": 0.8
+                        }
+                    },
+                    "required": ["collection", "field"]
+                }
+            },
             // Schema Management
             {
                 "name": "schema_set",
@@ -598,6 +627,25 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
             let collection = get_string(&params, "collection")?;
             let indexes = adapter.list_indexes(&collection)?;
             Ok(json!({"indexes": indexes}))
+        }
+        "index_create_fuzzy" => {
+            let collection = get_string(&params, "collection")?;
+            let field = get_string(&params, "field")?;
+            let algorithm = params
+                .get("algorithm")
+                .and_then(|v| v.as_str())
+                .unwrap_or("jaro_winkler");
+            let threshold = params
+                .get("threshold")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.8);
+            let name = adapter.create_fuzzy_index(&collection, &field, algorithm, threshold)?;
+            Ok(json!({
+                "index_name": name,
+                "field": field,
+                "algorithm": algorithm,
+                "threshold": threshold
+            }))
         }
 
         // Schema Management

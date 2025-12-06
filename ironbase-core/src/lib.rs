@@ -47,7 +47,7 @@ pub(crate) mod aggregation;
 // NOTE: btree.rs was removed - it was an alternative B+ tree implementation that was never integrated
 // The actual B+ tree implementation is in index.rs (BTreeNode, InternalNode, LeafNode)
 pub(crate) mod catalog_serde;
-pub(crate) mod index;
+pub mod index; // Public for FuzzyIndex and FuzzyAlgorithm exports
 pub(crate) mod logging;
 pub(crate) mod query_cache;
 pub(crate) mod query_planner;
@@ -84,3 +84,6 @@ pub use wal::{
     CommittedTransaction, TransactionGrouper, WALEntry, WALEntryIterator, WALEntryType,
     WriteAheadLog,
 };
+
+// Fuzzy text index exports
+pub use index::{FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata};

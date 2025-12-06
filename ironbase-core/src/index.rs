@@ -1,5 +1,5 @@
 // src/index.rs
-// B+ Tree Index Implementation
+// B+ Tree Index Implementation + Fuzzy Text Index
 
 use crate::document::DocumentId;
 use crate::error::{MongoLiteError, Result};
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use strsim::{damerau_levenshtein, jaro_winkler, normalized_levenshtein};
 
 // Node page constants (for file-based persistence)
 pub const NODE_PAGE_SIZE: usize = 4096; // 4KB pages
@@ -842,6 +843,197 @@ pub enum IndexType {
     Geo2d,
 }
 
+// ===== Fuzzy Text Index =====
+
+/// Fuzzy matching algorithm
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FuzzyAlgorithm {
+    /// Jaro-Winkler similarity (default) - fast, good for names
+    #[default]
+    JaroWinkler,
+    /// Normalized Levenshtein distance - accurate edit distance
+    Levenshtein,
+    /// Damerau-Levenshtein - includes transpositions
+    DamerauLevenshtein,
+}
+
+impl FuzzyAlgorithm {
+    /// Calculate similarity between two strings (0.0 to 1.0)
+    pub fn similarity(&self, a: &str, b: &str) -> f64 {
+        let a_lower = a.to_lowercase();
+        let b_lower = b.to_lowercase();
+        match self {
+            FuzzyAlgorithm::JaroWinkler => jaro_winkler(&a_lower, &b_lower),
+            FuzzyAlgorithm::Levenshtein => normalized_levenshtein(&a_lower, &b_lower),
+            FuzzyAlgorithm::DamerauLevenshtein => {
+                let max_len = a_lower.len().max(b_lower.len());
+                if max_len == 0 {
+                    return 1.0;
+                }
+                let distance = damerau_levenshtein(&a_lower, &b_lower);
+                1.0 - (distance as f64 / max_len as f64)
+            }
+        }
+    }
+
+    /// Parse algorithm name from string
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "jaro_winkler" | "jarowinkler" => Some(FuzzyAlgorithm::JaroWinkler),
+            "levenshtein" => Some(FuzzyAlgorithm::Levenshtein),
+            "damerau_levenshtein" | "dameraulevenshtein" => {
+                Some(FuzzyAlgorithm::DamerauLevenshtein)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Fuzzy index metadata
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FuzzyIndexMetadata {
+    pub name: String,
+    pub field: String,
+    pub algorithm: FuzzyAlgorithm,
+    pub threshold: f64,
+    pub num_entries: usize,
+}
+
+/// Fuzzy text index - stores string values for similarity search
+///
+/// Unlike B+ tree indexes which support exact matching and range queries,
+/// fuzzy indexes support similarity-based search using algorithms like
+/// Jaro-Winkler or Levenshtein distance.
+///
+/// # Performance Characteristics
+/// - Insert: O(1)
+/// - Search: O(n) where n = number of indexed values
+/// - Storage: ~40-60% overhead per indexed field
+///
+/// # Example
+/// ```rust,ignore
+/// let mut index = FuzzyIndex::new("name_fuzzy", "name", FuzzyAlgorithm::JaroWinkler, 0.8);
+/// index.insert("John Smith", doc_id);
+/// let matches = index.search("Jon Smyth", None); // Returns similar matches
+/// ```
+#[derive(Debug, Clone)]
+pub struct FuzzyIndex {
+    pub metadata: FuzzyIndexMetadata,
+    /// Indexed entries: (lowercase_value, original_value, document_id)
+    entries: Vec<(String, String, DocumentId)>,
+}
+
+impl FuzzyIndex {
+    /// Create a new fuzzy index
+    pub fn new(name: &str, field: &str, algorithm: FuzzyAlgorithm, threshold: f64) -> Self {
+        FuzzyIndex {
+            metadata: FuzzyIndexMetadata {
+                name: name.to_string(),
+                field: field.to_string(),
+                algorithm,
+                threshold: threshold.clamp(0.0, 1.0),
+                num_entries: 0,
+            },
+            entries: Vec::new(),
+        }
+    }
+
+    /// Insert a value into the fuzzy index
+    pub fn insert(&mut self, value: &str, doc_id: DocumentId) {
+        let lower = value.to_lowercase();
+        self.entries.push((lower, value.to_string(), doc_id));
+        self.metadata.num_entries = self.entries.len();
+    }
+
+    /// Remove a document from the fuzzy index
+    pub fn remove(&mut self, doc_id: &DocumentId) {
+        self.entries.retain(|(_, _, id)| id != doc_id);
+        self.metadata.num_entries = self.entries.len();
+    }
+
+    /// Remove a specific value-document pair
+    pub fn remove_value(&mut self, value: &str, doc_id: &DocumentId) {
+        let lower = value.to_lowercase();
+        self.entries
+            .retain(|(l, _, id)| !(l == &lower && id == doc_id));
+        self.metadata.num_entries = self.entries.len();
+    }
+
+    /// Search for similar values
+    ///
+    /// Returns document IDs where the indexed value has similarity >= threshold
+    /// Optionally override the default threshold for this search
+    pub fn search(&self, query: &str, threshold_override: Option<f64>) -> Vec<(DocumentId, f64)> {
+        let threshold = threshold_override.unwrap_or(self.metadata.threshold);
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        for (lower_value, _original, doc_id) in &self.entries {
+            let similarity = self
+                .metadata
+                .algorithm
+                .similarity(&query_lower, lower_value);
+            if similarity >= threshold {
+                results.push((doc_id.clone(), similarity));
+            }
+        }
+
+        // Sort by similarity descending
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+
+    /// Search with algorithm override
+    pub fn search_with_algorithm(
+        &self,
+        query: &str,
+        algorithm: FuzzyAlgorithm,
+        threshold: f64,
+    ) -> Vec<(DocumentId, f64)> {
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        for (lower_value, _original, doc_id) in &self.entries {
+            let similarity = algorithm.similarity(&query_lower, lower_value);
+            if similarity >= threshold {
+                results.push((doc_id.clone(), similarity));
+            }
+        }
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results
+    }
+
+    /// Get index size
+    pub fn size(&self) -> usize {
+        self.metadata.num_entries
+    }
+
+    /// Clear the index
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.metadata.num_entries = 0;
+    }
+
+    /// Rebuild index from documents
+    ///
+    /// Clears existing entries and rebuilds from the provided documents
+    pub fn rebuild<'a, I>(&mut self, documents: I)
+    where
+        I: Iterator<Item = (&'a serde_json::Value, &'a DocumentId)>,
+    {
+        self.entries.clear();
+
+        for (doc, doc_id) in documents {
+            if let Some(value) = get_nested_value(doc, &self.metadata.field) {
+                if let Some(s) = value.as_str() {
+                    self.insert(s, doc_id.clone());
+                }
+            }
+        }
+    }
+}
+
 /// Index definition
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexDefinition {
@@ -900,6 +1092,8 @@ impl Index {
 pub struct IndexManager {
     btree_indexes: HashMap<String, BPlusTree>,
     legacy_indexes: HashMap<String, Index>,
+    /// Fuzzy text indexes for similarity search
+    fuzzy_indexes: HashMap<String, FuzzyIndex>,
     /// File paths for persistent indexes (for two-phase commit)
     index_file_paths: HashMap<String, PathBuf>,
 }
@@ -909,6 +1103,7 @@ impl IndexManager {
         IndexManager {
             btree_indexes: HashMap::new(),
             legacy_indexes: HashMap::new(),
+            fuzzy_indexes: HashMap::new(),
             index_file_paths: HashMap::new(),
         }
     }
@@ -991,9 +1186,13 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Drop index by name
+    /// Drop index by name (supports B+ tree, legacy, and fuzzy indexes)
     pub fn drop_index(&mut self, name: &str) -> Result<()> {
-        if self.btree_indexes.remove(name).is_none() && self.legacy_indexes.remove(name).is_none() {
+        let removed = self.btree_indexes.remove(name).is_some()
+            || self.legacy_indexes.remove(name).is_some()
+            || self.fuzzy_indexes.remove(name).is_some();
+
+        if !removed {
             return Err(MongoLiteError::IndexError(format!(
                 "Index not found: {}",
                 name
@@ -1036,6 +1235,7 @@ impl IndexManager {
             .btree_indexes
             .keys()
             .chain(self.legacy_indexes.keys())
+            .chain(self.fuzzy_indexes.keys())
             .cloned()
             .collect();
         names.sort();
@@ -1076,13 +1276,84 @@ impl IndexManager {
         result
     }
 
+    // ========== FUZZY INDEX OPERATIONS ==========
+
+    /// Create a fuzzy text index
+    ///
+    /// # Arguments
+    /// * `name` - Index name
+    /// * `field` - Field to index
+    /// * `algorithm` - Similarity algorithm (JaroWinkler, Levenshtein, DamerauLevenshtein)
+    /// * `threshold` - Minimum similarity threshold (0.0-1.0)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// manager.create_fuzzy_index(
+    ///     "name_fuzzy",
+    ///     "name",
+    ///     FuzzyAlgorithm::JaroWinkler,
+    ///     0.8
+    /// )?;
+    /// ```
+    pub fn create_fuzzy_index(
+        &mut self,
+        name: String,
+        field: String,
+        algorithm: FuzzyAlgorithm,
+        threshold: f64,
+    ) -> Result<()> {
+        // Check if any index with this name already exists
+        if self.btree_indexes.contains_key(&name)
+            || self.legacy_indexes.contains_key(&name)
+            || self.fuzzy_indexes.contains_key(&name)
+        {
+            return Err(MongoLiteError::IndexError(format!(
+                "Index already exists: {}",
+                name
+            )));
+        }
+
+        let index = FuzzyIndex::new(&name, &field, algorithm, threshold);
+        self.fuzzy_indexes.insert(name, index);
+        Ok(())
+    }
+
+    /// Get fuzzy index
+    pub fn get_fuzzy_index(&self, name: &str) -> Option<&FuzzyIndex> {
+        self.fuzzy_indexes.get(name)
+    }
+
+    /// Get fuzzy index (mutable)
+    pub fn get_fuzzy_index_mut(&mut self, name: &str) -> Option<&mut FuzzyIndex> {
+        self.fuzzy_indexes.get_mut(name)
+    }
+
+    /// Get fuzzy index for a field (if one exists)
+    pub fn get_fuzzy_index_for_field(&self, field: &str) -> Option<&FuzzyIndex> {
+        self.fuzzy_indexes
+            .values()
+            .find(|idx| idx.metadata.field == field)
+    }
+
+    /// List all fuzzy indexes
+    pub fn list_fuzzy_indexes(&self) -> Vec<&FuzzyIndex> {
+        self.fuzzy_indexes.values().collect()
+    }
+
+    /// Add a pre-loaded FuzzyIndex
+    pub fn add_loaded_fuzzy_index(&mut self, index: FuzzyIndex) {
+        let name = index.metadata.name.clone();
+        self.fuzzy_indexes.insert(name, index);
+    }
+
     // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========
 
-    /// Add a document to all indexes
+    /// Add a document to all indexes (B+ tree and fuzzy)
     ///
     /// Properly handles both single-field and compound indexes using extract_key().
     /// For unique indexes: includes null keys (MongoDB treats null as a value).
     /// For non-unique indexes: skips null keys (no query benefit).
+    /// For fuzzy indexes: only indexes string values.
     ///
     /// # Arguments
     /// * `doc` - The document as JSON Value
@@ -1094,6 +1365,7 @@ impl IndexManager {
         doc_id: &DocumentId,
         exclude_index: Option<&str>,
     ) -> Result<()> {
+        // B+ tree indexes
         let index_names: Vec<String> = self.btree_indexes.keys().cloned().collect();
 
         for index_name in index_names {
@@ -1115,14 +1387,35 @@ impl IndexManager {
             }
         }
 
+        // Fuzzy indexes
+        let fuzzy_names: Vec<String> = self.fuzzy_indexes.keys().cloned().collect();
+
+        for index_name in fuzzy_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.fuzzy_indexes.get_mut(&index_name) {
+                // Get field value - only index string values
+                if let Some(value) = get_nested_value(doc, &index.metadata.field) {
+                    if let Some(s) = value.as_str() {
+                        index.insert(s, doc_id.clone());
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
-    /// Remove a document from all indexes
+    /// Remove a document from all indexes (B+ tree and fuzzy)
     ///
     /// Properly handles both single-field and compound indexes.
     /// For unique indexes: removes null keys (they were inserted).
     /// For non-unique indexes: skips null keys (they weren't inserted).
+    /// For fuzzy indexes: removes by document ID.
     ///
     /// # Arguments
     /// * `doc` - The document as JSON Value
@@ -1134,6 +1427,7 @@ impl IndexManager {
         doc_id: &DocumentId,
         exclude_index: Option<&str>,
     ) -> Result<()> {
+        // B+ tree indexes
         let index_names: Vec<String> = self.btree_indexes.keys().cloned().collect();
 
         for index_name in index_names {
@@ -1152,6 +1446,21 @@ impl IndexManager {
                 if !is_null || index.metadata.unique {
                     index.delete(&index_key, doc_id)?;
                 }
+            }
+        }
+
+        // Fuzzy indexes - remove by document ID
+        let fuzzy_names: Vec<String> = self.fuzzy_indexes.keys().cloned().collect();
+
+        for index_name in fuzzy_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.fuzzy_indexes.get_mut(&index_name) {
+                index.remove(doc_id);
             }
         }
 
@@ -1612,5 +1921,233 @@ mod debug_tests {
 
         println!("Result: {:?}", result);
         assert!(result.is_err(), "Should find duplicate compound key!");
+    }
+}
+
+#[cfg(test)]
+mod fuzzy_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_fuzzy_algorithm_similarity() {
+        let jw = FuzzyAlgorithm::JaroWinkler;
+        let lev = FuzzyAlgorithm::Levenshtein;
+        let dl = FuzzyAlgorithm::DamerauLevenshtein;
+
+        // Exact match should be 1.0
+        assert!((jw.similarity("john", "john") - 1.0).abs() < 0.001);
+        assert!((lev.similarity("john", "john") - 1.0).abs() < 0.001);
+        assert!((dl.similarity("john", "john") - 1.0).abs() < 0.001);
+
+        // Similar strings should have high similarity
+        assert!(jw.similarity("john", "jon") > 0.8);
+        assert!(lev.similarity("john", "jon") > 0.7);
+
+        // Transposition - DL should handle better
+        assert!(dl.similarity("the", "teh") > 0.6);
+
+        // Case insensitive
+        assert!((jw.similarity("JOHN", "john") - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fuzzy_algorithm_from_str() {
+        assert_eq!(
+            FuzzyAlgorithm::from_str("jaro_winkler"),
+            Some(FuzzyAlgorithm::JaroWinkler)
+        );
+        assert_eq!(
+            FuzzyAlgorithm::from_str("levenshtein"),
+            Some(FuzzyAlgorithm::Levenshtein)
+        );
+        assert_eq!(
+            FuzzyAlgorithm::from_str("damerau_levenshtein"),
+            Some(FuzzyAlgorithm::DamerauLevenshtein)
+        );
+        assert_eq!(FuzzyAlgorithm::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_fuzzy_index_create() {
+        let index = FuzzyIndex::new("name_idx", "name", FuzzyAlgorithm::JaroWinkler, 0.8);
+
+        assert_eq!(index.metadata.name, "name_idx");
+        assert_eq!(index.metadata.field, "name");
+        assert_eq!(index.metadata.algorithm, FuzzyAlgorithm::JaroWinkler);
+        assert!((index.metadata.threshold - 0.8).abs() < 0.001);
+        assert_eq!(index.size(), 0);
+    }
+
+    #[test]
+    fn test_fuzzy_index_insert_search() {
+        let mut index = FuzzyIndex::new("name_idx", "name", FuzzyAlgorithm::JaroWinkler, 0.8);
+
+        index.insert("John Smith", DocumentId::Int(1));
+        index.insert("Jane Doe", DocumentId::Int(2));
+        index.insert("Jon Snow", DocumentId::Int(3));
+
+        assert_eq!(index.size(), 3);
+
+        // Exact match
+        let results = index.search("John Smith", None);
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0, DocumentId::Int(1));
+
+        // Fuzzy match - "Jon" should match "John" with JaroWinkler
+        let results = index.search("Jon", None);
+        // Should find "Jon Snow" (exact partial) and possibly "John Smith" (similar)
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_fuzzy_index_remove() {
+        let mut index = FuzzyIndex::new("name_idx", "name", FuzzyAlgorithm::JaroWinkler, 0.8);
+
+        index.insert("John", DocumentId::Int(1));
+        index.insert("Jane", DocumentId::Int(2));
+        assert_eq!(index.size(), 2);
+
+        index.remove(&DocumentId::Int(1));
+        assert_eq!(index.size(), 1);
+
+        // Search should not find removed document
+        let results = index.search("John", None);
+        for (doc_id, _) in &results {
+            assert_ne!(*doc_id, DocumentId::Int(1));
+        }
+    }
+
+    #[test]
+    fn test_fuzzy_index_threshold_override() {
+        let mut index = FuzzyIndex::new("name_idx", "name", FuzzyAlgorithm::JaroWinkler, 0.9);
+
+        index.insert("John", DocumentId::Int(1));
+        index.insert("Jane", DocumentId::Int(2));
+
+        // High threshold (default 0.9) - "Jon" might not match "John"
+        let results_high = index.search("Jon", None);
+
+        // Lower threshold - should find more matches
+        let results_low = index.search("Jon", Some(0.7));
+
+        // Lower threshold should return at least as many results
+        assert!(results_low.len() >= results_high.len());
+    }
+
+    #[test]
+    fn test_fuzzy_index_algorithm_override() {
+        let mut index = FuzzyIndex::new("name_idx", "name", FuzzyAlgorithm::JaroWinkler, 0.8);
+
+        index.insert("the", DocumentId::Int(1));
+        index.insert("teh", DocumentId::Int(2)); // transposition
+
+        // Search with Damerau-Levenshtein (good for transpositions)
+        let results = index.search_with_algorithm("teh", FuzzyAlgorithm::DamerauLevenshtein, 0.6);
+
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_index_manager_fuzzy() {
+        let mut manager = IndexManager::new();
+
+        // Create fuzzy index
+        manager
+            .create_fuzzy_index(
+                "name_fuzzy".to_string(),
+                "name".to_string(),
+                FuzzyAlgorithm::JaroWinkler,
+                0.8,
+            )
+            .unwrap();
+
+        // Verify it exists
+        let index = manager.get_fuzzy_index("name_fuzzy").unwrap();
+        assert_eq!(index.metadata.field, "name");
+
+        // Duplicate should fail
+        let result = manager.create_fuzzy_index(
+            "name_fuzzy".to_string(),
+            "name".to_string(),
+            FuzzyAlgorithm::JaroWinkler,
+            0.8,
+        );
+        assert!(result.is_err());
+
+        // List should include fuzzy index
+        let indexes = manager.list_indexes();
+        assert!(indexes.contains(&"name_fuzzy".to_string()));
+
+        // Drop should work
+        manager.drop_index("name_fuzzy").unwrap();
+        assert!(manager.get_fuzzy_index("name_fuzzy").is_none());
+    }
+
+    #[test]
+    fn test_index_manager_fuzzy_with_documents() {
+        let mut manager = IndexManager::new();
+
+        // Create fuzzy index
+        manager
+            .create_fuzzy_index(
+                "name_fuzzy".to_string(),
+                "name".to_string(),
+                FuzzyAlgorithm::JaroWinkler,
+                0.8,
+            )
+            .unwrap();
+
+        // Add documents
+        let doc1 = json!({"name": "John Smith", "age": 30});
+        let doc2 = json!({"name": "Jane Doe", "age": 25});
+
+        manager
+            .add_document_to_indexes(&doc1, &DocumentId::Int(1), None)
+            .unwrap();
+        manager
+            .add_document_to_indexes(&doc2, &DocumentId::Int(2), None)
+            .unwrap();
+
+        // Check fuzzy index has entries
+        let index = manager.get_fuzzy_index("name_fuzzy").unwrap();
+        assert_eq!(index.size(), 2);
+
+        // Search should work
+        let results = index.search("John", None);
+        assert!(!results.is_empty());
+
+        // Remove document
+        manager
+            .remove_document_from_indexes(&doc1, &DocumentId::Int(1), None)
+            .unwrap();
+
+        let index = manager.get_fuzzy_index("name_fuzzy").unwrap();
+        assert_eq!(index.size(), 1);
+    }
+
+    #[test]
+    fn test_fuzzy_index_results_sorted_by_similarity() {
+        let mut index = FuzzyIndex::new("name_idx", "name", FuzzyAlgorithm::JaroWinkler, 0.5);
+
+        index.insert("John", DocumentId::Int(1));
+        index.insert("Johnny", DocumentId::Int(2));
+        index.insert("Jonathan", DocumentId::Int(3));
+        index.insert("Jane", DocumentId::Int(4));
+
+        let results = index.search("John", Some(0.5));
+
+        // Results should be sorted by similarity (descending)
+        for i in 0..results.len() - 1 {
+            assert!(
+                results[i].1 >= results[i + 1].1,
+                "Results should be sorted by similarity descending"
+            );
+        }
+
+        // "John" should be first (exact match = 1.0)
+        if !results.is_empty() {
+            assert_eq!(results[0].0, DocumentId::Int(1));
+        }
     }
 }

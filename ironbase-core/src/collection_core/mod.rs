@@ -1387,6 +1387,100 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         indexes.list_indexes_with_prefix_field()
     }
 
+    /// Create a fuzzy text index on a field
+    ///
+    /// Fuzzy indexes enable similarity-based text search using algorithms like
+    /// Jaro-Winkler, Levenshtein, or Damerau-Levenshtein.
+    ///
+    /// # Arguments
+    /// * `field` - Field to index
+    /// * `algorithm` - Similarity algorithm (default: JaroWinkler)
+    /// * `threshold` - Minimum similarity threshold 0.0-1.0 (default: 0.8)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// collection.create_fuzzy_index("name", FuzzyAlgorithm::JaroWinkler, 0.8)?;
+    /// ```
+    pub fn create_fuzzy_index(
+        &self,
+        field: String,
+        algorithm: crate::index::FuzzyAlgorithm,
+        threshold: f64,
+    ) -> Result<String> {
+        let index_name = format!("{}_{}_fuzzy", self.name, field);
+
+        let mut indexes = self.indexes.write();
+        indexes.create_fuzzy_index(index_name.clone(), field.clone(), algorithm, threshold)?;
+        drop(indexes);
+
+        // Populate index with existing documents
+        let docs_by_id = self.scan_documents_via_catalog()?;
+
+        // Re-acquire write lock and populate index
+        let mut indexes = self.indexes.write();
+        if let Some(index) = indexes.get_fuzzy_index_mut(&index_name) {
+            for (doc_id, doc) in &docs_by_id {
+                if let Some(value) = get_nested_value(doc, &field) {
+                    if let Some(s) = value.as_str() {
+                        index.insert(s, doc_id.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(index_name)
+    }
+
+    /// Search using a fuzzy index
+    ///
+    /// Returns documents where the indexed field is similar to the query string.
+    /// Results are sorted by similarity (highest first).
+    ///
+    /// # Arguments
+    /// * `field` - Field to search (must have a fuzzy index)
+    /// * `query` - Search string
+    /// * `threshold` - Optional threshold override
+    /// * `algorithm` - Optional algorithm override
+    ///
+    /// # Returns
+    /// Vector of (document, similarity_score) pairs
+    pub fn fuzzy_search(
+        &self,
+        field: &str,
+        query: &str,
+        threshold: Option<f64>,
+        algorithm: Option<crate::index::FuzzyAlgorithm>,
+    ) -> Result<Vec<(Value, f64)>> {
+        let indexes = self.indexes.read();
+
+        // Find fuzzy index for this field
+        let fuzzy_index = indexes.get_fuzzy_index_for_field(field).ok_or_else(|| {
+            crate::error::MongoLiteError::IndexError(format!(
+                "No fuzzy index found for field '{}'",
+                field
+            ))
+        })?;
+
+        // Perform search
+        let matches = if let Some(algo) = algorithm {
+            fuzzy_index.search_with_algorithm(query, algo, threshold.unwrap_or(0.8))
+        } else {
+            fuzzy_index.search(query, threshold)
+        };
+
+        drop(indexes);
+
+        // Fetch full documents for matched IDs
+        let mut results = Vec::with_capacity(matches.len());
+        for (doc_id, similarity) in matches {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                results.push((doc, similarity));
+            }
+        }
+
+        Ok(results)
+    }
+
     // ========== TRANSACTION OPERATIONS ==========
 
     /// Insert one document within a transaction
