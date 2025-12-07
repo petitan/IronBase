@@ -603,17 +603,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Find one document matching query
+    ///
+    /// Uses QueryPlanner for index optimization when available.
+    /// For `_id` queries, uses direct O(1) catalog lookup.
     pub fn find_one(&self, query_json: &Value) -> Result<Option<Value>> {
-        let parsed_query = Query::from_json(query_json)?;
-
         // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
+        // This is faster than going through QueryPlanner for the most common case
         if let Some(query_obj) = query_json.as_object() {
             if query_obj.len() == 1 && query_obj.contains_key("_id") {
                 if let Some(id_val) = query_obj.get("_id") {
-                    // Direct O(1) lookup using document_catalog (direct DocumentId conversion!)
+                    // Direct O(1) lookup using document_catalog
                     if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
                         if let Some(doc) = self.read_document_by_id(&doc_id)? {
                             // Verify query still matches (for consistency)
+                            let parsed_query = Query::from_json(query_json)?;
                             let doc_json_str = serde_json::to_string(&doc)?;
                             let document = Document::from_json(&doc_json_str)?;
 
@@ -627,35 +630,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // Fallback: Full scan using catalog iteration (still faster than file scan)
-        let docs_by_id = self.scan_documents_via_catalog()?;
+        // Use QueryPlanner with limit=1 - enables index usage for indexed fields
+        // This was previously a full collection scan (issue #19)
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, Some(1), true)?;
 
-        // Find first matching document (skip tombstones)
-        for (_, doc) in docs_by_id {
-            let doc_json_str = match serde_json::to_string(&doc) {
-                Ok(json) => json,
-                Err(_) => continue,
-            };
-            let document = match Document::from_json(&doc_json_str) {
-                Ok(doc) => doc,
-                Err(_) => continue,
-            };
-
-            if parsed_query.matches(&document) {
-                return Ok(Some(doc));
-            }
+        if let Some(doc_id) = doc_ids.first() {
+            self.read_document_by_id(doc_id)
+        } else {
+            Ok(None)
         }
-
-        Ok(None)
     }
 
     /// Count documents matching query
+    ///
+    /// Uses QueryPlanner for index optimization when available.
     pub fn count_documents(&self, query_json: &Value) -> Result<u64> {
+        // Fast path: empty query = count all
         if Self::query_matches_all(query_json) {
             let storage = self.storage.read();
             return Ok(storage.get_live_count(&self.name).unwrap_or(0));
         }
 
+        // Fast path: _id query = O(1) lookup
         if let Some(doc_id) = Self::extract_id_query(query_json) {
             return Ok(if self.read_document_by_id(&doc_id)?.is_some() {
                 1
@@ -664,23 +661,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             });
         }
 
-        let parsed_query = Query::from_json(query_json)?;
+        // Use QueryPlanner - enables index usage for indexed fields
+        // This was previously a full collection scan (issue #19)
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
 
-        // OPTIMIZATION: Use catalog iteration instead of full file scan
-        let docs_by_id = self.scan_documents_via_catalog()?;
-
-        // Count matching documents (skip tombstones already filtered by catalog scan)
-        let mut count = 0u64;
-        for (_, doc) in docs_by_id {
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
-
-            if parsed_query.matches(&document) {
-                count += 1;
-            }
-        }
-
-        Ok(count)
+        Ok(doc_ids.len() as u64)
     }
 
     // =========================================================================
