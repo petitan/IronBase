@@ -208,6 +208,40 @@ cp target/release/libironbase_ffi.so IronBase.NET/Demo/bin/Debug/net8.0/libironb
 
 This is especially important when debugging FFI issues - if debug logging doesn't appear, check that the correct library version is being loaded.
 
+### Python Database Closure (GC Timing Issue)
+
+When using Python bindings, you **must call `db.close()`** before reopening the same database file. Python's garbage collector does not immediately call Rust's `Drop` trait when you use `del db`.
+
+**Symptom**: "IO error: failed to fill whole buffer" when reopening a database
+
+**Root Cause**:
+- `del db` only marks the object for garbage collection
+- The Rust `Drop` (which calls `flush()`) runs later when GC runs
+- If you reopen the database before GC runs, the old instance still holds the file and unflushed data
+
+**Correct usage**:
+```python
+from ironbase import IronBase
+
+# Create and use database
+db = IronBase("/tmp/test.mlite")
+db.insert_one("users", {"name": "Alice"})
+db.close()  # REQUIRED before reopening!
+
+# Now safe to reopen
+db2 = IronBase("/tmp/test.mlite")
+print(db2.count_documents("users", {}))  # Works correctly
+```
+
+**Alternative** (not recommended):
+```python
+import gc
+del db
+gc.collect()  # Forces GC to run Drop immediately
+```
+
+**Note**: This issue does not affect Rust code, where scopes trigger `Drop` deterministically.
+
 ## MCP Server
 
 The `mcp-server/` directory contains a standalone MCP (Model Context Protocol) server that exposes IronBase as an AI assistant tool.

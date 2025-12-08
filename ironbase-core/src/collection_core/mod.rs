@@ -1237,7 +1237,28 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
         drop(indexes); // Release index lock
 
-        // PERSIST index metadata to collection metadata
+        // PERSIST index data to .idx file FIRST (to get correct root_offset)
+        let root_offset = {
+            let storage = self.storage.read();
+            let db_file_path = storage.get_file_path().to_string();
+            drop(storage);
+
+            if !db_file_path.is_empty() {
+                let mut indexes = self.indexes.write();
+                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                    persist_index_to_disk(&db_file_path, &index_name, |file| {
+                        index.save_to_file(file)
+                    })?;
+                    index.metadata.root_offset
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // THEN persist metadata with correct root_offset
         {
             let mut storage = self.storage.write();
             if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
@@ -1250,24 +1271,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     sparse: false,
                     num_keys: 0,
                     tree_height: 1,
-                    root_offset: 0,
+                    root_offset,
                 };
 
                 meta.indexes.push(index_meta);
                 storage.flush()?;
-
-                // PERSIST index data to .idx file
-                let db_file_path = storage.get_file_path().to_string();
-                drop(storage);
-
-                if !db_file_path.is_empty() {
-                    let mut indexes = self.indexes.write();
-                    if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                        persist_index_to_disk(&db_file_path, &index_name, |file| {
-                            index.save_to_file(file)
-                        })?;
-                    }
-                }
             }
         }
 
@@ -1308,11 +1316,31 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
         drop(indexes); // Release index lock
 
-        // PERSIST index metadata to collection metadata
+        // PERSIST index data to .idx file FIRST (to get correct root_offset)
+        let root_offset = {
+            let storage = self.storage.read();
+            let db_file_path = storage.get_file_path().to_string();
+            drop(storage);
+
+            if !db_file_path.is_empty() {
+                let mut indexes = self.indexes.write();
+                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                    persist_index_to_disk(&db_file_path, &index_name, |file| {
+                        index.save_to_file(file)
+                    })?;
+                    index.metadata.root_offset
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // THEN persist metadata with correct root_offset
         {
             let mut storage = self.storage.write();
             if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
-                // Create IndexMetadata
                 use crate::index::IndexMetadata;
                 let index_meta = IndexMetadata {
                     name: index_name.clone(),
@@ -1322,27 +1350,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     sparse: false,
                     num_keys: 0,
                     tree_height: 1,
-                    root_offset: 0,
+                    root_offset,
                 };
 
-                // Add to persisted indexes list
                 meta.indexes.push(index_meta);
-
-                // Save metadata to disk
                 storage.flush()?;
-
-                // PERSIST index data to .idx file
-                let db_file_path = storage.get_file_path().to_string();
-                drop(storage); // Release storage lock before acquiring index lock
-
-                if !db_file_path.is_empty() {
-                    let mut indexes = self.indexes.write();
-                    if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                        persist_index_to_disk(&db_file_path, &index_name, |file| {
-                            index.save_to_file(file)
-                        })?;
-                    }
-                }
             }
         }
 

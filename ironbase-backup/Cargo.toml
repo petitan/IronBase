@@ -1,0 +1,25 @@
+[package]
+name = "ironbase-backup"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+description = "Incremental backup and restore tool for IronBase databases"
+
+[[bin]]
+name = "ironbase-backup"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+zstd = "0.13"
+sha2 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+byteorder = "1.5"
+
+[dev-dependencies]
+tempfile = "3"

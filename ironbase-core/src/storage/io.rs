@@ -6,18 +6,32 @@ use crate::error::Result;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 impl StorageEngine {
-    /// Write data to end of file
+    /// Write data to end of document region
     /// Returns the offset where data was written
+    ///
+    /// CRITICAL FIX: Uses header.data_end_offset instead of SeekFrom::End(0)
+    /// to prevent overwriting metadata that was previously flushed.
     pub fn write_data(&mut self, data: &[u8]) -> Result<u64> {
-        let offset = self.file.seek(SeekFrom::End(0))?;
+        // Determine write position from data_end_offset
+        let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
+            self.header.data_end_offset
+        } else {
+            super::HEADER_SIZE
+        };
+
+        // Seek to write position
+        self.file.seek(SeekFrom::Start(write_offset))?;
 
         // Write length + data
         let len = (data.len() as u32).to_le_bytes();
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
 
+        // Update data_end_offset
+        self.header.data_end_offset = self.file.stream_position()?;
+
         self.metadata_dirty = true;
-        Ok(offset)
+        Ok(write_offset)
     }
 
     /// Read data from specified offset
@@ -81,6 +95,9 @@ impl StorageEngine {
     /// Write document and update catalog
     /// This is the new persistent write method that tracks document offsets
     /// Stores ABSOLUTE offsets in catalog for simplicity and correctness
+    ///
+    /// CRITICAL FIX: Uses header.data_end_offset instead of SeekFrom::End(0)
+    /// to prevent writing documents into old metadata regions.
     pub fn write_document(
         &mut self,
         collection: &str,
@@ -89,30 +106,44 @@ impl StorageEngine {
     ) -> Result<u64> {
         use crate::error::MongoLiteError;
 
-        // Append document after existing data
-        let absolute_offset = self.file.seek(SeekFrom::End(0))?;
+        // Determine write position from data_end_offset (not SeekFrom::End!)
+        // Migration: if data_end_offset is 0 (v2 database), use file end
+        let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
+            self.header.data_end_offset
+        } else {
+            // Migration from v2: calculate from catalog or use file end
+            let (max_offset, has_docs) = Self::find_max_document_offset(&self.collections);
+            if has_docs {
+                // Calculate end of last document
+                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)
+                    .unwrap_or(self.file.seek(SeekFrom::End(0))?)
+            } else {
+                super::HEADER_SIZE
+            }
+        };
+
+        // Seek to write position
+        self.file.seek(SeekFrom::Start(write_offset))?;
 
         // Write length + data (same format as write_data)
         let len = (data.len() as u32).to_le_bytes();
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
 
+        // Update data_end_offset to point after this document
+        self.header.data_end_offset = self.file.stream_position()?;
+
         self.metadata_dirty = true;
+
         // Update catalog in metadata with ABSOLUTE offset
-        // Direct insert using DocumentId (no serialization overhead!)
         let meta = self
             .get_collection_meta_mut(collection)
             .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
 
-        meta.document_catalog
-            .insert(doc_id.clone(), absolute_offset);
-        meta.document_count += 1; // CRITICAL: increment document count!
+        meta.document_catalog.insert(doc_id.clone(), write_offset);
+        meta.document_count += 1;
 
-        if self.header.metadata_offset > super::HEADER_SIZE {
-            self.metadata_dirty = true;
-        }
-
-        Ok(absolute_offset)
+        Ok(write_offset)
     }
 
     /// Read document by offset (catalog-based retrieval)
@@ -129,6 +160,9 @@ impl StorageEngine {
     /// - live_document_count: count of live (non-tombstone) documents
     /// - last_id: tracks highest auto-increment ID (prevents _id collisions after recovery)
     ///
+    /// CRITICAL FIX: Uses header.data_end_offset instead of SeekFrom::End(0)
+    /// to prevent writing documents into old metadata regions.
+    ///
     /// This is the ONLY function that should be used for writing documents during:
     /// - Normal runtime inserts/updates
     /// - WAL recovery
@@ -141,13 +175,31 @@ impl StorageEngine {
     ) -> Result<u64> {
         use crate::error::MongoLiteError;
 
-        // Append document after existing data
-        let absolute_offset = self.file.seek(SeekFrom::End(0))?;
+        // Determine write position from data_end_offset (not SeekFrom::End!)
+        // Migration: if data_end_offset is 0 (v2 database), use file end
+        let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
+            self.header.data_end_offset
+        } else {
+            // Migration from v2: calculate from catalog or use file end
+            let (max_offset, has_docs) = Self::find_max_document_offset(&self.collections);
+            if has_docs {
+                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)
+                    .unwrap_or(self.file.seek(SeekFrom::End(0))?)
+            } else {
+                super::HEADER_SIZE
+            }
+        };
+
+        // Seek to write position
+        self.file.seek(SeekFrom::Start(write_offset))?;
 
         // Write length + data (same format as write_data)
         let len = (data.len() as u32).to_le_bytes();
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
+
+        // Update data_end_offset to point after this document
+        self.header.data_end_offset = self.file.stream_position()?;
 
         self.metadata_dirty = true;
 
@@ -160,8 +212,7 @@ impl StorageEngine {
         let is_update = meta.document_catalog.contains_key(doc_id);
 
         // Update catalog with new offset
-        meta.document_catalog
-            .insert(doc_id.clone(), absolute_offset);
+        meta.document_catalog.insert(doc_id.clone(), write_offset);
 
         // Update document_count (total writes)
         meta.document_count += 1;
@@ -178,12 +229,14 @@ impl StorageEngine {
             }
         }
 
-        Ok(absolute_offset)
+        Ok(write_offset)
     }
 
     /// Write tombstone with full metadata update
     ///
     /// Used for deletes - writes a tombstone marker and updates all metadata
+    ///
+    /// CRITICAL FIX: Uses header.data_end_offset instead of SeekFrom::End(0)
     pub fn write_tombstone_full(
         &mut self,
         collection: &str,
@@ -200,11 +253,30 @@ impl StorageEngine {
         let tombstone_json = serde_json::to_string(&tombstone)
             .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
 
-        // Write tombstone to file
-        let _offset = self.file.seek(SeekFrom::End(0))?;
+        // Determine write position from data_end_offset (not SeekFrom::End!)
+        let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
+            self.header.data_end_offset
+        } else {
+            // Migration from v2: calculate from catalog or use file end
+            let (max_offset, has_docs) = Self::find_max_document_offset(&self.collections);
+            if has_docs {
+                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)
+                    .unwrap_or(self.file.seek(SeekFrom::End(0))?)
+            } else {
+                super::HEADER_SIZE
+            }
+        };
+
+        // Seek to write position
+        self.file.seek(SeekFrom::Start(write_offset))?;
+
+        // Write tombstone
         let len = (tombstone_json.len() as u32).to_le_bytes();
         self.file.write_all(&len)?;
         self.file.write_all(tombstone_json.as_bytes())?;
+
+        // Update data_end_offset
+        self.header.data_end_offset = self.file.stream_position()?;
 
         self.metadata_dirty = true;
 
@@ -222,5 +294,38 @@ impl StorageEngine {
         }
 
         Ok(())
+    }
+
+    /// Calculate data end position from the last document's offset
+    /// Used for migration from v2 databases that don't have data_end_offset
+    pub(crate) fn calculate_data_end_from_last_doc(
+        file: &mut std::fs::File,
+        max_doc_offset: u64,
+    ) -> Result<u64> {
+        use crate::error::MongoLiteError;
+
+        file.seek(SeekFrom::Start(max_doc_offset))?;
+
+        // Read document length (4 bytes)
+        let mut len_bytes = [0u8; 4];
+        file.read_exact(&mut len_bytes).map_err(|e| {
+            MongoLiteError::Corruption(format!(
+                "Failed to read document length at offset {}: {}",
+                max_doc_offset, e
+            ))
+        })?;
+
+        let doc_len = u32::from_le_bytes(len_bytes) as u64;
+
+        // Sanity check: doc_len should be reasonable (< 16MB)
+        if doc_len > 16 * 1024 * 1024 {
+            return Err(MongoLiteError::Corruption(format!(
+                "Suspiciously large document size: {} bytes at offset {}",
+                doc_len, max_doc_offset
+            )));
+        }
+
+        // data_end = offset + 4 (length header) + doc_len
+        Ok(max_doc_offset + 4 + doc_len)
     }
 }

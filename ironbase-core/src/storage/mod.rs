@@ -50,31 +50,37 @@ pub const DATA_START_OFFSET: u64 = HEADER_SIZE + RESERVED_METADATA_SIZE; // Docu
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Header {
     pub magic: [u8; 8],        // "MONGOLTE"
-    pub version: u32,          // Version number (2 = dynamic metadata)
+    pub version: u32,          // Version number (2 = dynamic metadata, 3 = data_end tracking)
     pub page_size: u32,        // Page size (default: 4KB)
     pub collection_count: u32, // Number of collections
     pub free_list_head: u64,   // Free blocks list head
     #[serde(default)]
     pub index_section_offset: u64, // Index metadata section offset (0 = none)
 
-    // NEW: Dynamic metadata support (version 2+)
+    // Dynamic metadata support (version 2+)
     #[serde(default)]
     pub metadata_offset: u64, // Offset where metadata starts (0 = use legacy fixed location)
     #[serde(default)]
     pub metadata_size: u64, // Size of metadata section in bytes
+
+    // Explicit data end tracking (version 3+)
+    // This prevents SeekFrom::End(0) corruption when metadata is at file end
+    #[serde(default)]
+    pub data_end_offset: u64, // End of document data section (where next document should be written)
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 2, // Version 2: dynamic metadata
+            version: 3, // Version 3: data_end tracking
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
             index_section_offset: 0,
             metadata_offset: 0, // Will be set on first write
             metadata_size: 0,
+            data_end_offset: HEADER_SIZE, // Documents start right after header
         }
     }
 }
@@ -979,7 +985,7 @@ mod tests {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 2); // Version 2: dynamic metadata
+        assert_eq!(storage.header.version, 3); // Version 3: data_end tracking
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -1323,10 +1329,11 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 2); // Version 2: dynamic metadata
+        assert_eq!(header.version, 3); // Version 3: data_end tracking
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);
+        assert_eq!(header.data_end_offset, HEADER_SIZE); // Documents start after header
     }
 
     // ========== ACD Transaction Tests ==========

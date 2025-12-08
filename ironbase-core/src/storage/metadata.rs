@@ -9,6 +9,10 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 impl StorageEngine {
     /// Load metadata from file (supports both legacy and dynamic formats)
+    ///
+    /// MIGRATION (v2 → v3): If data_end_offset is 0 (v2 database), it will be
+    /// calculated from the document catalog on first write. The header is NOT
+    /// updated here to avoid unnecessary I/O - migration happens lazily.
     pub(super) fn load_metadata(
         file: &mut File,
     ) -> Result<(Header, HashMap<String, CollectionMeta>)> {
@@ -18,7 +22,7 @@ impl StorageEngine {
         let mut header_bytes = vec![0u8; 256]; // Max header size
         file.read_exact(&mut header_bytes)?;
 
-        let header: Header = bincode::deserialize(&header_bytes)
+        let mut header: Header = bincode::deserialize(&header_bytes)
             .map_err(|e| MongoLiteError::Corruption(format!("Invalid header: {}", e)))?;
 
         // Magic number check
@@ -35,7 +39,49 @@ impl StorageEngine {
             Self::load_metadata_legacy(file, &header)?
         };
 
+        // MIGRATION (v2 → v3): Calculate data_end_offset if not set
+        // This ensures existing v2 databases work correctly with the new code
+        if header.data_end_offset == 0 && !collections.is_empty() {
+            let (max_doc_offset, has_docs) = Self::find_max_document_offset(&collections);
+            if has_docs {
+                // Calculate data_end from last document
+                if let Ok(data_end) = Self::calculate_data_end_from_catalog(file, max_doc_offset) {
+                    header.data_end_offset = data_end;
+                } else {
+                    // Fallback: use metadata_offset as boundary
+                    header.data_end_offset = header.metadata_offset;
+                }
+            } else {
+                // No documents - data starts right after header
+                header.data_end_offset = super::HEADER_SIZE;
+            }
+        } else if header.data_end_offset == 0 {
+            // Empty database - initialize to HEADER_SIZE
+            header.data_end_offset = super::HEADER_SIZE;
+        }
+
         Ok((header, collections))
+    }
+
+    /// Calculate data end offset from the last document in catalog
+    /// Used during v2 → v3 migration
+    fn calculate_data_end_from_catalog(file: &mut File, max_doc_offset: u64) -> Result<u64> {
+        file.seek(SeekFrom::Start(max_doc_offset))?;
+
+        // Read document length (4 bytes)
+        let mut len_bytes = [0u8; 4];
+        file.read_exact(&mut len_bytes)?;
+        let doc_len = u32::from_le_bytes(len_bytes) as u64;
+
+        // Sanity check
+        if doc_len > 16 * 1024 * 1024 {
+            return Err(MongoLiteError::Corruption(format!(
+                "Migration: suspiciously large document size: {} bytes",
+                doc_len
+            )));
+        }
+
+        Ok(max_doc_offset + 4 + doc_len)
     }
 
     /// Load metadata from dynamic location (version 2+)
@@ -128,11 +174,10 @@ impl StorageEngine {
     /// Flush metadata to disk with DYNAMIC METADATA approach (version 2+)
     ///
     /// Metadata is written at the END of the file, not at fixed offset.
-    /// This function uses helper methods for cleaner separation of concerns:
-    /// - find_max_document_offset(): Scan catalogs for document region end
-    /// - serialize_metadata(): Convert collections to bytes
-    /// - determine_metadata_offset(): Calculate write position (idempotent logic)
-    /// - write_metadata_and_header(): Atomic write of metadata + header
+    ///
+    /// CRITICAL FIX (v3): Uses header.data_end_offset directly instead of
+    /// scanning catalogs. This prevents the old bug where find_max_document_offset()
+    /// could return stale values after metadata was written.
     ///
     /// CRITICAL: No file truncation to prevent race conditions with concurrent reads.
     pub(crate) fn flush_metadata(&mut self) -> Result<()> {
@@ -146,21 +191,26 @@ impl StorageEngine {
         // 2. Serialize metadata to buffer
         let metadata_bytes = Self::serialize_metadata(&self.collections)?;
 
-        // 3. Find document region end
-        let (max_doc_offset, has_documents) = Self::find_max_document_offset(&self.collections);
+        // 3. Determine metadata write position using data_end_offset (v3 approach)
+        // This is simpler and more reliable than scanning catalogs
+        let metadata_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
+            // v3: Use explicit data_end_offset
+            self.header.data_end_offset
+        } else {
+            // Migration from v2: calculate from catalog
+            let (max_doc_offset, has_documents) = Self::find_max_document_offset(&self.collections);
+            let file_len = self.file.metadata()?.len();
 
-        // 4. Determine write position (idempotent logic)
-        let file_len = self.file.metadata()?.len();
-        let metadata_offset = Self::determine_metadata_offset(
-            &mut self.file,
-            &self.header,
-            max_doc_offset,
-            has_documents,
-            file_len,
-            self.metadata_dirty,
-        )?;
+            if has_documents {
+                // Calculate end of last document
+                Self::calculate_metadata_offset(&mut self.file, max_doc_offset, file_len)?
+            } else {
+                // No documents - write metadata right after header
+                super::HEADER_SIZE
+            }
+        };
 
-        // 5. Write metadata and header atomically
+        // 4. Write metadata and header atomically
         Self::write_metadata_and_header(
             &mut self.file,
             &mut self.header,
@@ -246,7 +296,9 @@ impl StorageEngine {
     /// Returns (max_offset, has_documents) tuple:
     /// - max_offset: The highest byte offset of any document in any collection
     /// - has_documents: true if at least one document exists
-    fn find_max_document_offset(collections: &HashMap<String, CollectionMeta>) -> (u64, bool) {
+    pub(crate) fn find_max_document_offset(
+        collections: &HashMap<String, CollectionMeta>,
+    ) -> (u64, bool) {
         let mut max_offset: u64 = 0;
         let mut has_documents = false;
 
@@ -269,46 +321,6 @@ impl StorageEngine {
         let mut buffer = Cursor::new(Vec::new());
         Self::write_metadata_body(&mut buffer, collections)?;
         Ok(buffer.into_inner())
-    }
-
-    /// Determine where metadata should be written
-    ///
-    /// This function encapsulates the idempotent offset calculation logic:
-    /// - If metadata_dirty is false and valid metadata exists, reuse existing offset
-    /// - If metadata_dirty is true, recalculate based on document region end
-    /// - If no documents exist, append at file end (or HEADER_SIZE minimum)
-    fn determine_metadata_offset(
-        file: &mut File,
-        header: &Header,
-        max_doc_offset: u64,
-        has_documents: bool,
-        file_len: u64,
-        metadata_dirty: bool,
-    ) -> Result<u64> {
-        // Check if we have existing valid metadata
-        let has_valid_metadata = header.metadata_offset > 0
-            && header.metadata_offset >= super::HEADER_SIZE
-            && header.metadata_offset <= file_len;
-
-        if has_valid_metadata {
-            if metadata_dirty {
-                // Metadata changed - recalculate position
-                if has_documents {
-                    Self::calculate_metadata_offset(file, max_doc_offset, file_len)
-                } else {
-                    Ok(file_len.max(super::HEADER_SIZE))
-                }
-            } else {
-                // Metadata unchanged - reuse existing offset
-                Ok(header.metadata_offset)
-            }
-        } else if has_documents {
-            // No existing metadata - calculate from last document
-            Self::calculate_metadata_offset(file, max_doc_offset, file_len)
-        } else {
-            // No documents yet - append at file end (at least HEADER_SIZE)
-            Ok(file_len.max(super::HEADER_SIZE))
-        }
     }
 
     /// Write metadata body and update header atomically
