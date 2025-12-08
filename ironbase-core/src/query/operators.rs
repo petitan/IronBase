@@ -1381,6 +1381,36 @@ where
     }
 }
 
+/// Checks if ANY value from a multi-value list matches an operator condition.
+/// MongoDB semantics: if ANY value matches, the condition is satisfied.
+///
+/// # Arguments
+/// - `doc_values`: List of values from document (e.g., from array traversal)
+/// - `doc_value`: Single value fallback (when doc_values is empty)
+/// - `operator`: The operator to apply
+/// - `op_value`: The value to compare against
+/// - `document`: The full document (for context)
+fn check_operator_match(
+    doc_values: &[&Value],
+    doc_value: Option<&Value>,
+    operator: &dyn OperatorMatcher,
+    op_value: &Value,
+    document: Option<&Document>,
+) -> Result<bool> {
+    if doc_values.is_empty() {
+        // Single value mode
+        operator.matches(doc_value, op_value, document)
+    } else {
+        // Multi-value mode: ANY match is success
+        for dv in doc_values {
+            if operator.matches(Some(*dv), op_value, document)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+}
+
 /// Matches a single filter value against a document value
 ///
 /// This is used by $not and other operators that need to recursively evaluate conditions
@@ -1576,19 +1606,13 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                         }
                         if op_name.starts_with('$') {
                             if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
-                                // MongoDB-style: if we have multiple values, ANY match is success
-                                if use_multi_value_matching {
-                                    let mut any_match = false;
-                                    for dv in &doc_values {
-                                        if operator.matches(Some(*dv), op_value, Some(document))? {
-                                            any_match = true;
-                                            break;
-                                        }
-                                    }
-                                    if !any_match {
-                                        return Ok(false);
-                                    }
-                                } else if !operator.matches(doc_value, op_value, Some(document))? {
+                                if !check_operator_match(
+                                    &doc_values,
+                                    doc_value,
+                                    operator.as_ref(),
+                                    op_value,
+                                    Some(document),
+                                )? {
                                     return Ok(false);
                                 }
                             } else {
@@ -1605,19 +1629,13 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                     for (op_name, op_value) in condition_obj {
                         if op_name.starts_with('$') {
                             if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
-                                // MongoDB-style: if we have multiple values, ANY match is success
-                                if use_multi_value_matching {
-                                    let mut any_match = false;
-                                    for dv in &doc_values {
-                                        if operator.matches(Some(*dv), op_value, Some(document))? {
-                                            any_match = true;
-                                            break;
-                                        }
-                                    }
-                                    if !any_match {
-                                        return Ok(false);
-                                    }
-                                } else if !operator.matches(doc_value, op_value, Some(document))? {
+                                if !check_operator_match(
+                                    &doc_values,
+                                    doc_value,
+                                    operator.as_ref(),
+                                    op_value,
+                                    Some(document),
+                                )? {
                                     return Ok(false);
                                 }
                             } else {
@@ -1632,19 +1650,13 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
             } else {
                 // Direct equality check like { name: "Alice" }
                 // Use EqOperator for array element matching support
-                // MongoDB-style: if we have multiple values, ANY match is success
-                if use_multi_value_matching {
-                    let mut any_match = false;
-                    for dv in &doc_values {
-                        if EqOperator.matches(Some(*dv), value, Some(document))? {
-                            any_match = true;
-                            break;
-                        }
-                    }
-                    if !any_match {
-                        return Ok(false);
-                    }
-                } else if !EqOperator.matches(doc_value, value, Some(document))? {
+                if !check_operator_match(
+                    &doc_values,
+                    doc_value,
+                    &EqOperator,
+                    value,
+                    Some(document),
+                )? {
                     return Ok(false);
                 }
             }

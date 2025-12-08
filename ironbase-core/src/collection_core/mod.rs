@@ -1881,6 +1881,91 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(docs_by_id)
     }
 
+    /// 🚀 OPTIMIZED: Scan documents with early termination support
+    /// Unlike scan_documents_via_catalog which loads ALL documents,
+    /// this method stops early when skip + limit documents are found.
+    /// This is critical for performance on large collections with pagination.
+    fn scan_documents_with_early_termination(
+        &self,
+        parsed_query: &Query,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<DocumentId>> {
+        let mut storage = self.storage.write();
+
+        // Clone the catalog to avoid borrow checker issues
+        let catalog = {
+            let meta = storage
+                .get_collection_meta(&self.name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            log_debug!(
+                "scan_documents_with_early_termination: collection '{}' has {} docs, skip={}, limit={:?}",
+                self.name,
+                meta.document_catalog.len(),
+                skip,
+                limit
+            );
+            meta.document_catalog.clone()
+        };
+
+        let mut doc_ids = Vec::new();
+        let mut skipped = 0usize;
+
+        // Iterate over catalog with early termination
+        for (doc_id, offset) in &catalog {
+            // Check if we've collected enough documents
+            // MongoDB compatibility: limit(0) means "no limit"
+            if let Some(limit_count) = limit {
+                if limit_count > 0 && doc_ids.len() >= limit_count {
+                    log_debug!(
+                        "Early termination: collected {} docs (limit={})",
+                        doc_ids.len(),
+                        limit_count
+                    );
+                    break;
+                }
+            }
+
+            // Read document from storage
+            let doc_bytes = match storage.read_data(*offset) {
+                Ok(bytes) => bytes,
+                Err(_) => continue, // Skip corrupted entries
+            };
+
+            // Parse document
+            let doc: Value = match serde_json::from_slice(&doc_bytes) {
+                Ok(d) => d,
+                Err(_) => continue, // Skip corrupted JSON
+            };
+
+            // Skip tombstones
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            // Apply query filter
+            let document = Document::from_value_owned(doc)?;
+            if parsed_query.matches(&document) {
+                // Apply skip
+                if skipped < skip {
+                    skipped += 1;
+                    continue;
+                }
+                doc_ids.push(doc_id.clone());
+            }
+        }
+
+        log_debug!(
+            "scan_documents_with_early_termination: returning {} doc IDs",
+            doc_ids.len()
+        );
+        Ok(doc_ids)
+    }
+
     fn collect_doc_ids(&self, query_json: &Value) -> Result<Vec<DocumentId>> {
         let (ids, _) =
             self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
@@ -1937,34 +2022,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let (doc_ids_vec, used_sort) = if let Some(plan) = plan {
             self.collect_doc_ids_from_plan(&parsed_query, plan, sort_field, sort_desc, skip, limit)?
         } else {
-            // Fallback to full scan using catalog
-            let docs_by_id = self.scan_documents_via_catalog()?;
-            log_debug!(
-                "scan_documents_via_catalog returned {} documents",
-                docs_by_id.len()
-            );
-            let mut doc_ids = Vec::new();
-            let mut skipped = 0usize;
-
-            for (doc_id, doc) in docs_by_id {
-                // 🚀 OPTIMIZED: Use from_value_owned to avoid clone (owned doc consumed here)
-                let document = Document::from_value_owned(doc)?;
-
-                if parsed_query.matches(&document) {
-                    if skipped < skip {
-                        skipped += 1;
-                        continue;
-                    }
-                    doc_ids.push(doc_id.clone());
-                    // MongoDB compatibility: limit(0) means "no limit"
-                    if let Some(limit_count) = limit {
-                        if limit_count > 0 && doc_ids.len() >= limit_count {
-                            break;
-                        }
-                    }
-                }
-            }
-
+            // 🚀 FIX: Use early termination scan instead of loading all documents
+            // This is critical for performance on large collections with pagination.
+            // Previously scan_documents_via_catalog() loaded ALL documents first,
+            // making limit=1 take the same time as limit=50 on large collections.
+            let doc_ids = self.scan_documents_with_early_termination(&parsed_query, skip, limit)?;
             (doc_ids, false)
         };
 
