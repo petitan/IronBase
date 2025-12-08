@@ -23,11 +23,20 @@ jobs:
           cd mcp-server
           cargo build --release
 
-      - name: Upload Windows artifact
+      - name: Build Backup CLI (Windows)
+        run: cargo build --release -p ironbase-backup
+
+      - name: Upload Windows MCP artifact
         uses: actions/upload-artifact@v4
         with:
           name: mcp-ironbase-server-windows
           path: mcp-server/target/release/mcp-ironbase-server.exe
+
+      - name: Upload Windows Backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironbase-backup-windows
+          path: target/release/ironbase-backup.exe
 
   build-linux:
     name: Build Linux
@@ -43,11 +52,20 @@ jobs:
           cd mcp-server
           cargo build --release
 
-      - name: Upload Linux artifact
+      - name: Build Backup CLI (Linux)
+        run: cargo build --release -p ironbase-backup
+
+      - name: Upload Linux MCP artifact
         uses: actions/upload-artifact@v4
         with:
           name: mcp-ironbase-server-linux
           path: mcp-server/target/release/mcp-ironbase-server
+
+      - name: Upload Linux Backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironbase-backup-linux
+          path: target/release/ironbase-backup
 
   build-macos:
     name: Build macOS
@@ -63,11 +81,20 @@ jobs:
           cd mcp-server
           cargo build --release
 
-      - name: Upload macOS artifact
+      - name: Build Backup CLI (macOS)
+        run: cargo build --release -p ironbase-backup
+
+      - name: Upload macOS MCP artifact
         uses: actions/upload-artifact@v4
         with:
           name: mcp-ironbase-server-macos
           path: mcp-server/target/release/mcp-ironbase-server
+
+      - name: Upload macOS Backup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironbase-backup-macos
+          path: target/release/ironbase-backup
 
   create-release:
     name: Create Release
@@ -87,19 +114,33 @@ jobs:
         run: |
           mkdir -p release-assets
 
-          # Windows
+          # MCP Server - Windows
           cp artifacts/mcp-ironbase-server-windows/mcp-ironbase-server.exe \
              release-assets/mcp-ironbase-server-windows.exe
 
-          # Linux
+          # MCP Server - Linux
           cp artifacts/mcp-ironbase-server-linux/mcp-ironbase-server \
              release-assets/mcp-ironbase-server-linux
           chmod +x release-assets/mcp-ironbase-server-linux
 
-          # macOS
+          # MCP Server - macOS
           cp artifacts/mcp-ironbase-server-macos/mcp-ironbase-server \
              release-assets/mcp-ironbase-server-macos
           chmod +x release-assets/mcp-ironbase-server-macos
+
+          # Backup CLI - Windows
+          cp artifacts/ironbase-backup-windows/ironbase-backup.exe \
+             release-assets/ironbase-backup-windows.exe
+
+          # Backup CLI - Linux
+          cp artifacts/ironbase-backup-linux/ironbase-backup \
+             release-assets/ironbase-backup-linux
+          chmod +x release-assets/ironbase-backup-linux
+
+          # Backup CLI - macOS
+          cp artifacts/ironbase-backup-macos/ironbase-backup \
+             release-assets/ironbase-backup-macos
+          chmod +x release-assets/ironbase-backup-macos
 
           # Copy installer scripts
           cp mcp-server/scripts/install.ps1 release-assets/
@@ -123,12 +164,15 @@ jobs:
             release-assets/mcp-ironbase-server-windows.exe
             release-assets/mcp-ironbase-server-linux
             release-assets/mcp-ironbase-server-macos
+            release-assets/ironbase-backup-windows.exe
+            release-assets/ironbase-backup-linux
+            release-assets/ironbase-backup-macos
             release-assets/install.ps1
             release-assets/install.sh
           body: |
-            ## IronBase MCP Server ${{ steps.get_version.outputs.VERSION }}
+            ## IronBase ${{ steps.get_version.outputs.VERSION }}
 
-            ### Downloads
+            ### MCP Server Downloads
 
             | Platform | File | Install |
             |----------|------|---------|
@@ -136,18 +180,42 @@ jobs:
             | Linux | `mcp-ironbase-server-linux` | `sudo ./install.sh` |
             | macOS | `mcp-ironbase-server-macos` | `sudo ./install.sh` |
 
-            ### Quick Install (Windows)
+            ### Backup CLI Downloads
+
+            | Platform | File |
+            |----------|------|
+            | Windows | `ironbase-backup-windows.exe` |
+            | Linux | `ironbase-backup-linux` |
+            | macOS | `ironbase-backup-macos` |
+
+            ### Quick Install MCP Server (Windows)
 
             ```powershell
             # Download and run installer (as Administrator)
             irm https://github.com/petitan/IronBase/releases/latest/download/install.ps1 | iex
             ```
 
-            ### Quick Install (Linux/macOS)
+            ### Quick Install MCP Server (Linux/macOS)
 
             ```bash
             # Download and run installer
             curl -sSL https://github.com/petitan/IronBase/releases/latest/download/install.sh | sudo bash
+            ```
+
+            ### Backup CLI Usage
+
+            ```bash
+            # Create full backup
+            ironbase-backup backup --db mydata.mlite --output ./backups --full
+
+            # Create incremental backup
+            ironbase-backup backup --db mydata.mlite --output ./backups
+
+            # Restore from backups
+            ironbase-backup restore --dir ./backups --output restored.mlite
+
+            # Verify backup integrity
+            ironbase-backup verify --dir ./backups
             ```
 
             ### Manual Installation
