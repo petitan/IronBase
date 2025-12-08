@@ -76,13 +76,16 @@ function Get-LatestRelease {
         $version = $releaseInfo.tag_name
         Write-Host "Latest version: $version" -ForegroundColor Green
 
-        # Find the Windows exe asset
+        # Find the MCP server Windows exe asset (not backup)
         $asset = $releaseInfo.assets | Where-Object {
-            $_.name -like "*windows*.exe" -or $_.name -eq $ExeName
+            $_.name -eq "mcp-ironbase-server-windows.exe"
         } | Select-Object -First 1
 
         if (-not $asset) {
-            $asset = $releaseInfo.assets | Where-Object { $_.name -like "*.exe" } | Select-Object -First 1
+            # Fallback: search for mcp-server in name
+            $asset = $releaseInfo.assets | Where-Object {
+                $_.name -like "*mcp*server*windows*.exe"
+            } | Select-Object -First 1
         }
 
         if (-not $asset) {
