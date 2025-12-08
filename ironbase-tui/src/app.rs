@@ -751,6 +751,21 @@ impl App {
         self.loading_frame = self.loading_frame.wrapping_add(1);
     }
 
+    /// Update page_size based on terminal height
+    /// Returns true if page_size changed (requires document refresh)
+    pub fn update_page_size(&mut self, terminal_height: u16) -> bool {
+        // Calculate available height for documents:
+        // terminal_height - header(1) - command_bar(1) - borders(2) = inner height
+        let new_page_size = terminal_height.saturating_sub(4).max(5) as usize;
+
+        if new_page_size != self.page_size {
+            self.page_size = new_page_size;
+            true
+        } else {
+            false
+        }
+    }
+
     // NOTE: Database connection is now handled asynchronously in main.rs
     // The old synchronous open_database and refresh methods have been replaced
     // with async versions: refresh_collections_async, refresh_documents_async

@@ -1,11 +1,11 @@
 [package]
 name = "ironbase-tui"
-version.workspace = true
-edition.workspace = true
+version = "0.1.0"
+edition = "2021"
 description = "Intelligent TUI for IronBase NoSQL database"
-license.workspace = true
-authors.workspace = true
-repository.workspace = true
+license = "MIT"
+authors = ["Petitan"]
+repository = "https://github.com/petitan/IronBase"
 
 [[bin]]
 name = "ironbase-tui"

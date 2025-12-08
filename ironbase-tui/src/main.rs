@@ -146,6 +146,10 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyhow::Result<()> {
+    // Initial page_size update based on terminal size
+    let size = terminal.size()?;
+    app.update_page_size(size.height);
+
     loop {
         // Tick loading animation
         if app.is_loading() {
@@ -156,13 +160,23 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
 
         // Use poll with timeout for non-blocking check
         if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                // Handle modal keys first
-                if app.modal.is_some() {
-                    handle_modal_key_async(app, key.code, key.modifiers).await;
-                } else {
-                    handle_global_key_async(app, key.code, key.modifiers).await;
+            match event::read()? {
+                Event::Key(key) => {
+                    // Handle modal keys first
+                    if app.modal.is_some() {
+                        handle_modal_key_async(app, key.code, key.modifiers).await;
+                    } else {
+                        handle_global_key_async(app, key.code, key.modifiers).await;
+                    }
                 }
+                Event::Resize(_, height) => {
+                    // Update page_size when terminal is resized
+                    if app.update_page_size(height) && !app.startup {
+                        // Refresh documents with new page size
+                        let _ = app.refresh_documents_async().await;
+                    }
+                }
+                _ => {}
             }
         }
 
