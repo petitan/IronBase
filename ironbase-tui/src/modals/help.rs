@@ -1,0 +1,99 @@
+//! Help modal - keyboard shortcuts reference
+
+use super::render_modal_frame;
+use crate::theme::Theme;
+use ratatui::prelude::*;
+use ratatui::widgets::Paragraph;
+
+/// Render the help modal
+pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
+    let inner = render_modal_frame(frame, area, "Sugo", theme, 60, 70);
+
+    let help_text = vec![
+        Line::from(Span::styled(
+            "Navigacio",
+            Style::default().fg(theme.accent).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Tab       ", Style::default().fg(theme.accent)),
+            Span::raw("Kovetkezo panel"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+Tab ", Style::default().fg(theme.accent)),
+            Span::raw("Elozo panel"),
+        ]),
+        Line::from(vec![
+            Span::styled("↑/↓ j/k   ", Style::default().fg(theme.accent)),
+            Span::raw("Listaban mozgas"),
+        ]),
+        Line::from(vec![
+            Span::styled("PgUp/PgDn ", Style::default().fg(theme.accent)),
+            Span::raw("Lapozas"),
+        ]),
+        Line::from(vec![
+            Span::styled("Home/g    ", Style::default().fg(theme.accent)),
+            Span::raw("Lista elejere"),
+        ]),
+        Line::from(vec![
+            Span::styled("End/G     ", Style::default().fg(theme.accent)),
+            Span::raw("Lista vegere"),
+        ]),
+        Line::from(vec![
+            Span::styled("Enter     ", Style::default().fg(theme.accent)),
+            Span::raw("Kivalaszt"),
+        ]),
+        Line::from(vec![
+            Span::styled("Esc       ", Style::default().fg(theme.accent)),
+            Span::raw("Vissza / Bezar"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Funkciok",
+            Style::default().fg(theme.accent).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("/         ", Style::default().fg(theme.accent)),
+            Span::raw("Kereses megnyitasa"),
+        ]),
+        Line::from(vec![
+            Span::styled("a         ", Style::default().fg(theme.accent)),
+            Span::raw("Akciok menu"),
+        ]),
+        Line::from(vec![
+            Span::styled("?         ", Style::default().fg(theme.accent)),
+            Span::raw("Sugo be/ki"),
+        ]),
+        Line::from(vec![
+            Span::styled("t         ", Style::default().fg(theme.accent)),
+            Span::raw("Tema valtas"),
+        ]),
+        Line::from(vec![
+            Span::styled("q         ", Style::default().fg(theme.accent)),
+            Span::raw("Kilepes"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Detail panel",
+            Style::default().fg(theme.accent).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("e         ", Style::default().fg(theme.accent)),
+            Span::raw("Dokumentum szerkesztese"),
+        ]),
+        Line::from(vec![
+            Span::styled("d         ", Style::default().fg(theme.accent)),
+            Span::raw("Dokumentum torlese"),
+        ]),
+        Line::from(vec![
+            Span::styled("y         ", Style::default().fg(theme.accent)),
+            Span::raw("JSON masolasa"),
+        ]),
+    ];
+
+    let help = Paragraph::new(help_text).style(Style::default().fg(theme.fg));
+
+    frame.render_widget(help, inner);
+}
