@@ -74,6 +74,10 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Set page_size based on terminal size BEFORE loading documents
+    let size = terminal.size()?;
+    app.update_page_size(size.height);
+
     // Show splash screen immediately
     terminal.draw(|f| render_ui(f, &app))?;
 
