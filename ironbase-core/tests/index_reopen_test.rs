@@ -6,14 +6,17 @@ use std::fs;
 
 #[test]
 fn test_index_reopen_with_documents() {
-    let test_path = "/tmp/test_index_reopen.mlite";
-    let wal_path = "/tmp/test_index_reopen.wal";
+    let temp_dir = std::env::temp_dir();
+    let test_path = temp_dir.join("test_index_reopen.mlite");
+    let wal_path = temp_dir.join("test_index_reopen.wal");
+    let test_path = test_path.to_str().unwrap();
+    let wal_path = wal_path.to_str().unwrap();
 
     // Clean up
     let _ = fs::remove_file(test_path);
     let _ = fs::remove_file(wal_path);
     // Remove any .idx files
-    if let Ok(entries) = fs::read_dir("/tmp") {
+    if let Ok(entries) = fs::read_dir(&temp_dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with("test_index_reopen_") && name.ends_with(".idx") {
@@ -71,7 +74,7 @@ fn test_index_reopen_with_documents() {
     // Clean up
     let _ = fs::remove_file(test_path);
     let _ = fs::remove_file(wal_path);
-    if let Ok(entries) = fs::read_dir("/tmp") {
+    if let Ok(entries) = fs::read_dir(&temp_dir) {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
                 if name.starts_with("test_index_reopen_") && name.ends_with(".idx") {
