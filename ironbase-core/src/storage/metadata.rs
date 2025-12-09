@@ -9,8 +9,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 
 /// Maximum allowed size for a single collection metadata entry.
 /// Protects against DoS via malicious files with corrupted length fields.
-/// 16 MB matches the document size limit used elsewhere.
-const MAX_METADATA_SIZE: usize = 16 * 1024 * 1024;
+/// 64 MB allows ~2-4 million documents per collection with ObjectId keys.
+const MAX_METADATA_SIZE: usize = 64 * 1024 * 1024;
 
 impl StorageEngine {
     /// Load metadata from file (supports both legacy and dynamic formats)
