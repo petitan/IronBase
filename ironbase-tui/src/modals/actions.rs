@@ -77,7 +77,12 @@ fn get_context_actions(app: &App) -> Vec<ActionItem> {
         },
         ActionItem {
             key: 'r',
-            label: "Run query",
+            label: "Run query (JSON)",
+            enabled: has_collection,
+        },
+        ActionItem {
+            key: 'f',
+            label: "Filter (visual)",
             enabled: has_collection,
         },
         ActionItem {

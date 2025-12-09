@@ -48,6 +48,7 @@ pub enum Modal {
     Index,
     Query,
     Export,
+    Filter,
     ErrorDetail,
 }
 
@@ -136,6 +137,440 @@ impl SearchState {
     pub fn cursor_right(&mut self) {
         if self.cursor_pos < self.query_input.len() {
             self.cursor_pos += 1;
+        }
+    }
+}
+
+/// Filter operator for visual search
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterOperator {
+    #[default]
+    Equals,      // $eq
+    NotEquals,   // $ne
+    GreaterThan, // $gt
+    LessThan,    // $lt
+    GreaterOrEq, // $gte
+    LessOrEq,    // $lte
+    Contains,    // $regex (case insensitive)
+    StartsWith,  // $regex ^
+    Exists,      // $exists
+    In,          // $in (comma separated)
+}
+
+impl FilterOperator {
+    pub fn all() -> &'static [FilterOperator] {
+        &[
+            Self::Equals,
+            Self::NotEquals,
+            Self::Contains,
+            Self::StartsWith,
+            Self::GreaterThan,
+            Self::GreaterOrEq,
+            Self::LessThan,
+            Self::LessOrEq,
+            Self::Exists,
+            Self::In,
+        ]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Equals => "=",
+            Self::NotEquals => "≠",
+            Self::GreaterThan => ">",
+            Self::LessThan => "<",
+            Self::GreaterOrEq => ">=",
+            Self::LessOrEq => "<=",
+            Self::Contains => "contains",
+            Self::StartsWith => "starts with",
+            Self::Exists => "exists",
+            Self::In => "in list",
+        }
+    }
+
+    pub fn to_query(&self, field: &str, value: &str) -> Value {
+        use serde_json::json;
+
+        // Helper to parse value as number or return string
+        let parse_value = |v: &str| -> Value {
+            if let Ok(n) = v.parse::<i64>() {
+                json!(n)
+            } else if let Ok(n) = v.parse::<f64>() {
+                json!(n)
+            } else if v == "true" {
+                json!(true)
+            } else if v == "false" {
+                json!(false)
+            } else if v == "null" {
+                json!(null)
+            } else {
+                json!(v)
+            }
+        };
+
+        match self {
+            Self::Equals => {
+                let v = parse_value(value);
+                json!({ (field): v })
+            }
+            Self::NotEquals => {
+                let v = parse_value(value);
+                json!({ (field): { "$ne": v } })
+            }
+            Self::GreaterThan => {
+                let v = parse_value(value);
+                json!({ (field): { "$gt": v } })
+            }
+            Self::LessThan => {
+                let v = parse_value(value);
+                json!({ (field): { "$lt": v } })
+            }
+            Self::GreaterOrEq => {
+                let v = parse_value(value);
+                json!({ (field): { "$gte": v } })
+            }
+            Self::LessOrEq => {
+                let v = parse_value(value);
+                json!({ (field): { "$lte": v } })
+            }
+            Self::Contains => json!({ (field): { "$regex": value } }),
+            Self::StartsWith => json!({ (field): { "$regex": format!("^{}", value) } }),
+            Self::Exists => json!({ (field): { "$exists": value != "false" && value != "0" } }),
+            Self::In => {
+                let values: Vec<Value> = value
+                    .split(',')
+                    .map(|s| parse_value(s.trim()))
+                    .collect();
+                json!({ (field): { "$in": values } })
+            }
+        }
+    }
+}
+
+/// A single filter condition
+#[derive(Debug, Clone)]
+pub struct FilterCondition {
+    pub field: String,
+    pub operator: FilterOperator,
+    pub value: String,
+}
+
+impl FilterCondition {
+    pub fn to_query(&self) -> Value {
+        self.operator.to_query(&self.field, &self.value)
+    }
+
+    pub fn display(&self) -> String {
+        if self.operator == FilterOperator::Exists {
+            format!("{} {}", self.field, self.operator.label())
+        } else {
+            format!("{} {} \"{}\"", self.field, self.operator.label(), self.value)
+        }
+    }
+}
+
+/// Focus state for filter modal
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FilterFocus {
+    #[default]
+    Field,
+    Operator,
+    Value,
+    Filters,
+}
+
+/// Visual filter state
+#[derive(Debug, Clone, Default)]
+pub struct FilterState {
+    pub field_input: String,
+    pub field_cursor: usize,
+    pub operator: FilterOperator,
+    pub operator_idx: usize,
+    pub value_input: String,
+    pub value_cursor: usize,
+    pub focus: FilterFocus,
+    pub filters: Vec<FilterCondition>,
+    pub selected_filter: usize,
+    /// All available field names from collection schema
+    pub all_fields: Vec<String>,
+    /// Filtered suggestions based on current input
+    pub filtered_suggestions: Vec<String>,
+    pub suggestion_idx: usize,
+    pub show_suggestions: bool,
+    pub results: Option<Vec<Value>>,
+    pub result_count: usize,
+    pub error: Option<String>,
+}
+
+impl FilterState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.field_input.clear();
+        self.field_cursor = 0;
+        self.value_input.clear();
+        self.value_cursor = 0;
+        self.operator = FilterOperator::default();
+        self.operator_idx = 0;
+        self.filters.clear();
+        self.selected_filter = 0;
+        // Keep all_fields - they're from the collection schema
+        self.filtered_suggestions.clear();
+        self.suggestion_idx = 0;
+        self.show_suggestions = false;
+        self.results = None;
+        self.result_count = 0;
+        self.error = None;
+    }
+
+    pub fn next_focus(&mut self) {
+        self.focus = match self.focus {
+            FilterFocus::Field => {
+                self.show_suggestions = false;
+                FilterFocus::Operator
+            }
+            FilterFocus::Operator => FilterFocus::Value,
+            FilterFocus::Value => {
+                if self.filters.is_empty() {
+                    self.update_suggestions();
+                    FilterFocus::Field
+                } else {
+                    FilterFocus::Filters
+                }
+            }
+            FilterFocus::Filters => {
+                self.update_suggestions();
+                FilterFocus::Field
+            }
+        };
+    }
+
+    pub fn prev_focus(&mut self) {
+        self.focus = match self.focus {
+            FilterFocus::Field => {
+                self.show_suggestions = false;
+                if self.filters.is_empty() {
+                    FilterFocus::Value
+                } else {
+                    FilterFocus::Filters
+                }
+            }
+            FilterFocus::Operator => {
+                self.update_suggestions();
+                FilterFocus::Field
+            }
+            FilterFocus::Value => FilterFocus::Operator,
+            FilterFocus::Filters => FilterFocus::Value,
+        };
+    }
+
+    pub fn next_operator(&mut self) {
+        let ops = FilterOperator::all();
+        self.operator_idx = (self.operator_idx + 1) % ops.len();
+        self.operator = ops[self.operator_idx];
+    }
+
+    pub fn prev_operator(&mut self) {
+        let ops = FilterOperator::all();
+        if self.operator_idx == 0 {
+            self.operator_idx = ops.len() - 1;
+        } else {
+            self.operator_idx -= 1;
+        }
+        self.operator = ops[self.operator_idx];
+    }
+
+    pub fn add_filter(&mut self) {
+        if !self.field_input.is_empty() {
+            let condition = FilterCondition {
+                field: self.field_input.clone(),
+                operator: self.operator,
+                value: self.value_input.clone(),
+            };
+            self.filters.push(condition);
+            self.field_input.clear();
+            self.field_cursor = 0;
+            self.value_input.clear();
+            self.value_cursor = 0;
+            self.operator = FilterOperator::default();
+            self.operator_idx = 0;
+            self.focus = FilterFocus::Field;
+        }
+    }
+
+    pub fn remove_selected_filter(&mut self) {
+        if !self.filters.is_empty() {
+            self.filters.remove(self.selected_filter);
+            if self.selected_filter >= self.filters.len() && !self.filters.is_empty() {
+                self.selected_filter = self.filters.len() - 1;
+            }
+            if self.filters.is_empty() {
+                self.focus = FilterFocus::Field;
+            }
+        }
+    }
+
+    pub fn build_query(&self) -> Value {
+        use serde_json::json;
+        if self.filters.is_empty() {
+            json!({})
+        } else if self.filters.len() == 1 {
+            self.filters[0].to_query()
+        } else {
+            let conditions: Vec<Value> = self.filters.iter().map(|f| f.to_query()).collect();
+            json!({ "$and": conditions })
+        }
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        match self.focus {
+            FilterFocus::Field => {
+                self.field_input.insert(self.field_cursor, c);
+                self.field_cursor += 1;
+                self.update_suggestions();
+            }
+            FilterFocus::Value => {
+                self.value_input.insert(self.value_cursor, c);
+                self.value_cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        match self.focus {
+            FilterFocus::Field => {
+                if self.field_cursor > 0 {
+                    self.field_cursor -= 1;
+                    self.field_input.remove(self.field_cursor);
+                    self.update_suggestions();
+                }
+            }
+            FilterFocus::Value => {
+                if self.value_cursor > 0 {
+                    self.value_cursor -= 1;
+                    self.value_input.remove(self.value_cursor);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn cursor_left(&mut self) {
+        match self.focus {
+            FilterFocus::Field => {
+                if self.field_cursor > 0 {
+                    self.field_cursor -= 1;
+                }
+            }
+            FilterFocus::Value => {
+                if self.value_cursor > 0 {
+                    self.value_cursor -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        match self.focus {
+            FilterFocus::Field => {
+                if self.field_cursor < self.field_input.len() {
+                    self.field_cursor += 1;
+                }
+            }
+            FilterFocus::Value => {
+                if self.value_cursor < self.value_input.len() {
+                    self.value_cursor += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub fn cursor_home(&mut self) {
+        match self.focus {
+            FilterFocus::Field => self.field_cursor = 0,
+            FilterFocus::Value => self.value_cursor = 0,
+            _ => {}
+        }
+    }
+
+    pub fn cursor_end(&mut self) {
+        match self.focus {
+            FilterFocus::Field => self.field_cursor = self.field_input.len(),
+            FilterFocus::Value => self.value_cursor = self.value_input.len(),
+            _ => {}
+        }
+    }
+
+    /// Set available fields from collection schema
+    pub fn set_fields(&mut self, fields: Vec<String>) {
+        self.all_fields = fields;
+        // Show suggestions immediately when fields are loaded
+        self.update_suggestions();
+        self.show_suggestions = true;
+    }
+
+    /// Update filtered suggestions based on current input
+    pub fn update_suggestions(&mut self) {
+        let input = self.field_input.to_lowercase();
+        if input.is_empty() {
+            // Show all fields when input is empty
+            self.filtered_suggestions = self.all_fields.clone();
+        } else {
+            // Filter fields that contain the input
+            self.filtered_suggestions = self
+                .all_fields
+                .iter()
+                .filter(|f| f.to_lowercase().contains(&input))
+                .cloned()
+                .collect();
+        }
+        // Reset selection if out of bounds
+        if self.suggestion_idx >= self.filtered_suggestions.len() {
+            self.suggestion_idx = 0;
+        }
+        // Show suggestions when there are matches
+        self.show_suggestions = !self.filtered_suggestions.is_empty();
+    }
+
+    /// Select next suggestion (down arrow)
+    pub fn suggestion_down(&mut self) {
+        if !self.filtered_suggestions.is_empty() {
+            self.suggestion_idx = (self.suggestion_idx + 1) % self.filtered_suggestions.len();
+        }
+    }
+
+    /// Select previous suggestion (up arrow)
+    pub fn suggestion_up(&mut self) {
+        if !self.filtered_suggestions.is_empty() {
+            if self.suggestion_idx == 0 {
+                self.suggestion_idx = self.filtered_suggestions.len() - 1;
+            } else {
+                self.suggestion_idx -= 1;
+            }
+        }
+    }
+
+    /// Apply selected suggestion to field input
+    pub fn apply_suggestion(&mut self) {
+        if let Some(suggestion) = self.filtered_suggestions.get(self.suggestion_idx) {
+            self.field_input = suggestion.clone();
+            self.field_cursor = self.field_input.len();
+            self.show_suggestions = false;
+        }
+    }
+
+    /// Toggle suggestions visibility
+    pub fn toggle_suggestions(&mut self) {
+        if self.focus == FilterFocus::Field {
+            self.show_suggestions = !self.show_suggestions;
+            if self.show_suggestions {
+                self.update_suggestions();
+            }
         }
     }
 }
@@ -666,6 +1101,9 @@ pub struct App {
     // Query builder state
     pub query_state: QueryState,
 
+    // Visual filter state
+    pub filter_state: FilterState,
+
     // Export state
     pub export_state: ExportState,
 
@@ -712,6 +1150,7 @@ impl App {
             insert: InsertState::default(),
             index_state: IndexState::default(),
             query_state: QueryState::default(),
+            filter_state: FilterState::default(),
             export_state: ExportState::default(),
             config,
             status_message: None,
@@ -967,6 +1406,45 @@ impl App {
 
         self.query_state = QueryState::new(coll_name);
         self.modal = Some(Modal::Query);
+    }
+
+    /// Open visual filter modal (sync - no schema loading)
+    pub fn open_filter_modal(&mut self) {
+        if self.current_collection_name().is_none() {
+            self.set_error("Nincs kiválasztott kollekció");
+            return;
+        };
+
+        self.filter_state = FilterState::new();
+        self.modal = Some(Modal::Filter);
+    }
+
+    /// Open visual filter modal with schema loading (async)
+    pub async fn open_filter_modal_async(&mut self) {
+        let coll_name = match self.current_collection_name() {
+            Some(name) => name.to_string(),
+            None => {
+                self.set_error("Nincs kiválasztott kollekció");
+                return;
+            }
+        };
+
+        self.filter_state = FilterState::new();
+        self.modal = Some(Modal::Filter);
+
+        // Load schema for field suggestions
+        if let Some(db) = &self.db {
+            match db.infer_schema(&coll_name, 100).await {
+                Ok(fields) => {
+                    let field_names: Vec<String> = fields.into_iter().map(|f| f.name).collect();
+                    self.filter_state.set_fields(field_names);
+                }
+                Err(e) => {
+                    // Non-fatal - just no suggestions
+                    self.filter_state.error = Some(format!("Schema betoltes hiba: {}", e));
+                }
+            }
+        }
     }
 
     // execute_query törölve - használd execute_query_async
@@ -1560,6 +2038,76 @@ impl App {
             }
             Err(e) => {
                 self.query_state.error = Some(format!("Lekérdezés hiba: {}", e));
+            }
+        }
+    }
+
+    // === Async Filter ===
+
+    /// Execute the visual filter (async) - max 1000 results
+    pub async fn execute_filter_async(&mut self) {
+        const FILTER_LIMIT: usize = 1000;
+
+        // Ha van kitöltött field, automatikusan adjuk hozzá keresés előtt
+        if !self.filter_state.field_input.is_empty() {
+            self.filter_state.add_filter();
+        }
+
+        if self.filter_state.filters.is_empty() {
+            self.filter_state.error = Some("Adj hozza legalabb egy szurot".to_string());
+            return;
+        }
+
+        let query = self.filter_state.build_query();
+        let collection = match self.current_collection_name() {
+            Some(name) => name.to_string(),
+            None => {
+                self.filter_state.error = Some("Nincs kiválasztott kollekció".to_string());
+                return;
+            }
+        };
+
+        let Some(db) = &self.db else {
+            self.filter_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        match db
+            .find_with_options(&collection, &query, 0, FILTER_LIMIT)
+            .await
+        {
+            Ok(docs) => {
+                let count = docs.len();
+                self.filter_state.result_count = count;
+                self.filter_state.results = Some(docs.clone());
+                self.filter_state.error = None;
+
+                if count == 0 {
+                    // 0 eredmény - maradjon nyitva a modal, mutassa a query-t
+                    let query = self.filter_state.build_query();
+                    self.filter_state.error = Some(format!(
+                        "0 talalat. Query: {}",
+                        serde_json::to_string(&query).unwrap_or_default()
+                    ));
+                } else {
+                    // Van eredmény - frissítsd a dokumentum listát és zárd be
+                    self.documents = docs;
+                    self.selected_document = 0;
+                    self.doc_scroll_offset = 0;
+                    self.total_docs = count;
+
+                    if count >= FILTER_LIMIT {
+                        self.set_status(format!("{}+ talalat (limit: {})", count, FILTER_LIMIT));
+                    } else {
+                        self.set_status(format!("{} talalat", count));
+                    }
+
+                    // Close the modal to show results
+                    self.close_modal();
+                }
+            }
+            Err(e) => {
+                self.filter_state.error = Some(format!("Szures hiba: {}", e));
             }
         }
     }

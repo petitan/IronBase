@@ -190,8 +190,8 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
     }
 }
 
-/// Handle keys in actions modal
-fn handle_actions_key(app: &mut App, key: KeyCode) {
+/// Handle keys in actions modal (async for schema loading)
+async fn handle_actions_key_async(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc | KeyCode::Char('q') => app.close_modal(),
         // Action shortcuts
@@ -214,6 +214,10 @@ fn handle_actions_key(app: &mut App, key: KeyCode) {
         KeyCode::Char('r') => {
             app.close_modal();
             app.open_query_modal();
+        }
+        KeyCode::Char('f') => {
+            app.close_modal();
+            app.open_filter_modal_async().await;
         }
         KeyCode::Char('o') => {
             app.close_modal();
@@ -331,6 +335,7 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Index => modals::index::render(frame, frame.area(), &app.index_state, &theme),
             Modal::Query => modals::query::render(frame, frame.area(), &app.query_state, &theme),
             Modal::Export => modals::export::render(frame, frame.area(), &app.export_state, &theme),
+            Modal::Filter => modals::filter::render(frame, frame.area(), &app.filter_state, &theme),
             Modal::ErrorDetail => {
                 if let Some(ref err) = app.error_message {
                     modals::error::render(frame, frame.area(), err, app.error_scroll, &theme);
@@ -400,6 +405,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ("Tab", "Panel"),
             ("j/k", "Navigate"),
             ("Enter", "Select"),
+            ("f", "Filter"),
             ("/", "Search"),
             ("a", "Actions"),
             ("q", "Quit"),
@@ -408,6 +414,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ("Tab", "Panel"),
             ("j/k", "Navigate"),
             ("PgUp/Dn", "Page"),
+            ("f", "Filter"),
             ("/", "Search"),
             ("a", "Actions"),
             ("q", "Quit"),
@@ -468,7 +475,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match app.modal {
         Some(Modal::Search) => handle_search_key_async(app, key, modifiers).await,
-        Some(Modal::Actions) => handle_actions_key(app, key),
+        Some(Modal::Actions) => handle_actions_key_async(app, key).await,
         Some(Modal::Help) => {
             app.close_modal();
         }
@@ -478,6 +485,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::Index) => handle_index_key_async(app, key, modifiers).await,
         Some(Modal::Query) => handle_query_key_async(app, key, modifiers).await,
         Some(Modal::Export) => handle_export_key_async(app, key, modifiers).await,
+        Some(Modal::Filter) => handle_filter_key_async(app, key, modifiers).await,
         None => {}
     }
 }
@@ -512,6 +520,7 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char('/'), _) => app.open_search(),
         (KeyCode::Char('a'), _) => app.open_actions(),
         (KeyCode::Char('?'), _) => app.open_help(),
+        (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
 
         // Error detail modal (if error present, 'e' opens error details)
         (KeyCode::Char('e'), _) if app.error_message.is_some() => {
@@ -770,6 +779,158 @@ async fn handle_export_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
             app.export_state.insert_char(c);
         }
+        _ => {}
+    }
+}
+
+/// Async filter key handler
+async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
+    use crate::app::FilterFocus;
+
+    match (key, modifiers) {
+        // Close modal
+        (KeyCode::Esc, _) => app.close_modal(),
+
+        // Execute filter search
+        (KeyCode::F(5), _) => {
+            app.execute_filter_async().await;
+        }
+
+        // Tab - apply suggestion if showing, otherwise cycle between fields
+        (KeyCode::Tab, KeyModifiers::NONE) => {
+            if app.filter_state.focus == FilterFocus::Field && app.filter_state.show_suggestions {
+                // Apply suggestion and move to operator
+                app.filter_state.apply_suggestion();
+                app.filter_state.focus = FilterFocus::Operator;
+            } else {
+                app.filter_state.next_focus();
+            }
+        }
+        (KeyCode::BackTab, _) => {
+            app.filter_state.prev_focus();
+        }
+
+        // Enter - navigate or add filter
+        (KeyCode::Enter, _) => {
+            match app.filter_state.focus {
+                FilterFocus::Field => {
+                    // Ha van suggestion látható, alkalmazzuk és lépjünk tovább
+                    if app.filter_state.show_suggestions && !app.filter_state.filtered_suggestions.is_empty() {
+                        app.filter_state.apply_suggestion();
+                        app.filter_state.focus = FilterFocus::Operator;
+                    } else if !app.filter_state.field_input.is_empty() {
+                        // Field-nél Enter = lépj Operator-ra, DE csak ha nem üres!
+                        app.filter_state.focus = FilterFocus::Operator;
+                    }
+                }
+                FilterFocus::Operator => {
+                    // Operator-nál Enter = lépj Value-ra
+                    app.filter_state.focus = FilterFocus::Value;
+                }
+                FilterFocus::Value => {
+                    // Value-nál Enter = add filter (ha valid) és vissza Field-re
+                    // Exists operátorhoz nem kell érték, máshoz igen
+                    let needs_value = app.filter_state.operator != crate::app::FilterOperator::Exists;
+                    let has_value = !app.filter_state.value_input.is_empty();
+
+                    if !needs_value || has_value {
+                        app.filter_state.add_filter();
+                    } else {
+                        app.filter_state.error = Some("Ertek megadasa kotelezo!".to_string());
+                    }
+                }
+                FilterFocus::Filters => {
+                    // Filters-nél Enter = törölje a kiválasztott szűrőt
+                    app.filter_state.remove_selected_filter();
+                }
+            }
+        }
+
+        // Left arrow - cursor left in text fields, prev operator in Operator focus
+        (KeyCode::Left, _) => {
+            match app.filter_state.focus {
+                FilterFocus::Operator => app.filter_state.prev_operator(),
+                FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_left(),
+                _ => {}
+            }
+        }
+
+        // Right arrow - cursor right in text fields, next operator in Operator focus
+        (KeyCode::Right, _) => {
+            match app.filter_state.focus {
+                FilterFocus::Operator => app.filter_state.next_operator(),
+                FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_right(),
+                _ => {}
+            }
+        }
+
+        // Home/End - cursor to start/end of text
+        (KeyCode::Home, _) => app.filter_state.cursor_home(),
+        (KeyCode::End, _) => app.filter_state.cursor_end(),
+
+        // Up/Down - navigate suggestions (Field) or filters list (Filters)
+        (KeyCode::Up, _) => {
+            match app.filter_state.focus {
+                FilterFocus::Field => {
+                    // Navigate suggestions up
+                    if app.filter_state.show_suggestions {
+                        app.filter_state.suggestion_up();
+                    } else {
+                        // Show suggestions if we have them
+                        app.filter_state.update_suggestions();
+                    }
+                }
+                FilterFocus::Filters => {
+                    if app.filter_state.selected_filter > 0 {
+                        app.filter_state.selected_filter -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        (KeyCode::Down, _) => {
+            match app.filter_state.focus {
+                FilterFocus::Field => {
+                    // Navigate suggestions down
+                    if app.filter_state.show_suggestions {
+                        app.filter_state.suggestion_down();
+                    } else {
+                        // Show suggestions if we have them
+                        app.filter_state.update_suggestions();
+                    }
+                }
+                FilterFocus::Filters => {
+                    if app.filter_state.selected_filter + 1 < app.filter_state.filters.len() {
+                        app.filter_state.selected_filter += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Delete - remove selected filter
+        (KeyCode::Delete, _) if app.filter_state.focus == FilterFocus::Filters => {
+            app.filter_state.remove_selected_filter();
+        }
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) if app.filter_state.focus == FilterFocus::Filters => {
+            app.filter_state.remove_selected_filter();
+        }
+
+        // Backspace - delete character
+        (KeyCode::Backspace, _) => {
+            app.filter_state.backspace();
+        }
+
+        // Character input - only for Field and Value focus
+        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
+            match app.filter_state.focus {
+                FilterFocus::Field | FilterFocus::Value => {
+                    app.filter_state.insert_char(c);
+                }
+                _ => {}
+            }
+        }
+
         _ => {}
     }
 }
