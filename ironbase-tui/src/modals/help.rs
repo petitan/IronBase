@@ -88,8 +88,16 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
             Span::raw("Dokumentum torlese"),
         ]),
         Line::from(vec![
-            Span::styled("y         ", Style::default().fg(theme.accent)),
-            Span::raw("JSON masolasa"),
+            Span::styled("f         ", Style::default().fg(theme.accent)),
+            Span::raw("Vizualis szuro"),
+        ]),
+        Line::from(vec![
+            Span::styled("i         ", Style::default().fg(theme.accent)),
+            Span::raw("Dokumentum beszurasa"),
+        ]),
+        Line::from(vec![
+            Span::styled("x         ", Style::default().fg(theme.accent)),
+            Span::raw("Index kezeles"),
         ]),
     ];
 
