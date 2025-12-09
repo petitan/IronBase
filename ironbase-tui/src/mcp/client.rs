@@ -16,7 +16,7 @@ pub struct McpClient {
 impl McpClient {
     /// Connect via HTTP transport
     pub async fn connect_http(url: &str) -> McpResult<Self> {
-        let transport = HttpTransport::new(url);
+        let transport = HttpTransport::new(url)?;
         let mut client = Self {
             transport: Arc::new(transport),
             initialized: false,

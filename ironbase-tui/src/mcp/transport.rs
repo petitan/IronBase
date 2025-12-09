@@ -27,16 +27,16 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     /// Create a new HTTP transport
-    pub fn new(base_url: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>) -> McpResult<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120)) // Longer timeout for large collections
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| McpError::connection(format!("Failed to create HTTP client: {}", e)))?;
 
-        Self {
+        Ok(Self {
             client,
             base_url: base_url.into(),
-        }
+        })
     }
 
     /// Get the MCP endpoint URL
