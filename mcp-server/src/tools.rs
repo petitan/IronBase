@@ -676,7 +676,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_run",
-                "description": "Run a saved script by name with optional parameters. Scripts have access to database functions: db_find, db_find_one, db_insert_one, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Returns the script result and captured logs.",
+                "description": "Run a saved script by name with optional parameters. Scripts have access to database functions: db_find, db_find_one, db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Returns the script result and captured logs.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -690,6 +690,24 @@ pub fn get_tools_list() -> Value {
                         }
                     },
                     "required": ["name"]
+                }
+            },
+            {
+                "name": "script_exec",
+                "description": "Execute inline Rhai code without saving. Useful for one-off operations. Scripts have access to: db_find, db_find_one, db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Rhai script code to execute"
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Optional parameters passed to the script (accessible as 'params' variable)"
+                        }
+                    },
+                    "required": ["code"]
                 }
             },
             {
@@ -1197,6 +1215,21 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let manager = ScriptManager::new(Arc::clone(adapter));
             let engine = RhaiEngine::new(Arc::clone(adapter));
             let result = manager.run_script(&name, script_params, &engine)?;
+
+            Ok(json!({
+                "success": true,
+                "result": result.result,
+                "logs": result.logs,
+                "execution_time_ms": result.execution_time_ms
+            }))
+        }
+        "script_exec" => {
+            let code = get_string(&params, "code")?;
+            let script_params = params.get("params").cloned();
+
+            // Run inline code directly without saving
+            let engine = RhaiEngine::new(Arc::clone(adapter));
+            let result = engine.run(&code, script_params)?;
 
             Ok(json!({
                 "success": true,

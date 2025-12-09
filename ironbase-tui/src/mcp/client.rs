@@ -130,7 +130,8 @@ impl McpClient {
         skip: Option<usize>,
         limit: Option<usize>,
     ) -> McpResult<Vec<Value>> {
-        self.find_with_sort(collection, query, skip, limit, None).await
+        self.find_with_sort(collection, query, skip, limit, None)
+            .await
     }
 
     /// Find documents with optional sort

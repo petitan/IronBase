@@ -831,6 +831,27 @@ impl RhaiEngine {
             }
         });
 
+        // db_insert_many(collection, documents_array) -> {inserted_count, inserted_ids}
+        let adapter_insert_many = adapter.clone();
+        engine.register_fn("db_insert_many", move |collection: &str, docs: rhai::Array| -> Dynamic {
+            // Convert Rhai Array to Vec<Value>
+            let docs_vec: Vec<Value> = docs.iter()
+                .map(dynamic_to_json)
+                .collect();
+            match adapter_insert_many.insert_many(collection, docs_vec) {
+                Ok(ids) => {
+                    let mut map = Map::new();
+                    map.insert("inserted_count".into(), Dynamic::from(ids.len() as i64));
+                    let id_dynamics: Vec<Dynamic> = ids.into_iter()
+                        .map(Dynamic::from)
+                        .collect();
+                    map.insert("inserted_ids".into(), Dynamic::from(id_dynamics));
+                    Dynamic::from(map)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e))
+            }
+        });
+
         // db_update_one(collection, filter, update) -> {matched_count, modified_count}
         let adapter_update_one = adapter.clone();
         engine.register_fn("db_update_one", move |collection: &str, filter: Map, update: Map| -> Dynamic {

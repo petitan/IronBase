@@ -78,7 +78,11 @@ fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
 
 fn render_field_input(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
     let is_focused = state.focus == FilterFocus::Field;
-    let border_color = if is_focused { theme.accent } else { theme.secondary };
+    let border_color = if is_focused {
+        theme.accent
+    } else {
+        theme.secondary
+    };
 
     // Show field count hint if we have suggestions
     let title = if !state.all_fields.is_empty() {
@@ -174,7 +178,11 @@ fn render_suggestions(frame: &mut Frame, area: Rect, state: &FilterState, theme:
 
 fn render_operator(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
     let is_focused = state.focus == FilterFocus::Operator;
-    let border_color = if is_focused { theme.accent } else { theme.secondary };
+    let border_color = if is_focused {
+        theme.accent
+    } else {
+        theme.secondary
+    };
 
     let block = Block::default()
         .title(" Operator [</>] ")
@@ -209,7 +217,11 @@ fn render_operator(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
 
 fn render_value_input(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
     let is_focused = state.focus == FilterFocus::Value;
-    let border_color = if is_focused { theme.accent } else { theme.secondary };
+    let border_color = if is_focused {
+        theme.accent
+    } else {
+        theme.secondary
+    };
 
     let block = Block::default()
         .title(" Ertek ")
@@ -247,27 +259,27 @@ fn render_add_hint(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
         FilterFocus::Field if state.field_input.is_empty() => {
             ("Irj be mezonevet (pl: name, age, email)", theme.muted)
         }
-        FilterFocus::Field => {
-            ("Enter/Tab: tovabb az Operator-ra", theme.accent)
-        }
-        FilterFocus::Operator => {
-            ("<-/-> valassz operatort, Enter/Tab: tovabb", theme.accent)
-        }
+        FilterFocus::Field => ("Enter/Tab: tovabb az Operator-ra", theme.accent),
+        FilterFocus::Operator => ("<-/-> valassz operatort, Enter/Tab: tovabb", theme.accent),
         FilterFocus::Value if state.operator == FilterOperator::Exists => {
             ("Enter: feltetel hozzaadasa (ertek nem kell)", theme.accent)
         }
-        FilterFocus::Value if state.value_input.is_empty() => {
-            ("Irj be keresett erteket, vagy F5 az azonnali kereseshez", theme.muted)
-        }
-        FilterFocus::Value => {
-            ("Enter: feltetel hozzaadasa | F5: azonnali kereses", theme.accent)
-        }
-        FilterFocus::Filters => {
-            ("Enter: szerk | Del: torol | Ctrl+↑↓: mozgat | F5: kereses", theme.accent)
-        }
-        FilterFocus::SortField => {
-            ("←/→: mezo valasztas | Space: irany | F5: kereses", theme.accent)
-        }
+        FilterFocus::Value if state.value_input.is_empty() => (
+            "Irj be keresett erteket, vagy F5 az azonnali kereseshez",
+            theme.muted,
+        ),
+        FilterFocus::Value => (
+            "Enter: feltetel hozzaadasa | F5: azonnali kereses",
+            theme.accent,
+        ),
+        FilterFocus::Filters => (
+            "Enter: szerk | Del: torol | Ctrl+↑↓: mozgat | F5: kereses",
+            theme.accent,
+        ),
+        FilterFocus::SortField => (
+            "←/→: mezo valasztas | Space: irany | F5: kereses",
+            theme.accent,
+        ),
     };
 
     let p = Paragraph::new(hint.0)
@@ -278,7 +290,11 @@ fn render_add_hint(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
 
 fn render_filters(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
     let is_focused = state.focus == FilterFocus::Filters;
-    let border_color = if is_focused { theme.accent } else { theme.secondary };
+    let border_color = if is_focused {
+        theme.accent
+    } else {
+        theme.secondary
+    };
 
     let title = format!(" Aktiv szurok ({}) ", state.filters.len());
     let block = Block::default()
@@ -321,7 +337,11 @@ fn render_filters(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Th
 
 fn render_sort(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
     let is_focused = state.focus == FilterFocus::SortField;
-    let border_color = if is_focused { theme.accent } else { theme.secondary };
+    let border_color = if is_focused {
+        theme.accent
+    } else {
+        theme.secondary
+    };
 
     let block = Block::default()
         .title(" Rendezés [←/→ Space] ")
@@ -355,12 +375,10 @@ fn render_status(frame: &mut Frame, area: Rect, state: &FilterState, theme: &The
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if state.result_count > 0 {
-        Line::from(vec![
-            Span::styled(
-                format!("{} talalat", state.result_count),
-                Style::default().fg(theme.accent),
-            ),
-        ])
+        Line::from(vec![Span::styled(
+            format!("{} talalat", state.result_count),
+            Style::default().fg(theme.accent),
+        )])
     } else if !state.filters.is_empty() {
         Line::from(Span::styled(
             "Nyomd meg F5-t a kereséshez",

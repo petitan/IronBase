@@ -42,7 +42,11 @@ impl DocumentId {
     /// Used in loops where we want to skip invalid documents.
     pub fn try_from_value(doc: &Value) -> Option<DocumentId> {
         match doc.get("_id") {
-            Some(Value::Number(n)) => Some(DocumentId::Int(n.as_i64().unwrap_or(0))),
+            Some(Value::Number(n)) => {
+                // Return None for numbers that can't be represented as i64
+                // (floats, very large numbers) - don't silently convert to 0
+                n.as_i64().map(DocumentId::Int)
+            }
             Some(Value::String(s)) => {
                 if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
                     Some(DocumentId::ObjectId(s.clone()))

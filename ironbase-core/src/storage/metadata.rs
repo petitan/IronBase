@@ -7,6 +7,11 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+/// Maximum allowed size for a single collection metadata entry.
+/// Protects against DoS via malicious files with corrupted length fields.
+/// 16 MB matches the document size limit used elsewhere.
+const MAX_METADATA_SIZE: usize = 16 * 1024 * 1024;
+
 impl StorageEngine {
     /// Load metadata from file (supports both legacy and dynamic formats)
     ///
@@ -104,6 +109,14 @@ impl StorageEngine {
             file.read_exact(&mut len_bytes)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
 
+            // DoS protection: validate metadata size before allocation
+            if len == 0 || len > MAX_METADATA_SIZE {
+                return Err(MongoLiteError::Corruption(format!(
+                    "Collection metadata size {} exceeds maximum {} bytes",
+                    len, MAX_METADATA_SIZE
+                )));
+            }
+
             let mut meta_bytes = vec![0u8; len];
             file.read_exact(&mut meta_bytes)?;
 
@@ -127,6 +140,14 @@ impl StorageEngine {
             let mut len_bytes = [0u8; 4];
             file.read_exact(&mut len_bytes)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
+
+            // DoS protection: validate metadata size before allocation
+            if len == 0 || len > MAX_METADATA_SIZE {
+                return Err(MongoLiteError::Corruption(format!(
+                    "Collection metadata size {} exceeds maximum {} bytes",
+                    len, MAX_METADATA_SIZE
+                )));
+            }
 
             let mut meta_bytes = vec![0u8; len];
             file.read_exact(&mut meta_bytes)?;

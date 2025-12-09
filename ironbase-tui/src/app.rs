@@ -68,10 +68,7 @@ pub enum Modal {
 #[derive(Debug, Clone)]
 pub enum ProgressState {
     /// Indeterminate progress (spinner) - for unknown duration tasks
-    Indeterminate {
-        message: String,
-        frame: usize,
-    },
+    Indeterminate { message: String, frame: usize },
     /// Determinate progress (bar) - for tasks with known total
     Determinate {
         message: String,
@@ -245,7 +242,6 @@ impl SearchState {
         self.doc_matches.get(self.current_match).map(|m| m.line)
     }
 
-
     pub fn insert_char(&mut self, c: char) {
         // Convert character position to byte position for UTF-8 safety
         let byte_pos = self
@@ -290,7 +286,7 @@ impl SearchState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilterOperator {
     #[default]
-    Equals,      // $eq
+    Equals, // $eq
     NotEquals,   // $ne
     GreaterThan, // $gt
     LessThan,    // $lt
@@ -416,7 +412,12 @@ impl FilterCondition {
         if self.operator == FilterOperator::Exists {
             format!("{} {}", self.field, self.operator.label())
         } else {
-            format!("{} {} \"{}\"", self.field, self.operator.label(), self.value)
+            format!(
+                "{} {} \"{}\"",
+                self.field,
+                self.operator.label(),
+                self.value
+            )
         }
     }
 }
@@ -516,9 +517,9 @@ impl FilterState {
 
     /// Build sort object for query
     pub fn build_sort(&self) -> Option<Value> {
-        self.sort_field.as_ref().map(|field| {
-            serde_json::json!({ field: self.sort_direction.to_value() })
-        })
+        self.sort_field
+            .as_ref()
+            .map(|field| serde_json::json!({ field: self.sort_direction.to_value() }))
     }
 
     /// Select next sort field from available fields
@@ -704,7 +705,8 @@ impl FilterState {
     /// Move selected filter up in the list
     pub fn move_filter_up(&mut self) {
         if self.selected_filter > 0 && !self.filters.is_empty() {
-            self.filters.swap(self.selected_filter, self.selected_filter - 1);
+            self.filters
+                .swap(self.selected_filter, self.selected_filter - 1);
             self.selected_filter -= 1;
         }
     }
@@ -712,7 +714,8 @@ impl FilterState {
     /// Move selected filter down in the list
     pub fn move_filter_down(&mut self) {
         if self.selected_filter + 1 < self.filters.len() {
-            self.filters.swap(self.selected_filter, self.selected_filter + 1);
+            self.filters
+                .swap(self.selected_filter, self.selected_filter + 1);
             self.selected_filter += 1;
         }
     }
@@ -1745,12 +1748,12 @@ impl App {
         self.search.current_match = 0;
 
         // Set mode based on active pane
-        self.search.mode = if self.active_pane == Pane::Detail && self.get_selected_document().is_some()
-        {
-            SearchMode::Document
-        } else {
-            SearchMode::Collections
-        };
+        self.search.mode =
+            if self.active_pane == Pane::Detail && self.get_selected_document().is_some() {
+                SearchMode::Document
+            } else {
+                SearchMode::Collections
+            };
     }
 
     // execute_search() és goto_search_result() törölve
@@ -2186,7 +2189,7 @@ impl App {
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
                     self.active_filter = None; // Clear filter on collection change
-                    self.active_sort = None;   // Clear sort on collection change
+                    self.active_sort = None; // Clear sort on collection change
                     self.filter_state = FilterState::new(); // Clear filter state too
                     let _ = self.refresh_documents_async().await;
                 }
@@ -2217,7 +2220,7 @@ impl App {
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
                     self.active_filter = None; // Clear filter on collection change
-                    self.active_sort = None;   // Clear sort on collection change
+                    self.active_sort = None; // Clear sort on collection change
                     self.filter_state = FilterState::new(); // Clear filter state too
                     let _ = self.refresh_documents_async().await;
                 }
@@ -2317,7 +2320,10 @@ impl App {
     pub async fn go_to_end_async(&mut self) {
         match self.active_pane {
             Pane::Collections => {
-                let last = self.collections.len().saturating_sub(1);
+                if self.collections.is_empty() {
+                    return;
+                }
+                let last = self.collections.len() - 1;
                 if self.selected_collection != last {
                     self.selected_collection = last;
                     self.doc_scroll_offset = 0;
@@ -2326,9 +2332,12 @@ impl App {
                 }
             }
             Pane::Documents => {
-                let last = self.total_docs.saturating_sub(1);
+                if self.total_docs == 0 {
+                    return;
+                }
+                let last = self.total_docs - 1;
                 self.selected_document = last;
-                self.doc_scroll_offset = last.saturating_sub(self.page_size - 1);
+                self.doc_scroll_offset = last.saturating_sub(self.page_size.saturating_sub(1));
                 let _ = self.refresh_documents_async().await;
             }
             Pane::Detail => {
@@ -2472,7 +2481,12 @@ impl App {
 
     /// Navigate to selected search result (async)
     pub async fn goto_search_result_async(&mut self) {
-        if let Some(result) = self.search.results.get(self.search.selected_result).cloned() {
+        if let Some(result) = self
+            .search
+            .results
+            .get(self.search.selected_result)
+            .cloned()
+        {
             // Navigate to collection
             if let Some(idx) = self.collections.iter().position(|c| c.name == result.name) {
                 self.selected_collection = idx;

@@ -41,7 +41,6 @@ impl CollectionInfo {
     }
 }
 
-
 /// Field information from schema inference
 #[derive(Debug, Clone)]
 pub struct FieldInfo {

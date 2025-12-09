@@ -99,43 +99,83 @@ fn format_json_pretty(
     lines
 }
 
-/// Highlight search matches in a line
+/// Highlight search matches in a line (UTF-8 safe)
 fn highlight_line(line: &str, query: &str, theme: &Theme) -> Line<'static> {
     let line_lower = line.to_lowercase();
     let mut spans = Vec::new();
-    let mut last_end = 0;
 
-    // Find all matches in the line
-    let mut search_start = 0;
-    while let Some(pos) = line_lower[search_start..].find(query) {
-        let match_start = search_start + pos;
-        let match_end = match_start + query.len();
+    // Build char index to byte index mappings for UTF-8 safe slicing
+    let char_indices: Vec<usize> = line.char_indices().map(|(i, _)| i).collect();
+    let char_indices_lower: Vec<usize> = line_lower.char_indices().map(|(i, _)| i).collect();
 
-        // Add text before match (with basic styling)
-        if match_start > last_end {
+    // If char counts differ due to case mapping, fall back to simple display
+    if char_indices.len() != char_indices_lower.len() {
+        return syntax_highlight_line(line, theme);
+    }
+
+    let mut last_char_end = 0;
+
+    // Find all matches using char indices
+    let query_char_len = query.chars().count();
+    let mut search_char_start = 0;
+
+    while search_char_start + query_char_len <= char_indices_lower.len() {
+        // Get byte slice for search
+        let search_byte_start = char_indices_lower[search_char_start];
+        let search_byte_end = if search_char_start + query_char_len < char_indices_lower.len() {
+            char_indices_lower[search_char_start + query_char_len]
+        } else {
+            line_lower.len()
+        };
+
+        if line_lower[search_byte_start..search_byte_end].starts_with(query) {
+            // Found a match at search_char_start
+            let match_char_start = search_char_start;
+            let match_char_end = search_char_start + query_char_len;
+
+            // Add text before match
+            if match_char_start > last_char_end {
+                let byte_start = char_indices[last_char_end];
+                let byte_end = char_indices[match_char_start];
+                spans.push(Span::styled(
+                    line[byte_start..byte_end].to_string(),
+                    Style::default().fg(theme.fg),
+                ));
+            }
+
+            // Add highlighted match
+            let match_byte_start = char_indices[match_char_start];
+            let match_byte_end = if match_char_end < char_indices.len() {
+                char_indices[match_char_end]
+            } else {
+                line.len()
+            };
             spans.push(Span::styled(
-                line[last_end..match_start].to_string(),
-                Style::default().fg(theme.fg),
+                line[match_byte_start..match_byte_end].to_string(),
+                Style::default()
+                    .fg(theme.bg)
+                    .bg(theme.warning)
+                    .add_modifier(Modifier::BOLD),
             ));
+
+            last_char_end = match_char_end;
+            search_char_start = match_char_end;
+        } else {
+            search_char_start += 1;
         }
-
-        // Add highlighted match
-        spans.push(Span::styled(
-            line[match_start..match_end].to_string(),
-            Style::default()
-                .fg(theme.bg)
-                .bg(theme.warning)
-                .add_modifier(Modifier::BOLD),
-        ));
-
-        last_end = match_end;
-        search_start = match_end;
     }
 
     // Add remaining text
-    if last_end < line.len() {
+    if last_char_end < char_indices.len() {
+        let byte_start = char_indices[last_char_end];
         spans.push(Span::styled(
-            line[last_end..].to_string(),
+            line[byte_start..].to_string(),
+            Style::default().fg(theme.fg),
+        ));
+    } else if last_char_end == 0 {
+        // No matches found, return whole line
+        spans.push(Span::styled(
+            line.to_string(),
             Style::default().fg(theme.fg),
         ));
     }
