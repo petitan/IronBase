@@ -356,11 +356,9 @@ fn render_ui(frame: &mut Frame, app: &App) {
         }
     }
 
-    // Render progress overlay (on top of modals) for determinate progress
+    // Render progress overlay (on top of modals) for ALL progress types
     if let Some(progress) = app.get_progress() {
-        if progress.is_determinate() {
-            modals::progress::render(frame, frame.area(), progress, &theme);
-        }
+        modals::progress::render(frame, frame.area(), progress, &theme);
     }
 }
 
