@@ -615,6 +615,19 @@ async fn handle_search_key_async(app: &mut App, key: KeyCode, _modifiers: KeyMod
                 app.search.toggle_mode();
                 app.execute_search_async().await;
             }
+            // Mode shortcuts: 'c' for Collections, 'd' for Documents
+            KeyCode::Char('c') => {
+                if app.search.mode != crate::app::SearchMode::Collections {
+                    app.search.mode = crate::app::SearchMode::Collections;
+                    app.execute_search_async().await;
+                }
+            }
+            KeyCode::Char('d') => {
+                if app.search.mode != crate::app::SearchMode::Documents {
+                    app.search.mode = crate::app::SearchMode::Documents;
+                    app.execute_search_async().await;
+                }
+            }
             KeyCode::Char('/') => {
                 app.search.input_active = true;
             }

@@ -140,10 +140,11 @@ fn render_results(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(list, area);
 }
 
-fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
     } else {
-        &s[..max]
+        // Safe UTF-8 truncation at character boundary
+        s.chars().take(max).collect()
     }
 }
