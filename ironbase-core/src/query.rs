@@ -159,6 +159,29 @@ impl Query {
     pub fn into_json(self) -> Value {
         self.json
     }
+
+    /// Check if this query matches all documents (empty query or null)
+    ///
+    /// An empty query `{}` or `null` matches all documents.
+    /// This is useful for performance optimizations when skip/limit
+    /// can be applied directly without reading documents.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// let empty_query = Query::new();
+    /// assert!(empty_query.is_match_all());
+    ///
+    /// let filtered = Query::from_json(&json!({"age": {"$gt": 18}}))?;
+    /// assert!(!filtered.is_match_all());
+    /// ```
+    pub fn is_match_all(&self) -> bool {
+        match &self.json {
+            Value::Null => true,
+            Value::Object(map) => map.is_empty(),
+            _ => false,
+        }
+    }
 }
 
 impl Default for Query {

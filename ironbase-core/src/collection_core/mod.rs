@@ -1908,10 +1908,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             meta.document_catalog.clone()
         };
 
+        // 🚀 FAST PATH: Empty query - skip directly from catalog without disk I/O
+        // This is critical for pagination performance on large collections
+        if parsed_query.is_match_all() {
+            let effective_limit = limit.unwrap_or(usize::MAX);
+            let doc_ids: Vec<DocumentId> = catalog
+                .keys()
+                .skip(skip)
+                .take(if effective_limit == 0 {
+                    usize::MAX
+                } else {
+                    effective_limit
+                })
+                .cloned()
+                .collect();
+            log_debug!(
+                "scan_documents_with_early_termination: FAST PATH (empty query) - skip={}, limit={:?}, returning {} docs",
+                skip,
+                limit,
+                doc_ids.len()
+            );
+            return Ok(doc_ids);
+        }
+
         let mut doc_ids = Vec::new();
         let mut skipped = 0usize;
 
-        // Iterate over catalog with early termination
+        // Iterate over catalog with early termination (for filtered queries)
         for (doc_id, offset) in &catalog {
             // Check if we've collected enough documents
             // MongoDB compatibility: limit(0) means "no limit"
