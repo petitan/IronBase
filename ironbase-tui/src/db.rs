@@ -382,13 +382,15 @@ fn search_in_value_recursive(value: &Value, query: &str, path: &str) -> Option<S
     }
 }
 
-/// Truncate JSON to a max length for preview
+/// Truncate JSON to a max length for preview (UTF-8 safe)
 fn truncate_json(value: &Value, max_len: usize) -> String {
     let json_str = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    if json_str.len() <= max_len {
+    if json_str.chars().count() <= max_len {
         json_str
     } else {
-        format!("{}...", &json_str[..max_len])
+        // Safe UTF-8 truncation at character boundary
+        let truncated: String = json_str.chars().take(max_len).collect();
+        format!("{}...", truncated)
     }
 }
 

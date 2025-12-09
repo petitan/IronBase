@@ -101,9 +101,11 @@ fn create_preview(doc: &serde_json::Value, max_len: usize) -> String {
         json_str
     };
 
-    if preview.len() <= max_len {
+    if preview.chars().count() <= max_len {
         preview
     } else {
-        format!("{}...", &preview[..max_len.saturating_sub(3)])
+        // Safe UTF-8 truncation at character boundary
+        let truncated: String = preview.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     }
 }
