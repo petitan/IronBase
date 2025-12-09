@@ -71,8 +71,23 @@ fn get_context_actions(app: &App) -> Vec<ActionItem> {
             enabled: has_document,
         },
         ActionItem {
+            key: 'y',
+            label: "Yank (copy) document",
+            enabled: has_document,
+        },
+        ActionItem {
+            key: 'c',
+            label: "Create collection",
+            enabled: true,
+        },
+        ActionItem {
+            key: 'D',
+            label: "Delete collection",
+            enabled: has_collection,
+        },
+        ActionItem {
             key: 'x',
-            label: "Create index",
+            label: "Index management",
             enabled: has_collection,
         },
         ActionItem {
@@ -89,16 +104,6 @@ fn get_context_actions(app: &App) -> Vec<ActionItem> {
             key: 'o',
             label: "Export collection",
             enabled: has_collection,
-        },
-        ActionItem {
-            key: 's',
-            label: "Save as recipe",
-            enabled: has_collection,
-        },
-        ActionItem {
-            key: 'n',
-            label: "New collection",
-            enabled: true,
         },
     ]
 }

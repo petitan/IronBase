@@ -224,13 +224,17 @@ async fn handle_actions_key_async(app: &mut App, key: KeyCode) {
             app.close_modal();
             app.open_export_modal();
         }
-        KeyCode::Char('s') => {
-            app.set_status("Save recipe - hamarosan...");
-            app.close_modal();
-        }
-        KeyCode::Char('n') => {
+        KeyCode::Char('c') => {
             app.close_modal();
             app.open_new_collection();
+        }
+        KeyCode::Char('y') => {
+            app.close_modal();
+            app.copy_document_to_clipboard();
+        }
+        KeyCode::Char('D') => {
+            app.close_modal();
+            app.open_delete_collection_confirm();
         }
         _ => {}
     }
