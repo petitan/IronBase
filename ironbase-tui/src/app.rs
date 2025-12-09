@@ -1229,6 +1229,14 @@ impl App {
         )
     }
 
+    /// Get line count of selected document (for scroll bounds)
+    pub fn get_selected_document_lines(&self) -> usize {
+        self.get_selected_document()
+            .and_then(|doc| serde_json::to_string_pretty(doc).ok())
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+
     /// Get cached indexes for current collection (for sync render)
     pub fn get_current_indexes(&self) -> &[String] {
         &self.index_state.indexes
@@ -1640,7 +1648,8 @@ impl App {
                 }
             }
             Pane::Detail => {
-                if self.detail_scroll < u16::MAX as usize {
+                let max_scroll = self.get_selected_document_lines().saturating_sub(10);
+                if self.detail_scroll < max_scroll {
                     self.detail_scroll += 1;
                 }
             }
@@ -1691,7 +1700,8 @@ impl App {
                 }
             }
             Pane::Detail => {
-                self.detail_scroll = (self.detail_scroll + 10).min(u16::MAX as usize);
+                let max_scroll = self.get_selected_document_lines().saturating_sub(10);
+                self.detail_scroll = (self.detail_scroll + 10).min(max_scroll);
             }
         }
     }
@@ -1739,7 +1749,9 @@ impl App {
                 let _ = self.refresh_documents_async().await;
             }
             Pane::Detail => {
-                self.detail_scroll = 10000;
+                // Scroll to end based on actual document line count
+                let lines = self.get_selected_document_lines();
+                self.detail_scroll = lines.saturating_sub(10); // Leave some visible lines
             }
         }
     }
