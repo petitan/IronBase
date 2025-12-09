@@ -5,9 +5,12 @@ use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
+/// Total number of help lines (for scroll bounds)
+pub const HELP_LINES: usize = 28;
+
 /// Render the help modal
-pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Sugo", theme, 60, 70);
+pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
+    let inner = render_modal_frame(frame, area, "Sugo [j/k gorgetes]", theme, 60, 70);
 
     let help_text = vec![
         Line::from(Span::styled(
@@ -101,7 +104,9 @@ pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
         ]),
     ];
 
-    let help = Paragraph::new(help_text).style(Style::default().fg(theme.fg));
+    let help = Paragraph::new(help_text)
+        .style(Style::default().fg(theme.fg))
+        .scroll((scroll as u16, 0));
 
     frame.render_widget(help, inner);
 }

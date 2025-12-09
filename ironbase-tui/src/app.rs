@@ -1062,6 +1062,7 @@ pub struct App {
     // Focus management
     pub active_pane: Pane,
     pub modal: Option<Modal>,
+    pub help_scroll: usize,
 
     // Theme
     pub theme_name: ThemeName,
@@ -1132,6 +1133,7 @@ impl App {
             should_quit: false,
             active_pane: Pane::Collections,
             modal: None,
+            help_scroll: 0,
             theme_name,
             theme,
             db: None,

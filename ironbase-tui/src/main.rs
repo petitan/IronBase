@@ -329,7 +329,7 @@ fn render_ui(frame: &mut Frame, app: &App) {
         match modal {
             Modal::Search => modals::search::render(frame, frame.area(), app, &theme),
             Modal::Actions => modals::actions::render(frame, frame.area(), app, &theme),
-            Modal::Help => modals::help::render(frame, frame.area(), &theme),
+            Modal::Help => modals::help::render(frame, frame.area(), app.help_scroll, &theme),
             Modal::Confirm => modals::confirm::render(frame, frame.area(), &app.confirm, &theme),
             Modal::Insert => modals::insert::render(frame, frame.area(), &app.insert, &theme),
             Modal::Index => modals::index::render(frame, frame.area(), &app.index_state, &theme),
@@ -477,7 +477,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::Search) => handle_search_key_async(app, key, modifiers).await,
         Some(Modal::Actions) => handle_actions_key_async(app, key).await,
         Some(Modal::Help) => {
-            app.close_modal();
+            handle_help_key(app, key);
         }
         Some(Modal::ErrorDetail) => handle_error_modal_key(app, key),
         Some(Modal::Confirm) => handle_confirm_key_async(app, key).await,
@@ -552,6 +552,37 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         // Theme
         (KeyCode::Char('t'), _) => app.next_theme(),
 
+        _ => {}
+    }
+}
+
+/// Help modal key handler with scrolling support
+fn handle_help_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+            app.help_scroll = 0;
+            app.close_modal();
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.help_scroll < modals::help::HELP_LINES.saturating_sub(10) {
+                app.help_scroll += 1;
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            app.help_scroll = app.help_scroll.saturating_sub(1);
+        }
+        KeyCode::PageDown => {
+            app.help_scroll = (app.help_scroll + 5).min(modals::help::HELP_LINES.saturating_sub(10));
+        }
+        KeyCode::PageUp => {
+            app.help_scroll = app.help_scroll.saturating_sub(5);
+        }
+        KeyCode::Home | KeyCode::Char('g') => {
+            app.help_scroll = 0;
+        }
+        KeyCode::End | KeyCode::Char('G') => {
+            app.help_scroll = modals::help::HELP_LINES.saturating_sub(10);
+        }
         _ => {}
     }
 }
