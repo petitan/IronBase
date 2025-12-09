@@ -552,6 +552,15 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         // Theme
         (KeyCode::Char('t'), _) => app.next_theme(),
 
+        // Clear filter (Escape in Documents pane when filter is active)
+        (KeyCode::Esc, _) if app.active_filter.is_some() => {
+            app.active_filter = None;
+            app.doc_scroll_offset = 0;
+            app.selected_document = 0;
+            let _ = app.refresh_documents_async().await;
+            app.set_status("Szuro torolve");
+        }
+
         _ => {}
     }
 }

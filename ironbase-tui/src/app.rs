@@ -1090,6 +1090,7 @@ pub struct App {
     pub doc_scroll_offset: usize,
     pub page_size: usize,
     pub total_docs: usize,
+    pub active_filter: Option<Value>, // Active filter query for pagination
 
     // Detail pane
     pub detail_scroll: usize,
@@ -1153,6 +1154,7 @@ impl App {
             doc_scroll_offset: 0,
             page_size: 20,
             total_docs: 0,
+            active_filter: None,
             detail_scroll: 0,
             search: SearchState::new(),
             confirm: ConfirmState::default(),
@@ -1567,11 +1569,18 @@ impl App {
 
         if let Some(db) = &self.db {
             let skip = self.doc_scroll_offset;
-            let docs = db.get_documents(&coll_name, skip, self.page_size).await?;
+
+            // Use active filter if set, otherwise get all documents
+            let docs = if let Some(ref filter) = self.active_filter {
+                db.find_with_options(&coll_name, filter, skip, self.page_size)
+                    .await?
+            } else {
+                db.get_documents(&coll_name, skip, self.page_size).await?
+            };
             self.documents = docs;
 
-            // Lazy load: only fetch details if not already loaded
-            if needs_details {
+            // Lazy load: only fetch details if not already loaded (skip if filtering)
+            if needs_details && self.active_filter.is_none() {
                 let (doc_count, index_names) = db.load_collection_details(&coll_name).await?;
                 self.total_docs = doc_count;
 
@@ -1613,6 +1622,7 @@ impl App {
                     self.selected_collection -= 1;
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
+                    self.active_filter = None; // Clear filter on collection change
                     let _ = self.refresh_documents_async().await;
                 }
             }
@@ -1641,6 +1651,7 @@ impl App {
                     self.selected_collection += 1;
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
+                    self.active_filter = None; // Clear filter on collection change
                     let _ = self.refresh_documents_async().await;
                 }
             }
@@ -2116,6 +2127,7 @@ impl App {
                     self.selected_document = 0;
                     self.doc_scroll_offset = 0;
                     self.total_docs = count;
+                    self.active_filter = Some(query.clone()); // Store filter for pagination
 
                     if count >= FILTER_LIMIT {
                         self.set_status(format!("{}+ talalat (limit: {})", count, FILTER_LIMIT));

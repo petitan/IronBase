@@ -18,9 +18,17 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
         Style::default().fg(theme.secondary)
     };
 
-    // Title with pagination info
+    // Title with pagination info and filter indicator
     let (current_page, total_pages) = app.get_pagination_info();
-    let title = format!(" Documents (Page {}/{}) ", current_page, total_pages);
+    let filter_indicator = if app.active_filter.is_some() {
+        " [SZURT - Esc torol]"
+    } else {
+        ""
+    };
+    let title = format!(
+        " Documents (Page {}/{}) {}",
+        current_page, total_pages, filter_indicator
+    );
 
     let block = Block::default()
         .title(title)
