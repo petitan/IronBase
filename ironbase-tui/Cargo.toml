@@ -42,3 +42,6 @@ rhai = { version = "1.18", features = ["sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync"] }
 async-trait = "0.1"
+
+# Clipboard
+arboard = "3.4"

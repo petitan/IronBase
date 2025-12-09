@@ -8,7 +8,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 /// Render the visual filter modal
 pub fn render(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Szuro", theme, 70, 70);
+    let inner = render_modal_frame(frame, area, "Szuro", theme, 70, 75);
 
     // Calculate suggestion height (max 5 visible)
     let suggestion_height = if state.show_suggestions && state.focus == FilterFocus::Field {
@@ -17,7 +17,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme)
         0
     };
 
-    // Layout: help, field/op/value row, suggestions, add button, filters list, status
+    // Layout: help, field/op/value row, suggestions, add button, filters list, sort, status
     let chunks = Layout::vertical([
         Constraint::Length(2),                 // Help
         Constraint::Length(3),                 // Field input
@@ -25,7 +25,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme)
         Constraint::Length(3),                 // Operator selector
         Constraint::Length(3),                 // Value input
         Constraint::Length(1),                 // Add button hint
-        Constraint::Min(4),                    // Active filters
+        Constraint::Min(3),                    // Active filters
+        Constraint::Length(3),                 // Sort selector
         Constraint::Length(2),                 // Status/result count
     ])
     .split(inner);
@@ -53,8 +54,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme)
     // Active filters list
     render_filters(frame, chunks[6], state, theme);
 
+    // Sort selector
+    render_sort(frame, chunks[7], state, theme);
+
     // Status
-    render_status(frame, chunks[7], state, theme);
+    render_status(frame, chunks[8], state, theme);
 }
 
 fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -92,11 +96,10 @@ fn render_field_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     frame.render_widget(block, area);
 
     let display = if is_focused {
-        format!(
-            "{}|{}",
-            &state.field_input[..state.field_cursor],
-            &state.field_input[state.field_cursor..]
-        )
+        // UTF-8 safe slicing using character positions
+        let before: String = state.field_input.chars().take(state.field_cursor).collect();
+        let after: String = state.field_input.chars().skip(state.field_cursor).collect();
+        format!("{}|{}", before, after)
     } else if state.field_input.is_empty() {
         if state.all_fields.is_empty() {
             "pl: name, age, email...".to_string()
@@ -217,11 +220,10 @@ fn render_value_input(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     frame.render_widget(block, area);
 
     let display = if is_focused {
-        format!(
-            "{}|{}",
-            &state.value_input[..state.value_cursor],
-            &state.value_input[state.value_cursor..]
-        )
+        // UTF-8 safe slicing using character positions
+        let before: String = state.value_input.chars().take(state.value_cursor).collect();
+        let after: String = state.value_input.chars().skip(state.value_cursor).collect();
+        format!("{}|{}", before, after)
     } else if state.value_input.is_empty() {
         "keresett ertek...".to_string()
     } else {
@@ -261,7 +263,10 @@ fn render_add_hint(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
             ("Enter: feltetel hozzaadasa | F5: azonnali kereses", theme.accent)
         }
         FilterFocus::Filters => {
-            ("Enter/Del: szuro torlese | F5: kereses inditasa", theme.accent)
+            ("Enter: szerk | Del: torol | Ctrl+↑↓: mozgat | F5: kereses", theme.accent)
+        }
+        FilterFocus::SortField => {
+            ("←/→: mezo valasztas | Space: irany | F5: kereses", theme.accent)
         }
     };
 
@@ -312,6 +317,35 @@ fn render_filters(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Th
 
     let list = List::new(items);
     frame.render_widget(list, inner);
+}
+
+fn render_sort(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {
+    let is_focused = state.focus == FilterFocus::SortField;
+    let border_color = if is_focused { theme.accent } else { theme.secondary };
+
+    let block = Block::default()
+        .title(" Rendezés [←/→ Space] ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let sort_text = match &state.sort_field {
+        Some(field) => format!("{} {}", field, state.sort_direction.label()),
+        None => "Nincs rendezés".to_string(),
+    };
+
+    let style = if is_focused {
+        Style::default().fg(theme.accent)
+    } else if state.sort_field.is_some() {
+        Style::default().fg(theme.fg)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+
+    let p = Paragraph::new(sort_text).style(style);
+    frame.render_widget(p, inner);
 }
 
 fn render_status(frame: &mut Frame, area: Rect, state: &FilterState, theme: &Theme) {

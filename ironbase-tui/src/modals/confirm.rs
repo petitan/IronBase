@@ -75,6 +75,20 @@ impl ConfirmState {
         }
     }
 
+    pub fn delete_collection(name: String, doc_count: usize) -> Self {
+        Self {
+            title: "Kollekcio torlese".to_string(),
+            message: format!(
+                "Biztosan torli a(z) \"{}\" kollekciot?\n\n{} dokumentum fog torlodni!",
+                name, doc_count
+            ),
+            confirm_text: "Torles".to_string(),
+            cancel_text: "Megse".to_string(),
+            selected: ConfirmOption::Cancel,
+            on_confirm: ConfirmAction::DeleteCollection { name },
+        }
+    }
+
     pub fn toggle_selection(&mut self) {
         self.selected = self.selected.toggle();
     }

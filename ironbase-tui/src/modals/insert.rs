@@ -54,16 +54,13 @@ fn render_editor(frame: &mut Frame, area: Rect, state: &InsertState, theme: &The
         let is_cursor_line = line_idx == state.cursor_line;
 
         if is_cursor_line {
-            // Line with cursor
-            let before = if state.cursor_col <= line.len() {
-                &line[..state.cursor_col]
+            // Line with cursor - use character-based slicing for UTF-8 safety
+            let char_count = line.chars().count();
+            let before: String = line.chars().take(state.cursor_col).collect();
+            let after: String = if state.cursor_col < char_count {
+                line.chars().skip(state.cursor_col).collect()
             } else {
-                line.as_str()
-            };
-            let after = if state.cursor_col < line.len() {
-                &line[state.cursor_col..]
-            } else {
-                ""
+                String::new()
             };
 
             let line_num = format!("{:3} ", line_idx + 1);

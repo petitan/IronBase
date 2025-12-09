@@ -8,6 +8,17 @@ use crate::theme::{Theme, ThemeName};
 use serde_json::Value;
 use std::path::PathBuf;
 
+// === UI Layout Constants ===
+
+/// Terminal overhead (header + command bar + borders)
+const TERMINAL_OVERHEAD: u16 = 4;
+
+/// Minimum document page size
+const MIN_PAGE_SIZE: u16 = 5;
+
+/// Detail pane scroll step (also used for page jump in collections)
+const SCROLL_STEP: usize = 10;
+
 /// Active pane in the 3-panel layout
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Pane {
@@ -50,6 +61,7 @@ pub enum Modal {
     Export,
     Filter,
     ErrorDetail,
+    NewCollection,
 }
 
 /// Progress state for long-running operations
@@ -146,28 +158,26 @@ impl ProgressState {
     }
 }
 
-/// Search mode enum
+/// Search mode - collections or document content
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
     #[default]
     Collections,
-    Documents,
+    Document,
 }
 
-/// Search result item
+/// Search result - collection match
 #[derive(Debug, Clone)]
-pub enum SearchResult {
-    Collection {
-        name: String,
-        doc_count: usize,
-        match_reason: String,
-    },
-    Document {
-        collection: String,
-        doc_id: String,
-        preview: String,
-        match_field: String,
-    },
+pub struct SearchResult {
+    pub name: String,
+    pub doc_count: usize,
+}
+
+/// Document search match (line number where query was found)
+#[derive(Debug, Clone)]
+pub struct DocSearchMatch {
+    pub line: usize,
+    pub col_start: usize,
 }
 
 /// Search state
@@ -177,10 +187,14 @@ pub struct SearchState {
     pub cursor_pos: usize,
     pub input_active: bool,
     pub mode: SearchMode,
+    // Collection search results
     pub results: Vec<SearchResult>,
     pub selected_result: usize,
     pub result_offset: usize,
     pub last_search: String,
+    // Document search results
+    pub doc_matches: Vec<DocSearchMatch>,
+    pub current_match: usize,
 }
 
 impl SearchState {
@@ -198,27 +212,63 @@ impl SearchState {
         self.selected_result = 0;
         self.result_offset = 0;
         self.last_search.clear();
+        self.doc_matches.clear();
+        self.current_match = 0;
     }
 
-    pub fn toggle_mode(&mut self) {
-        self.mode = match self.mode {
-            SearchMode::Collections => SearchMode::Documents,
-            SearchMode::Documents => SearchMode::Collections,
-        };
-        self.results.clear();
-        self.selected_result = 0;
-        self.last_search.clear();
+    /// Clear only document search state (keep query)
+    pub fn clear_doc_matches(&mut self) {
+        self.doc_matches.clear();
+        self.current_match = 0;
     }
+
+    /// Navigate to next match
+    pub fn next_match(&mut self) {
+        if !self.doc_matches.is_empty() {
+            self.current_match = (self.current_match + 1) % self.doc_matches.len();
+        }
+    }
+
+    /// Navigate to previous match
+    pub fn prev_match(&mut self) {
+        if !self.doc_matches.is_empty() {
+            self.current_match = if self.current_match == 0 {
+                self.doc_matches.len() - 1
+            } else {
+                self.current_match - 1
+            };
+        }
+    }
+
+    /// Get current match line number (for scrolling)
+    pub fn current_match_line(&self) -> Option<usize> {
+        self.doc_matches.get(self.current_match).map(|m| m.line)
+    }
+
 
     pub fn insert_char(&mut self, c: char) {
-        self.query_input.insert(self.cursor_pos, c);
+        // Convert character position to byte position for UTF-8 safety
+        let byte_pos = self
+            .query_input
+            .char_indices()
+            .nth(self.cursor_pos)
+            .map(|(i, _)| i)
+            .unwrap_or(self.query_input.len());
+        self.query_input.insert(byte_pos, c);
         self.cursor_pos += 1;
     }
 
     pub fn delete_char(&mut self) {
         if self.cursor_pos > 0 {
             self.cursor_pos -= 1;
-            self.query_input.remove(self.cursor_pos);
+            // Convert character position to byte position for UTF-8 safety
+            let byte_pos = self
+                .query_input
+                .char_indices()
+                .nth(self.cursor_pos)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.query_input.remove(byte_pos);
         }
     }
 
@@ -229,7 +279,8 @@ impl SearchState {
     }
 
     pub fn cursor_right(&mut self) {
-        if self.cursor_pos < self.query_input.len() {
+        // Use character count, not byte length
+        if self.cursor_pos < self.query_input.chars().count() {
             self.cursor_pos += 1;
         }
     }
@@ -378,6 +429,38 @@ pub enum FilterFocus {
     Operator,
     Value,
     Filters,
+    SortField,
+}
+
+/// Sort direction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    #[default]
+    Asc,
+    Desc,
+}
+
+impl SortDirection {
+    pub fn toggle(&self) -> Self {
+        match self {
+            SortDirection::Asc => SortDirection::Desc,
+            SortDirection::Desc => SortDirection::Asc,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SortDirection::Asc => "↑ Növekvő",
+            SortDirection::Desc => "↓ Csökkenő",
+        }
+    }
+
+    pub fn to_value(&self) -> i32 {
+        match self {
+            SortDirection::Asc => 1,
+            SortDirection::Desc => -1,
+        }
+    }
 }
 
 /// Visual filter state
@@ -401,11 +484,84 @@ pub struct FilterState {
     pub results: Option<Vec<Value>>,
     pub result_count: usize,
     pub error: Option<String>,
+    // === Sort ===
+    pub sort_field: Option<String>,
+    pub sort_direction: SortDirection,
+    pub sort_field_idx: usize,
 }
 
 impl FilterState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Reset input fields only, preserving existing filters and sort
+    pub fn reset_inputs(&mut self) {
+        self.field_input.clear();
+        self.field_cursor = 0;
+        self.value_input.clear();
+        self.value_cursor = 0;
+        self.operator = FilterOperator::default();
+        self.operator_idx = 0;
+        self.focus = FilterFocus::Field;
+        // Preserve: filters, selected_filter, all_fields, sort_field, sort_direction
+        self.filtered_suggestions.clear();
+        self.suggestion_idx = 0;
+        self.show_suggestions = false;
+        // Preserve results for context, clear error
+        self.error = None;
+        // Update suggestions based on schema
+        self.update_suggestions();
+    }
+
+    /// Build sort object for query
+    pub fn build_sort(&self) -> Option<Value> {
+        self.sort_field.as_ref().map(|field| {
+            serde_json::json!({ field: self.sort_direction.to_value() })
+        })
+    }
+
+    /// Select next sort field from available fields
+    pub fn next_sort_field(&mut self) {
+        if self.all_fields.is_empty() {
+            return;
+        }
+        self.sort_field_idx = (self.sort_field_idx + 1) % (self.all_fields.len() + 1);
+        self.sort_field = if self.sort_field_idx == 0 {
+            None // First option = no sort
+        } else {
+            Some(self.all_fields[self.sort_field_idx - 1].clone())
+        };
+    }
+
+    /// Select previous sort field
+    pub fn prev_sort_field(&mut self) {
+        if self.all_fields.is_empty() {
+            return;
+        }
+        let total = self.all_fields.len() + 1;
+        self.sort_field_idx = if self.sort_field_idx == 0 {
+            total - 1
+        } else {
+            self.sort_field_idx - 1
+        };
+        self.sort_field = if self.sort_field_idx == 0 {
+            None
+        } else {
+            Some(self.all_fields[self.sort_field_idx - 1].clone())
+        };
+    }
+
+    /// Toggle sort direction
+    pub fn toggle_sort_direction(&mut self) {
+        self.sort_direction = self.sort_direction.toggle();
+    }
+
+    /// Clear sort
+    pub fn clear_sort(&mut self) {
+        self.sort_field = None;
+        self.sort_field_idx = 0;
+        self.sort_direction = SortDirection::Asc;
     }
 
     pub fn clear(&mut self) {
@@ -424,6 +580,10 @@ impl FilterState {
         self.results = None;
         self.result_count = 0;
         self.error = None;
+        // Clear sort too
+        self.sort_field = None;
+        self.sort_field_idx = 0;
+        self.sort_direction = SortDirection::Asc;
     }
 
     pub fn next_focus(&mut self) {
@@ -435,13 +595,13 @@ impl FilterState {
             FilterFocus::Operator => FilterFocus::Value,
             FilterFocus::Value => {
                 if self.filters.is_empty() {
-                    self.update_suggestions();
-                    FilterFocus::Field
+                    FilterFocus::SortField
                 } else {
                     FilterFocus::Filters
                 }
             }
-            FilterFocus::Filters => {
+            FilterFocus::Filters => FilterFocus::SortField,
+            FilterFocus::SortField => {
                 self.update_suggestions();
                 FilterFocus::Field
             }
@@ -452,11 +612,7 @@ impl FilterState {
         self.focus = match self.focus {
             FilterFocus::Field => {
                 self.show_suggestions = false;
-                if self.filters.is_empty() {
-                    FilterFocus::Value
-                } else {
-                    FilterFocus::Filters
-                }
+                FilterFocus::SortField
             }
             FilterFocus::Operator => {
                 self.update_suggestions();
@@ -464,6 +620,13 @@ impl FilterState {
             }
             FilterFocus::Value => FilterFocus::Operator,
             FilterFocus::Filters => FilterFocus::Value,
+            FilterFocus::SortField => {
+                if self.filters.is_empty() {
+                    FilterFocus::Value
+                } else {
+                    FilterFocus::Filters
+                }
+            }
         };
     }
 
@@ -485,15 +648,14 @@ impl FilterState {
 
     pub fn add_filter(&mut self) {
         if !self.field_input.is_empty() {
+            // Use mem::take to avoid clone+clear pattern
             let condition = FilterCondition {
-                field: self.field_input.clone(),
+                field: std::mem::take(&mut self.field_input),
                 operator: self.operator,
-                value: self.value_input.clone(),
+                value: std::mem::take(&mut self.value_input),
             };
             self.filters.push(condition);
-            self.field_input.clear();
             self.field_cursor = 0;
-            self.value_input.clear();
             self.value_cursor = 0;
             self.operator = FilterOperator::default();
             self.operator_idx = 0;
@@ -513,6 +675,48 @@ impl FilterState {
         }
     }
 
+    /// Load selected filter into input fields for editing
+    pub fn edit_selected_filter(&mut self) {
+        if let Some(filter) = self.filters.get(self.selected_filter).cloned() {
+            // Load filter values into input fields
+            self.field_input = filter.field;
+            self.field_cursor = self.field_input.chars().count();
+            self.value_input = filter.value;
+            self.value_cursor = self.value_input.chars().count();
+            self.operator = filter.operator;
+            self.operator_idx = FilterOperator::all()
+                .iter()
+                .position(|&op| op == filter.operator)
+                .unwrap_or(0);
+
+            // Remove the filter being edited
+            self.filters.remove(self.selected_filter);
+            if self.selected_filter >= self.filters.len() && !self.filters.is_empty() {
+                self.selected_filter = self.filters.len() - 1;
+            }
+
+            // Move focus to field for editing
+            self.focus = FilterFocus::Field;
+            self.show_suggestions = false;
+        }
+    }
+
+    /// Move selected filter up in the list
+    pub fn move_filter_up(&mut self) {
+        if self.selected_filter > 0 && !self.filters.is_empty() {
+            self.filters.swap(self.selected_filter, self.selected_filter - 1);
+            self.selected_filter -= 1;
+        }
+    }
+
+    /// Move selected filter down in the list
+    pub fn move_filter_down(&mut self) {
+        if self.selected_filter + 1 < self.filters.len() {
+            self.filters.swap(self.selected_filter, self.selected_filter + 1);
+            self.selected_filter += 1;
+        }
+    }
+
     pub fn build_query(&self) -> Value {
         use serde_json::json;
         if self.filters.is_empty() {
@@ -528,12 +732,25 @@ impl FilterState {
     pub fn insert_char(&mut self, c: char) {
         match self.focus {
             FilterFocus::Field => {
-                self.field_input.insert(self.field_cursor, c);
+                // Convert character position to byte position for UTF-8 safety
+                let byte_pos = self
+                    .field_input
+                    .char_indices()
+                    .nth(self.field_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.field_input.len());
+                self.field_input.insert(byte_pos, c);
                 self.field_cursor += 1;
                 self.update_suggestions();
             }
             FilterFocus::Value => {
-                self.value_input.insert(self.value_cursor, c);
+                let byte_pos = self
+                    .value_input
+                    .char_indices()
+                    .nth(self.value_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.value_input.len());
+                self.value_input.insert(byte_pos, c);
                 self.value_cursor += 1;
             }
             _ => {}
@@ -545,14 +762,27 @@ impl FilterState {
             FilterFocus::Field => {
                 if self.field_cursor > 0 {
                     self.field_cursor -= 1;
-                    self.field_input.remove(self.field_cursor);
+                    // Convert character position to byte position for UTF-8 safety
+                    let byte_pos = self
+                        .field_input
+                        .char_indices()
+                        .nth(self.field_cursor)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.field_input.remove(byte_pos);
                     self.update_suggestions();
                 }
             }
             FilterFocus::Value => {
                 if self.value_cursor > 0 {
                     self.value_cursor -= 1;
-                    self.value_input.remove(self.value_cursor);
+                    let byte_pos = self
+                        .value_input
+                        .char_indices()
+                        .nth(self.value_cursor)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    self.value_input.remove(byte_pos);
                 }
             }
             _ => {}
@@ -578,12 +808,13 @@ impl FilterState {
     pub fn cursor_right(&mut self) {
         match self.focus {
             FilterFocus::Field => {
-                if self.field_cursor < self.field_input.len() {
+                // Use character count, not byte length
+                if self.field_cursor < self.field_input.chars().count() {
                     self.field_cursor += 1;
                 }
             }
             FilterFocus::Value => {
-                if self.value_cursor < self.value_input.len() {
+                if self.value_cursor < self.value_input.chars().count() {
                     self.value_cursor += 1;
                 }
             }
@@ -601,8 +832,9 @@ impl FilterState {
 
     pub fn cursor_end(&mut self) {
         match self.focus {
-            FilterFocus::Field => self.field_cursor = self.field_input.len(),
-            FilterFocus::Value => self.value_cursor = self.value_input.len(),
+            // Use character count, not byte length
+            FilterFocus::Field => self.field_cursor = self.field_input.chars().count(),
+            FilterFocus::Value => self.value_cursor = self.value_input.chars().count(),
             _ => {}
         }
     }
@@ -660,7 +892,8 @@ impl FilterState {
     pub fn apply_suggestion(&mut self) {
         if let Some(suggestion) = self.filtered_suggestions.get(self.suggestion_idx) {
             self.field_input = suggestion.clone();
-            self.field_cursor = self.field_input.len();
+            // Use character count, not byte length for UTF-8 safety
+            self.field_cursor = self.field_input.chars().count();
             self.show_suggestions = false;
         }
     }
@@ -752,8 +985,15 @@ impl InsertState {
     /// Insert a character at cursor position
     pub fn insert_char(&mut self, c: char) {
         if let Some(line) = self.lines.get_mut(self.cursor_line) {
-            if self.cursor_col <= line.len() {
-                line.insert(self.cursor_col, c);
+            let char_count = line.chars().count();
+            if self.cursor_col <= char_count {
+                // Convert character position to byte position for UTF-8 safety
+                let byte_pos = line
+                    .char_indices()
+                    .nth(self.cursor_col)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
+                line.insert(byte_pos, c);
                 self.cursor_col += 1;
             }
         }
@@ -764,17 +1004,21 @@ impl InsertState {
     pub fn backspace(&mut self) {
         if self.cursor_col > 0 {
             if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                if self.cursor_col <= line.len() {
-                    line.remove(self.cursor_col - 1);
-                    self.cursor_col -= 1;
-                }
+                // Convert character position to byte position for UTF-8 safety
+                let byte_pos = line
+                    .char_indices()
+                    .nth(self.cursor_col - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                line.remove(byte_pos);
+                self.cursor_col -= 1;
             }
         } else if self.cursor_line > 0 {
             // Join with previous line
             let current_line = self.lines.remove(self.cursor_line);
             self.cursor_line -= 1;
             if let Some(prev_line) = self.lines.get_mut(self.cursor_line) {
-                self.cursor_col = prev_line.len();
+                self.cursor_col = prev_line.chars().count();
                 prev_line.push_str(&current_line);
             }
         }
@@ -784,7 +1028,13 @@ impl InsertState {
     /// Insert a new line at cursor
     pub fn insert_newline(&mut self) {
         if let Some(line) = self.lines.get_mut(self.cursor_line) {
-            let rest = line.split_off(self.cursor_col);
+            // Convert character position to byte position for UTF-8 safety
+            let byte_pos = line
+                .char_indices()
+                .nth(self.cursor_col)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            let rest = line.split_off(byte_pos);
             self.cursor_line += 1;
             self.lines.insert(self.cursor_line, rest);
             self.cursor_col = 0;
@@ -804,22 +1054,24 @@ impl InsertState {
             self.cursor_col -= 1;
         } else if self.cursor_line > 0 {
             self.cursor_line -= 1;
+            // Use character count, not byte length
             self.cursor_col = self
                 .lines
                 .get(self.cursor_line)
-                .map(|l| l.len())
+                .map(|l| l.chars().count())
                 .unwrap_or(0);
         }
     }
 
     /// Move cursor right
     pub fn cursor_right(&mut self) {
-        let line_len = self
+        // Use character count, not byte length
+        let char_count = self
             .lines
             .get(self.cursor_line)
-            .map(|l| l.len())
+            .map(|l| l.chars().count())
             .unwrap_or(0);
-        if self.cursor_col < line_len {
+        if self.cursor_col < char_count {
             self.cursor_col += 1;
         } else if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
@@ -831,12 +1083,13 @@ impl InsertState {
     pub fn cursor_up(&mut self) {
         if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            let line_len = self
+            // Use character count, not byte length
+            let char_count = self
                 .lines
                 .get(self.cursor_line)
-                .map(|l| l.len())
+                .map(|l| l.chars().count())
                 .unwrap_or(0);
-            self.cursor_col = self.cursor_col.min(line_len);
+            self.cursor_col = self.cursor_col.min(char_count);
         }
     }
 
@@ -844,12 +1097,13 @@ impl InsertState {
     pub fn cursor_down(&mut self) {
         if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
-            let line_len = self
+            // Use character count, not byte length
+            let char_count = self
                 .lines
                 .get(self.cursor_line)
-                .map(|l| l.len())
+                .map(|l| l.chars().count())
                 .unwrap_or(0);
-            self.cursor_col = self.cursor_col.min(line_len);
+            self.cursor_col = self.cursor_col.min(char_count);
         }
     }
 
@@ -978,8 +1232,15 @@ impl QueryState {
 
     pub fn insert_char(&mut self, c: char) {
         if let Some(line) = self.lines.get_mut(self.cursor_line) {
-            if self.cursor_col <= line.len() {
-                line.insert(self.cursor_col, c);
+            let char_count = line.chars().count();
+            if self.cursor_col <= char_count {
+                // Convert character position to byte position for UTF-8 safety
+                let byte_pos = line
+                    .char_indices()
+                    .nth(self.cursor_col)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
+                line.insert(byte_pos, c);
                 self.cursor_col += 1;
             }
         }
@@ -989,16 +1250,20 @@ impl QueryState {
     pub fn backspace(&mut self) {
         if self.cursor_col > 0 {
             if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                if self.cursor_col <= line.len() {
-                    line.remove(self.cursor_col - 1);
-                    self.cursor_col -= 1;
-                }
+                // Convert character position to byte position for UTF-8 safety
+                let byte_pos = line
+                    .char_indices()
+                    .nth(self.cursor_col - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                line.remove(byte_pos);
+                self.cursor_col -= 1;
             }
         } else if self.cursor_line > 0 {
             let current_line = self.lines.remove(self.cursor_line);
             self.cursor_line -= 1;
             if let Some(prev_line) = self.lines.get_mut(self.cursor_line) {
-                self.cursor_col = prev_line.len();
+                self.cursor_col = prev_line.chars().count();
                 prev_line.push_str(&current_line);
             }
         }
@@ -1007,7 +1272,13 @@ impl QueryState {
 
     pub fn insert_newline(&mut self) {
         if let Some(line) = self.lines.get_mut(self.cursor_line) {
-            let rest = line.split_off(self.cursor_col);
+            // Convert character position to byte position for UTF-8 safety
+            let byte_pos = line
+                .char_indices()
+                .nth(self.cursor_col)
+                .map(|(i, _)| i)
+                .unwrap_or(line.len());
+            let rest = line.split_off(byte_pos);
             self.cursor_line += 1;
             self.lines.insert(self.cursor_line, rest);
             self.cursor_col = 0;
@@ -1025,21 +1296,23 @@ impl QueryState {
             self.cursor_col -= 1;
         } else if self.cursor_line > 0 {
             self.cursor_line -= 1;
+            // Use character count, not byte length
             self.cursor_col = self
                 .lines
                 .get(self.cursor_line)
-                .map(|l| l.len())
+                .map(|l| l.chars().count())
                 .unwrap_or(0);
         }
     }
 
     pub fn cursor_right(&mut self) {
-        let line_len = self
+        // Use character count, not byte length
+        let char_count = self
             .lines
             .get(self.cursor_line)
-            .map(|l| l.len())
+            .map(|l| l.chars().count())
             .unwrap_or(0);
-        if self.cursor_col < line_len {
+        if self.cursor_col < char_count {
             self.cursor_col += 1;
         } else if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
@@ -1050,24 +1323,26 @@ impl QueryState {
     pub fn cursor_up(&mut self) {
         if self.cursor_line > 0 {
             self.cursor_line -= 1;
-            let line_len = self
+            // Use character count, not byte length
+            let char_count = self
                 .lines
                 .get(self.cursor_line)
-                .map(|l| l.len())
+                .map(|l| l.chars().count())
                 .unwrap_or(0);
-            self.cursor_col = self.cursor_col.min(line_len);
+            self.cursor_col = self.cursor_col.min(char_count);
         }
     }
 
     pub fn cursor_down(&mut self) {
         if self.cursor_line + 1 < self.lines.len() {
             self.cursor_line += 1;
-            let line_len = self
+            // Use character count, not byte length
+            let char_count = self
                 .lines
                 .get(self.cursor_line)
-                .map(|l| l.len())
+                .map(|l| l.chars().count())
                 .unwrap_or(0);
-            self.cursor_col = self.cursor_col.min(line_len);
+            self.cursor_col = self.cursor_col.min(char_count);
         }
     }
 
@@ -1155,6 +1430,61 @@ impl ExportState {
     }
 }
 
+/// New collection state
+#[derive(Debug, Clone, Default)]
+pub struct NewCollectionState {
+    pub name: String,
+    pub cursor: usize,
+    pub error: Option<String>,
+}
+
+impl NewCollectionState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        // Only allow valid collection name characters
+        if c.is_alphanumeric() || c == '_' || c == '-' {
+            let byte_pos = self
+                .name
+                .char_indices()
+                .nth(self.cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.name.len());
+            self.name.insert(byte_pos, c);
+            self.cursor += 1;
+            self.error = None;
+        }
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            let byte_pos = self
+                .name
+                .char_indices()
+                .nth(self.cursor - 1)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.name.remove(byte_pos);
+            self.cursor -= 1;
+            self.error = None;
+        }
+    }
+
+    pub fn cursor_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        if self.cursor < self.name.chars().count() {
+            self.cursor += 1;
+        }
+    }
+}
+
 /// Main application state
 pub struct App {
     // Quit flag
@@ -1185,6 +1515,7 @@ pub struct App {
     pub page_size: usize,
     pub total_docs: usize,
     pub active_filter: Option<Value>, // Active filter query for pagination
+    pub active_sort: Option<Value>,   // Active sort for pagination
 
     // Detail pane
     pub detail_scroll: usize,
@@ -1209,6 +1540,9 @@ pub struct App {
 
     // Export state
     pub export_state: ExportState,
+
+    // New collection state
+    pub new_collection_state: NewCollectionState,
 
     // Config
     pub config: Config,
@@ -1248,6 +1582,7 @@ impl App {
             page_size: 20,
             total_docs: 0,
             active_filter: None,
+            active_sort: None,
             detail_scroll: 0,
             search: SearchState::new(),
             confirm: ConfirmState::default(),
@@ -1256,6 +1591,7 @@ impl App {
             query_state: QueryState::default(),
             filter_state: FilterState::default(),
             export_state: ExportState::default(),
+            new_collection_state: NewCollectionState::default(),
             config,
             status_message: None,
             error_message: None,
@@ -1311,7 +1647,9 @@ impl App {
     pub fn update_page_size(&mut self, terminal_height: u16) -> bool {
         // Calculate available height for documents:
         // terminal_height - header(1) - command_bar(1) - borders(2) = inner height
-        let new_page_size = terminal_height.saturating_sub(4).max(5) as usize;
+        let new_page_size = terminal_height
+            .saturating_sub(TERMINAL_OVERHEAD)
+            .max(MIN_PAGE_SIZE) as usize;
 
         if new_page_size != self.page_size {
             self.page_size = new_page_size;
@@ -1395,7 +1733,7 @@ impl App {
 
     // === Modals ===
 
-    /// Open search modal
+    /// Open search modal - mode depends on active pane
     pub fn open_search(&mut self) {
         self.modal = Some(Modal::Search);
         self.search.input_active = true;
@@ -1403,6 +1741,16 @@ impl App {
         self.search.cursor_pos = 0;
         self.search.results.clear();
         self.search.selected_result = 0;
+        self.search.doc_matches.clear();
+        self.search.current_match = 0;
+
+        // Set mode based on active pane
+        self.search.mode = if self.active_pane == Pane::Detail && self.get_selected_document().is_some()
+        {
+            SearchMode::Document
+        } else {
+            SearchMode::Collections
+        };
     }
 
     // execute_search() és goto_search_result() törölve
@@ -1465,6 +1813,18 @@ impl App {
         self.modal = Some(Modal::Confirm);
     }
 
+    /// Open delete confirmation for selected collection
+    pub fn open_delete_collection_confirm(&mut self) {
+        let Some(coll) = self.collections.get(self.selected_collection).cloned() else {
+            self.set_error("Nincs kiválasztott kollekció");
+            return;
+        };
+
+        let doc_count = coll.doc_count.unwrap_or(0);
+        self.confirm = ConfirmState::delete_collection(coll.name, doc_count);
+        self.modal = Some(Modal::Confirm);
+    }
+
     /// Toggle confirm dialog selection
     pub fn confirm_toggle(&mut self) {
         self.confirm.toggle_selection();
@@ -1511,9 +1871,30 @@ impl App {
             return;
         };
 
-        // Indexes will be loaded async later
+        // Initialize with empty, will be loaded async
         self.index_state = IndexState::new(coll_name, vec![]);
         self.modal = Some(Modal::Index);
+    }
+
+    /// Load indexes for current collection (call after opening index modal)
+    pub async fn load_indexes_async(&mut self) {
+        let collection = self.index_state.collection.clone();
+        if collection.is_empty() {
+            return;
+        }
+
+        let Some(db) = &self.db else {
+            return;
+        };
+
+        match db.list_indexes(&collection).await {
+            Ok(indexes) => {
+                self.index_state.indexes = indexes;
+            }
+            Err(e) => {
+                self.index_state.message = Some(format!("Hiba: {}", e));
+            }
+        }
     }
 
     // execute_create_index, execute_delete_index törölve
@@ -1539,7 +1920,8 @@ impl App {
             return;
         };
 
-        self.filter_state = FilterState::new();
+        // Preserve existing filters, only reset input fields
+        self.filter_state.reset_inputs();
         self.modal = Some(Modal::Filter);
     }
 
@@ -1553,7 +1935,8 @@ impl App {
             }
         };
 
-        self.filter_state = FilterState::new();
+        // Preserve existing filters, only reset input fields
+        self.filter_state.reset_inputs();
         self.modal = Some(Modal::Filter);
 
         // Load schema for field suggestions
@@ -1586,6 +1969,50 @@ impl App {
         self.modal = Some(Modal::Export);
     }
 
+    // === New Collection ===
+
+    /// Open new collection modal
+    pub fn open_new_collection(&mut self) {
+        self.new_collection_state = NewCollectionState::new();
+        self.modal = Some(Modal::NewCollection);
+    }
+
+    /// Create new collection (async)
+    pub async fn create_collection_async(&mut self) {
+        let name = self.new_collection_state.name.trim().to_string();
+        if name.is_empty() {
+            self.new_collection_state.error = Some("Név megadása kötelező".to_string());
+            return;
+        }
+
+        // Check if collection already exists
+        if self.collections.iter().any(|c| c.name == name) {
+            self.new_collection_state.error = Some("Ez a kollekció már létezik".to_string());
+            return;
+        }
+
+        let Some(db) = &self.db else {
+            self.set_error("Nincs megnyitva adatbázis");
+            return;
+        };
+
+        match db.create_collection(&name).await {
+            Ok(()) => {
+                self.close_modal();
+                self.set_status(format!("Kollekció létrehozva: {}", name));
+                let _ = self.refresh_collections_async().await;
+                // Select the new collection
+                if let Some(idx) = self.collections.iter().position(|c| c.name == name) {
+                    self.selected_collection = idx;
+                    let _ = self.refresh_documents_async().await;
+                }
+            }
+            Err(e) => {
+                self.new_collection_state.error = Some(format!("Hiba: {}", e));
+            }
+        }
+    }
+
     // === Theme ===
 
     /// Cycle to next theme
@@ -1610,6 +2037,31 @@ impl App {
     /// Clear error
     pub fn clear_error(&mut self) {
         self.error_message = None;
+    }
+
+    /// Copy selected document JSON to clipboard
+    pub fn copy_document_to_clipboard(&mut self) {
+        let Some(doc) = self.get_selected_document() else {
+            self.set_error("Nincs kiválasztott dokumentum");
+            return;
+        };
+
+        let json = serde_json::to_string_pretty(doc).unwrap_or_else(|_| "{}".to_string());
+
+        match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.set_text(&json) {
+                Ok(()) => {
+                    let preview: String = json.chars().take(50).collect();
+                    self.set_status(format!("Vágólapra másolva: {}...", preview));
+                }
+                Err(e) => {
+                    self.set_error(format!("Clipboard hiba: {}", e));
+                }
+            },
+            Err(e) => {
+                self.set_error(format!("Clipboard nem elérhető: {}", e));
+            }
+        }
     }
 
     /// Get database name
@@ -1675,13 +2127,17 @@ impl App {
         if let Some(db) = &self.db {
             let skip = self.doc_scroll_offset;
 
-            // Use active filter if set, otherwise get all documents
-            let docs = if let Some(ref filter) = self.active_filter {
-                db.find_with_options(&coll_name, filter, skip, self.page_size)
-                    .await?
-            } else {
-                db.get_documents(&coll_name, skip, self.page_size).await?
-            };
+            // Use active filter/sort if set
+            let query = self.active_filter.clone().unwrap_or(serde_json::json!({}));
+            let docs = db
+                .find_with_sort(
+                    &coll_name,
+                    &query,
+                    skip,
+                    self.page_size,
+                    self.active_sort.as_ref(),
+                )
+                .await?;
             self.documents = docs;
 
             // Lazy load: only fetch details if not already loaded (skip if filtering)
@@ -1697,12 +2153,14 @@ impl App {
 
                 // Update index_state for UI display
                 self.index_state.indexes = index_names;
-            } else {
-                // Use cached count
+            } else if self.active_filter.is_none() {
+                // Use cached count ONLY when not filtering
+                // (filtered total_docs is set by execute_filter_async)
                 if let Some(coll) = self.collections.get(self.selected_collection) {
                     self.total_docs = coll.doc_count.unwrap_or(0);
                 }
             }
+            // When active_filter is set, total_docs is preserved from execute_filter_async
         }
         Ok(())
     }
@@ -1728,6 +2186,8 @@ impl App {
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
                     self.active_filter = None; // Clear filter on collection change
+                    self.active_sort = None;   // Clear sort on collection change
+                    self.filter_state = FilterState::new(); // Clear filter state too
                     let _ = self.refresh_documents_async().await;
                 }
             }
@@ -1757,6 +2217,8 @@ impl App {
                     self.doc_scroll_offset = 0;
                     self.selected_document = 0;
                     self.active_filter = None; // Clear filter on collection change
+                    self.active_sort = None;   // Clear sort on collection change
+                    self.filter_state = FilterState::new(); // Clear filter state too
                     let _ = self.refresh_documents_async().await;
                 }
             }
@@ -1771,10 +2233,8 @@ impl App {
                 }
             }
             Pane::Detail => {
-                let max_scroll = self.get_selected_document_lines().saturating_sub(10);
-                if self.detail_scroll < max_scroll {
-                    self.detail_scroll += 1;
-                }
+                // Allow free scrolling - rendering handles bounds
+                self.detail_scroll += 1;
             }
         }
     }
@@ -1783,7 +2243,7 @@ impl App {
     pub async fn page_up_async(&mut self) {
         match self.active_pane {
             Pane::Collections => {
-                self.selected_collection = self.selected_collection.saturating_sub(10);
+                self.selected_collection = self.selected_collection.saturating_sub(SCROLL_STEP);
                 self.doc_scroll_offset = 0;
                 self.selected_document = 0;
                 let _ = self.refresh_documents_async().await;
@@ -1797,7 +2257,7 @@ impl App {
                 }
             }
             Pane::Detail => {
-                self.detail_scroll = self.detail_scroll.saturating_sub(10);
+                self.detail_scroll = self.detail_scroll.saturating_sub(SCROLL_STEP);
             }
         }
     }
@@ -1807,7 +2267,7 @@ impl App {
         match self.active_pane {
             Pane::Collections => {
                 let max = self.collections.len().saturating_sub(1);
-                self.selected_collection = (self.selected_collection + 10).min(max);
+                self.selected_collection = (self.selected_collection + SCROLL_STEP).min(max);
                 self.doc_scroll_offset = 0;
                 self.selected_document = 0;
                 let _ = self.refresh_documents_async().await;
@@ -1823,8 +2283,8 @@ impl App {
                 }
             }
             Pane::Detail => {
-                let max_scroll = self.get_selected_document_lines().saturating_sub(10);
-                self.detail_scroll = (self.detail_scroll + 10).min(max_scroll);
+                // Allow free scrolling - rendering handles bounds
+                self.detail_scroll += SCROLL_STEP;
             }
         }
     }
@@ -1872,9 +2332,9 @@ impl App {
                 let _ = self.refresh_documents_async().await;
             }
             Pane::Detail => {
-                // Scroll to end based on actual document line count
-                let lines = self.get_selected_document_lines();
-                self.detail_scroll = lines.saturating_sub(10); // Leave some visible lines
+                // Scroll to end - use total lines as scroll position
+                // Rendering will show last lines at top of view
+                self.detail_scroll = self.get_selected_document_lines();
             }
         }
     }
@@ -1883,6 +2343,14 @@ impl App {
 
     /// Execute search based on current mode and query (async)
     pub async fn execute_search_async(&mut self) {
+        match self.search.mode {
+            SearchMode::Collections => self.execute_collection_search_async().await,
+            SearchMode::Document => self.execute_document_search(),
+        }
+    }
+
+    /// Search collections (async - requires DB call)
+    async fn execute_collection_search_async(&mut self) {
         let query = self.search.query_input.trim();
         if query.is_empty() {
             self.search.results.clear();
@@ -1903,38 +2371,19 @@ impl App {
             return;
         };
 
-        match self.search.mode {
-            SearchMode::Collections => match db.search_collections(query).await {
-                Ok(collections) => {
-                    self.search.results = collections
-                        .into_iter()
-                        .map(|c| SearchResult::Collection {
-                            match_reason: format!("nev tartalmazza: '{}'", query),
-                            name: c.name,
-                            doc_count: c.doc_count.unwrap_or(0),
-                        })
-                        .collect();
-                }
-                Err(e) => {
-                    self.set_error(format!("Kereses hiba: {}", e));
-                }
-            },
-            SearchMode::Documents => match db.search_documents(query, None, 100).await {
-                Ok(matches) => {
-                    self.search.results = matches
-                        .into_iter()
-                        .map(|m| SearchResult::Document {
-                            collection: m.collection,
-                            doc_id: m.doc_id,
-                            preview: m.preview,
-                            match_field: m.matched_field,
-                        })
-                        .collect();
-                }
-                Err(e) => {
-                    self.set_error(format!("Kereses hiba: {}", e));
-                }
-            },
+        match db.search_collections(query).await {
+            Ok(collections) => {
+                self.search.results = collections
+                    .into_iter()
+                    .map(|c| SearchResult {
+                        name: c.name,
+                        doc_count: c.doc_count.unwrap_or(0),
+                    })
+                    .collect();
+            }
+            Err(e) => {
+                self.set_error(format!("Kereses hiba: {}", e));
+            }
         }
 
         if self.search.results.is_empty() {
@@ -1944,33 +2393,93 @@ impl App {
         }
     }
 
+    /// Search within current document (sync - local operation)
+    pub fn execute_document_search(&mut self) {
+        let query = self.search.query_input.trim().to_lowercase();
+        if query.is_empty() {
+            self.search.doc_matches.clear();
+            return;
+        }
+
+        self.search.doc_matches.clear();
+        self.search.current_match = 0;
+
+        // Get current document
+        let Some(doc) = self.get_selected_document() else {
+            self.set_status("Nincs kivalasztott dokumentum");
+            return;
+        };
+
+        // Pretty print and search
+        let pretty = serde_json::to_string_pretty(&doc).unwrap_or_default();
+
+        for (line_num, line) in pretty.lines().enumerate() {
+            let line_lower = line.to_lowercase();
+            let mut search_start = 0;
+            while let Some(col) = line_lower[search_start..].find(&query) {
+                self.search.doc_matches.push(DocSearchMatch {
+                    line: line_num,
+                    col_start: search_start + col,
+                });
+                search_start += col + query.len();
+            }
+        }
+
+        if self.search.doc_matches.is_empty() {
+            self.set_status("Nincs talalat");
+        } else {
+            self.set_status(format!(
+                "{} talalat (n/N: kovetkezo/elozo)",
+                self.search.doc_matches.len()
+            ));
+            // Jump to first match
+            self.scroll_to_current_match();
+        }
+    }
+
+    /// Scroll detail pane to show current match
+    pub fn scroll_to_current_match(&mut self) {
+        if let Some(line) = self.search.current_match_line() {
+            // Leave some context lines above
+            self.detail_scroll = line.saturating_sub(3);
+        }
+    }
+
+    /// Navigate to next/prev match and scroll
+    pub fn goto_next_match(&mut self) {
+        self.search.next_match();
+        self.scroll_to_current_match();
+        if !self.search.doc_matches.is_empty() {
+            self.set_status(format!(
+                "Talalat {}/{}",
+                self.search.current_match + 1,
+                self.search.doc_matches.len()
+            ));
+        }
+    }
+
+    pub fn goto_prev_match(&mut self) {
+        self.search.prev_match();
+        self.scroll_to_current_match();
+        if !self.search.doc_matches.is_empty() {
+            self.set_status(format!(
+                "Talalat {}/{}",
+                self.search.current_match + 1,
+                self.search.doc_matches.len()
+            ));
+        }
+    }
+
     /// Navigate to selected search result (async)
     pub async fn goto_search_result_async(&mut self) {
-        if let Some(result) = self
-            .search
-            .results
-            .get(self.search.selected_result)
-            .cloned()
-        {
-            match result {
-                SearchResult::Collection { name, .. } => {
-                    if let Some(idx) = self.collections.iter().position(|c| c.name == name) {
-                        self.selected_collection = idx;
-                        self.doc_scroll_offset = 0;
-                        self.selected_document = 0;
-                        let _ = self.refresh_documents_async().await;
-                        self.active_pane = Pane::Documents;
-                    }
-                }
-                SearchResult::Document { collection, .. } => {
-                    if let Some(idx) = self.collections.iter().position(|c| c.name == collection) {
-                        self.selected_collection = idx;
-                        self.doc_scroll_offset = 0;
-                        self.selected_document = 0;
-                        let _ = self.refresh_documents_async().await;
-                        self.active_pane = Pane::Documents;
-                    }
-                }
+        if let Some(result) = self.search.results.get(self.search.selected_result).cloned() {
+            // Navigate to collection
+            if let Some(idx) = self.collections.iter().position(|c| c.name == result.name) {
+                self.selected_collection = idx;
+                self.doc_scroll_offset = 0;
+                self.selected_document = 0;
+                let _ = self.refresh_documents_async().await;
+                self.active_pane = Pane::Documents;
             }
             self.close_modal();
         }
@@ -1993,7 +2502,7 @@ impl App {
                 self.do_delete_document_async(&collection, &doc_id).await;
             }
             ConfirmAction::DeleteCollection { name } => {
-                self.set_status(format!("Kollekció törlés: {} - hamarosan...", name));
+                self.do_delete_collection_async(&name).await;
             }
         }
     }
@@ -2013,6 +2522,29 @@ impl App {
                 } else {
                     self.set_error("Dokumentum nem található");
                 }
+            }
+            Err(e) => {
+                self.set_error(format!("Törlés hiba: {}", e));
+            }
+        }
+    }
+
+    /// Actually delete a collection (async)
+    async fn do_delete_collection_async(&mut self, name: &str) {
+        let Some(db) = &self.db else {
+            self.set_error("Nincs megnyitva adatbázis");
+            return;
+        };
+
+        match db.drop_collection(name).await {
+            Ok(()) => {
+                self.set_status(format!("Kollekció törölve: {}", name));
+                // Reset selection and refresh
+                self.selected_collection = 0;
+                self.documents.clear();
+                self.selected_document = 0;
+                self.doc_scroll_offset = 0;
+                let _ = self.refresh_collections_async().await;
             }
             Err(e) => {
                 self.set_error(format!("Törlés hiba: {}", e));
@@ -2154,7 +2686,11 @@ impl App {
 
         let collection = self.query_state.collection.clone();
 
+        // Show loading indicator (before db borrow)
+        self.set_loading("Lekérdezés...");
+
         let Some(db) = &self.db else {
+            self.clear_loading();
             self.set_error("Nincs megnyitva adatbázis");
             return;
         };
@@ -2177,6 +2713,7 @@ impl App {
                 self.query_state.error = Some(format!("Lekérdezés hiba: {}", e));
             }
         }
+        self.clear_loading();
     }
 
     // === Async Filter ===
@@ -2204,50 +2741,68 @@ impl App {
             }
         };
 
+        // Show loading indicator (before db borrow)
+        self.set_loading("Szűrés...");
+
+        // Build sort from filter state
+        let sort = self.filter_state.build_sort();
+
         let Some(db) = &self.db else {
+            self.clear_loading();
             self.filter_state.error = Some("Nincs megnyitva adatbázis".to_string());
             return;
         };
 
+        // First get the total count matching the query
+        let total_count = match db.count_with_query(&collection, &query).await {
+            Ok(c) => c,
+            Err(e) => {
+                self.clear_loading();
+                self.filter_state.error = Some(format!("Szamlalas hiba: {}", e));
+                return;
+            }
+        };
+
+        if total_count == 0 {
+            // 0 eredmény - maradjon nyitva a modal, mutassa a query-t
+            self.clear_loading();
+            self.filter_state.result_count = 0;
+            self.filter_state.results = Some(vec![]);
+            self.filter_state.error = Some(format!(
+                "0 talalat. Query: {}",
+                serde_json::to_string(&query).unwrap_or_default()
+            ));
+            return;
+        }
+
+        // Load first page of results
         match db
-            .find_with_options(&collection, &query, 0, FILTER_LIMIT)
+            .find_with_sort(&collection, &query, 0, self.page_size, sort.as_ref())
             .await
         {
             Ok(docs) => {
-                let count = docs.len();
-                self.filter_state.result_count = count;
+                self.filter_state.result_count = total_count;
                 self.filter_state.results = Some(docs.clone());
                 self.filter_state.error = None;
 
-                if count == 0 {
-                    // 0 eredmény - maradjon nyitva a modal, mutassa a query-t
-                    let query = self.filter_state.build_query();
-                    self.filter_state.error = Some(format!(
-                        "0 talalat. Query: {}",
-                        serde_json::to_string(&query).unwrap_or_default()
-                    ));
-                } else {
-                    // Van eredmény - frissítsd a dokumentum listát és zárd be
-                    self.documents = docs;
-                    self.selected_document = 0;
-                    self.doc_scroll_offset = 0;
-                    self.total_docs = count;
-                    self.active_filter = Some(query.clone()); // Store filter for pagination
+                // Van eredmény - frissítsd a dokumentum listát és zárd be
+                self.documents = docs;
+                self.selected_document = 0;
+                self.doc_scroll_offset = 0;
+                self.total_docs = total_count; // Use actual total, not loaded count!
+                self.active_filter = Some(query.clone()); // Store filter for pagination
+                self.active_sort = sort; // Store sort for pagination
 
-                    if count >= FILTER_LIMIT {
-                        self.set_status(format!("{}+ talalat (limit: {})", count, FILTER_LIMIT));
-                    } else {
-                        self.set_status(format!("{} talalat", count));
-                    }
+                self.set_status(format!("{} talalat", total_count));
 
-                    // Close the modal to show results
-                    self.close_modal();
-                }
+                // Close the modal to show results
+                self.close_modal();
             }
             Err(e) => {
                 self.filter_state.error = Some(format!("Szures hiba: {}", e));
             }
         }
+        self.clear_loading();
     }
 
     // === Async Export ===
@@ -2270,11 +2825,6 @@ impl App {
         let format = self.export_state.format;
         let total_docs = self.export_state.doc_count;
 
-        let Some(db) = &self.db else {
-            self.set_error("Nincs megnyitva adatbázis");
-            return;
-        };
-
         let file = match File::create(&file_path) {
             Ok(f) => f,
             Err(e) => {
@@ -2284,12 +2834,19 @@ impl App {
         };
         let mut writer = BufWriter::new(file);
 
-        // Set determinate progress
+        // Set determinate progress before db borrow
         self.set_progress("Exportálás", 0, total_docs);
+
+        let Some(db) = &self.db else {
+            self.set_error("Nincs megnyitva adatbázis");
+            self.clear_loading();
+            return;
+        };
 
         let result: Result<usize, String> = match format {
             ExportFormat::Json => {
                 if let Err(e) = writeln!(writer, "[") {
+                    self.clear_loading();
                     return self.export_state.error = Some(format!("Írási hiba: {}", e));
                 }
 
@@ -2305,6 +2862,7 @@ impl App {
                         Ok(d) => d,
                         Err(e) => {
                             self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
+                            self.clear_loading();
                             return;
                         }
                     };
@@ -2321,25 +2879,26 @@ impl App {
                             Ok(j) => j,
                             Err(e) => {
                                 self.export_state.error = Some(format!("JSON hiba: {}", e));
+                                self.clear_loading();
                                 return;
                             }
                         };
 
                         if let Err(e) = write!(writer, "{}{}", prefix, json) {
                             self.export_state.error = Some(format!("Írási hiba: {}", e));
+                            self.clear_loading();
                             return;
                         }
                     }
 
                     exported += docs.len();
                     offset += docs.len();
-                    self.update_progress(exported, total_docs);
-                    self.export_state.message =
-                        Some(format!("Exportálás... {}/{}", exported, total_docs));
+                    // Note: self.update_progress not called here due to db borrow conflict
                 }
 
                 if let Err(e) = writeln!(writer, "\n]") {
                     self.export_state.error = Some(format!("Írási hiba: {}", e));
+                    self.clear_loading();
                     return;
                 }
 
@@ -2353,12 +2912,14 @@ impl App {
                     Ok(d) => d,
                     Err(e) => {
                         self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
+                        self.clear_loading();
                         return;
                     }
                 };
 
                 if sample.is_empty() {
                     self.export_state.error = Some("Nincs exportálandó dokumentum".to_string());
+                    self.clear_loading();
                     return;
                 }
 
@@ -2375,6 +2936,7 @@ impl App {
 
                 if let Err(e) = writeln!(writer, "{}", fields.join(",")) {
                     self.export_state.error = Some(format!("Írási hiba: {}", e));
+                    self.clear_loading();
                     return;
                 }
 
@@ -2389,6 +2951,7 @@ impl App {
                         Ok(d) => d,
                         Err(e) => {
                             self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
+                            self.clear_loading();
                             return;
                         }
                     };
@@ -2418,15 +2981,14 @@ impl App {
 
                         if let Err(e) = writeln!(writer, "{}", row.join(",")) {
                             self.export_state.error = Some(format!("Írási hiba: {}", e));
+                            self.clear_loading();
                             return;
                         }
                     }
 
                     exported += docs.len();
                     offset += docs.len();
-                    self.update_progress(exported, total_docs);
-                    self.export_state.message =
-                        Some(format!("Exportálás... {}/{}", exported, total_docs));
+                    // Note: self.update_progress not called here due to db borrow conflict
                 }
 
                 Ok(exported)

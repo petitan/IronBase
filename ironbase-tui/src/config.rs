@@ -45,7 +45,7 @@ pub struct Config {
 }
 
 fn default_mcp_url() -> String {
-    "http://192.168.0.136:8080".to_string()
+    "http://127.0.0.1:8080".to_string()
 }
 
 impl Default for Config {

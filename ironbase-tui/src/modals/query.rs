@@ -53,16 +53,13 @@ fn render_editor(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Them
         let is_cursor_line = line_idx == state.cursor_line;
 
         if is_cursor_line {
-            // Line with cursor
-            let before = if state.cursor_col <= line.len() {
-                &line[..state.cursor_col]
+            // Line with cursor - UTF-8 safe slicing
+            let char_count = line.chars().count();
+            let before: String = line.chars().take(state.cursor_col).collect();
+            let after: String = if state.cursor_col < char_count {
+                line.chars().skip(state.cursor_col).collect()
             } else {
-                line.as_str()
-            };
-            let after = if state.cursor_col < line.len() {
-                &line[state.cursor_col..]
-            } else {
-                ""
+                String::new()
             };
 
             let line_num = format!("{:2} ", line_idx + 1);
@@ -104,8 +101,10 @@ fn render_results(frame: &mut Frame, area: Rect, state: &QueryState, theme: &The
         let count = results.len();
         let preview = if count > 0 {
             let first = serde_json::to_string(&results[0]).unwrap_or_default();
-            let truncated = if first.len() > 80 {
-                format!("{}...", &first[..80])
+            // UTF-8 safe truncation using character count
+            let truncated = if first.chars().count() > 80 {
+                let chars: String = first.chars().take(80).collect();
+                format!("{}...", chars)
             } else {
                 first
             };

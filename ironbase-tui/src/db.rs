@@ -2,7 +2,7 @@
 //!
 //! This module provides async database operations via MCP protocol.
 
-use crate::mcp::{McpClient, McpResult};
+use crate::mcp::McpClient;
 use anyhow::Result;
 use serde_json::Value;
 use std::path::Path;
@@ -41,14 +41,6 @@ impl CollectionInfo {
     }
 }
 
-/// Document search match
-#[derive(Debug, Clone)]
-pub struct DocumentMatch {
-    pub collection: String,
-    pub doc_id: String,
-    pub preview: String,
-    pub matched_field: String,
-}
 
 /// Field information from schema inference
 #[derive(Debug, Clone)]
@@ -126,6 +118,12 @@ impl DbWrapper {
         Ok(count as usize)
     }
 
+    /// Count documents matching a query
+    pub async fn count_with_query(&self, collection: &str, query: &Value) -> Result<usize> {
+        let count = self.client.count_documents(collection, query).await?;
+        Ok(count as usize)
+    }
+
     /// Execute a query on a collection
     pub async fn find(&self, collection: &str, query: &Value) -> Result<Vec<Value>> {
         let docs = self.client.find(collection, query, None, None).await?;
@@ -143,6 +141,22 @@ impl DbWrapper {
         let docs = self
             .client
             .find(collection, query, Some(skip), Some(limit))
+            .await?;
+        Ok(docs)
+    }
+
+    /// Execute a query with sort
+    pub async fn find_with_sort(
+        &self,
+        collection: &str,
+        query: &Value,
+        skip: usize,
+        limit: usize,
+        sort: Option<&Value>,
+    ) -> Result<Vec<Value>> {
+        let docs = self
+            .client
+            .find_with_sort(collection, query, Some(skip), Some(limit), sort)
             .await?;
         Ok(docs)
     }
@@ -256,141 +270,22 @@ impl DbWrapper {
         Ok(filtered)
     }
 
-    /// Search documents across collections
-    /// Returns (collection_name, doc_id, preview, matched_field)
-    pub async fn search_documents(
-        &self,
-        query: &str,
-        collection_filter: Option<&str>,
-        limit: usize,
-    ) -> Result<Vec<DocumentMatch>> {
-        let query_lower = query.to_lowercase();
-        let mut results = Vec::new();
+    /// Create a new empty collection
+    pub async fn create_collection(&self, name: &str) -> Result<()> {
+        self.client.create_collection(name).await?;
+        Ok(())
+    }
 
-        // Get collections to search
-        let collections: Vec<String> = if let Some(coll) = collection_filter {
-            vec![coll.to_string()]
-        } else {
-            self.client.list_collections().await?
-        };
-
-        // Search each collection
-        for coll_name in collections {
-            if results.len() >= limit {
-                break;
-            }
-
-            // Get documents (limit per collection to avoid slowness)
-            let docs = self
-                .client
-                .find(&coll_name, &serde_json::json!({}), None, Some(500))
-                .await?;
-
-            for doc in docs {
-                if results.len() >= limit {
-                    break;
-                }
-
-                // Search in document JSON
-                if let Some(matched) = search_in_value(&doc, &query_lower) {
-                    let doc_id = doc
-                        .get("_id")
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-
-                    // Create preview (truncated JSON)
-                    let preview = truncate_json(&doc, 100);
-
-                    results.push(DocumentMatch {
-                        collection: coll_name.clone(),
-                        doc_id,
-                        preview,
-                        matched_field: matched,
-                    });
-                }
-            }
-        }
-
-        Ok(results)
+    /// Drop a collection
+    pub async fn drop_collection(&self, name: &str) -> Result<()> {
+        self.client.drop_collection(name).await?;
+        Ok(())
     }
 
     /// Close the connection
     pub async fn close(&self) -> Result<()> {
         self.client.close().await?;
         Ok(())
-    }
-}
-
-/// Search for query string in a JSON value, returning the matched field path
-fn search_in_value(value: &Value, query: &str) -> Option<String> {
-    search_in_value_recursive(value, query, "")
-}
-
-fn search_in_value_recursive(value: &Value, query: &str, path: &str) -> Option<String> {
-    match value {
-        Value::String(s) => {
-            if s.to_lowercase().contains(query) {
-                Some(if path.is_empty() {
-                    "(root)".to_string()
-                } else {
-                    path.to_string()
-                })
-            } else {
-                None
-            }
-        }
-        Value::Number(n) => {
-            if n.to_string().contains(query) {
-                Some(if path.is_empty() {
-                    "(root)".to_string()
-                } else {
-                    path.to_string()
-                })
-            } else {
-                None
-            }
-        }
-        Value::Object(obj) => {
-            for (key, val) in obj {
-                let new_path = if path.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{}.{}", path, key)
-                };
-
-                // Also search in key name
-                if key.to_lowercase().contains(query) {
-                    return Some(format!("key:{}", new_path));
-                }
-
-                if let Some(found) = search_in_value_recursive(val, query, &new_path) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        Value::Array(arr) => {
-            for (idx, val) in arr.iter().enumerate() {
-                let new_path = format!("{}[{}]", path, idx);
-                if let Some(found) = search_in_value_recursive(val, query, &new_path) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-/// Truncate JSON to a max length for preview (UTF-8 safe)
-fn truncate_json(value: &Value, max_len: usize) -> String {
-    let json_str = serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string());
-    if json_str.chars().count() <= max_len {
-        json_str
-    } else {
-        // Safe UTF-8 truncation at character boundary
-        let truncated: String = json_str.chars().take(max_len).collect();
-        format!("{}...", truncated)
     }
 }
 

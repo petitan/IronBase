@@ -1,4 +1,4 @@
-//! Search modal - command palette style search
+//! Search modal - collection or document search
 
 use super::render_modal_frame;
 use crate::app::{App, SearchMode};
@@ -8,12 +8,17 @@ use ratatui::widgets::{List, ListItem, Paragraph};
 
 /// Render the search modal
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Kereses", theme, 60, 50);
+    let title = match app.search.mode {
+        SearchMode::Collections => "Kollekciok keresese",
+        SearchMode::Document => "Kereses a dokumentumban",
+    };
 
-    // Split into input, mode selector, and results
+    let inner = render_modal_frame(frame, area, title, theme, 60, 50);
+
+    // Split into input and results/status
     let chunks = Layout::vertical([
         Constraint::Length(3), // Input
-        Constraint::Length(2), // Mode hints
+        Constraint::Length(1), // Help hint
         Constraint::Min(3),    // Results
     ])
     .split(inner);
@@ -21,16 +26,24 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // Search input
     render_search_input(frame, chunks[0], app, theme);
 
-    // Mode selector hints
-    render_mode_hints(frame, chunks[1], app, theme);
+    // Help hint (mode-specific)
+    render_help(frame, chunks[1], app, theme);
 
-    // Results
-    render_results(frame, chunks[2], app, theme);
+    // Results or match info
+    match app.search.mode {
+        SearchMode::Collections => render_collection_results(frame, chunks[2], app, theme),
+        SearchMode::Document => render_doc_results(frame, chunks[2], app, theme),
+    }
 }
 
 fn render_search_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let placeholder = match app.search.mode {
+        SearchMode::Collections => "Irj be kollekcio nevet...",
+        SearchMode::Document => "Irj be keresett szoveget...",
+    };
+
     let input_text = if app.search.query_input.is_empty() {
-        "Irj be keresokifejezest..."
+        placeholder
     } else {
         &app.search.query_input
     };
@@ -41,10 +54,20 @@ fn render_search_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
         Style::default().fg(theme.fg)
     };
 
-    // Add cursor if active
+    // Add cursor if active - UTF-8 safe slicing
     let display = if app.search.input_active && !app.search.query_input.is_empty() {
-        let before = &app.search.query_input[..app.search.cursor_pos];
-        let after = &app.search.query_input[app.search.cursor_pos..];
+        let before: String = app
+            .search
+            .query_input
+            .chars()
+            .take(app.search.cursor_pos)
+            .collect();
+        let after: String = app
+            .search
+            .query_input
+            .chars()
+            .skip(app.search.cursor_pos)
+            .collect();
         format!("{}|{}", before, after)
     } else if app.search.input_active {
         "|".to_string()
@@ -59,34 +82,29 @@ fn render_search_input(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) 
     frame.render_widget(input, area);
 }
 
-fn render_mode_hints(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let (coll_style, doc_style) = match app.search.mode {
-        SearchMode::Collections => (
-            Style::default().fg(theme.bg).bg(theme.accent),
-            Style::default().fg(theme.muted),
-        ),
-        SearchMode::Documents => (
-            Style::default().fg(theme.muted),
-            Style::default().fg(theme.bg).bg(theme.accent),
-        ),
+fn render_help(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let line = match app.search.mode {
+        SearchMode::Collections => Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(theme.accent)),
+            Span::styled(" Kereses/Ugras  ", Style::default().fg(theme.muted)),
+            Span::styled("[Esc]", Style::default().fg(theme.accent)),
+            Span::styled(" Bezar", Style::default().fg(theme.muted)),
+        ]),
+        SearchMode::Document => Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(theme.accent)),
+            Span::styled(" Kereses  ", Style::default().fg(theme.muted)),
+            Span::styled("[n/N]", Style::default().fg(theme.accent)),
+            Span::styled(" Kov/Eloz  ", Style::default().fg(theme.muted)),
+            Span::styled("[Esc]", Style::default().fg(theme.accent)),
+            Span::styled(" Bezar", Style::default().fg(theme.muted)),
+        ]),
     };
-
-    let line = Line::from(vec![
-        Span::styled("[c]", Style::default().fg(theme.accent)),
-        Span::styled(" Kollekcio ", coll_style),
-        Span::raw("  "),
-        Span::styled("[d]", Style::default().fg(theme.accent)),
-        Span::styled(" Dokumentum ", doc_style),
-        Span::raw("  "),
-        Span::styled("[Tab]", Style::default().fg(theme.muted)),
-        Span::styled(" valtas", Style::default().fg(theme.muted)),
-    ]);
 
     let hints = Paragraph::new(line);
     frame.render_widget(hints, area);
 }
 
-fn render_results(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+fn render_collection_results(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     if app.search.results.is_empty() {
         let msg = if app.search.query_input.is_empty() {
             ""
@@ -116,21 +134,7 @@ fn render_results(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 Style::default().fg(theme.fg)
             };
 
-            let text = match result {
-                crate::app::SearchResult::Collection {
-                    name, doc_count, ..
-                } => {
-                    format!("  {} ({} docs)", name, doc_count)
-                }
-                crate::app::SearchResult::Document {
-                    collection,
-                    doc_id,
-                    preview,
-                    ..
-                } => {
-                    format!("  [{}] #{} {}", collection, doc_id, truncate(preview, 30))
-                }
-            };
+            let text = format!("  {} ({} docs)", result.name, result.doc_count);
 
             ListItem::new(text).style(style)
         })
@@ -140,11 +144,29 @@ fn render_results(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     frame.render_widget(list, area);
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
+fn render_doc_results(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let text = if app.search.doc_matches.is_empty() {
+        if app.search.query_input.is_empty() {
+            "Kezdj el gepelni a kereséshez".to_string()
+        } else {
+            "Nincs talalat".to_string()
+        }
     } else {
-        // Safe UTF-8 truncation at character boundary
-        s.chars().take(max).collect()
-    }
+        format!(
+            "Talalat: {}/{}\n\n[n] Kovetkezo  [N] Elozo\n[Esc] Bezar (talaltok kijelolve maradnak)",
+            app.search.current_match + 1,
+            app.search.doc_matches.len()
+        )
+    };
+
+    let style = if app.search.doc_matches.is_empty() {
+        Style::default().fg(theme.muted)
+    } else {
+        Style::default().fg(theme.accent)
+    };
+
+    let p = Paragraph::new(text)
+        .style(style)
+        .alignment(Alignment::Center);
+    frame.render_widget(p, area);
 }

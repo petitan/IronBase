@@ -210,6 +210,7 @@ async fn handle_actions_key_async(app: &mut App, key: KeyCode) {
         KeyCode::Char('x') => {
             app.close_modal();
             app.open_index_modal();
+            app.load_indexes_async().await;
         }
         KeyCode::Char('r') => {
             app.close_modal();
@@ -228,8 +229,8 @@ async fn handle_actions_key_async(app: &mut App, key: KeyCode) {
             app.close_modal();
         }
         KeyCode::Char('n') => {
-            app.set_status("New collection - hamarosan...");
             app.close_modal();
+            app.open_new_collection();
         }
         _ => {}
     }
@@ -344,6 +345,9 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Query => modals::query::render(frame, frame.area(), &app.query_state, &theme),
             Modal::Export => modals::export::render(frame, frame.area(), &app.export_state, &theme),
             Modal::Filter => modals::filter::render(frame, frame.area(), &app.filter_state, &theme),
+            Modal::NewCollection => {
+                modals::new_collection::render(frame, frame.area(), &app.new_collection_state, &theme)
+            }
             Modal::ErrorDetail => {
                 if let Some(ref err) = app.error_message {
                     modals::error::render(frame, frame.area(), err, app.error_scroll, &theme);
@@ -523,6 +527,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::Query) => handle_query_key_async(app, key, modifiers).await,
         Some(Modal::Export) => handle_export_key_async(app, key, modifiers).await,
         Some(Modal::Filter) => handle_filter_key_async(app, key, modifiers).await,
+        Some(Modal::NewCollection) => handle_new_collection_key_async(app, key).await,
         None => {}
     }
 }
@@ -572,11 +577,16 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
             app.open_edit();
         }
 
-        // Delete (Detail pane, Documents pane)
+        // Delete document (Detail pane, Documents pane)
         (KeyCode::Char('d'), _)
             if app.active_pane == Pane::Detail || app.active_pane == Pane::Documents =>
         {
             app.open_delete_confirm();
+        }
+
+        // Delete collection (Collections pane - Shift+D)
+        (KeyCode::Char('D'), KeyModifiers::SHIFT) if app.active_pane == Pane::Collections => {
+            app.open_delete_collection_confirm();
         }
 
         // Insert (Collections, Documents pane)
@@ -584,6 +594,13 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
             if app.active_pane == Pane::Collections || app.active_pane == Pane::Documents =>
         {
             app.open_insert();
+        }
+
+        // Copy to clipboard (Detail or Documents pane)
+        (KeyCode::Char('y'), _)
+            if app.active_pane == Pane::Detail || app.active_pane == Pane::Documents =>
+        {
+            app.copy_document_to_clipboard();
         }
 
         // Theme
@@ -635,6 +652,16 @@ fn handle_help_key(app: &mut App, key: KeyCode) {
 
 /// Async search key handler
 async fn handle_search_key_async(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
+    use crate::app::SearchMode;
+
+    match app.search.mode {
+        SearchMode::Collections => handle_collection_search_key(app, key).await,
+        SearchMode::Document => handle_document_search_key(app, key),
+    }
+}
+
+/// Handle collection search keys
+async fn handle_collection_search_key(app: &mut App, key: KeyCode) {
     if app.search.input_active {
         match key {
             KeyCode::Esc => app.close_modal(),
@@ -648,24 +675,11 @@ async fn handle_search_key_async(app: &mut App, key: KeyCode, _modifiers: KeyMod
                     }
                 }
             }
-            KeyCode::Char(c) => {
-                app.search.insert_char(c);
-            }
-            KeyCode::Backspace => {
-                app.search.delete_char();
-            }
-            KeyCode::Left => {
-                app.search.cursor_left();
-            }
-            KeyCode::Right => {
-                app.search.cursor_right();
-            }
-            KeyCode::Tab => {
-                app.search.toggle_mode();
-                app.search.results.clear();
-                app.search.last_search.clear();
-            }
-            KeyCode::Down => {
+            KeyCode::Char(c) => app.search.insert_char(c),
+            KeyCode::Backspace => app.search.delete_char(),
+            KeyCode::Left => app.search.cursor_left(),
+            KeyCode::Right => app.search.cursor_right(),
+            KeyCode::Tab | KeyCode::Down => {
                 if !app.search.results.is_empty() {
                     app.search.input_active = false;
                 }
@@ -675,9 +689,7 @@ async fn handle_search_key_async(app: &mut App, key: KeyCode, _modifiers: KeyMod
     } else {
         match key {
             KeyCode::Esc => app.close_modal(),
-            KeyCode::Enter => {
-                app.goto_search_result_async().await;
-            }
+            KeyCode::Enter => app.goto_search_result_async().await,
             KeyCode::Up | KeyCode::Char('k') => {
                 if app.search.selected_result == 0 {
                     app.search.input_active = true;
@@ -685,31 +697,43 @@ async fn handle_search_key_async(app: &mut App, key: KeyCode, _modifiers: KeyMod
                     app.search_select_up();
                 }
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                app.search_select_down();
-            }
-            KeyCode::Tab => {
-                app.search.toggle_mode();
-                app.execute_search_async().await;
-            }
-            // Mode shortcuts: 'c' for Collections, 'd' for Documents
-            KeyCode::Char('c') => {
-                if app.search.mode != crate::app::SearchMode::Collections {
-                    app.search.mode = crate::app::SearchMode::Collections;
-                    app.execute_search_async().await;
-                }
-            }
-            KeyCode::Char('d') => {
-                if app.search.mode != crate::app::SearchMode::Documents {
-                    app.search.mode = crate::app::SearchMode::Documents;
-                    app.execute_search_async().await;
-                }
-            }
-            KeyCode::Char('/') => {
-                app.search.input_active = true;
-            }
+            KeyCode::Down | KeyCode::Char('j') => app.search_select_down(),
+            KeyCode::Tab | KeyCode::Char('/') => app.search.input_active = true,
             _ => {}
         }
+    }
+}
+
+/// Handle document search keys
+fn handle_document_search_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => app.close_modal(),
+        KeyCode::Enter => {
+            if !app.search.query_input.is_empty() {
+                app.execute_document_search();
+            }
+        }
+        KeyCode::Char('n') => {
+            // Next match
+            if !app.search.doc_matches.is_empty() {
+                app.goto_next_match();
+            } else {
+                app.search.insert_char('n');
+            }
+        }
+        KeyCode::Char('N') => {
+            // Previous match
+            if !app.search.doc_matches.is_empty() {
+                app.goto_prev_match();
+            } else {
+                app.search.insert_char('N');
+            }
+        }
+        KeyCode::Char(c) => app.search.insert_char(c),
+        KeyCode::Backspace => app.search.delete_char(),
+        KeyCode::Left => app.search.cursor_left(),
+        KeyCode::Right => app.search.cursor_right(),
+        _ => {}
     }
 }
 
@@ -930,33 +954,52 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                     }
                 }
                 FilterFocus::Filters => {
-                    // Filters-nél Enter = törölje a kiválasztott szűrőt
-                    app.filter_state.remove_selected_filter();
+                    // Filters-nél Enter = szerkesztés (Delete = törlés)
+                    app.filter_state.edit_selected_filter();
+                }
+                FilterFocus::SortField => {
+                    // SortField-nél Enter = tovább a Field-re
+                    app.filter_state.next_focus();
                 }
             }
         }
 
-        // Left arrow - cursor left in text fields, prev operator in Operator focus
+        // Left arrow - cursor left in text fields, prev operator in Operator focus, prev sort field
         (KeyCode::Left, _) => {
             match app.filter_state.focus {
                 FilterFocus::Operator => app.filter_state.prev_operator(),
                 FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_left(),
+                FilterFocus::SortField => app.filter_state.prev_sort_field(),
                 _ => {}
             }
         }
 
-        // Right arrow - cursor right in text fields, next operator in Operator focus
+        // Right arrow - cursor right in text fields, next operator in Operator focus, next sort field
         (KeyCode::Right, _) => {
             match app.filter_state.focus {
                 FilterFocus::Operator => app.filter_state.next_operator(),
                 FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_right(),
+                FilterFocus::SortField => app.filter_state.next_sort_field(),
                 _ => {}
             }
+        }
+
+        // Space - toggle sort direction in SortField focus
+        (KeyCode::Char(' '), _) if app.filter_state.focus == FilterFocus::SortField => {
+            app.filter_state.toggle_sort_direction();
         }
 
         // Home/End - cursor to start/end of text
         (KeyCode::Home, _) => app.filter_state.cursor_home(),
         (KeyCode::End, _) => app.filter_state.cursor_end(),
+
+        // Ctrl+Up/Down - move filter up/down in list
+        (KeyCode::Up, KeyModifiers::CONTROL) if app.filter_state.focus == FilterFocus::Filters => {
+            app.filter_state.move_filter_up();
+        }
+        (KeyCode::Down, KeyModifiers::CONTROL) if app.filter_state.focus == FilterFocus::Filters => {
+            app.filter_state.move_filter_down();
+        }
 
         // Up/Down - navigate suggestions (Field) or filters list (Filters)
         (KeyCode::Up, _) => {
@@ -1021,6 +1064,29 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
             }
         }
 
+        _ => {}
+    }
+}
+
+/// Async new collection key handler
+async fn handle_new_collection_key_async(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => app.close_modal(),
+        KeyCode::Enter => {
+            app.create_collection_async().await;
+        }
+        KeyCode::Backspace => {
+            app.new_collection_state.backspace();
+        }
+        KeyCode::Left => {
+            app.new_collection_state.cursor_left();
+        }
+        KeyCode::Right => {
+            app.new_collection_state.cursor_right();
+        }
+        KeyCode::Char(c) => {
+            app.new_collection_state.insert_char(c);
+        }
         _ => {}
     }
 }

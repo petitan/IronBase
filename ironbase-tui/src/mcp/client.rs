@@ -104,6 +104,24 @@ impl McpClient {
         Ok(names)
     }
 
+    /// Create a new collection
+    pub async fn create_collection(&self, name: &str) -> McpResult<()> {
+        let args = serde_json::json!({
+            "collection": name
+        });
+        self.call_tool("collection_create", args).await?;
+        Ok(())
+    }
+
+    /// Drop a collection
+    pub async fn drop_collection(&self, name: &str) -> McpResult<()> {
+        let args = serde_json::json!({
+            "collection": name
+        });
+        self.call_tool("collection_drop", args).await?;
+        Ok(())
+    }
+
     /// Find documents in a collection
     pub async fn find(
         &self,
@@ -111,6 +129,18 @@ impl McpClient {
         query: &Value,
         skip: Option<usize>,
         limit: Option<usize>,
+    ) -> McpResult<Vec<Value>> {
+        self.find_with_sort(collection, query, skip, limit, None).await
+    }
+
+    /// Find documents with optional sort
+    pub async fn find_with_sort(
+        &self,
+        collection: &str,
+        query: &Value,
+        skip: Option<usize>,
+        limit: Option<usize>,
+        sort: Option<&Value>,
     ) -> McpResult<Vec<Value>> {
         let mut args = serde_json::json!({
             "collection": collection,
@@ -122,6 +152,9 @@ impl McpClient {
         }
         if let Some(l) = limit {
             args["limit"] = serde_json::json!(l);
+        }
+        if let Some(sort_obj) = sort {
+            args["sort"] = sort_obj.clone();
         }
 
         let result = self.call_tool("find", args).await?;
