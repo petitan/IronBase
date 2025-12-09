@@ -38,6 +38,8 @@ pub struct UpdateResult {
 /// IronBase Adapter
 pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,
+    /// Database file path (stored for stats)
+    db_path: std::path::PathBuf,
 }
 
 /// Scripts collection name
@@ -49,9 +51,11 @@ pub const SCRIPT_VERSIONS_COLLECTION: &str = "_system.script_versions";
 impl IronBaseAdapter {
     /// Create a new adapter with the given database path
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let db = DatabaseCore::open(path)?;
+        let db_path = path.as_ref().to_path_buf();
+        let db = DatabaseCore::open(&db_path)?;
         let adapter = Self {
             db: Arc::new(RwLock::new(db)),
+            db_path,
         };
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
@@ -103,6 +107,7 @@ impl IronBaseAdapter {
     pub fn stats(&self) -> Value {
         let db = self.db.read();
         serde_json::json!({
+            "database_path": self.db_path.display().to_string(),
             "collections": db.list_collections(),
             "collection_count": db.list_collections().len(),
         })

@@ -89,7 +89,8 @@ async fn main() -> anyhow::Result<()> {
             match DbWrapper::connect_http(&config.mcp_url).await {
                 Ok(db) => {
                     app.db = Some(db);
-                    app.db_path = db_path.clone();
+                    // Fetch database path from MCP server
+                    let _ = app.fetch_db_path_async().await;
                     if let Err(e) = app.refresh_collections_async().await {
                         app.set_error(format!("Nem sikerult betolteni: {}", e));
                     }

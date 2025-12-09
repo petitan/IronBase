@@ -117,6 +117,11 @@ impl DbWrapper {
         Ok(count as usize)
     }
 
+    /// Get database statistics
+    pub async fn db_stats(&self) -> Result<Value> {
+        self.client.db_stats().await.map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
     /// Count documents matching a query
     pub async fn count_with_query(&self, collection: &str, query: &Value) -> Result<usize> {
         let count = self.client.count_documents(collection, query).await?;

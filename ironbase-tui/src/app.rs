@@ -2085,6 +2085,18 @@ impl App {
     // === Async methods for MCP communication ===
     // ============================================
 
+    /// Fetch database path from MCP server (for HTTP mode)
+    /// This sets app.db_path from db_stats response
+    pub async fn fetch_db_path_async(&mut self) -> anyhow::Result<()> {
+        if let Some(db) = &self.db {
+            let stats = db.db_stats().await?;
+            if let Some(path_str) = stats.get("database_path").and_then(|v| v.as_str()) {
+                self.db_path = Some(std::path::PathBuf::from(path_str));
+            }
+        }
+        Ok(())
+    }
+
     /// Refresh collections list (async)
     pub async fn refresh_collections_async(&mut self) -> anyhow::Result<()> {
         self.set_loading("Kollekciok betoltese...");
