@@ -125,12 +125,16 @@ fn render_suggestions(frame: &mut Frame, area: Rect, state: &FilterState, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Get visible suggestions (max 5)
-    let visible_count = state.filtered_suggestions.len().min(5);
-    let start = if state.suggestion_idx >= visible_count {
-        state.suggestion_idx - visible_count + 1
-    } else {
+    // Max 5 visible items with scrolling window
+    let max_visible = 5;
+    let total = state.filtered_suggestions.len();
+
+    // Calculate scroll window to keep selected item visible
+    let start = if state.suggestion_idx < max_visible {
         0
+    } else {
+        // Keep selected item at bottom of visible window
+        state.suggestion_idx.saturating_sub(max_visible - 1)
     };
 
     let items: Vec<ListItem> = state
@@ -138,7 +142,7 @@ fn render_suggestions(frame: &mut Frame, area: Rect, state: &FilterState, theme:
         .iter()
         .enumerate()
         .skip(start)
-        .take(visible_count)
+        .take(max_visible)
         .map(|(i, field)| {
             let is_selected = i == state.suggestion_idx;
             let style = if is_selected {
@@ -147,7 +151,16 @@ fn render_suggestions(frame: &mut Frame, area: Rect, state: &FilterState, theme:
                 Style::default().fg(theme.fg)
             };
 
-            let prefix = if is_selected { "> " } else { "  " };
+            // Show scroll indicators
+            let prefix = if is_selected {
+                "> "
+            } else if i == start && start > 0 {
+                "↑ "
+            } else if i == start + max_visible - 1 && start + max_visible < total {
+                "↓ "
+            } else {
+                "  "
+            };
             ListItem::new(format!("{}{}", prefix, field)).style(style)
         })
         .collect();
