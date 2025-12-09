@@ -88,7 +88,7 @@ impl QueryExecutionContext {
             .map(|s| (Some(s[0].0.clone()), s[0].1 < 0))
             .unwrap_or((None, false));
 
-        // Determine fetch strategy
+        // Determine fetch strategy: sort present → load all, then paginate
         let apply_limit_after_sort = options.sort.is_some();
         let (fetch_skip, fetch_limit) = if apply_limit_after_sort {
             (0, None)

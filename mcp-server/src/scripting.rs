@@ -409,7 +409,7 @@ impl ScriptManager {
     /// Get version history for a script
     pub fn get_history(&self, name: &str, limit: Option<usize>) -> Result<Vec<ScriptVersion>> {
         let mut options = crate::adapter::FindOptions {
-            sort: Some(json!([["version", -1]])), // Newest first
+            sort: Some(vec![("version".to_string(), -1)]), // Newest first
             ..Default::default()
         };
         if let Some(lim) = limit {

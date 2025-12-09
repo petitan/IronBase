@@ -58,6 +58,49 @@ fn parse_skip(params: &Value) -> Option<usize> {
     params.get("skip").and_then(|v| v.as_u64()).map(|v| v as usize)
 }
 
+/// Parse sort parameter - returns None if missing, null, or empty
+/// Accepts two formats:
+/// - Array: [["field", 1], ["field2", -1]]
+/// - Object: {"field": 1, "field2": -1}
+fn parse_sort(params: &Value) -> Option<Vec<(String, i32)>> {
+    let sort_value = params.get("sort")?;
+
+    // null → None
+    if sort_value.is_null() {
+        return None;
+    }
+
+    let sort_vec: Vec<(String, i32)> = if let Some(arr) = sort_value.as_array() {
+        // Array format: [["field", 1], ["field2", -1]]
+        arr.iter()
+            .filter_map(|item| {
+                let pair = item.as_array()?;
+                if pair.len() == 2 {
+                    let field = pair[0].as_str()?.to_string();
+                    let dir = pair[1].as_i64()? as i32;
+                    Some((field, dir))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    } else if let Some(obj) = sort_value.as_object() {
+        // Object format: {"field": 1, "field2": -1}
+        obj.iter()
+            .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(1) as i32))
+            .collect()
+    } else {
+        return None;
+    };
+
+    // Empty → None (enables O(1) skip/limit)
+    if sort_vec.is_empty() {
+        None
+    } else {
+        Some(sort_vec)
+    }
+}
+
 /// Validate threshold is in range [0.0, 1.0]
 fn parse_threshold(params: &Value) -> Result<Option<f64>> {
     match params.get("threshold").and_then(|v| v.as_f64()) {
@@ -952,7 +995,7 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
                 .unwrap_or(false);
             let options = FindOptions {
                 projection: params.get("projection").cloned(),
-                sort: params.get("sort").cloned(),
+                sort: parse_sort(&params),
                 limit: parse_limit(&params),
                 skip: parse_skip(&params),
                 include_total,

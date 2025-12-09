@@ -12,7 +12,8 @@ use std::sync::Arc;
 #[derive(Debug, Default)]
 pub struct FindOptions {
     pub projection: Option<Value>,
-    pub sort: Option<Value>,
+    /// Sort specification - already parsed, None means no sort (O(1) skip/limit)
+    pub sort: Option<Vec<(String, i32)>>,
     pub limit: Option<usize>,
     pub skip: Option<usize>,
     /// If true, also return the total count of matching documents (before limit/skip)
@@ -183,7 +184,7 @@ impl IronBaseAdapter {
             None
         };
 
-        // Convert to IronBase FindOptions
+        // Convert to IronBase FindOptions - clean pass-through, no conversion needed
         let ironbase_options = ironbase_core::FindOptions {
             projection: options.projection.as_ref().and_then(|p| {
                 p.as_object().map(|obj| {
@@ -192,32 +193,8 @@ impl IronBaseAdapter {
                         .collect()
                 })
             }),
-            sort: options.sort.as_ref().and_then(|s| {
-                if let Some(arr) = s.as_array() {
-                    // Array format: [["field", 1], ["field2", -1]]
-                    Some(
-                        arr.iter()
-                            .filter_map(|item| {
-                                if let Some(pair) = item.as_array() {
-                                    if pair.len() == 2 {
-                                        let field = pair[0].as_str()?.to_string();
-                                        let dir = pair[1].as_i64()? as i32;
-                                        return Some((field, dir));
-                                    }
-                                }
-                                None
-                            })
-                            .collect(),
-                    )
-                } else {
-                    // Object format: {"field": 1, "field2": -1}
-                    s.as_object().map(|obj| {
-                        obj.iter()
-                            .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(1) as i32))
-                            .collect()
-                    })
-                }
-            }),
+            // Sort already parsed by tools.rs - None means O(1) skip/limit
+            sort: options.sort,
             limit: options.limit,
             skip: options.skip,
         };
