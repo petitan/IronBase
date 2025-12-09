@@ -62,6 +62,9 @@ pub enum IronBaseErrorCode {
     /// WAL corruption detected
     WalCorruption = -15,
 
+    /// Operation not allowed (e.g., dropping protected collection)
+    OperationNotAllowed = -16,
+
     /// Unknown/internal error
     Unknown = -99,
 }
@@ -83,6 +86,7 @@ impl From<&MongoLiteError> for IronBaseErrorCode {
             MongoLiteError::TransactionCommitted => IronBaseErrorCode::TransactionCommitted,
             MongoLiteError::TransactionAborted(_) => IronBaseErrorCode::TransactionAborted,
             MongoLiteError::WALCorruption => IronBaseErrorCode::WalCorruption,
+            MongoLiteError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
             MongoLiteError::Unknown(_) => IronBaseErrorCode::Unknown,
         }
     }

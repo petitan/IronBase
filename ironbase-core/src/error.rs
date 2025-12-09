@@ -45,6 +45,9 @@ pub enum MongoLiteError {
     #[error("WAL corruption detected")]
     WALCorruption,
 
+    #[error("Operation not allowed: {0}")]
+    OperationNotAllowed(String),
+
     #[error("Unknown error: {0}")]
     Unknown(String),
 }

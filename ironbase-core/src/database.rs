@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::collection_core::{CollectionCore, RawOperations};
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
-use crate::error::Result;
+use crate::error::{MongoLiteError, Result};
 use crate::index::IndexManager;
 use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
@@ -1456,19 +1456,79 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         collection.set_schema(schema)
     }
 
-    /// List all collection names
+    /// List visible collection names (excludes hidden collections)
     pub fn list_collections(&self) -> Vec<String> {
+        let storage = self.storage.read();
+        storage
+            .list_collections()
+            .into_iter()
+            .filter(|name| {
+                storage
+                    .get_collection_meta(name)
+                    .map(|meta| !meta.flags.hidden)
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
+    /// List ALL collection names including hidden/system collections
+    pub fn list_all_collections(&self) -> Vec<String> {
         let storage = self.storage.read();
         storage.list_collections()
     }
 
-    /// Drop collection
+    /// Drop collection (fails if protected)
     pub fn drop_collection(&self, name: &str) -> Result<()> {
+        // Check if collection is protected
+        {
+            let storage = self.storage.read();
+            if let Some(meta) = storage.get_collection_meta(name) {
+                if meta.flags.protected {
+                    return Err(MongoLiteError::OperationNotAllowed(format!(
+                        "Cannot drop protected collection '{}'",
+                        name
+                    )));
+                }
+            }
+        }
+
         // Remove shared IndexManager first
         self.index_managers.write().remove(name);
 
         let mut storage = self.storage.write();
         storage.drop_collection(name)
+    }
+
+    /// Set collection flags (system, protected, hidden)
+    pub fn set_collection_flags(
+        &self,
+        name: &str,
+        flags: crate::storage::CollectionFlags,
+    ) -> Result<()> {
+        let mut storage = self.storage.write();
+        let meta = storage
+            .get_collection_meta_mut(name)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(name.to_string()))?;
+        meta.flags = flags;
+        Ok(())
+    }
+
+    /// Create a system collection (auto-sets is_system + protected flags)
+    /// System collections use `_system.` prefix by convention
+    pub fn create_system_collection(&self, name: &str) -> Result<()> {
+        // Create the collection first
+        {
+            let mut storage = self.storage.write();
+            storage.create_collection(name)?;
+        }
+
+        // Set system flags
+        let flags = crate::storage::CollectionFlags {
+            is_system: true,
+            protected: true,
+            hidden: false, // System collections visible by default (for debugging)
+        };
+        self.set_collection_flags(name, flags)
     }
 
     /// Flush all changes to disk
@@ -1954,5 +2014,82 @@ mod tests {
         // Query using index
         let results = coll.find(&json!({"age": {"$gte": 50}})).unwrap();
         assert_eq!(results.len(), 5);
+    }
+
+    // ==================== System Collections Tests ====================
+
+    #[test]
+    fn test_system_collection_protected_from_drop() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+        // Create system collection
+        db.create_system_collection("_system.api_keys").unwrap();
+
+        // Try to drop - should fail
+        let result = db.drop_collection("_system.api_keys");
+        assert!(result.is_err());
+
+        // Verify error message
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("protected"));
+    }
+
+    #[test]
+    fn test_hidden_collection_not_in_list() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+        // Create normal collection
+        db.collection("users").unwrap();
+
+        // Create hidden collection
+        db.collection("_internal").unwrap();
+        db.set_collection_flags(
+            "_internal",
+            crate::storage::CollectionFlags {
+                is_system: false,
+                protected: false,
+                hidden: true,
+            },
+        )
+        .unwrap();
+
+        // list_collections should only show "users"
+        let visible = db.list_collections();
+        assert_eq!(visible.len(), 1);
+        assert!(visible.contains(&"users".to_string()));
+        assert!(!visible.contains(&"_internal".to_string()));
+
+        // list_all_collections should show both
+        let all = db.list_all_collections();
+        assert_eq!(all.len(), 2);
+        assert!(all.contains(&"_internal".to_string()));
+    }
+
+    #[test]
+    fn test_system_collection_visible_by_default() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+        // Create system collection (hidden = false by default)
+        db.create_system_collection("_system.scripts").unwrap();
+
+        // System collections are visible in list_collections by default
+        let visible = db.list_collections();
+        assert!(visible.contains(&"_system.scripts".to_string()));
+    }
+
+    #[test]
+    fn test_normal_collection_can_be_dropped() {
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+        // Create normal collection
+        db.collection("temp").unwrap();
+
+        // Drop should succeed
+        let result = db.drop_collection("temp");
+        assert!(result.is_ok());
+
+        // Collection should be gone
+        let collections = db.list_collections();
+        assert!(!collections.contains(&"temp".to_string()));
     }
 }

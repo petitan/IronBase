@@ -15,7 +15,7 @@
 
 use crate::document::{Document, DocumentId};
 use crate::error::{MongoLiteError, Result};
-use crate::storage::{CollectionMeta, RawStorage, Storage};
+use crate::storage::{CollectionFlags, CollectionMeta, RawStorage, Storage};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -208,6 +208,7 @@ impl Storage for MemoryStorage {
             indexes: Vec::new(),
             fuzzy_indexes: Vec::new(),
             schema: None,
+            flags: CollectionFlags::default(),
         };
 
         self.metadata.insert(name.to_string(), meta);

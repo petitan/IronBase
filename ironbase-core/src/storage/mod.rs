@@ -85,6 +85,20 @@ impl Default for Header {
     }
 }
 
+/// Collection flags for system/protected collections
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CollectionFlags {
+    /// True if this is a system collection (e.g., `_system.*`)
+    #[serde(default)]
+    pub is_system: bool,
+    /// True if collection is protected from deletion
+    #[serde(default)]
+    pub protected: bool,
+    /// True if collection should be hidden from list_collections()
+    #[serde(default)]
+    pub hidden: bool,
+}
+
 /// Collection metadata
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CollectionMeta {
@@ -115,6 +129,10 @@ pub struct CollectionMeta {
     /// Optional JSON schema for validation
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
+
+    /// Collection flags (system, protected, hidden)
+    #[serde(default)]
+    pub flags: CollectionFlags,
 }
 
 /// Index record for persistence
@@ -204,6 +222,7 @@ impl StorageEngine {
             indexes: Vec::new(),              // Initialize empty index list
             fuzzy_indexes: Vec::new(),        // Initialize empty fuzzy index list
             schema: None,
+            flags: CollectionFlags::default(),
         };
 
         self.collections.insert(name.to_string(), meta);
@@ -747,6 +766,7 @@ impl StorageEngine {
                                     indexes: Vec::new(),
                                     fuzzy_indexes: Vec::new(),
                                     schema: None,
+                                    flags: CollectionFlags::default(),
                                 });
 
                             if is_tombstone {
