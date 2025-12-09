@@ -28,6 +28,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 thiserror = "1.0"
 
+# Time handling
+chrono = "0.4"
+
+# Scripting engine
+rhai = { version = "1.19", features = ["sync"] }
+
+# Base64 encoding for scripts
+base64 = "0.22"
+
 # IronBase integration
 ironbase-core = { path = "../ironbase-core" }
 

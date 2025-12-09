@@ -2,7 +2,28 @@
 
 use crate::adapter::{FindOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
+use crate::scripting::{RhaiEngine, ScriptManager};
 use serde_json::{json, Value};
+use std::sync::Arc;
+
+/// Verify admin key from params against IRONBASE_ADMIN_KEY env var
+fn verify_admin_key(params: &Value) -> Result<()> {
+    let expected = std::env::var("IRONBASE_ADMIN_KEY").map_err(|_| {
+        McpError::InvalidParams(
+            "Admin operations require IRONBASE_ADMIN_KEY environment variable to be set".into(),
+        )
+    })?;
+
+    let provided = params
+        .get("admin_key")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| McpError::InvalidParams("admin_key parameter is required".into()))?;
+
+    if provided != expected {
+        return Err(McpError::InvalidParams("Invalid admin_key".into()));
+    }
+    Ok(())
+}
 
 /// Get the list of all available tools for MCP tools/list
 pub fn get_tools_list() -> Value {
@@ -506,13 +527,172 @@ pub fn get_tools_list() -> Value {
                     },
                     "required": ["collection"]
                 }
+            },
+            // Script Management
+            {
+                "name": "script_save",
+                "description": "Save a script to the database. Scripts are stored in _system.scripts collection.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name (used as identifier)"
+                        },
+                        "code": {
+                            "type": "string",
+                            "description": "Rhai script code"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional description of what the script does"
+                        }
+                    },
+                    "required": ["name", "code"]
+                }
+            },
+            {
+                "name": "script_list",
+                "description": "List all saved scripts (without code)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "script_get",
+                "description": "Get a script by name (with code)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "script_delete",
+                "description": "Delete a script by name",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name to delete"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "script_run",
+                "description": "Run a saved script by name with optional parameters. Scripts have access to database functions: db_find, db_find_one, db_insert_one, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Returns the script result and captured logs.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name to run"
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "Optional parameters passed to the script (accessible as 'params' variable)"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            // Admin Operations (require IRONBASE_ADMIN_KEY)
+            {
+                "name": "admin_list_all_collections",
+                "description": "List ALL collections including hidden/system collections. Requires IRONBASE_ADMIN_KEY env var.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        }
+                    },
+                    "required": ["admin_key"]
+                }
+            },
+            {
+                "name": "admin_create_system_collection",
+                "description": "Create a system collection with protected/hidden flags. Requires IRONBASE_ADMIN_KEY env var.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Collection name (convention: _system.xxx)"
+                        }
+                    },
+                    "required": ["admin_key", "name"]
+                }
+            },
+            {
+                "name": "admin_set_collection_flags",
+                "description": "Set collection flags (is_system, protected, hidden). Requires IRONBASE_ADMIN_KEY env var.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        },
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "is_system": {
+                            "type": "boolean",
+                            "description": "Mark as system collection"
+                        },
+                        "protected": {
+                            "type": "boolean",
+                            "description": "Prevent deletion via drop_collection"
+                        },
+                        "hidden": {
+                            "type": "boolean",
+                            "description": "Hide from list_collections (still visible via admin_list_all_collections)"
+                        }
+                    },
+                    "required": ["admin_key", "collection"]
+                }
+            },
+            {
+                "name": "admin_drop_protected",
+                "description": "Force drop a protected collection. Requires IRONBASE_ADMIN_KEY env var. USE WITH CAUTION!",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Collection name to drop"
+                        }
+                    },
+                    "required": ["admin_key", "name"]
+                }
             }
         ]
     })
 }
 
 /// Dispatch a tool call to the appropriate handler
-pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Result<Value> {
+pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     match name {
         // Database Management
         "db_stats" => Ok(adapter.stats()),
@@ -757,6 +937,92 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &IronBaseAdapter) -> Re
             let collection = get_string(&params, "collection")?;
             let schema = adapter.get_schema(&collection)?;
             Ok(json!({"schema": schema}))
+        }
+
+        // Script Management
+        "script_save" => {
+            let name = get_string(&params, "name")?;
+            let code = get_string(&params, "code")?;
+            let description = params.get("description").and_then(|v| v.as_str());
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            manager.save(&name, &code, description)?;
+            Ok(json!({"success": true, "name": name}))
+        }
+        "script_list" => {
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            let scripts = manager.list()?;
+            Ok(json!({"scripts": scripts, "count": scripts.len()}))
+        }
+        "script_get" => {
+            let name = get_string(&params, "name")?;
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            match manager.get(&name)? {
+                Some(script) => Ok(json!({
+                    "name": script.name,
+                    "code": script.code,
+                    "description": script.description,
+                    "created_at": script.created_at
+                })),
+                None => Err(McpError::InvalidParams(format!("Script '{}' not found", name))),
+            }
+        }
+        "script_delete" => {
+            let name = get_string(&params, "name")?;
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            let deleted = manager.delete(&name)?;
+            if deleted {
+                Ok(json!({"success": true, "deleted": name}))
+            } else {
+                Err(McpError::InvalidParams(format!("Script '{}' not found", name)))
+            }
+        }
+        "script_run" => {
+            let name = get_string(&params, "name")?;
+            let script_params = params.get("params").cloned();
+
+            // Get the script code
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            let script = manager.get(&name)?.ok_or_else(|| {
+                McpError::InvalidParams(format!("Script '{}' not found", name))
+            })?;
+
+            // Run the script
+            let engine = RhaiEngine::new(Arc::clone(adapter));
+            let result = engine.run(&script.code, script_params)?;
+
+            Ok(json!({
+                "success": true,
+                "result": result.result,
+                "logs": result.logs
+            }))
+        }
+
+        // Admin Operations (require IRONBASE_ADMIN_KEY)
+        "admin_list_all_collections" => {
+            verify_admin_key(&params)?;
+            let collections = adapter.list_all_collections();
+            Ok(json!({"collections": collections, "count": collections.len()}))
+        }
+        "admin_create_system_collection" => {
+            verify_admin_key(&params)?;
+            let name = get_string(&params, "name")?;
+            adapter.create_system_collection(&name)?;
+            Ok(json!({"success": true, "collection": name, "flags": {"is_system": true, "protected": true, "hidden": false}}))
+        }
+        "admin_set_collection_flags" => {
+            verify_admin_key(&params)?;
+            let collection = get_string(&params, "collection")?;
+            let is_system = params.get("is_system").and_then(|v| v.as_bool());
+            let protected = params.get("protected").and_then(|v| v.as_bool());
+            let hidden = params.get("hidden").and_then(|v| v.as_bool());
+            adapter.set_collection_flags(&collection, is_system, protected, hidden)?;
+            Ok(json!({"success": true, "collection": collection, "flags": {"is_system": is_system, "protected": protected, "hidden": hidden}}))
+        }
+        "admin_drop_protected" => {
+            verify_admin_key(&params)?;
+            let name = get_string(&params, "name")?;
+            adapter.force_drop_collection(&name)?;
+            Ok(json!({"success": true, "dropped": name}))
         }
 
         _ => Err(McpError::InvalidParams(format!("Unknown tool: {}", name))),

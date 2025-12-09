@@ -126,11 +126,13 @@ fn print_help() {
     println!("    --version   Show version");
     println!();
     println!("ENVIRONMENT:");
-    println!("    IRONBASE_PATH   Database file path");
-    println!("                    Default (Windows): %LOCALAPPDATA%\\IronBase\\data\\ironbase_data.mlite");
-    println!("                    Default (Linux):   /var/lib/ironbase/ironbase_data.mlite");
-    println!("                    Default (macOS):   /usr/local/var/ironbase/ironbase_data.mlite");
-    println!("    MCP_CONFIG      Config file path (default: config.toml)");
+    println!("    IRONBASE_PATH       Database file path");
+    println!("                        Default (Windows): %LOCALAPPDATA%\\IronBase\\data\\ironbase_data.mlite");
+    println!("                        Default (Linux):   /var/lib/ironbase/ironbase_data.mlite");
+    println!("                        Default (macOS):   /usr/local/var/ironbase/ironbase_data.mlite");
+    println!("    MCP_CONFIG          Config file path (default: config.toml)");
+    println!("    IRONBASE_ADMIN_KEY  Admin key for protected operations (admin_* tools)");
+    println!("                        If not set, admin operations are disabled");
 }
 
 // ============================================================

@@ -17,6 +17,8 @@ pub enum McpError {
     IndexError(String),
     /// Serialization error
     Serialization(String),
+    /// Script execution error
+    ScriptError(String),
     /// Internal error
     Internal(String),
 }
@@ -30,6 +32,7 @@ impl fmt::Display for McpError {
             McpError::DocumentNotFound(id) => write!(f, "Document not found: {}", id),
             McpError::IndexError(msg) => write!(f, "Index error: {}", msg),
             McpError::Serialization(msg) => write!(f, "Serialization error: {}", msg),
+            McpError::ScriptError(msg) => write!(f, "Script error: {}", msg),
             McpError::Internal(msg) => write!(f, "Internal error: {}", msg),
         }
     }

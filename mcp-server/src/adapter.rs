@@ -40,13 +40,33 @@ pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,
 }
 
+/// Scripts collection name
+pub const SCRIPTS_COLLECTION: &str = "_system.scripts";
+
 impl IronBaseAdapter {
     /// Create a new adapter with the given database path
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let db = DatabaseCore::open(path)?;
-        Ok(Self {
+        let adapter = Self {
             db: Arc::new(RwLock::new(db)),
-        })
+        };
+        // Ensure system collections exist
+        adapter.ensure_system_collections()?;
+        Ok(adapter)
+    }
+
+    /// Ensure system collections exist (_system.scripts)
+    fn ensure_system_collections(&self) -> Result<()> {
+        let db = self.db.read();
+        // Check if scripts collection exists
+        let collections = db.list_all_collections();
+        if !collections.contains(&SCRIPTS_COLLECTION.to_string()) {
+            // Create it as a system collection (protected, but visible)
+            drop(db); // Release read lock
+            let db = self.db.read();
+            db.create_system_collection(SCRIPTS_COLLECTION)?;
+        }
+        Ok(())
     }
 
     // ============================================================
@@ -394,5 +414,58 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.collection(collection)?;
         Ok(coll.get_schema())
+    }
+
+    // ============================================================
+    // Admin Operations
+    // ============================================================
+
+    /// List ALL collections including hidden/system collections
+    pub fn list_all_collections(&self) -> Vec<String> {
+        let db = self.db.read();
+        db.list_all_collections()
+    }
+
+    /// Create a system collection with is_system, protected, hidden flags
+    pub fn create_system_collection(&self, name: &str) -> Result<()> {
+        let db = self.db.read();
+        db.create_system_collection(name)?;
+        Ok(())
+    }
+
+    /// Set collection flags (only sets flags that are Some)
+    pub fn set_collection_flags(
+        &self,
+        collection: &str,
+        is_system: Option<bool>,
+        protected: Option<bool>,
+        hidden: Option<bool>,
+    ) -> Result<()> {
+        let db = self.db.read();
+        // Get existing flags first
+        let mut flags = db
+            .get_collection_flags(collection)
+            .unwrap_or_default();
+
+        // Only update flags that are explicitly set
+        if let Some(v) = is_system {
+            flags.is_system = v;
+        }
+        if let Some(v) = protected {
+            flags.protected = v;
+        }
+        if let Some(v) = hidden {
+            flags.hidden = v;
+        }
+
+        db.set_collection_flags(collection, flags)?;
+        Ok(())
+    }
+
+    /// Force drop a collection, ignoring protected flag
+    pub fn force_drop_collection(&self, name: &str) -> Result<()> {
+        let db = self.db.write();
+        db.force_drop_collection(name)?;
+        Ok(())
     }
 }

@@ -269,6 +269,7 @@ cd mcp-server && cargo build --release
 - `fuzzy_search` - Execute fuzzy text queries
 - `schema_get`, `schema_set` - JSON schema validation
 - `db_stats` - Database statistics
+- `script_save`, `script_list`, `script_get`, `script_delete`, `script_run` - Rhai scripting
 
 ### Testing HTTP Mode
 ```bash
@@ -280,6 +281,56 @@ curl -X POST http://127.0.0.1:8080/mcp \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
+
+### Rhai Scripting
+
+The MCP server includes a Rhai scripting engine for server-side script execution. Scripts are stored persistently in the `_system.scripts` collection.
+
+**Script Management Tools:**
+- `script_save(name, code, description)` - Save or update a script
+- `script_list()` - List all saved scripts
+- `script_get(name)` - Get script code and metadata
+- `script_delete(name)` - Delete a script
+- `script_run(name, params)` - Execute a script with optional parameters
+
+**Available DB Functions in Scripts:**
+```rhai
+db_find(collection, query)           // Find documents
+db_find_one(collection, query)       // Find single document
+db_insert_one(collection, doc)       // Insert document
+db_update_one(collection, filter, update)   // Update one
+db_update_many(collection, filter, update)  // Update many
+db_delete_one(collection, filter)    // Delete one
+db_delete_many(collection, filter)   // Delete many
+db_count(collection, query)          // Count documents
+db_aggregate(collection, pipeline)   // Aggregation pipeline
+```
+
+**Utility Functions:**
+```rhai
+base64_encode(string)    // Encode string to base64
+base64_decode(base64)    // Decode base64 to string
+print(message)           // Log message (captured in result.logs)
+```
+
+**Example Script:**
+```rhai
+// Create users with random ages
+let names = ["Anna", "Bela", "Csaba"];
+let count = 0;
+for i in 0..params.count {
+    let name = names[i % 3];
+    let age = 18 + (i % 50);
+    db_insert_one("users", #{ name: name, age: age });
+    count += 1;
+}
+count  // Return value
+```
+
+**Security Limits:**
+- Max execution time: 60 seconds
+- Max operations: 1,000,000
+- No file I/O or network access
 
 ## Testing Strategy
 

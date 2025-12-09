@@ -9,16 +9,17 @@ use mcp_docjl::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, IronBaseAdapter,
 };
 use serde_json::json;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 // ============================================================
 // Helper Functions
 // ============================================================
 
-fn create_test_adapter() -> (IronBaseAdapter, TempDir) {
+fn create_test_adapter() -> (Arc<IronBaseAdapter>, TempDir) {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let db_path = temp_dir.path().join("test.mlite");
-    let adapter = IronBaseAdapter::new(&db_path).expect("Failed to create adapter");
+    let adapter = Arc::new(IronBaseAdapter::new(&db_path).expect("Failed to create adapter"));
     (adapter, temp_dir)
 }
 
@@ -162,7 +163,13 @@ fn test_get_prompt_content_discover_schema_with_args() {
 fn test_adapter_creation() {
     let (adapter, _temp) = create_test_adapter();
     let collections = adapter.list_collections();
-    assert!(collections.is_empty());
+    // _system.scripts is automatically created but it's a system collection
+    // It should be visible in list_collections (hidden: false by default)
+    assert!(
+        collections.len() <= 1,
+        "Expected at most 1 system collection, got {:?}",
+        collections
+    );
 }
 
 #[test]
@@ -693,7 +700,6 @@ fn test_dispatch_invalid_param_type() {
 // Concurrency Tests
 // ============================================================
 
-use std::sync::Arc;
 use std::thread;
 
 #[test]
@@ -1149,4 +1155,442 @@ fn test_stress_many_concurrent_operations() {
         &adapter,
     );
     assert!(count_result.is_ok());
+}
+
+// ============================================================
+// Script Management Tests
+// ============================================================
+
+#[test]
+fn test_script_save_new() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool(
+        "script_save",
+        json!({
+            "name": "my_script",
+            "code": "let x = 1 + 2; x",
+            "description": "Simple math script"
+        }),
+        &adapter,
+    );
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    assert_eq!(value.get("success"), Some(&json!(true)));
+    assert_eq!(value.get("name"), Some(&json!("my_script")));
+}
+
+#[test]
+fn test_script_save_without_description() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool(
+        "script_save",
+        json!({
+            "name": "minimal_script",
+            "code": "42"
+        }),
+        &adapter,
+    );
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    assert_eq!(value.get("success"), Some(&json!(true)));
+}
+
+#[test]
+fn test_script_get_existing() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Save a script first
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "test_script",
+            "code": "let result = 10 * 5; result",
+            "description": "Multiplication test"
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    // Get it back
+    let result = dispatch_tool("script_get", json!({"name": "test_script"}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+
+    // script_get returns script fields directly
+    assert_eq!(value.get("name"), Some(&json!("test_script")));
+    assert_eq!(value.get("code"), Some(&json!("let result = 10 * 5; result")));
+    assert_eq!(value.get("description"), Some(&json!("Multiplication test")));
+}
+
+#[test]
+fn test_script_get_nonexistent() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_get", json!({"name": "nonexistent"}), &adapter);
+    // script_get returns error for non-existent script
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_script_list_empty() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_list", json!({}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    let scripts = value.get("scripts").unwrap().as_array().unwrap();
+    assert!(scripts.is_empty());
+}
+
+#[test]
+fn test_script_list_multiple() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Save multiple scripts
+    dispatch_tool(
+        "script_save",
+        json!({"name": "script_a", "code": "1", "description": "First"}),
+        &adapter,
+    )
+    .unwrap();
+    dispatch_tool(
+        "script_save",
+        json!({"name": "script_b", "code": "2", "description": "Second"}),
+        &adapter,
+    )
+    .unwrap();
+    dispatch_tool(
+        "script_save",
+        json!({"name": "script_c", "code": "3"}),
+        &adapter,
+    )
+    .unwrap();
+
+    // List them
+    let result = dispatch_tool("script_list", json!({}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    let scripts = value.get("scripts").unwrap().as_array().unwrap();
+    assert_eq!(scripts.len(), 3);
+    assert_eq!(value.get("count"), Some(&json!(3)));
+
+    // Verify names are in the list
+    let names: Vec<&str> = scripts
+        .iter()
+        .filter_map(|s| s.get("name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(names.contains(&"script_a"));
+    assert!(names.contains(&"script_b"));
+    assert!(names.contains(&"script_c"));
+}
+
+#[test]
+fn test_script_update_existing() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Save initial version
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "updatable",
+            "code": "version_1",
+            "description": "Initial version"
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    // Update it
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "updatable",
+            "code": "version_2",
+            "description": "Updated version"
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    // Verify update - script_get returns fields directly
+    let result = dispatch_tool("script_get", json!({"name": "updatable"}), &adapter);
+    let value = result.unwrap();
+    assert_eq!(value.get("code"), Some(&json!("version_2")));
+    assert_eq!(value.get("description"), Some(&json!("Updated version")));
+
+    // Should still be only one script with this name
+    let list_result = dispatch_tool("script_list", json!({}), &adapter);
+    let count = list_result.unwrap().get("count").unwrap().as_i64().unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn test_script_delete_existing() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Save a script
+    dispatch_tool(
+        "script_save",
+        json!({"name": "to_delete", "code": "delete me"}),
+        &adapter,
+    )
+    .unwrap();
+
+    // Delete it
+    let result = dispatch_tool("script_delete", json!({"name": "to_delete"}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    assert_eq!(value.get("success"), Some(&json!(true)));
+    assert_eq!(value.get("deleted"), Some(&json!("to_delete")));
+
+    // Verify it's gone (script_get returns error for non-existent)
+    let get_result = dispatch_tool("script_get", json!({"name": "to_delete"}), &adapter);
+    assert!(get_result.is_err());
+}
+
+#[test]
+fn test_script_delete_nonexistent() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_delete", json!({"name": "nonexistent"}), &adapter);
+    // script_delete returns error for non-existent script
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_script_save_missing_name() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_save", json!({"code": "some code"}), &adapter);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_script_save_missing_code() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_save", json!({"name": "test"}), &adapter);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_script_get_missing_name() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_get", json!({}), &adapter);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_script_delete_missing_name() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_delete", json!({}), &adapter);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_tools_list_contains_script_tools() {
+    let result = get_tools_list();
+    let tools = result.get("tools").unwrap().as_array().unwrap();
+    let tool_names: Vec<&str> = tools
+        .iter()
+        .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+        .collect();
+
+    assert!(tool_names.contains(&"script_save"), "Missing script_save");
+    assert!(tool_names.contains(&"script_list"), "Missing script_list");
+    assert!(tool_names.contains(&"script_get"), "Missing script_get");
+    assert!(tool_names.contains(&"script_delete"), "Missing script_delete");
+    assert!(tool_names.contains(&"script_run"), "Missing script_run");
+}
+
+// ============================================================
+// Script Execution Tests (script_run)
+// ============================================================
+
+#[test]
+fn test_script_run_simple() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Save a simple script
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "add_numbers",
+            "code": "1 + 2 + 3"
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    // Run it
+    let result = dispatch_tool("script_run", json!({"name": "add_numbers"}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    assert_eq!(value.get("success"), Some(&json!(true)));
+    assert_eq!(value.get("result"), Some(&json!(6)));
+}
+
+#[test]
+fn test_script_run_with_params() {
+    let (adapter, _temp) = create_test_adapter();
+
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "multiply",
+            "code": "params.a * params.b"
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    let result = dispatch_tool(
+        "script_run",
+        json!({
+            "name": "multiply",
+            "params": {"a": 7, "b": 6}
+        }),
+        &adapter,
+    );
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    assert_eq!(value.get("result"), Some(&json!(42)));
+}
+
+#[test]
+fn test_script_run_with_print() {
+    let (adapter, _temp) = create_test_adapter();
+
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "logging_script",
+            "code": r#"
+                print("Starting...");
+                let x = 10 + 20;
+                print("Result calculated");
+                x
+            "#
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    let result = dispatch_tool("script_run", json!({"name": "logging_script"}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+    assert_eq!(value.get("result"), Some(&json!(30)));
+
+    let logs = value.get("logs").unwrap().as_array().unwrap();
+    assert_eq!(logs.len(), 2);
+    assert_eq!(logs[0], "Starting...");
+    assert_eq!(logs[1], "Result calculated");
+}
+
+#[test]
+fn test_script_run_db_operations() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Save a script that performs database operations
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "db_script",
+            "code": r#"
+                // Insert some documents
+                db_insert_one("products", #{ name: "Apple", price: 1.50 });
+                db_insert_one("products", #{ name: "Banana", price: 0.75 });
+                db_insert_one("products", #{ name: "Orange", price: 2.00 });
+
+                // Count them
+                let count = db_count("products", #{});
+
+                // Find all
+                let products = db_find("products", #{});
+
+                #{ count: count, product_count: products.len() }
+            "#
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    let result = dispatch_tool("script_run", json!({"name": "db_script"}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+
+    let result_obj = value.get("result").unwrap();
+    assert_eq!(result_obj.get("count"), Some(&json!(3)));
+    assert_eq!(result_obj.get("product_count"), Some(&json!(3)));
+}
+
+#[test]
+fn test_script_run_db_update_delete() {
+    let (adapter, _temp) = create_test_adapter();
+
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "crud_script",
+            "code": r#"
+                // Insert
+                db_insert_one("items", #{ id: 1, status: "active" });
+                db_insert_one("items", #{ id: 2, status: "active" });
+                db_insert_one("items", #{ id: 3, status: "inactive" });
+
+                // Update
+                let update_result = db_update_many("items", #{ status: "active" }, #{ "$set": #{ status: "processed" } });
+
+                // Delete inactive
+                let delete_count = db_delete_one("items", #{ status: "inactive" });
+
+                // Final count
+                let remaining = db_count("items", #{});
+
+                #{
+                    updated: update_result.modified_count,
+                    deleted: delete_count,
+                    remaining: remaining
+                }
+            "#
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    let result = dispatch_tool("script_run", json!({"name": "crud_script"}), &adapter);
+    assert!(result.is_ok());
+    let value = result.unwrap();
+
+    let result_obj = value.get("result").unwrap();
+    assert_eq!(result_obj.get("updated"), Some(&json!(2)));
+    assert_eq!(result_obj.get("deleted"), Some(&json!(1)));
+    assert_eq!(result_obj.get("remaining"), Some(&json!(2)));
+}
+
+#[test]
+fn test_script_run_nonexistent() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_run", json!({"name": "nonexistent_script"}), &adapter);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_script_run_syntax_error() {
+    let (adapter, _temp) = create_test_adapter();
+
+    dispatch_tool(
+        "script_save",
+        json!({
+            "name": "broken_script",
+            "code": "let x = "  // Syntax error
+        }),
+        &adapter,
+    )
+    .unwrap();
+
+    let result = dispatch_tool("script_run", json!({"name": "broken_script"}), &adapter);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_script_run_missing_name() {
+    let (adapter, _temp) = create_test_adapter();
+    let result = dispatch_tool("script_run", json!({}), &adapter);
+    assert!(result.is_err());
 }

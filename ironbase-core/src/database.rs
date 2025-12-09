@@ -1531,6 +1531,22 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         self.set_collection_flags(name, flags)
     }
 
+    /// Get collection flags (returns default flags if collection not found)
+    pub fn get_collection_flags(&self, name: &str) -> Option<crate::storage::CollectionFlags> {
+        let storage = self.storage.read();
+        storage.get_collection_meta(name).map(|meta| meta.flags)
+    }
+
+    /// Force drop a protected collection (admin only)
+    /// Use with caution - bypasses protection checks
+    pub fn force_drop_collection(&self, name: &str) -> Result<()> {
+        // Remove shared IndexManager first
+        self.index_managers.write().remove(name);
+
+        let mut storage = self.storage.write();
+        storage.drop_collection(name)
+    }
+
     /// Flush all changes to disk
     pub fn flush(&self) -> Result<()>
     where
