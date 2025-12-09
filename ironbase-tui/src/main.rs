@@ -461,6 +461,8 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Pane::Detail => vec![
             ("Tab", "Panel"),
             ("j/k", "Scroll"),
+            ("/", "Search"),
+            ("n/N", "Match"),
             ("e", "Edit"),
             ("d", "Delete"),
             ("y", "Copy"),
@@ -601,6 +603,18 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
             app.copy_document_to_clipboard();
         }
 
+        // Search navigation (Detail pane - n/N for next/prev match)
+        (KeyCode::Char('n'), _)
+            if app.active_pane == Pane::Detail && !app.search.doc_matches.is_empty() =>
+        {
+            app.goto_next_match();
+        }
+        (KeyCode::Char('N'), KeyModifiers::SHIFT)
+            if app.active_pane == Pane::Detail && !app.search.doc_matches.is_empty() =>
+        {
+            app.goto_prev_match();
+        }
+
         // Theme
         (KeyCode::Char('t'), _) => app.next_theme(),
 
@@ -709,6 +723,11 @@ fn handle_document_search_key(app: &mut App, key: KeyCode) {
         KeyCode::Enter => {
             if !app.search.query_input.is_empty() {
                 app.execute_document_search();
+                // Ha van találat, zárd be a modalt és váltsd Detail pane-re
+                if !app.search.doc_matches.is_empty() {
+                    app.close_modal();
+                    app.active_pane = crate::app::Pane::Detail;
+                }
             }
         }
         KeyCode::Char('n') => {
