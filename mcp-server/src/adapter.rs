@@ -43,6 +43,9 @@ pub struct IronBaseAdapter {
 /// Scripts collection name
 pub const SCRIPTS_COLLECTION: &str = "_system.scripts";
 
+/// Script versions collection name (for version history)
+pub const SCRIPT_VERSIONS_COLLECTION: &str = "_system.script_versions";
+
 impl IronBaseAdapter {
     /// Create a new adapter with the given database path
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -55,16 +58,26 @@ impl IronBaseAdapter {
         Ok(adapter)
     }
 
-    /// Ensure system collections exist (_system.scripts)
+    /// Ensure system collections exist (_system.scripts, _system.script_versions)
     fn ensure_system_collections(&self) -> Result<()> {
         let db = self.db.read();
-        // Check if scripts collection exists
         let collections = db.list_all_collections();
-        if !collections.contains(&SCRIPTS_COLLECTION.to_string()) {
-            // Create it as a system collection (protected, but visible)
+
+        // Check if scripts collection exists
+        let needs_scripts = !collections.contains(&SCRIPTS_COLLECTION.to_string());
+        // Check if script_versions collection exists
+        let needs_versions = !collections.contains(&SCRIPT_VERSIONS_COLLECTION.to_string());
+
+        if needs_scripts || needs_versions {
             drop(db); // Release read lock
-            let db = self.db.read();
-            db.create_system_collection(SCRIPTS_COLLECTION)?;
+            let db = self.db.write(); // Need write lock to create collections
+
+            if needs_scripts {
+                db.create_system_collection(SCRIPTS_COLLECTION)?;
+            }
+            if needs_versions {
+                db.create_system_collection(SCRIPT_VERSIONS_COLLECTION)?;
+            }
         }
         Ok(())
     }

@@ -174,18 +174,29 @@ async fn run_http_server_internal(
     info!("Starting MCP IronBase Server v{} (HTTP mode)", VERSION);
 
     // Load configuration
-    let config = load_config().expect("Failed to load configuration");
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to load configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
     let host = config.host.clone();
     let port = config.port;
     let max_body_size = config.max_body_size;
 
     // Initialize IronBase adapter
-    let adapter = Arc::new(
-        IronBaseAdapter::new(&config.database_path).expect("Failed to create IronBase adapter"),
-    );
+    let adapter = match IronBaseAdapter::new(&config.database_path) {
+        Ok(a) => Arc::new(a),
+        Err(e) => {
+            tracing::error!("Failed to create IronBase adapter: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     let app_state = Arc::new(HttpAppState {
         adapter: adapter.clone(),
+        initialized: std::sync::atomic::AtomicBool::new(false),
     });
 
     // HTTP request handler
@@ -193,7 +204,7 @@ async fn run_http_server_internal(
         State(state): State<Arc<HttpAppState>>,
         Json(request): Json<McpRequest>,
     ) -> Response {
-        match handle_request(&request, &state.adapter) {
+        match handle_request(&request, &state.adapter, &state.initialized) {
             Some(response) => (StatusCode::OK, Json(response)).into_response(),
             None => {
                 // Notification - no response body per JSON-RPC spec
@@ -220,9 +231,13 @@ async fn run_http_server_internal(
         .with_state(app_state);
 
     let addr = format!("{}:{}", host, port);
-    let listener = TcpListener::bind(&addr)
-        .await
-        .expect("Failed to bind address");
+    let listener = match TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
 
     info!(
         "Server listening on {} (max body size: {})",
@@ -246,10 +261,12 @@ async fn run_http_server_internal(
     let shutdown_future = shutdown::shutdown_signal();
 
     // Run server with graceful shutdown
-    axum::serve(listener, app)
+    if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_future)
         .await
-        .expect("Server error");
+    {
+        tracing::error!("Server error: {}", e);
+    }
 
     // Graceful shutdown: checkpoint database
     info!("Shutting down gracefully...");
@@ -261,6 +278,9 @@ async fn run_http_server_internal(
 
 struct HttpAppState {
     adapter: Arc<IronBaseAdapter>,
+    /// MCP lifecycle state: track if initialize has been called
+    /// Per spec: "The initialization phase MUST be the first interaction"
+    initialized: std::sync::atomic::AtomicBool,
 }
 
 // MCP Request/Response types (duplicated from main.rs for lib independence)
@@ -327,8 +347,7 @@ struct InitializeResult {
 struct Capabilities {
     tools: serde_json::Value,
     prompts: serde_json::Value,
-    resources: serde_json::Value,
-    logging: serde_json::Value,
+    // Note: resources and logging are intentionally omitted as we don't implement them
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -337,29 +356,49 @@ struct ServerInfo {
     version: String,
 }
 
-fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Option<McpResponse> {
+fn handle_request(
+    request: &McpRequest,
+    adapter: &Arc<IronBaseAdapter>,
+    initialized: &std::sync::atomic::AtomicBool,
+) -> Option<McpResponse> {
     use crate::{dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list};
+    use std::sync::atomic::Ordering;
 
     let is_notification = request.id.is_none() || matches!(&request.id, Some(v) if v.is_null());
 
-    match request.method.as_str() {
-        "initialize" => Some(create_success_response(
-            serde_json::to_value(InitializeResult {
-                protocol_version: "2025-06-18".to_string(),
-                capabilities: Capabilities {
-                    tools: serde_json::json!({"listChanged": false}),
-                    prompts: serde_json::json!({"listChanged": false}),
-                    resources: serde_json::json!({}),
-                    logging: serde_json::json!({}),
-                },
-                server_info: ServerInfo {
-                    name: "ironbase-mcp".to_string(),
-                    version: VERSION.to_string(),
-                },
-            })
-            .unwrap(),
+    // MCP lifecycle enforcement: only allow initialize and ping before initialization
+    // Per spec: "The initialization phase MUST be the first interaction"
+    if !initialized.load(Ordering::SeqCst)
+        && request.method != "initialize"
+        && request.method != "ping"
+        && !request.method.starts_with("notifications/")
+    {
+        return Some(create_error_response(
+            -32002, // Server not initialized (custom error code)
+            "Server not initialized. Call 'initialize' first.",
             request.id.clone(),
-        )),
+        ));
+    }
+
+    match request.method.as_str() {
+        "initialize" => {
+            initialized.store(true, Ordering::SeqCst);
+            Some(create_success_response(
+                serde_json::to_value(InitializeResult {
+                    protocol_version: "2025-06-18".to_string(),
+                    capabilities: Capabilities {
+                        tools: serde_json::json!({"listChanged": false}),
+                        prompts: serde_json::json!({"listChanged": false}),
+                    },
+                    server_info: ServerInfo {
+                        name: "ironbase-mcp".to_string(),
+                        version: VERSION.to_string(),
+                    },
+                })
+                .unwrap(),
+                request.id.clone(),
+            ))
+        }
 
         "initialized" | "notifications/initialized" => None,
 

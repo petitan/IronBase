@@ -1,5 +1,7 @@
 //! IronBase MCP Server - Model Context Protocol server for IronBase document database
 
+#![recursion_limit = "512"]
+
 pub mod adapter;
 pub mod error;
 pub mod http_server;

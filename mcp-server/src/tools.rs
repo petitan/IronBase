@@ -6,6 +6,25 @@ use crate::scripting::{RhaiEngine, ScriptManager};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+/// Maximum limit for queries (DoS protection)
+const MAX_QUERY_LIMIT: usize = 10_000;
+
+/// Maximum collection name length
+const MAX_COLLECTION_NAME_LEN: usize = 128;
+
+/// Constant-time string comparison to prevent timing attacks
+fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    // XOR all bytes - result is 0 only if all match
+    let mut result = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
+}
+
 /// Verify admin key from params against IRONBASE_ADMIN_KEY env var
 fn verify_admin_key(params: &Value) -> Result<()> {
     let expected = std::env::var("IRONBASE_ADMIN_KEY").map_err(|_| {
@@ -19,8 +38,55 @@ fn verify_admin_key(params: &Value) -> Result<()> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| McpError::InvalidParams("admin_key parameter is required".into()))?;
 
-    if provided != expected {
+    // Use constant-time comparison to prevent timing attacks
+    if !constant_time_compare(provided.as_bytes(), expected.as_bytes()) {
         return Err(McpError::InvalidParams("Invalid admin_key".into()));
+    }
+    Ok(())
+}
+
+/// Validate and parse limit, capping at MAX_QUERY_LIMIT
+fn parse_limit(params: &Value) -> Option<usize> {
+    params
+        .get("limit")
+        .and_then(|v| v.as_u64())
+        .map(|v| (v as usize).min(MAX_QUERY_LIMIT))
+}
+
+/// Validate and parse skip
+fn parse_skip(params: &Value) -> Option<usize> {
+    params.get("skip").and_then(|v| v.as_u64()).map(|v| v as usize)
+}
+
+/// Validate threshold is in range [0.0, 1.0]
+fn parse_threshold(params: &Value) -> Result<Option<f64>> {
+    match params.get("threshold").and_then(|v| v.as_f64()) {
+        Some(t) if !(0.0..=1.0).contains(&t) => {
+            Err(McpError::InvalidParams(format!(
+                "threshold must be between 0.0 and 1.0, got: {}",
+                t
+            )))
+        }
+        t => Ok(t),
+    }
+}
+
+/// Validate collection name
+fn validate_collection_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(McpError::InvalidParams("Collection name cannot be empty".into()));
+    }
+    if name.len() > MAX_COLLECTION_NAME_LEN {
+        return Err(McpError::InvalidParams(format!(
+            "Collection name too long (max {} chars)",
+            MAX_COLLECTION_NAME_LEN
+        )));
+    }
+    // Check for invalid characters (allow alphanumeric, underscore, dot, hyphen)
+    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-') {
+        return Err(McpError::InvalidParams(
+            "Collection name can only contain alphanumeric characters, underscores, dots, and hyphens".into()
+        ));
     }
     Ok(())
 }
@@ -531,7 +597,7 @@ pub fn get_tools_list() -> Value {
             // Script Management
             {
                 "name": "script_save",
-                "description": "Save a script to the database. Scripts are stored in _system.scripts collection.",
+                "description": "Save a script to the database. Scripts are stored in _system.scripts collection. Supports versioning - each save creates a new version.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -546,6 +612,16 @@ pub fn get_tools_list() -> Value {
                         "description": {
                             "type": "string",
                             "description": "Optional description of what the script does"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional tags for categorization (e.g. ['utility', 'report'])"
+                        },
+                        "dependencies": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional list of script names this script depends on"
                         }
                     },
                     "required": ["name", "code"]
@@ -553,10 +629,20 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_list",
-                "description": "List all saved scripts (without code)",
+                "description": "List all saved scripts (without code). Supports filtering by tags.",
                 "inputSchema": {
                     "type": "object",
-                    "properties": {},
+                    "properties": {
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Optional tags to filter by"
+                        },
+                        "match_all": {
+                            "type": "boolean",
+                            "description": "If true, match ALL tags (AND). If false or omitted, match ANY tag (OR)."
+                        }
+                    },
                     "required": []
                 }
             },
@@ -601,6 +687,112 @@ pub fn get_tools_list() -> Value {
                         "params": {
                             "type": "object",
                             "description": "Optional parameters passed to the script (accessible as 'params' variable)"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "script_history",
+                "description": "Get version history of a script",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of versions to return (optional)"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "script_rollback",
+                "description": "Rollback a script to a previous version (creates a new version with the old code)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name"
+                        },
+                        "version": {
+                            "type": "integer",
+                            "description": "Version number to rollback to"
+                        }
+                    },
+                    "required": ["name", "version"]
+                }
+            },
+            {
+                "name": "script_version_get",
+                "description": "Get a specific version of a script",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name"
+                        },
+                        "version": {
+                            "type": "integer",
+                            "description": "Version number to retrieve"
+                        }
+                    },
+                    "required": ["name", "version"]
+                }
+            },
+            {
+                "name": "script_tags_add",
+                "description": "Add tags to a script",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Tags to add"
+                        }
+                    },
+                    "required": ["name", "tags"]
+                }
+            },
+            {
+                "name": "script_tags_remove",
+                "description": "Remove tags from a script",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Tags to remove"
+                        }
+                    },
+                    "required": ["name", "tags"]
+                }
+            },
+            {
+                "name": "script_stats",
+                "description": "Get execution statistics for a script",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Script name"
                         }
                     },
                     "required": ["name"]
@@ -734,6 +926,7 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
         }
         "find" => {
             let collection = get_string(&params, "collection")?;
+            validate_collection_name(&collection)?;
             let query = params.get("query").cloned().unwrap_or(json!({}));
             let include_total = params
                 .get("include_total")
@@ -742,14 +935,8 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let options = FindOptions {
                 projection: params.get("projection").cloned(),
                 sort: params.get("sort").cloned(),
-                limit: params
-                    .get("limit")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize),
-                skip: params
-                    .get("skip")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as usize),
+                limit: parse_limit(&params),
+                skip: parse_skip(&params),
                 include_total,
             };
             let result = adapter.find(&collection, query, options)?;
@@ -770,19 +957,17 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
         }
         "fuzzy_search" => {
             let collection = get_string(&params, "collection")?;
+            validate_collection_name(&collection)?;
             let field = get_string(&params, "field")?;
             let query = get_string(&params, "query")?;
-            let threshold = params.get("threshold").and_then(|v| v.as_f64());
+            let threshold = parse_threshold(&params)?;
             let algorithm = params.get("algorithm").and_then(|v| v.as_str());
-            let limit = params
-                .get("limit")
-                .and_then(|v| v.as_u64())
-                .map(|v| v as usize);
+            let limit = parse_limit(&params);
 
             // Use the real fuzzy search with index
             let mut results = adapter.fuzzy_search(&collection, &field, &query, threshold, algorithm)?;
 
-            // Apply limit if specified
+            // Apply limit if specified (capped at MAX_QUERY_LIMIT)
             if let Some(lim) = limit {
                 results.truncate(lim);
             }
@@ -944,13 +1129,37 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let name = get_string(&params, "name")?;
             let code = get_string(&params, "code")?;
             let description = params.get("description").and_then(|v| v.as_str());
+            let tags: Option<Vec<String>> = params.get("tags").and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                })
+            });
+            let dependencies: Option<Vec<String>> = params.get("dependencies").and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                })
+            });
             let manager = ScriptManager::new(Arc::clone(adapter));
-            manager.save(&name, &code, description)?;
-            Ok(json!({"success": true, "name": name}))
+            let version = manager.save(&name, &code, description, tags, dependencies)?;
+            Ok(json!({"success": true, "name": name, "version": version}))
         }
         "script_list" => {
+            use crate::scripting::ScriptListFilter;
             let manager = ScriptManager::new(Arc::clone(adapter));
-            let scripts = manager.list()?;
+            let filter = {
+                let tags: Option<Vec<String>> = params.get("tags").and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                    })
+                });
+                let match_all = params.get("match_all").and_then(|v| v.as_bool()).unwrap_or(false);
+                if tags.is_some() {
+                    Some(ScriptListFilter { tags, match_all_tags: match_all })
+                } else {
+                    None
+                }
+            };
+            let scripts = manager.list(filter)?;
             Ok(json!({"scripts": scripts, "count": scripts.len()}))
         }
         "script_get" => {
@@ -961,7 +1170,11 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
                     "name": script.name,
                     "code": script.code,
                     "description": script.description,
-                    "created_at": script.created_at
+                    "created_at": script.created_at,
+                    "updated_at": script.updated_at,
+                    "version": script.version,
+                    "tags": script.tags,
+                    "dependencies": script.dependencies
                 })),
                 None => Err(McpError::InvalidParams(format!("Script '{}' not found", name))),
             }
@@ -980,21 +1193,94 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let name = get_string(&params, "name")?;
             let script_params = params.get("params").cloned();
 
-            // Get the script code
+            // Run the script with dependencies and stats tracking
             let manager = ScriptManager::new(Arc::clone(adapter));
-            let script = manager.get(&name)?.ok_or_else(|| {
-                McpError::InvalidParams(format!("Script '{}' not found", name))
-            })?;
-
-            // Run the script
             let engine = RhaiEngine::new(Arc::clone(adapter));
-            let result = engine.run(&script.code, script_params)?;
+            let result = manager.run_script(&name, script_params, &engine)?;
 
             Ok(json!({
                 "success": true,
                 "result": result.result,
-                "logs": result.logs
+                "logs": result.logs,
+                "execution_time_ms": result.execution_time_ms
             }))
+        }
+        // Version Management
+        "script_history" => {
+            let name = get_string(&params, "name")?;
+            let limit = params.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            let history = manager.get_history(&name, limit)?;
+            Ok(json!({"history": history, "count": history.len()}))
+        }
+        "script_rollback" => {
+            let name = get_string(&params, "name")?;
+            let version = params.get("version").and_then(|v| v.as_u64()).ok_or_else(|| {
+                McpError::InvalidParams("version is required".to_string())
+            })? as u32;
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            let new_version = manager.rollback(&name, version)?;
+            Ok(json!({"success": true, "name": name, "new_version": new_version}))
+        }
+        "script_version_get" => {
+            let name = get_string(&params, "name")?;
+            let version = params.get("version").and_then(|v| v.as_u64()).ok_or_else(|| {
+                McpError::InvalidParams("version is required".to_string())
+            })? as u32;
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            match manager.get_version(&name, version)? {
+                Some(v) => Ok(json!({
+                    "script_name": v.script_name,
+                    "version": v.version,
+                    "code": v.code,
+                    "description": v.description,
+                    "tags": v.tags,
+                    "dependencies": v.dependencies,
+                    "created_at": v.created_at
+                })),
+                None => Err(McpError::InvalidParams(format!(
+                    "Version {} of script '{}' not found", version, name
+                ))),
+            }
+        }
+        // Tag Management
+        "script_tags_add" => {
+            let name = get_string(&params, "name")?;
+            let tags: Vec<String> = params.get("tags").and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                })
+            }).ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            manager.add_tags(&name, tags.clone())?;
+            Ok(json!({"success": true, "name": name, "added_tags": tags}))
+        }
+        "script_tags_remove" => {
+            let name = get_string(&params, "name")?;
+            let tags: Vec<String> = params.get("tags").and_then(|v| {
+                v.as_array().map(|arr| {
+                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                })
+            }).ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            manager.remove_tags(&name, tags.clone())?;
+            Ok(json!({"success": true, "name": name, "removed_tags": tags}))
+        }
+        // Execution Statistics
+        "script_stats" => {
+            let name = get_string(&params, "name")?;
+            let manager = ScriptManager::new(Arc::clone(adapter));
+            match manager.get_stats(&name)? {
+                Some(stats) => Ok(json!({
+                    "name": stats.name,
+                    "execution_count": stats.execution_count,
+                    "last_run_at": stats.last_run_at,
+                    "last_run_success": stats.last_run_success,
+                    "total_execution_time_ms": stats.total_execution_time_ms,
+                    "avg_execution_time_ms": stats.avg_execution_time_ms
+                })),
+                None => Err(McpError::InvalidParams(format!("Script '{}' not found", name))),
+            }
         }
 
         // Admin Operations (require IRONBASE_ADMIN_KEY)

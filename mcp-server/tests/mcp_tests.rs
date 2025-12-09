@@ -163,11 +163,11 @@ fn test_get_prompt_content_discover_schema_with_args() {
 fn test_adapter_creation() {
     let (adapter, _temp) = create_test_adapter();
     let collections = adapter.list_collections();
-    // _system.scripts is automatically created but it's a system collection
-    // It should be visible in list_collections (hidden: false by default)
+    // _system.scripts and _system.script_versions are automatically created
+    // They should be visible in list_collections (hidden: false by default)
     assert!(
-        collections.len() <= 1,
-        "Expected at most 1 system collection, got {:?}",
+        collections.len() <= 2,
+        "Expected at most 2 system collections, got {:?}",
         collections
     );
 }

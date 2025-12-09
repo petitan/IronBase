@@ -208,6 +208,9 @@ fn run_stdio_server() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
+    // MCP lifecycle state: track if initialize has been called
+    let mut initialized = false;
+
     for line in stdin.lock().lines() {
         let line = match line {
             Ok(l) => l,
@@ -238,8 +241,8 @@ fn run_stdio_server() {
             }
         };
 
-        // Handle request - only respond if it's a request (has id), not a notification
-        if let Some(response) = handle_request(&request, &adapter) {
+        // Handle request with lifecycle enforcement
+        if let Some(response) = handle_request(&request, &adapter, &mut initialized) {
             // Write response only for requests, not notifications
             if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(&response).unwrap()) {
                 eprintln!("Write error: {}", e);
@@ -250,28 +253,48 @@ fn run_stdio_server() {
     }
 }
 
-fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Option<McpResponse> {
+fn handle_request(
+    request: &McpRequest,
+    adapter: &Arc<IronBaseAdapter>,
+    initialized: &mut bool,
+) -> Option<McpResponse> {
     // Check if this is a notification (no id) - notifications get no response per JSON-RPC spec
     let is_notification = request.id.is_none() || matches!(&request.id, Some(v) if v.is_null());
 
-    match request.method.as_str() {
-        "initialize" => Some(create_success_response(
-            serde_json::to_value(InitializeResult {
-                protocol_version: "2025-06-18".to_string(),
-                capabilities: Capabilities {
-                    tools: serde_json::json!({"listChanged": false}),
-                    prompts: serde_json::json!({"listChanged": false}),
-                    resources: serde_json::json!({}),
-                    logging: serde_json::json!({}),
-                },
-                server_info: ServerInfo {
-                    name: "ironbase-mcp".to_string(),
-                    version: VERSION.to_string(),
-                },
-            })
-            .unwrap(),
+    // MCP lifecycle enforcement: only allow initialize and ping before initialization
+    // Per spec: "The initialization phase MUST be the first interaction"
+    if !*initialized
+        && request.method != "initialize"
+        && request.method != "ping"
+        && !request.method.starts_with("notifications/")
+    {
+        return Some(create_error_response(
+            -32002, // Server not initialized (custom error code)
+            "Server not initialized. Call 'initialize' first.",
             request.id.clone(),
-        )),
+        ));
+    }
+
+    match request.method.as_str() {
+        "initialize" => {
+            *initialized = true;
+            eprintln!("Server initialized");
+            Some(create_success_response(
+                serde_json::to_value(InitializeResult {
+                    protocol_version: "2025-06-18".to_string(),
+                    capabilities: Capabilities {
+                        tools: serde_json::json!({"listChanged": false}),
+                        prompts: serde_json::json!({"listChanged": false}),
+                    },
+                    server_info: ServerInfo {
+                        name: "ironbase-mcp".to_string(),
+                        version: VERSION.to_string(),
+                    },
+                })
+                .unwrap(),
+                request.id.clone(),
+            ))
+        }
 
         "initialized" | "notifications/initialized" => {
             // This is a notification - NO RESPONSE per JSON-RPC spec
@@ -280,7 +303,7 @@ fn handle_request(request: &McpRequest, adapter: &Arc<IronBaseAdapter>) -> Optio
         }
 
         "ping" => {
-            // Keep-alive ping - return empty result
+            // Keep-alive ping - allowed before initialization
             Some(create_success_response(
                 serde_json::json!({}),
                 request.id.clone(),
@@ -476,8 +499,7 @@ struct InitializeResult {
 struct Capabilities {
     tools: serde_json::Value,
     prompts: serde_json::Value,
-    resources: serde_json::Value,
-    logging: serde_json::Value,
+    // Note: resources and logging are intentionally omitted as we don't implement them
 }
 
 #[derive(Debug, Serialize)]
