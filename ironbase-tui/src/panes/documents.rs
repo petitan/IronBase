@@ -1,6 +1,7 @@
 //! Documents pane - center panel showing document list
 
 use crate::app::App;
+use crate::base64_detect::sanitize_base64_values;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -94,10 +95,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
 
 /// Create a truncated preview of a document
 fn create_preview(doc: &serde_json::Value, max_len: usize) -> String {
-    let json_str = serde_json::to_string(doc).unwrap_or_else(|_| "{}".to_string());
+    // Base64 tartalmak helyettesítése előnézettel
+    let sanitized = sanitize_base64_values(doc);
+    let json_str = serde_json::to_string(&sanitized).unwrap_or_else(|_| "{}".to_string());
 
     // Remove _id from preview to save space
-    let preview = if let Some(obj) = doc.as_object() {
+    let preview = if let Some(obj) = sanitized.as_object() {
         let filtered: serde_json::Map<String, serde_json::Value> = obj
             .iter()
             .filter(|(k, _)| *k != "_id")

@@ -5,6 +5,7 @@
 //! Uses MCP (Model Context Protocol) to communicate with IronBase.
 
 mod app;
+mod base64_detect;
 mod config;
 mod db;
 mod mcp;
@@ -349,9 +350,12 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Query => modals::query::render(frame, frame.area(), &app.query_state, &theme),
             Modal::Export => modals::export::render(frame, frame.area(), &app.export_state, &theme),
             Modal::Filter => modals::filter::render(frame, frame.area(), &app.filter_state, &theme),
-            Modal::NewCollection => {
-                modals::new_collection::render(frame, frame.area(), &app.new_collection_state, &theme)
-            }
+            Modal::NewCollection => modals::new_collection::render(
+                frame,
+                frame.area(),
+                &app.new_collection_state,
+                &theme,
+            ),
             Modal::ErrorDetail => {
                 if let Some(ref err) = app.error_message {
                     modals::error::render(frame, frame.area(), err, app.error_scroll, &theme);
@@ -651,7 +655,8 @@ fn handle_help_key(app: &mut App, key: KeyCode) {
             app.help_scroll = app.help_scroll.saturating_sub(1);
         }
         KeyCode::PageDown => {
-            app.help_scroll = (app.help_scroll + 5).min(modals::help::HELP_LINES.saturating_sub(10));
+            app.help_scroll =
+                (app.help_scroll + 5).min(modals::help::HELP_LINES.saturating_sub(10));
         }
         KeyCode::PageUp => {
             app.help_scroll = app.help_scroll.saturating_sub(5);
@@ -950,7 +955,9 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
             match app.filter_state.focus {
                 FilterFocus::Field => {
                     // Ha van suggestion látható, alkalmazzuk és lépjünk tovább
-                    if app.filter_state.show_suggestions && !app.filter_state.filtered_suggestions.is_empty() {
+                    if app.filter_state.show_suggestions
+                        && !app.filter_state.filtered_suggestions.is_empty()
+                    {
                         app.filter_state.apply_suggestion();
                         app.filter_state.focus = FilterFocus::Operator;
                     } else if !app.filter_state.field_input.is_empty() {
@@ -965,7 +972,8 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                 FilterFocus::Value => {
                     // Value-nál Enter = add filter (ha valid) és vissza Field-re
                     // Exists operátorhoz nem kell érték, máshoz igen
-                    let needs_value = app.filter_state.operator != crate::app::FilterOperator::Exists;
+                    let needs_value =
+                        app.filter_state.operator != crate::app::FilterOperator::Exists;
                     let has_value = !app.filter_state.value_input.is_empty();
 
                     if !needs_value || has_value {
@@ -986,24 +994,20 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         }
 
         // Left arrow - cursor left in text fields, prev operator in Operator focus, prev sort field
-        (KeyCode::Left, _) => {
-            match app.filter_state.focus {
-                FilterFocus::Operator => app.filter_state.prev_operator(),
-                FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_left(),
-                FilterFocus::SortField => app.filter_state.prev_sort_field(),
-                _ => {}
-            }
-        }
+        (KeyCode::Left, _) => match app.filter_state.focus {
+            FilterFocus::Operator => app.filter_state.prev_operator(),
+            FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_left(),
+            FilterFocus::SortField => app.filter_state.prev_sort_field(),
+            _ => {}
+        },
 
         // Right arrow - cursor right in text fields, next operator in Operator focus, next sort field
-        (KeyCode::Right, _) => {
-            match app.filter_state.focus {
-                FilterFocus::Operator => app.filter_state.next_operator(),
-                FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_right(),
-                FilterFocus::SortField => app.filter_state.next_sort_field(),
-                _ => {}
-            }
-        }
+        (KeyCode::Right, _) => match app.filter_state.focus {
+            FilterFocus::Operator => app.filter_state.next_operator(),
+            FilterFocus::Field | FilterFocus::Value => app.filter_state.cursor_right(),
+            FilterFocus::SortField => app.filter_state.next_sort_field(),
+            _ => {}
+        },
 
         // Space - toggle sort direction in SortField focus
         (KeyCode::Char(' '), _) if app.filter_state.focus == FilterFocus::SortField => {
@@ -1018,7 +1022,9 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Up, KeyModifiers::CONTROL) if app.filter_state.focus == FilterFocus::Filters => {
             app.filter_state.move_filter_up();
         }
-        (KeyCode::Down, KeyModifiers::CONTROL) if app.filter_state.focus == FilterFocus::Filters => {
+        (KeyCode::Down, KeyModifiers::CONTROL)
+            if app.filter_state.focus == FilterFocus::Filters =>
+        {
             app.filter_state.move_filter_down();
         }
 
@@ -1066,7 +1072,9 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Delete, _) if app.filter_state.focus == FilterFocus::Filters => {
             app.filter_state.remove_selected_filter();
         }
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) if app.filter_state.focus == FilterFocus::Filters => {
+        (KeyCode::Char('d'), KeyModifiers::CONTROL)
+            if app.filter_state.focus == FilterFocus::Filters =>
+        {
             app.filter_state.remove_selected_filter();
         }
 

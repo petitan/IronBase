@@ -1,6 +1,7 @@
 //! Detail pane - right panel showing full document JSON
 
 use crate::app::App;
+use crate::base64_detect::sanitize_base64_values;
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
@@ -74,7 +75,9 @@ fn format_json_pretty(
     theme: &Theme,
     highlight: Option<&str>,
 ) -> Vec<Line<'static>> {
-    let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string());
+    // Base64 tartalmak helyettesítése előnézettel
+    let sanitized = sanitize_base64_values(value);
+    let pretty = serde_json::to_string_pretty(&sanitized).unwrap_or_else(|_| "{}".to_string());
 
     let mut lines = Vec::new();
 
