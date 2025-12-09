@@ -1526,7 +1526,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let flags = crate::storage::CollectionFlags {
             is_system: true,
             protected: true,
-            hidden: false, // System collections visible by default (for debugging)
+            hidden: true, // System collections hidden by default
         };
         self.set_collection_flags(name, flags)
     }
@@ -2082,15 +2082,19 @@ mod tests {
     }
 
     #[test]
-    fn test_system_collection_visible_by_default() {
+    fn test_system_collection_hidden_by_default() {
         let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
 
-        // Create system collection (hidden = false by default)
+        // Create system collection (hidden = true by default)
         db.create_system_collection("_system.scripts").unwrap();
 
-        // System collections are visible in list_collections by default
+        // System collections are NOT visible in list_collections by default
         let visible = db.list_collections();
-        assert!(visible.contains(&"_system.scripts".to_string()));
+        assert!(!visible.contains(&"_system.scripts".to_string()));
+
+        // But visible in list_all_collections
+        let all = db.list_all_collections();
+        assert!(all.contains(&"_system.scripts".to_string()));
     }
 
     #[test]
