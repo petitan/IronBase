@@ -239,9 +239,16 @@ impl FilterOperator {
             Self::In => {
                 let values: Vec<Value> = value
                     .split(',')
-                    .map(|s| parse_value(s.trim()))
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty()) // Skip empty values
+                    .map(parse_value)
                     .collect();
-                json!({ (field): { "$in": values } })
+                if values.is_empty() {
+                    // Return query that matches nothing if no valid values
+                    json!({ (field): { "$in": [] } })
+                } else {
+                    json!({ (field): { "$in": values } })
+                }
             }
         }
     }
