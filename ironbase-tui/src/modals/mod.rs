@@ -8,6 +8,7 @@ pub mod filter;
 pub mod help;
 pub mod index;
 pub mod insert;
+pub mod progress;
 pub mod query;
 pub mod search;
 pub mod splash;

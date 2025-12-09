@@ -269,8 +269,16 @@ fn render_ui(frame: &mut Frame, app: &App) {
 
     // Show splash screen during startup
     if app.startup {
-        let msg = app.loading.as_deref().unwrap_or("Betoltes...");
-        modals::splash::render(frame, frame.area(), msg, app.loading_frame, &theme);
+        if let Some(progress) = app.get_progress() {
+            const LOGO: &str = r#"
+  ___                 ____
+ |_ _|_ __ ___  _ __ | __ )  __ _ ___  ___
+  | || '__/ _ \| '_ \|  _ \ / _` / __|/ _ \
+  | || | | (_) | | | | |_) | (_| \__ \  __/
+ |___|_|  \___/|_| |_|____/ \__,_|___/\___|
+"#;
+            modals::progress::render_splash(frame, frame.area(), progress, &theme, LOGO);
+        }
         return;
     }
 
@@ -343,6 +351,13 @@ fn render_ui(frame: &mut Frame, app: &App) {
             }
         }
     }
+
+    // Render progress overlay (on top of modals) for determinate progress
+    if let Some(progress) = app.get_progress() {
+        if progress.is_determinate() {
+            modals::progress::render(frame, frame.area(), progress, &theme);
+        }
+    }
 }
 
 /// Render the header bar
@@ -351,9 +366,10 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     let header_style = Style::default().bg(theme.header_bg).fg(theme.fg);
 
-    // DB info
+    // DB info with version
     let db_info = format!(
-        " IronBase | {} ({} coll, {} docs) ",
+        " IronBase v{} | {} ({} coll, {} docs) ",
+        env!("CARGO_PKG_VERSION"),
         app.db_name(),
         app.collections.len(),
         app.total_doc_count()
@@ -373,13 +389,34 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::styled(pane_name, Style::default().fg(theme.fg)),
     ];
 
-    // Add loading indicator if loading
-    if let Some(ref loading_msg) = app.loading {
+    // Add loading/progress indicator
+    if let Some(progress) = app.get_progress() {
+        const SPINNERS: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
         spans.push(Span::raw(" | "));
-        spans.push(Span::styled(
-            format!("{} {}", app.loading_spinner(), loading_msg),
-            Style::default().fg(theme.warning).bold(),
-        ));
+        match progress {
+            crate::app::ProgressState::Indeterminate { message, frame } => {
+                let spinner = SPINNERS[*frame % SPINNERS.len()];
+                spans.push(Span::styled(
+                    format!("{} {}", spinner, message),
+                    Style::default().fg(theme.warning).bold(),
+                ));
+            }
+            crate::app::ProgressState::Determinate {
+                message,
+                current,
+                total,
+            } => {
+                let pct = if *total > 0 {
+                    (*current as f64 / *total as f64 * 100.0) as u8
+                } else {
+                    0
+                };
+                spans.push(Span::styled(
+                    format!("{} ({}/{}) {}%", message, current, total, pct),
+                    Style::default().fg(theme.warning).bold(),
+                ));
+            }
+        }
     } else {
         spans.push(Span::raw(" | "));
         spans.push(Span::styled("[/]", Style::default().fg(theme.accent)));

@@ -52,6 +52,100 @@ pub enum Modal {
     ErrorDetail,
 }
 
+/// Progress state for long-running operations
+#[derive(Debug, Clone)]
+pub enum ProgressState {
+    /// Indeterminate progress (spinner) - for unknown duration tasks
+    Indeterminate {
+        message: String,
+        frame: usize,
+    },
+    /// Determinate progress (bar) - for tasks with known total
+    Determinate {
+        message: String,
+        current: usize,
+        total: usize,
+    },
+}
+
+impl ProgressState {
+    /// Create new indeterminate progress
+    pub fn indeterminate(message: impl Into<String>) -> Self {
+        Self::Indeterminate {
+            message: message.into(),
+            frame: 0,
+        }
+    }
+
+    /// Create new determinate progress
+    pub fn determinate(message: impl Into<String>, current: usize, total: usize) -> Self {
+        Self::Determinate {
+            message: message.into(),
+            current,
+            total,
+        }
+    }
+
+    /// Update message
+    pub fn set_message(&mut self, msg: impl Into<String>) {
+        match self {
+            Self::Indeterminate { message, .. } => *message = msg.into(),
+            Self::Determinate { message, .. } => *message = msg.into(),
+        }
+    }
+
+    /// Update progress (for determinate)
+    pub fn set_progress(&mut self, current: usize, total: usize) {
+        if let Self::Determinate {
+            current: c,
+            total: t,
+            ..
+        } = self
+        {
+            *c = current;
+            *t = total;
+        }
+    }
+
+    /// Tick animation frame (for indeterminate)
+    pub fn tick(&mut self) {
+        if let Self::Indeterminate { frame, .. } = self {
+            *frame = frame.wrapping_add(1);
+        }
+    }
+
+    /// Get percentage (for determinate, 0-100)
+    pub fn percentage(&self) -> Option<u8> {
+        match self {
+            Self::Determinate { current, total, .. } if *total > 0 => {
+                Some(((*current as f64 / *total as f64) * 100.0) as u8)
+            }
+            _ => None,
+        }
+    }
+
+    /// Get the message
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Indeterminate { message, .. } => message,
+            Self::Determinate { message, .. } => message,
+        }
+    }
+
+    /// Get spinner frame (for indeterminate)
+    pub fn frame(&self) -> usize {
+        match self {
+            Self::Indeterminate { frame, .. } => *frame,
+            _ => 0,
+        }
+    }
+
+    /// Check if determinate
+    pub fn is_determinate(&self) -> bool {
+        matches!(self, Self::Determinate { .. })
+    }
+}
+
 /// Search mode enum
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
@@ -1124,9 +1218,8 @@ pub struct App {
     pub error_message: Option<String>,
     pub error_scroll: usize,
 
-    // Loading state
-    pub loading: Option<String>,
-    pub loading_frame: usize,
+    // Progress state for long-running operations
+    pub progress: Option<ProgressState>,
 
     // Startup phase (splash screen)
     pub startup: bool,
@@ -1167,38 +1260,50 @@ impl App {
             status_message: None,
             error_message: None,
             error_scroll: 0,
-            loading: None,
-            loading_frame: 0,
+            progress: None,
             startup: true,
         }
     }
 
-    // === Loading state ===
+    // === Progress state ===
 
-    /// Set loading state with message
+    /// Set indeterminate progress (spinner) with message
     pub fn set_loading(&mut self, msg: impl Into<String>) {
-        self.loading = Some(msg.into());
+        self.progress = Some(ProgressState::indeterminate(msg));
     }
 
-    /// Clear loading state
+    /// Set determinate progress (bar) with current/total
+    pub fn set_progress(&mut self, msg: impl Into<String>, current: usize, total: usize) {
+        self.progress = Some(ProgressState::determinate(msg, current, total));
+    }
+
+    /// Update progress values (for determinate progress)
+    pub fn update_progress(&mut self, current: usize, total: usize) {
+        if let Some(ref mut progress) = self.progress {
+            progress.set_progress(current, total);
+        }
+    }
+
+    /// Clear progress state
     pub fn clear_loading(&mut self) {
-        self.loading = None;
+        self.progress = None;
     }
 
-    /// Check if loading
+    /// Check if loading/progress active
     pub fn is_loading(&self) -> bool {
-        self.loading.is_some()
+        self.progress.is_some()
     }
 
-    /// Get loading spinner character (animated)
-    pub fn loading_spinner(&self) -> char {
-        const SPINNERS: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
-        SPINNERS[self.loading_frame % SPINNERS.len()]
+    /// Get progress state reference
+    pub fn get_progress(&self) -> Option<&ProgressState> {
+        self.progress.as_ref()
     }
 
-    /// Advance loading animation frame
+    /// Advance progress animation frame
     pub fn tick_loading(&mut self) {
-        self.loading_frame = self.loading_frame.wrapping_add(1);
+        if let Some(ref mut progress) = self.progress {
+            progress.tick();
+        }
     }
 
     /// Update page_size based on terminal height
@@ -2179,6 +2284,9 @@ impl App {
         };
         let mut writer = BufWriter::new(file);
 
+        // Set determinate progress
+        self.set_progress("Exportálás", 0, total_docs);
+
         let result: Result<usize, String> = match format {
             ExportFormat::Json => {
                 if let Err(e) = writeln!(writer, "[") {
@@ -2225,6 +2333,7 @@ impl App {
 
                     exported += docs.len();
                     offset += docs.len();
+                    self.update_progress(exported, total_docs);
                     self.export_state.message =
                         Some(format!("Exportálás... {}/{}", exported, total_docs));
                 }
@@ -2315,6 +2424,7 @@ impl App {
 
                     exported += docs.len();
                     offset += docs.len();
+                    self.update_progress(exported, total_docs);
                     self.export_state.message =
                         Some(format!("Exportálás... {}/{}", exported, total_docs));
                 }
@@ -2325,8 +2435,12 @@ impl App {
 
         if let Err(e) = writer.flush() {
             self.export_state.error = Some(format!("Flush hiba: {}", e));
+            self.clear_loading();
             return;
         }
+
+        // Clear progress
+        self.clear_loading();
 
         match result {
             Ok(count) => {
