@@ -648,6 +648,17 @@ impl ScriptManager {
         params: Option<Value>,
         engine: &RhaiEngine,
     ) -> Result<ScriptResult> {
+        self.run_script_with_options(name, params, engine, None)
+    }
+
+    /// Run a script by name with custom options
+    pub fn run_script_with_options(
+        &self,
+        name: &str,
+        params: Option<Value>,
+        engine: &RhaiEngine,
+        options: Option<ScriptOptions>,
+    ) -> Result<ScriptResult> {
         // Get the script
         let script = self.get(name)?.ok_or_else(|| {
             McpError::ScriptError(format!("Script '{}' not found", name))
@@ -663,8 +674,8 @@ impl ScriptManager {
             .filter_map(|dep_name| self.get(dep_name).ok().flatten().map(|s| s.code))
             .collect();
 
-        // Run the script with dependencies
-        let result = engine.run_with_dependencies(&script.code, dep_codes, params);
+        // Run the script with dependencies and options
+        let result = engine.run_with_dependencies_opts(&script.code, dep_codes, params, options);
 
         // Update execution stats
         match &result {
@@ -839,6 +850,17 @@ impl RhaiEngine {
         dependency_codes: Vec<String>,
         params: Option<Value>,
     ) -> Result<ScriptResult> {
+        self.run_with_dependencies_opts(code, dependency_codes, params, None)
+    }
+
+    /// Run a script with dependencies and custom options
+    pub fn run_with_dependencies_opts(
+        &self,
+        code: &str,
+        dependency_codes: Vec<String>,
+        params: Option<Value>,
+        options: Option<ScriptOptions>,
+    ) -> Result<ScriptResult> {
         // Concatenate dependency code before main script
         let full_code = if dependency_codes.is_empty() {
             code.to_string()
@@ -847,7 +869,10 @@ impl RhaiEngine {
             format!("{}\n\n// === Main Script ===\n{}", deps, code)
         };
 
-        self.run(&full_code, params)
+        match options {
+            Some(opts) => self.run_with_options(&full_code, params, opts),
+            None => self.run(&full_code, params),
+        }
     }
 
     /// Register database functions into the engine

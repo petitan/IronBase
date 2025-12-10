@@ -90,6 +90,11 @@ pub fn get_prompts_list() -> Value {
                 "name": "transaction-guide",
                 "description": "Guide for using ACD transactions with begin, commit, and rollback operations",
                 "arguments": []
+            },
+            {
+                "name": "rhai-scripting",
+                "description": "Guide for writing Rhai scripts with all available functions, helpers, and best practices",
+                "arguments": []
             }
         ]
     })
@@ -107,6 +112,7 @@ pub fn get_prompt_content(name: &str, arguments: &Value) -> Option<Value> {
         "schema-validation" => Some(get_schema_validation_prompt(arguments)),
         "index-optimization" => Some(get_index_optimization_prompt(arguments)),
         "transaction-guide" => Some(get_transaction_guide_prompt()),
+        "rhai-scripting" => Some(get_rhai_scripting_prompt()),
         _ => None,
     }
 }
@@ -904,6 +910,220 @@ Force specific index usage:
 - `$or` queries may not use compound indexes efficiently
 - `$regex` without anchor (^) cannot use index"#,
                         collection, collection, collection, collection, collection, collection, collection)
+                }
+            }
+        ]
+    })
+}
+
+fn get_rhai_scripting_prompt() -> Value {
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": r#"# IronBase Rhai Scripting Guide
+
+Rhai is a lightweight scripting language for server-side operations. Scripts can be saved and reused, with version history and execution statistics.
+
+## Running Scripts
+
+### Execute Inline Code
+```json
+// script_exec tool
+{"code": "let x = 1 + 2; x", "params": {"name": "test"}}
+```
+
+### Run Saved Script
+```json
+// script_run tool
+{"name": "my_script", "params": {"count": 10}}
+
+// With custom operation limit (DoS protection)
+{"name": "my_script", "params": {}, "max_operations": 500000}
+```
+
+## Database Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `db_find(coll, query)` | Find documents | `db_find("users", #{age: #{`$gt`: 18}})` |
+| `db_find_one(coll, query)` | Find single document (or null) | `db_find_one("users", #{name: "Alice"})` |
+| `db_find_one_result(coll, query)` | Find with explicit result type | Returns `#{found: bool, doc: ..., error: ...}` |
+| `db_insert_one(coll, doc)` | Insert document | `db_insert_one("users", #{name: "Bob"})` |
+| `db_insert_many(coll, docs)` | Insert multiple | `db_insert_many("users", [#{...}, #{...}])` |
+| `db_update_one(coll, filter, update)` | Update one | `db_update_one("users", #{name: "x"}, #{`$set`: #{age: 30}})` |
+| `db_update_many(coll, filter, update)` | Update many | Same as update_one |
+| `db_delete_one(coll, filter)` | Delete one | `db_delete_one("users", #{name: "x"})` |
+| `db_delete_many(coll, filter)` | Delete many | Same as delete_one |
+| `db_count(coll, query)` | Count documents | `db_count("users", #{active: true})` |
+| `db_aggregate(coll, pipeline)` | Aggregation | `db_aggregate("sales", [#{`$group`: ...}])` |
+
+## Helper Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `is_error(v)` | Check if value is error string | `if is_error(result) { ... }` |
+| `is_null(v)` | Check if value is null/unit | `if is_null(doc) { ... }` |
+| `get_error(v)` | Extract error message | `let msg = get_error(result);` |
+| `unwrap_or(v, default)` | Return value or default if error/null | `let x = unwrap_or(val, 0);` |
+
+## db_find_one vs db_find_one_result
+
+### db_find_one (Simple)
+Returns the document or null. Errors return error string.
+```rhai
+let doc = db_find_one("users", #{name: "Alice"});
+if is_null(doc) {
+    print("Not found");
+} else if is_error(doc) {
+    print("Error: " + get_error(doc));
+} else {
+    print("Found: " + doc.name);
+}
+```
+
+### db_find_one_result (Explicit)
+Returns a result object with explicit fields - preferred for clarity.
+```rhai
+let result = db_find_one_result("users", #{name: "Alice"});
+if result.error != () {
+    print("Error: " + result.error);
+} else if !result.found {
+    print("Not found");
+} else {
+    print("Found: " + result.doc.name);
+}
+```
+
+## Utility Functions
+
+| Function | Description |
+|----------|-------------|
+| `base64_encode(str)` | Encode string to base64 |
+| `base64_decode(b64)` | Decode base64 to string |
+| `print(msg)` | Log message (captured in result.logs) |
+
+## Rhai Syntax Basics
+
+### Variables & Types
+```rhai
+let x = 42;           // Integer
+let s = "hello";      // String
+let arr = [1, 2, 3];  // Array
+let map = #{a: 1, b: 2};  // Object map (use #{ } for maps!)
+```
+
+### Query Operators in Maps
+Use backticks for operators starting with `$`:
+```rhai
+let query = #{age: #{`$gt`: 18, `$lt`: 65}};
+let docs = db_find("users", query);
+```
+
+### Control Flow
+```rhai
+// If/else
+if x > 10 {
+    print("big");
+} else {
+    print("small");
+}
+
+// For loop
+for item in arr {
+    print(item);
+}
+
+// While loop
+while x > 0 {
+    x -= 1;
+}
+```
+
+### Functions
+```rhai
+fn greet(name) {
+    "Hello, " + name + "!"
+}
+
+let msg = greet("World");
+```
+
+## Example Scripts
+
+### Batch Insert with Logging
+```rhai
+let names = ["Alice", "Bob", "Carol"];
+let inserted = 0;
+
+for name in names {
+    let doc = #{name: name, created: "2024-01-01"};
+    let result = db_insert_one("users", doc);
+    if !is_error(result) {
+        inserted += 1;
+        print("Inserted: " + name);
+    }
+}
+
+#{inserted: inserted, total: names.len()}
+```
+
+### Safe Document Lookup
+```rhai
+let result = db_find_one_result("users", #{_id: params.user_id});
+
+if result.error != () {
+    #{success: false, error: result.error}
+} else if !result.found {
+    #{success: false, error: "User not found"}
+} else {
+    #{success: true, user: result.doc}
+}
+```
+
+### Aggregation Report
+```rhai
+let pipeline = [
+    #{`$match`: #{status: "completed"}},
+    #{`$group`: #{
+        _id: "$category",
+        total: #{`$sum`: "$amount"},
+        count: #{`$sum`: 1}
+    }},
+    #{`$sort`: #{total: -1}}
+];
+
+let results = db_aggregate("orders", pipeline);
+if is_error(results) {
+    #{error: get_error(results)}
+} else {
+    #{report: results, generated: "now"}
+}
+```
+
+## Script Management
+
+| Tool | Description |
+|------|-------------|
+| `script_save` | Save/update script with name, code, description |
+| `script_list` | List all saved scripts |
+| `script_get` | Get script code and metadata |
+| `script_delete` | Delete a script |
+| `script_history` | View version history |
+| `script_rollback` | Restore previous version |
+| `script_stats` | View execution statistics |
+
+## Security & Limits
+
+| Limit | Default | Description |
+|-------|---------|-------------|
+| Max operations | 1,000,000 | Prevents infinite loops (configurable via max_operations) |
+| Max log entries | 10,000 | Prevents memory exhaustion |
+| Max execution time | ~60s | Implicit via operation limit |
+
+No file I/O or network access - scripts can only interact with the database."#
                 }
             }
         ]

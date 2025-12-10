@@ -2,7 +2,7 @@
 
 use crate::adapter::{FindOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
-use crate::scripting::{RhaiEngine, ScriptManager};
+use crate::scripting::{RhaiEngine, ScriptManager, ScriptOptions};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -719,7 +719,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_run",
-                "description": "Run a saved script by name with optional parameters. Scripts have access to database functions: db_find, db_find_one, db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Returns the script result and captured logs.",
+                "description": "Run a saved script by name with optional parameters. Available functions: DB: db_find, db_find_one, db_find_one_result (returns {found, doc, error}), db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Helpers: is_error(v), is_null(v), get_error(v), unwrap_or(v, default). Utils: base64_encode, base64_decode, print. Returns script result and captured logs.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -730,6 +730,10 @@ pub fn get_tools_list() -> Value {
                         "params": {
                             "type": "object",
                             "description": "Optional parameters passed to the script (accessible as 'params' variable)"
+                        },
+                        "max_operations": {
+                            "type": "integer",
+                            "description": "Maximum number of operations allowed (default: 1000000, for DoS protection)"
                         }
                     },
                     "required": ["name"]
@@ -737,7 +741,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_exec",
-                "description": "Execute inline Rhai code without saving. Useful for one-off operations. Scripts have access to: db_find, db_find_one, db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate.",
+                "description": "Execute inline Rhai code without saving. Useful for one-off operations. Available functions: DB: db_find, db_find_one, db_find_one_result (returns {found, doc, error}), db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Helpers: is_error(v), is_null(v), get_error(v), unwrap_or(v, default). Utils: base64_encode, base64_decode, print.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -748,6 +752,10 @@ pub fn get_tools_list() -> Value {
                         "params": {
                             "type": "object",
                             "description": "Optional parameters passed to the script (accessible as 'params' variable)"
+                        },
+                        "max_operations": {
+                            "type": "integer",
+                            "description": "Maximum number of operations allowed (default: 1000000, for DoS protection)"
                         }
                     },
                     "required": ["code"]
@@ -1253,11 +1261,14 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
         "script_run" => {
             let name = get_string(&params, "name")?;
             let script_params = params.get("params").cloned();
+            let options = params.get("max_operations")
+                .and_then(|v| v.as_u64())
+                .map(ScriptOptions::with_max_operations);
 
             // Run the script with dependencies and stats tracking
             let manager = ScriptManager::new(Arc::clone(adapter));
             let engine = RhaiEngine::new(Arc::clone(adapter));
-            let result = manager.run_script(&name, script_params, &engine)?;
+            let result = manager.run_script_with_options(&name, script_params, &engine, options)?;
 
             Ok(json!({
                 "success": true,
@@ -1269,10 +1280,16 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
         "script_exec" => {
             let code = get_string(&params, "code")?;
             let script_params = params.get("params").cloned();
+            let options = params.get("max_operations")
+                .and_then(|v| v.as_u64())
+                .map(ScriptOptions::with_max_operations);
 
             // Run inline code directly without saving
             let engine = RhaiEngine::new(Arc::clone(adapter));
-            let result = engine.run(&code, script_params)?;
+            let result = match options {
+                Some(opts) => engine.run_with_options(&code, script_params, opts)?,
+                None => engine.run(&code, script_params)?,
+            };
 
             Ok(json!({
                 "success": true,
