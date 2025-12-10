@@ -95,6 +95,17 @@ pub fn get_prompts_list() -> Value {
                 "name": "rhai-scripting",
                 "description": "Guide for writing Rhai scripts with all available functions, helpers, and best practices",
                 "arguments": []
+            },
+            {
+                "name": "fuzzy-search",
+                "description": "Guide for fuzzy text search with Jaro-Winkler, Levenshtein, and Damerau-Levenshtein algorithms",
+                "arguments": [
+                    {
+                        "name": "field",
+                        "description": "The field name to search (optional, for examples)",
+                        "required": false
+                    }
+                ]
             }
         ]
     })
@@ -113,6 +124,7 @@ pub fn get_prompt_content(name: &str, arguments: &Value) -> Option<Value> {
         "index-optimization" => Some(get_index_optimization_prompt(arguments)),
         "transaction-guide" => Some(get_transaction_guide_prompt()),
         "rhai-scripting" => Some(get_rhai_scripting_prompt()),
+        "fuzzy-search" => Some(get_fuzzy_search_prompt(arguments)),
         _ => None,
     }
 }
@@ -1239,6 +1251,204 @@ except:
 - No distributed transactions
 - One active transaction per connection
 - Long transactions may impact performance"#
+                }
+            }
+        ]
+    })
+}
+
+fn get_fuzzy_search_prompt(arguments: &Value) -> Value {
+    let field = arguments
+        .get("field")
+        .and_then(|v| v.as_str())
+        .unwrap_or("name");
+
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": format!(r#"# IronBase Fuzzy Text Search Guide
+
+Fuzzy search finds approximate string matches using similarity algorithms. Perfect for:
+- Typo-tolerant search ("jonh" → "john")
+- Name matching ("Jon" ≈ "John")
+- Approximate text lookup
+
+## Two Ways to Use Fuzzy Search
+
+### Method 1: $fuzzy Query Operator (Simple)
+
+Works on ANY field without index setup. Scans all documents.
+
+**Simple form** (Jaro-Winkler, 0.8 threshold):
+```json
+// find tool
+{{
+  "collection": "users",
+  "query": {{"{field}": {{"$fuzzy": "john"}}}}
+}}
+```
+
+**Extended form** (custom algorithm and threshold):
+```json
+{{
+  "collection": "users",
+  "query": {{
+    "{field}": {{
+      "$fuzzy": {{
+        "value": "john",
+        "algorithm": "levenshtein",
+        "threshold": 0.7
+      }}
+    }}
+  }}
+}}
+```
+
+### Method 2: Fuzzy Index + fuzzy_search Tool (Fast)
+
+Pre-computed index for high-performance searches. Returns similarity scores.
+
+**Step 1: Create fuzzy index**
+```json
+// index_create_fuzzy tool
+{{
+  "collection": "users",
+  "field": "{field}",
+  "algorithm": "jaro_winkler",
+  "threshold": 0.8
+}}
+```
+
+**Step 2: Search using index**
+```json
+// fuzzy_search tool
+{{
+  "collection": "users",
+  "field": "{field}",
+  "query": "john",
+  "limit": 10
+}}
+```
+
+**Response includes similarity scores:**
+```json
+[
+  {{"_id": 1, "{field}": "John", "_similarity": 0.95}},
+  {{"_id": 2, "{field}": "Jon", "_similarity": 0.87}},
+  {{"_id": 3, "{field}": "Johnny", "_similarity": 0.82}}
+]
+```
+
+## Algorithms Comparison
+
+| Algorithm | Best For | Speed | Accuracy |
+|-----------|----------|-------|----------|
+| `jaro_winkler` | Names, short strings | ⚡ Fast | Good for prefix similarity |
+| `levenshtein` | General text | Medium | Most accurate edit distance |
+| `damerau_levenshtein` | Typos with transpositions | Medium | Handles "teh"→"the" |
+
+### Algorithm Details
+
+**Jaro-Winkler** (default)
+- Gives higher scores to strings with matching prefixes
+- "John" vs "Johnny" = 0.93 (high due to prefix match)
+- "John" vs "nhoj" = 0.53 (low, no prefix match)
+- Best for: First names, last names, short identifiers
+
+**Levenshtein**
+- Counts minimum edits (insert/delete/replace) needed
+- "kitten" vs "sitting" = 0.57 (3 edits / 7 chars)
+- "cat" vs "car" = 0.67 (1 edit / 3 chars)
+- Best for: Spell checking, general string similarity
+
+**Damerau-Levenshtein**
+- Like Levenshtein but transpositions count as 1 edit
+- "teh" vs "the" = 0.67 (Levenshtein) vs 0.67 (Damerau)
+- "ab" vs "ba" = 0.0 (Levenshtein: 2 edits) vs 0.5 (Damerau: 1 transposition)
+- Best for: User input with common typos
+
+## Threshold Guidelines
+
+| Threshold | Match Strictness | Example Use Case |
+|-----------|------------------|------------------|
+| 0.9+ | Very strict | Deduplication, exact-ish matches |
+| 0.8 | Default | General name search |
+| 0.7 | Lenient | Typo-tolerant search |
+| 0.6 | Very lenient | Broad similarity matching |
+| <0.5 | Not recommended | Too many false positives |
+
+## Practical Examples
+
+### 1. Name Search with Typo Tolerance
+```json
+// Find "Michael" even if typed as "Micheal" or "Michel"
+{{
+  "collection": "contacts",
+  "query": {{"firstName": {{"$fuzzy": {{"value": "michael", "threshold": 0.75}}}}}}
+}}
+```
+
+### 2. Product Search
+```json
+// Create index first
+{{"collection": "products", "field": "title", "algorithm": "levenshtein", "threshold": 0.7}}
+
+// Search
+{{"collection": "products", "field": "title", "query": "iphone", "limit": 20}}
+```
+
+### 3. Email Domain Deduplication
+```json
+// Strict matching to find near-duplicates
+{{
+  "collection": "users",
+  "query": {{"email": {{"$fuzzy": {{"value": "gmail.com", "threshold": 0.9}}}}}}
+}}
+```
+
+### 4. Combining with Other Operators
+```json
+{{
+  "collection": "users",
+  "query": {{
+    "$and": [
+      {{"city": "NYC"}},
+      {{"{field}": {{"$fuzzy": "smith"}}}}
+    ]
+  }}
+}}
+```
+
+## Performance Considerations
+
+| Approach | Use When | Performance |
+|----------|----------|-------------|
+| `$fuzzy` operator | Ad-hoc queries, small collections | O(n) scan |
+| `fuzzy_search` tool | Repeated searches, large collections | O(1) index lookup |
+
+**Index tradeoffs:**
+- ✅ Fast searches with similarity scores
+- ✅ Results pre-sorted by relevance
+- ❌ Index build time on insert/update
+- ❌ Additional storage space
+
+## Best Practices
+
+1. **Choose algorithm by use case**: Jaro-Winkler for names, Levenshtein for text
+2. **Start with threshold 0.8**: Adjust based on false positive/negative rate
+3. **Use indexes for production**: `$fuzzy` is fine for development
+4. **Combine with exact matches**: Use `$and` to filter first, then fuzzy
+5. **Limit results**: Fuzzy matches can return many documents
+
+## Limitations
+
+- Case-sensitive by default (normalize before storing)
+- Works only on string fields
+- No stemming or language-aware matching
+- Index must match search algorithm for best results"#, field = field)
                 }
             }
         ]
