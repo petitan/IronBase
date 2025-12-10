@@ -27,7 +27,9 @@ jobs:
         run: cargo build --release -p ironbase-backup
 
       - name: Build TUI (Windows)
-        run: cargo build --release -p ironbase-tui
+        run: |
+          cd ironbase-tui
+          cargo build --release
 
       - name: Upload Windows MCP artifact
         uses: actions/upload-artifact@v4
@@ -45,7 +47,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-tui-windows
-          path: target/release/ironbase-tui.exe
+          path: ironbase-tui/target/release/ironbase-tui.exe
 
   build-linux:
     name: Build Linux
@@ -65,7 +67,9 @@ jobs:
         run: cargo build --release -p ironbase-backup
 
       - name: Build TUI (Linux)
-        run: cargo build --release -p ironbase-tui
+        run: |
+          cd ironbase-tui
+          cargo build --release
 
       - name: Upload Linux MCP artifact
         uses: actions/upload-artifact@v4
@@ -83,7 +87,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-tui-linux
-          path: target/release/ironbase-tui
+          path: ironbase-tui/target/release/ironbase-tui
 
   build-macos:
     name: Build macOS
@@ -103,7 +107,9 @@ jobs:
         run: cargo build --release -p ironbase-backup
 
       - name: Build TUI (macOS)
-        run: cargo build --release -p ironbase-tui
+        run: |
+          cd ironbase-tui
+          cargo build --release
 
       - name: Upload macOS MCP artifact
         uses: actions/upload-artifact@v4
@@ -121,7 +127,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-tui-macos
-          path: target/release/ironbase-tui
+          path: ironbase-tui/target/release/ironbase-tui
 
   create-release:
     name: Create Release
