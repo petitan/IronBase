@@ -1149,16 +1149,33 @@ fn get_transaction_guide_prompt() -> Value {
                 "role": "user",
                 "content": {
                     "type": "text",
-                    "text": r#"# IronBase Transaction Guide (ACD)
+                    "text": r#"# IronBase Transaction Guide (ACID with Read Committed Isolation)
 
-IronBase supports ACD (Atomicity, Consistency, Durability) transactions with Write-Ahead Logging.
+IronBase supports ACID transactions with Read Committed isolation level and Write-Ahead Logging.
+
+## Transaction Properties (ACID)
+
+| Property | Description |
+|----------|-------------|
+| **Atomicity** | All operations succeed or all fail |
+| **Consistency** | Database remains valid after transaction |
+| **Isolation** | Read Committed - no dirty reads, single writer |
+| **Durability** | Committed changes survive crashes (WAL) |
+
+## Isolation Behavior (SQLite-style)
+
+- **Only ONE write transaction can be active at a time**
+- Second write transaction will **wait** (block) up to 5 seconds for the first to complete
+- If timeout expires: "Timeout waiting for write lock after 5s"
+- Read operations always see committed data only (no dirty reads)
+- Auto-commit operations (insert_one, update_one, etc.) are blocked while a write transaction is active
 
 ## Transaction Lifecycle
 
 ```
 begin_transaction
     ↓
-[operations: insert, update, delete]
+[_tx operations: insert_one_tx, update_one_tx, delete_one_tx]
     ↓
 commit_transaction  OR  rollback_transaction
 ```
@@ -1170,48 +1187,64 @@ commit_transaction  OR  rollback_transaction
 // begin_transaction tool (no parameters)
 {}
 ```
-Returns: `{"transaction_id": "uuid-here"}`
+Returns: `{"transaction_id": "123"}`
 
-### 2. Perform Operations
-All operations within transaction are isolated:
+### 2. Perform Operations (use _tx variants!)
+All _tx operations are buffered until commit:
 ```json
-// insert_one
-{"collection": "accounts", "document": {"id": 1, "balance": 1000}}
+// insert_one_tx
+{"transaction_id": "123", "collection": "accounts", "document": {"id": 1, "balance": 1000}}
 
-// update_one
-{"collection": "accounts", "filter": {"id": 1}, "update": {"$inc": {"balance": -100}}}
+// update_one_tx
+{"transaction_id": "123", "collection": "accounts", "filter": {"id": 1}, "update": {"$inc": {"balance": -100}}}
 
-// update_one
-{"collection": "accounts", "filter": {"id": 2}, "update": {"$inc": {"balance": 100}}}
+// delete_one_tx
+{"transaction_id": "123", "collection": "accounts", "filter": {"id": 3}}
 ```
 
 ### 3. Commit or Rollback
 ```json
 // commit_transaction - make changes permanent
-{}
+{"transaction_id": "123"}
 
 // rollback_transaction - discard all changes
-{}
+{"transaction_id": "123"}
 ```
+
+## Available Transaction Tools
+
+| Tool | Description |
+|------|-------------|
+| `begin_transaction` | Start new transaction, get transaction_id |
+| `commit_transaction` | Commit and make changes permanent |
+| `rollback_transaction` | Discard all buffered changes |
+| `insert_one_tx` | Insert document within transaction |
+| `update_one_tx` | Update document within transaction |
+| `delete_one_tx` | Delete document within transaction |
+| `transaction_status` | Check if write transaction is active |
 
 ## Example: Money Transfer
 
 ```
-1. begin_transaction
-2. Check source account balance
-3. Deduct from source: update_one({id: 1}, {$inc: {balance: -100}})
-4. Add to destination: update_one({id: 2}, {$inc: {balance: 100}})
-5. If all OK: commit_transaction
-   If error: rollback_transaction
+1. begin_transaction → {"transaction_id": "123"}
+2. Check source balance (use find - reads see committed data)
+3. update_one_tx({id: 1}, {$inc: {balance: -100}}, tx_id: "123")
+4. update_one_tx({id: 2}, {$inc: {balance: 100}}, tx_id: "123")
+5. If all OK: commit_transaction(tx_id: "123")
+   If error: rollback_transaction(tx_id: "123")
 ```
 
-## Transaction Properties
+## Read Committed Isolation Example
 
-| Property | Description |
-|----------|-------------|
-| **Atomicity** | All operations succeed or all fail |
-| **Consistency** | Database remains valid after transaction |
-| **Durability** | Committed changes survive crashes (WAL) |
+```
+Time  | Transaction 1          | Transaction 2
+------|------------------------|------------------
+T1    | begin_transaction      |
+T2    | insert_one_tx(Alice)   |
+T3    |                        | find("users") → [] (Alice not visible!)
+T4    | commit_transaction     |
+T5    |                        | find("users") → [Alice] (now visible)
+```
 
 ## Write-Ahead Log (WAL)
 
@@ -1219,38 +1252,33 @@ All operations within transaction are isolated:
 - CRC32 checksums for integrity
 - Automatic crash recovery on restart
 
-## Durability Modes
-
-| Mode | Description | Use Case |
-|------|-------------|----------|
-| Safe | Sync after each write | Critical data |
-| Batch | Sync periodically | Better performance |
-| Unsafe | No sync | Testing only |
-
 ## Best Practices
 
-1. **Keep transactions short**: Long transactions block other operations
+1. **Keep transactions short**: Long transactions block ALL other writes
 2. **Handle errors**: Always rollback on failure
-3. **Don't nest**: One transaction at a time per connection
-4. **Use for related changes**: Group logically related operations
+3. **Use _tx methods**: insert_one_tx, update_one_tx, delete_one_tx within transactions
+4. **Check status**: Use transaction_status to see if writes are blocked
+5. **Don't mix**: Don't use regular insert_one/update_one during a transaction
 
 ## Error Handling
 
 ```
-begin_transaction
+tx = begin_transaction
 try:
-    // operations
-    commit_transaction
+    insert_one_tx(...)
+    update_one_tx(...)
+    commit_transaction(tx)
 except:
-    rollback_transaction
+    rollback_transaction(tx)
 ```
 
 ## Limitations
 
-- Single-database transactions only
-- No distributed transactions
-- One active transaction per connection
-- Long transactions may impact performance"#
+- Only ONE write transaction at a time (SQLite-style)
+- Second write transaction waits up to 5 seconds (blocking)
+- Regular CRUD operations blocked during active write transaction
+- No nested transactions
+- No distributed transactions"#
                 }
             }
         ]

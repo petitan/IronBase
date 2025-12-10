@@ -463,4 +463,72 @@ impl IronBaseAdapter {
         db.force_drop_collection(name)?;
         Ok(())
     }
+
+    // ============================================================
+    // Transaction Management (Read Committed Isolation)
+    // ============================================================
+
+    /// Begin a new transaction
+    /// Returns the transaction ID as a string
+    pub fn begin_transaction(&self) -> u64 {
+        let db = self.db.read();
+        db.begin_transaction()
+    }
+
+    /// Commit a transaction
+    pub fn commit_transaction(&self, tx_id: u64) -> Result<()> {
+        let db = self.db.read();
+        db.commit_transaction(tx_id)?;
+        Ok(())
+    }
+
+    /// Rollback a transaction
+    pub fn rollback_transaction(&self, tx_id: u64) -> Result<()> {
+        let db = self.db.read();
+        db.rollback_transaction(tx_id)?;
+        Ok(())
+    }
+
+    /// Insert a document within a transaction
+    pub fn insert_one_tx(&self, collection: &str, document: Value, tx_id: u64) -> Result<String> {
+        let db = self.db.read();
+        let fields = Self::value_to_hashmap(document);
+        let id = db.insert_one_tx(collection, fields, tx_id)?;
+        Ok(Self::doc_id_to_string(&id))
+    }
+
+    /// Update a document within a transaction
+    pub fn update_one_tx(
+        &self,
+        collection: &str,
+        filter: Value,
+        update: Value,
+        tx_id: u64,
+    ) -> Result<UpdateResult> {
+        let db = self.db.read();
+        let (matched, modified) = db.update_one_tx(collection, &filter, update, tx_id)?;
+        Ok(UpdateResult {
+            matched_count: matched,
+            modified_count: modified,
+        })
+    }
+
+    /// Delete a document within a transaction
+    pub fn delete_one_tx(&self, collection: &str, filter: Value, tx_id: u64) -> Result<u64> {
+        let db = self.db.read();
+        let count = db.delete_one_tx(collection, &filter, tx_id)?;
+        Ok(count)
+    }
+
+    /// Check if there's an active write transaction
+    pub fn has_active_write_transaction(&self) -> bool {
+        let db = self.db.read();
+        db.has_active_write_transaction()
+    }
+
+    /// Get the current write lock holder (if any)
+    pub fn get_write_lock_holder(&self) -> Option<u64> {
+        let db = self.db.read();
+        db.get_write_lock_holder()
+    }
 }

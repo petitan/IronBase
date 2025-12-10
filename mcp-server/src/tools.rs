@@ -905,6 +905,130 @@ pub fn get_tools_list() -> Value {
                     "required": ["name"]
                 }
             },
+            // Transaction Management (Read Committed Isolation)
+            {
+                "name": "begin_transaction",
+                "title": "Begin Transaction",
+                "description": "Start a new transaction with Read Committed isolation. Only one write transaction can be active at a time. Returns transaction_id to use with other _tx operations.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "commit_transaction",
+                "title": "Commit Transaction",
+                "description": "Commit an active transaction, making all changes permanent. Releases the write lock.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "transaction_id": {
+                            "type": "string",
+                            "description": "Transaction ID returned by begin_transaction"
+                        }
+                    },
+                    "required": ["transaction_id"]
+                }
+            },
+            {
+                "name": "rollback_transaction",
+                "title": "Rollback Transaction",
+                "description": "Rollback an active transaction, discarding all buffered changes. Releases the write lock.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "transaction_id": {
+                            "type": "string",
+                            "description": "Transaction ID returned by begin_transaction"
+                        }
+                    },
+                    "required": ["transaction_id"]
+                }
+            },
+            {
+                "name": "insert_one_tx",
+                "title": "Insert Document (Transaction)",
+                "description": "Insert a document within a transaction. Changes are buffered until commit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "transaction_id": {
+                            "type": "string",
+                            "description": "Transaction ID returned by begin_transaction"
+                        },
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "document": {
+                            "type": "object",
+                            "description": "Document to insert"
+                        }
+                    },
+                    "required": ["transaction_id", "collection", "document"]
+                }
+            },
+            {
+                "name": "update_one_tx",
+                "title": "Update Document (Transaction)",
+                "description": "Update a document within a transaction. Changes are buffered until commit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "transaction_id": {
+                            "type": "string",
+                            "description": "Transaction ID returned by begin_transaction"
+                        },
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "filter": {
+                            "type": "object",
+                            "description": "Query filter to match the document"
+                        },
+                        "update": {
+                            "type": "object",
+                            "description": "Update operators (e.g. {\"$set\": {\"field\": \"value\"}})"
+                        }
+                    },
+                    "required": ["transaction_id", "collection", "filter", "update"]
+                }
+            },
+            {
+                "name": "delete_one_tx",
+                "title": "Delete Document (Transaction)",
+                "description": "Delete a document within a transaction. Changes are buffered until commit.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "transaction_id": {
+                            "type": "string",
+                            "description": "Transaction ID returned by begin_transaction"
+                        },
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "filter": {
+                            "type": "object",
+                            "description": "Query filter to match the document"
+                        }
+                    },
+                    "required": ["transaction_id", "collection", "filter"]
+                }
+            },
+            {
+                "name": "transaction_status",
+                "title": "Transaction Status",
+                "description": "Check if there's an active write transaction and get its ID",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
             // Admin Operations (require IRONBASE_ADMIN_KEY)
             {
                 "name": "admin_list_all_collections",
@@ -1446,6 +1570,66 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             Ok(json!({"success": true, "dropped": name}))
         }
 
+        // Transaction Management
+        "begin_transaction" => {
+            let tx_id = adapter.begin_transaction();
+            Ok(json!({
+                "transaction_id": tx_id.to_string(),
+                "message": "Transaction started. Use _tx operations with this ID. Only one write transaction can be active at a time."
+            }))
+        }
+        "commit_transaction" => {
+            let tx_id = parse_transaction_id(&params)?;
+            adapter.commit_transaction(tx_id)?;
+            Ok(json!({
+                "success": true,
+                "message": "Transaction committed successfully"
+            }))
+        }
+        "rollback_transaction" => {
+            let tx_id = parse_transaction_id(&params)?;
+            adapter.rollback_transaction(tx_id)?;
+            Ok(json!({
+                "success": true,
+                "message": "Transaction rolled back successfully"
+            }))
+        }
+        "insert_one_tx" => {
+            let tx_id = parse_transaction_id(&params)?;
+            let collection = get_string(&params, "collection")?;
+            validate_collection_name(&collection)?;
+            let document = get_object(&params, "document")?;
+            let id = adapter.insert_one_tx(&collection, document, tx_id)?;
+            Ok(json!({"inserted_id": id}))
+        }
+        "update_one_tx" => {
+            let tx_id = parse_transaction_id(&params)?;
+            let collection = get_string(&params, "collection")?;
+            validate_collection_name(&collection)?;
+            let filter = get_object(&params, "filter")?;
+            let update = get_object(&params, "update")?;
+            let result = adapter.update_one_tx(&collection, filter, update, tx_id)?;
+            Ok(json!({
+                "matched_count": result.matched_count,
+                "modified_count": result.modified_count
+            }))
+        }
+        "delete_one_tx" => {
+            let tx_id = parse_transaction_id(&params)?;
+            let collection = get_string(&params, "collection")?;
+            validate_collection_name(&collection)?;
+            let filter = get_object(&params, "filter")?;
+            let count = adapter.delete_one_tx(&collection, filter, tx_id)?;
+            Ok(json!({"deleted_count": count}))
+        }
+        "transaction_status" => {
+            let holder = adapter.get_write_lock_holder();
+            Ok(json!({
+                "has_active_write_transaction": holder.is_some(),
+                "write_lock_holder": holder.map(|id| id.to_string())
+            }))
+        }
+
         _ => Err(McpError::InvalidParams(format!("Unknown tool: {}", name))),
     }
 }
@@ -1484,4 +1668,20 @@ fn get_array(params: &Value, key: &str) -> Result<Vec<Value>> {
                 key
             ))
         })
+}
+
+/// Parse transaction_id from params (can be string or number)
+fn parse_transaction_id(params: &Value) -> Result<u64> {
+    let tx_param = params.get("transaction_id")
+        .ok_or_else(|| McpError::InvalidParams("transaction_id parameter is required".into()))?;
+
+    // Accept both string and number formats
+    if let Some(s) = tx_param.as_str() {
+        s.parse::<u64>()
+            .map_err(|_| McpError::InvalidParams(format!("Invalid transaction_id: {}", s)))
+    } else if let Some(n) = tx_param.as_u64() {
+        Ok(n)
+    } else {
+        Err(McpError::InvalidParams("transaction_id must be a string or number".into()))
+    }
 }

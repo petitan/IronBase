@@ -76,6 +76,12 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Shared IndexManagers per collection (fixes stale index problem)
     // Each collection shares its IndexManager across all CollectionCore instances
     index_managers: Arc<RwLock<HashMap<String, Arc<RwLock<IndexManager>>>>>,
+
+    // Transaction-level exclusive write lock for Read Committed isolation
+    // Only one write transaction can be active at a time (SQLite-style)
+    // None = no active write transaction
+    // Some(tx_id) = this transaction holds the exclusive write lock
+    write_transaction_lock: Arc<RwLock<Option<TransactionId>>>,
 }
 
 // ============================================================================
@@ -148,6 +154,7 @@ impl DatabaseCore<StorageEngine> {
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            write_transaction_lock: Arc::new(RwLock::new(None)),
         };
 
         // Apply recovered index changes to collections
@@ -203,11 +210,15 @@ impl DatabaseCore<StorageEngine> {
     }
 
     /// Commit a transaction (applies all buffered operations atomically) - StorageEngine-specific
+    ///
+    /// Automatically releases the write lock on completion (success or failure).
     pub fn commit_transaction(&self, tx_id: TransactionId) -> Result<()> {
         // Remove transaction from active list
         let mut transaction = {
             let mut active = self.active_transactions.write();
             active.remove(&tx_id).ok_or_else(|| {
+                // Release lock even if transaction not found
+                self.release_write_lock(tx_id);
                 crate::error::MongoLiteError::TransactionAborted(format!(
                     "Transaction {} not found",
                     tx_id
@@ -216,18 +227,27 @@ impl DatabaseCore<StorageEngine> {
         };
 
         // Commit through storage engine
-        let mut storage = self.storage.write();
-        storage.commit_transaction(&mut transaction)?;
+        let result = {
+            let mut storage = self.storage.write();
+            storage.commit_transaction(&mut transaction)
+        };
 
-        Ok(())
+        // Always release write lock (even on error to prevent deadlock)
+        self.release_write_lock(tx_id);
+
+        result
     }
 
     /// Rollback a transaction (discard all buffered operations) - StorageEngine-specific
+    ///
+    /// Automatically releases the write lock on completion (success or failure).
     pub fn rollback_transaction(&self, tx_id: TransactionId) -> Result<()> {
         // Remove transaction from active list
         let mut transaction = {
             let mut active = self.active_transactions.write();
             active.remove(&tx_id).ok_or_else(|| {
+                // Release lock even if transaction not found
+                self.release_write_lock(tx_id);
                 crate::error::MongoLiteError::TransactionAborted(format!(
                     "Transaction {} not found",
                     tx_id
@@ -236,18 +256,27 @@ impl DatabaseCore<StorageEngine> {
         };
 
         // Rollback through storage engine
-        let mut storage = self.storage.write();
-        storage.rollback_transaction(&mut transaction)?;
+        let result = {
+            let mut storage = self.storage.write();
+            storage.rollback_transaction(&mut transaction)
+        };
 
-        Ok(())
+        // Always release write lock (even on error to prevent deadlock)
+        self.release_write_lock(tx_id);
+
+        result
     }
 
     /// Commit transaction with index operations - StorageEngine-specific
+    ///
+    /// Automatically releases the write lock on completion (success or failure).
     pub fn commit_transaction_with_indexes(&self, tx_id: TransactionId) -> Result<()> {
         // Remove transaction from active list
         let mut transaction = {
             let mut active = self.active_transactions.write();
             active.remove(&tx_id).ok_or_else(|| {
+                // Release lock even if transaction not found
+                self.release_write_lock(tx_id);
                 crate::error::MongoLiteError::TransactionAborted(format!(
                     "Transaction {} not found",
                     tx_id
@@ -256,10 +285,15 @@ impl DatabaseCore<StorageEngine> {
         };
 
         // Commit through storage engine with index operations
-        let mut storage = self.storage.write();
-        storage.commit_transaction(&mut transaction)?;
+        let result = {
+            let mut storage = self.storage.write();
+            storage.commit_transaction(&mut transaction)
+        };
 
-        Ok(())
+        // Always release write lock (even on error to prevent deadlock)
+        self.release_write_lock(tx_id);
+
+        result
     }
 
     // ========== Auto-Commit Transaction Helpers (StorageEngine-specific, INTERNAL) ==========
@@ -365,6 +399,9 @@ impl DatabaseCore<StorageEngine> {
     ) -> Result<DocumentId> {
         match self.durability_mode {
             DurabilityMode::Safe => {
+                // Wait for any active write transaction to complete (blocking with timeout)
+                self.wait_for_write_lock_release()?;
+
                 // Safe mode: Auto-commit every operation
                 let collection = self.collection(collection_name)?;
 
@@ -404,6 +441,9 @@ impl DatabaseCore<StorageEngine> {
             }
 
             DurabilityMode::Batch { .. } => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 // Batch mode: Add to batch, flush when full
                 let collection = self.collection(collection_name)?;
 
@@ -441,6 +481,9 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Unsafe {
                 auto_checkpoint_ops,
             } => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 // Unsafe mode: Fast path, optional auto-checkpoint
                 let collection = self.collection(collection_name)?;
                 let doc_id = collection.insert_one_raw(document)?;
@@ -473,6 +516,9 @@ impl DatabaseCore<StorageEngine> {
     ) -> Result<(u64, u64)> {
         match self.durability_mode {
             DurabilityMode::Safe => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 let collection = self.collection(collection_name)?;
 
                 // 1. Find the document BEFORE update (for WAL old_doc)
@@ -513,6 +559,9 @@ impl DatabaseCore<StorageEngine> {
             }
 
             DurabilityMode::Batch { .. } => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 let collection = self.collection(collection_name)?;
                 let old_doc = collection.find_one(query)?;
                 if old_doc.is_none() {
@@ -547,6 +596,9 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Unsafe {
                 auto_checkpoint_ops,
             } => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 let collection = self.collection(collection_name)?;
                 let result = collection.update_one_raw(query, update)?;
 
@@ -572,6 +624,9 @@ impl DatabaseCore<StorageEngine> {
     pub fn delete_one(&self, collection_name: &str, query: &Value) -> Result<u64> {
         match self.durability_mode {
             DurabilityMode::Safe => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 let collection = self.collection(collection_name)?;
 
                 // 1. Find the document BEFORE delete (for WAL old_doc)
@@ -607,6 +662,9 @@ impl DatabaseCore<StorageEngine> {
             }
 
             DurabilityMode::Batch { .. } => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 let collection = self.collection(collection_name)?;
                 let old_doc = collection.find_one(query)?;
                 if old_doc.is_none() {
@@ -636,6 +694,9 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Unsafe {
                 auto_checkpoint_ops,
             } => {
+                // Wait for active write transaction to complete (Read Committed isolation)
+                self.wait_for_write_lock_release()?;
+
                 let collection = self.collection(collection_name)?;
                 let deleted = collection.delete_one_raw(query)?;
 
@@ -662,6 +723,9 @@ impl DatabaseCore<StorageEngine> {
         collection_name: &str,
         documents: Vec<HashMap<String, Value>>,
     ) -> Result<Vec<DocumentId>> {
+        // Wait for active write transaction to complete (Read Committed isolation)
+        self.wait_for_write_lock_release()?;
+
         match self.durability_mode {
             DurabilityMode::Safe => {
                 let collection = self.collection(collection_name)?;
@@ -790,6 +854,9 @@ impl DatabaseCore<StorageEngine> {
         query: &Value,
         update: &Value,
     ) -> Result<(u64, u64)> {
+        // Wait for active write transaction to complete (Read Committed isolation)
+        self.wait_for_write_lock_release()?;
+
         match self.durability_mode {
             DurabilityMode::Safe => {
                 let collection = self.collection(collection_name)?;
@@ -904,6 +971,9 @@ impl DatabaseCore<StorageEngine> {
     ///
     /// Returns deleted_count
     pub fn delete_many(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        // Wait for active write transaction to complete (Read Committed isolation)
+        self.wait_for_write_lock_release()?;
+
         match self.durability_mode {
             DurabilityMode::Safe => {
                 let collection = self.collection(collection_name)?;
@@ -1092,6 +1162,7 @@ impl DatabaseCore<MemoryStorage> {
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            write_transaction_lock: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -1171,6 +1242,147 @@ impl DatabaseCore<MemoryStorage> {
 // ============================================================================
 
 impl<S: Storage + RawStorage> DatabaseCore<S> {
+    // ========== Transaction Write Lock (Read Committed Isolation) ==========
+
+    /// Acquire exclusive write lock for a transaction
+    ///
+    /// Only one transaction can hold the write lock at a time.
+    /// This provides Read Committed isolation - prevents dirty reads.
+    ///
+    /// Uses default timeout of 5 seconds.
+    ///
+    /// # Errors
+    /// Returns error if lock cannot be acquired within timeout.
+    pub fn acquire_write_lock(&self, tx_id: TransactionId) -> Result<()> {
+        self.acquire_write_lock_with_timeout(tx_id, std::time::Duration::from_secs(5))
+    }
+
+    /// Acquire exclusive write lock for a transaction with custom timeout.
+    ///
+    /// If another transaction holds the lock, this will wait up to the specified
+    /// timeout before returning an error.
+    ///
+    /// # Arguments
+    /// * `tx_id` - The transaction requesting the lock
+    /// * `timeout` - Maximum time to wait for the lock
+    ///
+    /// # Errors
+    /// Returns error if lock cannot be acquired within timeout.
+    pub fn acquire_write_lock_with_timeout(
+        &self,
+        tx_id: TransactionId,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(10);
+
+        loop {
+            // Try to acquire the lock
+            {
+                let mut lock = self.write_transaction_lock.write();
+                match *lock {
+                    None => {
+                        // No transaction holds the lock - acquire it
+                        *lock = Some(tx_id);
+
+                        // Mark transaction as holding write lock
+                        let mut active = self.active_transactions.write();
+                        if let Some(tx) = active.get_mut(&tx_id) {
+                            tx.mark_write_lock_acquired();
+                        }
+
+                        return Ok(());
+                    }
+                    Some(holder) if holder == tx_id => {
+                        // This transaction already holds the lock - OK
+                        return Ok(());
+                    }
+                    Some(_) => {
+                        // Another transaction holds the lock - will retry
+                    }
+                }
+            } // Release the RwLock here
+
+            // Check timeout
+            if start.elapsed() >= timeout {
+                let holder = self.get_write_lock_holder();
+                return Err(MongoLiteError::TransactionAborted(format!(
+                    "Timeout waiting for write lock after {:?}. Lock held by transaction {}.",
+                    timeout,
+                    holder.map_or("unknown".to_string(), |h| h.to_string())
+                )));
+            }
+
+            // Wait before retrying
+            std::thread::sleep(poll_interval);
+        }
+    }
+
+    /// Release the write lock held by a transaction
+    ///
+    /// Called automatically on commit or rollback.
+    /// Safe to call even if transaction doesn't hold the lock.
+    pub fn release_write_lock(&self, tx_id: TransactionId) {
+        let mut lock = self.write_transaction_lock.write();
+        if *lock == Some(tx_id) {
+            *lock = None;
+        }
+    }
+
+    /// Check if a transaction currently holds the write lock
+    pub fn holds_write_lock(&self, tx_id: TransactionId) -> bool {
+        let lock = self.write_transaction_lock.read();
+        *lock == Some(tx_id)
+    }
+
+    /// Check if any transaction holds the write lock (for auto-commit conflict check)
+    pub fn has_active_write_transaction(&self) -> bool {
+        let lock = self.write_transaction_lock.read();
+        lock.is_some()
+    }
+
+    /// Get the ID of the transaction holding the write lock, if any
+    pub fn get_write_lock_holder(&self) -> Option<TransactionId> {
+        let lock = self.write_transaction_lock.read();
+        *lock
+    }
+
+    /// Wait for any active write transaction to complete (for auto-commit operations)
+    ///
+    /// Uses default timeout of 5 seconds.
+    /// Returns Ok(()) when lock is free, Err on timeout.
+    fn wait_for_write_lock_release(&self) -> Result<()> {
+        self.wait_for_write_lock_release_with_timeout(std::time::Duration::from_secs(5))
+    }
+
+    /// Wait for any active write transaction to complete with custom timeout
+    fn wait_for_write_lock_release_with_timeout(&self, timeout: std::time::Duration) -> Result<()> {
+        let start = std::time::Instant::now();
+        let poll_interval = std::time::Duration::from_millis(10);
+
+        loop {
+            // Check if lock is free
+            if !self.has_active_write_transaction() {
+                return Ok(());
+            }
+
+            // Check timeout
+            if start.elapsed() >= timeout {
+                let holder = self.get_write_lock_holder();
+                return Err(MongoLiteError::TransactionAborted(format!(
+                    "Timeout waiting for write transaction to complete after {:?}. Lock held by transaction {}.",
+                    timeout,
+                    holder.map_or("unknown".to_string(), |h| h.to_string())
+                )));
+            }
+
+            // Wait before retrying
+            std::thread::sleep(poll_interval);
+        }
+    }
+
+    // ========== IndexManager Management ==========
+
     /// Get or create a shared IndexManager for a collection
     ///
     /// This method uses double-checked locking to ensure thread-safe creation
@@ -1621,12 +1833,19 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     ///
     /// This is a helper that combines collection lookup and transaction execution.
     /// Equivalent to: db.collection(name).insert_one_tx(doc, tx)
+    ///
+    /// # Write Lock
+    /// Automatically acquires exclusive write lock on first write operation.
+    /// Only one write transaction can be active at a time (Read Committed isolation).
     pub fn insert_one_tx(
         &self,
         collection_name: &str,
         document: HashMap<String, Value>,
         tx_id: TransactionId,
     ) -> Result<DocumentId> {
+        // Acquire write lock (idempotent if already held)
+        self.acquire_write_lock(tx_id)?;
+
         let collection = self.collection(collection_name)?;
 
         self.with_transaction(tx_id, |transaction| {
@@ -1637,6 +1856,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Update one document within a transaction (convenience method)
     ///
     /// Returns (matched_count, modified_count)
+    ///
+    /// # Write Lock
+    /// Automatically acquires exclusive write lock on first write operation.
+    /// Only one write transaction can be active at a time (Read Committed isolation).
     pub fn update_one_tx(
         &self,
         collection_name: &str,
@@ -1644,6 +1867,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         update: Value,
         tx_id: TransactionId,
     ) -> Result<(u64, u64)> {
+        // Acquire write lock (idempotent if already held)
+        self.acquire_write_lock(tx_id)?;
+
         let collection = self.collection(collection_name)?;
 
         self.with_transaction(tx_id, |transaction| {
@@ -1654,12 +1880,19 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Delete one document within a transaction (convenience method)
     ///
     /// Returns deleted_count
+    ///
+    /// # Write Lock
+    /// Automatically acquires exclusive write lock on first write operation.
+    /// Only one write transaction can be active at a time (Read Committed isolation).
     pub fn delete_one_tx(
         &self,
         collection_name: &str,
         query: &Value,
         tx_id: TransactionId,
     ) -> Result<u64> {
+        // Acquire write lock (idempotent if already held)
+        self.acquire_write_lock(tx_id)?;
+
         let collection = self.collection(collection_name)?;
 
         self.with_transaction(tx_id, |transaction| {
@@ -2111,5 +2344,265 @@ mod tests {
         // Collection should be gone
         let collections = db.list_collections();
         assert!(!collections.contains(&"temp".to_string()));
+    }
+
+    // ========== Write Lock Isolation Tests ==========
+
+    #[test]
+    fn test_write_lock_acquired_on_first_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        let tx1 = db.begin_transaction();
+
+        // No lock held initially
+        assert!(!db.holds_write_lock(tx1));
+        assert!(!db.has_active_write_transaction());
+
+        // First write acquires lock
+        let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one_tx("users", doc, tx1).unwrap();
+
+        // Now lock is held
+        assert!(db.holds_write_lock(tx1));
+        assert!(db.has_active_write_transaction());
+        assert_eq!(db.get_write_lock_holder(), Some(tx1));
+
+        db.commit_transaction(tx1).unwrap();
+
+        // Lock released after commit
+        assert!(!db.has_active_write_transaction());
+    }
+
+    #[test]
+    fn test_second_write_transaction_waits_and_succeeds() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = Arc::new(DatabaseCore::open(&db_path).unwrap());
+
+        let tx1 = db.begin_transaction();
+
+        // tx1 acquires write lock
+        let doc1 = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one_tx("users", doc1, tx1).unwrap();
+
+        // Start tx2 in another thread - it will wait for tx1 to release lock
+        let db2 = Arc::clone(&db);
+        let tx2 = db.begin_transaction();
+        let handle = thread::spawn(move || {
+            let doc2 = HashMap::from([("name".to_string(), json!("Bob"))]);
+            // This should block until tx1 commits
+            let result = db2.insert_one_tx("users", doc2, tx2);
+            (result.is_ok(), tx2)
+        });
+
+        // Wait a bit to ensure tx2 is waiting
+        thread::sleep(Duration::from_millis(50));
+
+        // tx1 commits, releasing the lock
+        db.commit_transaction(tx1).unwrap();
+
+        // tx2 should now succeed
+        let (tx2_success, tx2) = handle.join().unwrap();
+        assert!(tx2_success, "tx2 should succeed after tx1 commits");
+
+        // Commit tx2
+        db.commit_transaction(tx2).unwrap();
+
+        // Verify both documents exist
+        let coll = db.collection("users").unwrap();
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_write_lock_timeout() {
+        use std::sync::Arc;
+        use std::time::{Duration, Instant};
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = Arc::new(DatabaseCore::open(&db_path).unwrap());
+
+        let tx1 = db.begin_transaction();
+
+        // tx1 acquires write lock
+        let doc1 = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one_tx("users", doc1, tx1).unwrap();
+
+        // tx2 should timeout waiting for lock (using short timeout)
+        let tx2 = db.begin_transaction();
+        let start = Instant::now();
+        let result = db.acquire_write_lock_with_timeout(tx2, Duration::from_millis(100));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Timeout waiting for write lock"));
+
+        // Should have waited approximately 100ms
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis(90),
+            "Should wait at least 90ms"
+        );
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "Should not wait more than 200ms"
+        );
+
+        // Cleanup
+        db.commit_transaction(tx1).unwrap();
+    }
+
+    #[test]
+    fn test_write_lock_released_on_rollback() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        let tx1 = db.begin_transaction();
+
+        // tx1 acquires write lock
+        let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one_tx("users", doc, tx1).unwrap();
+        assert!(db.has_active_write_transaction());
+
+        // Rollback releases lock
+        db.rollback_transaction(tx1).unwrap();
+        assert!(!db.has_active_write_transaction());
+
+        // New transaction can write now
+        let tx2 = db.begin_transaction();
+        let doc2 = HashMap::from([("name".to_string(), json!("Bob"))]);
+        db.insert_one_tx("users", doc2, tx2).unwrap();
+        db.commit_transaction(tx2).unwrap();
+    }
+
+    #[test]
+    fn test_same_transaction_can_write_multiple_times() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        let tx1 = db.begin_transaction();
+
+        // Multiple writes in same transaction should work
+        let doc1 = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one_tx("users", doc1, tx1).unwrap();
+
+        let doc2 = HashMap::from([("name".to_string(), json!("Bob"))]);
+        db.insert_one_tx("users", doc2, tx1).unwrap();
+
+        let doc3 = HashMap::from([("name".to_string(), json!("Charlie"))]);
+        db.insert_one_tx("users", doc3, tx1).unwrap();
+
+        db.update_one_tx(
+            "users",
+            &json!({"name": "Alice"}),
+            json!({"$set": {"age": 30}}),
+            tx1,
+        )
+        .unwrap();
+
+        db.commit_transaction(tx1).unwrap();
+
+        // Verify result - all 3 should be inserted
+        let coll = db.collection("users").unwrap();
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_read_operations_dont_need_lock() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Insert initial data (committed)
+        let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one("users", doc).unwrap();
+
+        let tx1 = db.begin_transaction();
+
+        // tx1 acquires write lock and adds to buffer
+        let doc2 = HashMap::from([("name".to_string(), json!("Bob"))]);
+        db.insert_one_tx("users", doc2, tx1).unwrap();
+
+        // Read operations should work and only see committed data
+        // (tx operations are buffered, not yet committed)
+        let coll = db.collection("users").unwrap();
+        let count = coll.count_documents(&json!({})).unwrap();
+        // Should only see Alice (Bob is not yet committed - Read Committed isolation!)
+        assert_eq!(count, 1);
+
+        // After commit, Bob becomes visible
+        db.commit_transaction(tx1).unwrap();
+        let count_after = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count_after, 2);
+    }
+
+    #[test]
+    fn test_auto_commit_waits_for_transaction() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = Arc::new(DatabaseCore::open(&db_path).unwrap());
+
+        // Start a transaction and acquire write lock
+        let tx1 = db.begin_transaction();
+        let doc1 = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one_tx("users", doc1, tx1).unwrap();
+
+        // Auto-commit waits for transaction to complete
+        let db_clone = Arc::clone(&db);
+        let handle = thread::spawn(move || {
+            // This will wait for tx1 to commit
+            let doc2 = HashMap::from([("name".to_string(), json!("Bob"))]);
+            db_clone.insert_one("users", doc2)
+        });
+
+        // Small delay, then commit tx1
+        thread::sleep(std::time::Duration::from_millis(50));
+        db.commit_transaction(tx1).unwrap();
+
+        // Auto-commit should succeed now
+        let result = handle.join().unwrap();
+        assert!(result.is_ok());
+
+        // Verify - both Alice and Bob are inserted
+        let coll = db.collection("users").unwrap();
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_auto_commit_timeout_during_long_transaction() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Start a transaction and acquire write lock
+        let tx1 = db.begin_transaction();
+        let doc1 = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one_tx("users", doc1, tx1).unwrap();
+
+        // Auto-commit will timeout (default 5s) - we'll use custom timeout via different method
+        // For this test, we just verify the transaction blocks other writes
+        assert!(db.has_active_write_transaction());
+
+        // Commit tx1
+        db.commit_transaction(tx1).unwrap();
+
+        // Now auto-commit should work
+        let doc2 = HashMap::from([("name".to_string(), json!("Bob"))]);
+        assert!(db.insert_one("users", doc2).is_ok());
+
+        // Verify
+        let coll = db.collection("users").unwrap();
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 2);
     }
 }

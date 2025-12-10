@@ -155,6 +155,12 @@ pub struct Transaction {
 
     /// Flag indicating operations were already applied (e.g., auto-commit fast path)
     operations_applied: bool,
+
+    /// Whether this transaction holds the exclusive write lock
+    has_write_lock: bool,
+
+    /// When the write lock was acquired (for diagnostics/timeout)
+    write_lock_acquired_at: Option<std::time::Instant>,
 }
 
 impl Transaction {
@@ -167,6 +173,8 @@ impl Transaction {
             metadata_changes: Vec::new(),
             state: TransactionState::Active,
             operations_applied: false,
+            has_write_lock: false,
+            write_lock_acquired_at: None,
         }
     }
 
@@ -256,6 +264,28 @@ impl Transaction {
     /// Get number of operations in transaction
     pub fn operation_count(&self) -> usize {
         self.operations.len()
+    }
+
+    /// Mark that this transaction has acquired the exclusive write lock
+    pub fn mark_write_lock_acquired(&mut self) {
+        self.has_write_lock = true;
+        self.write_lock_acquired_at = Some(std::time::Instant::now());
+    }
+
+    /// Check if this transaction holds the write lock
+    pub fn has_write_lock(&self) -> bool {
+        self.has_write_lock
+    }
+
+    /// Get how long the write lock has been held (for diagnostics)
+    pub fn write_lock_duration(&self) -> Option<std::time::Duration> {
+        self.write_lock_acquired_at.map(|t| t.elapsed())
+    }
+
+    /// Clear the write lock flag (called on commit/rollback)
+    pub fn clear_write_lock(&mut self) {
+        self.has_write_lock = false;
+        self.write_lock_acquired_at = None;
     }
 }
 
