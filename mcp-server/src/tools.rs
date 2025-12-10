@@ -141,6 +141,7 @@ pub fn get_tools_list() -> Value {
             // Database Management
             {
                 "name": "db_stats",
+                "title": "Database Statistics",
                 "description": "Get database statistics including collection count and names",
                 "inputSchema": {
                     "type": "object",
@@ -150,6 +151,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "db_compact",
+                "title": "Compact Database",
                 "description": "Compact the database file, removing deleted documents and freeing space",
                 "inputSchema": {
                     "type": "object",
@@ -159,6 +161,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "db_checkpoint",
+                "title": "Force Checkpoint",
                 "description": "Force a checkpoint - flush all pending writes to disk",
                 "inputSchema": {
                     "type": "object",
@@ -169,6 +172,7 @@ pub fn get_tools_list() -> Value {
             // Collection Management
             {
                 "name": "collection_list",
+                "title": "List Collections",
                 "description": "List all collections in the database",
                 "inputSchema": {
                     "type": "object",
@@ -178,6 +182,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "collection_create",
+                "title": "Create Collection",
                 "description": "Create a new collection (implicitly created on first insert if not exists)",
                 "inputSchema": {
                     "type": "object",
@@ -192,6 +197,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "collection_drop",
+                "title": "Drop Collection",
                 "description": "Drop (delete) a collection and all its documents",
                 "inputSchema": {
                     "type": "object",
@@ -207,6 +213,7 @@ pub fn get_tools_list() -> Value {
             // Document CRUD
             {
                 "name": "insert_one",
+                "title": "Insert Document",
                 "description": "Insert a single document into a collection",
                 "inputSchema": {
                     "type": "object",
@@ -225,6 +232,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "insert_many",
+                "title": "Insert Multiple Documents",
                 "description": "Insert multiple documents into a collection",
                 "inputSchema": {
                     "type": "object",
@@ -244,6 +252,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "find",
+                "title": "Find Documents",
                 "description": "Find documents matching a query with optional projection, sort, limit, skip, and total count",
                 "inputSchema": {
                     "type": "object",
@@ -283,6 +292,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "find_one",
+                "title": "Find One Document",
                 "description": "Find a single document matching the query",
                 "inputSchema": {
                     "type": "object",
@@ -301,6 +311,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "fuzzy_search",
+                "title": "Fuzzy Text Search",
                 "description": "Find documents using fuzzy text index (REQUIRES index_create_fuzzy first!). Returns documents with similarity scores, sorted by relevance. Useful for typo-tolerant search, name matching, and approximate string matching.",
                 "inputSchema": {
                     "type": "object",
@@ -336,6 +347,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "update_one",
+                "title": "Update Document",
                 "description": "Update a single document matching the filter",
                 "inputSchema": {
                     "type": "object",
@@ -358,6 +370,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "update_many",
+                "title": "Update Multiple Documents",
                 "description": "Update all documents matching the filter",
                 "inputSchema": {
                     "type": "object",
@@ -380,6 +393,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "delete_one",
+                "title": "Delete Document",
                 "description": "Delete a single document matching the filter",
                 "inputSchema": {
                     "type": "object",
@@ -398,6 +412,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "delete_many",
+                "title": "Delete Multiple Documents",
                 "description": "Delete all documents matching the filter",
                 "inputSchema": {
                     "type": "object",
@@ -417,6 +432,7 @@ pub fn get_tools_list() -> Value {
             // Query Features
             {
                 "name": "count_documents",
+                "title": "Count Documents",
                 "description": "Count documents matching a query",
                 "inputSchema": {
                     "type": "object",
@@ -435,6 +451,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "distinct",
+                "title": "Get Distinct Values",
                 "description": "Get distinct values for a field",
                 "inputSchema": {
                     "type": "object",
@@ -457,6 +474,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "aggregate",
+                "title": "Aggregation Pipeline",
                 "description": "Execute an aggregation pipeline",
                 "inputSchema": {
                     "type": "object",
@@ -476,6 +494,7 @@ pub fn get_tools_list() -> Value {
             // Index Management
             {
                 "name": "index_create",
+                "title": "Create Index",
                 "description": "Create an index on a collection field(s)",
                 "inputSchema": {
                     "type": "object",
@@ -504,6 +523,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "index_list",
+                "title": "List Indexes",
                 "description": "List all indexes on a collection",
                 "inputSchema": {
                     "type": "object",
@@ -518,6 +538,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "index_create_fuzzy",
+                "title": "Create Fuzzy Index",
                 "description": "Create a fuzzy text index for similarity-based search",
                 "inputSchema": {
                     "type": "object",
@@ -547,6 +568,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "index_drop",
+                "title": "Drop Index",
                 "description": "Drop (delete) an index from a collection",
                 "inputSchema": {
                     "type": "object",
@@ -566,6 +588,7 @@ pub fn get_tools_list() -> Value {
             // Query Analysis
             {
                 "name": "explain",
+                "title": "Explain Query",
                 "description": "Explain query execution plan. Shows whether an index is used and the query strategy.",
                 "inputSchema": {
                     "type": "object",
@@ -584,6 +607,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "find_with_hint",
+                "title": "Find with Index Hint",
                 "description": "Find documents using a specific index (forces index usage)",
                 "inputSchema": {
                     "type": "object",
@@ -607,6 +631,7 @@ pub fn get_tools_list() -> Value {
             // Schema Management
             {
                 "name": "schema_set",
+                "title": "Set JSON Schema",
                 "description": "Set or clear a JSON schema for a collection. Schema is used to validate documents on insert/update.",
                 "inputSchema": {
                     "type": "object",
@@ -625,6 +650,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "schema_get",
+                "title": "Get JSON Schema",
                 "description": "Get the JSON schema for a collection",
                 "inputSchema": {
                     "type": "object",
@@ -640,6 +666,7 @@ pub fn get_tools_list() -> Value {
             // Script Management
             {
                 "name": "script_save",
+                "title": "Save Script",
                 "description": "Save a script to the database. Scripts are stored in _system.scripts collection. Supports versioning - each save creates a new version.",
                 "inputSchema": {
                     "type": "object",
@@ -672,6 +699,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_list",
+                "title": "List Scripts",
                 "description": "List all saved scripts (without code). Supports filtering by tags.",
                 "inputSchema": {
                     "type": "object",
@@ -691,6 +719,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_get",
+                "title": "Get Script",
                 "description": "Get a script by name (with code)",
                 "inputSchema": {
                     "type": "object",
@@ -705,6 +734,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_delete",
+                "title": "Delete Script",
                 "description": "Delete a script by name",
                 "inputSchema": {
                     "type": "object",
@@ -719,6 +749,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_run",
+                "title": "Run Script",
                 "description": "Run a saved script by name with optional parameters. Available functions: DB: db_find, db_find_one, db_find_one_result (returns {found, doc, error}), db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Helpers: is_error(v), is_null(v), get_error(v), unwrap_or(v, default). Utils: base64_encode, base64_decode, print. Returns script result and captured logs.",
                 "inputSchema": {
                     "type": "object",
@@ -741,6 +772,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_exec",
+                "title": "Execute Script",
                 "description": "Execute inline Rhai code without saving. Useful for one-off operations. Available functions: DB: db_find, db_find_one, db_find_one_result (returns {found, doc, error}), db_insert_one, db_insert_many, db_update_one, db_update_many, db_delete_one, db_delete_many, db_count, db_aggregate. Helpers: is_error(v), is_null(v), get_error(v), unwrap_or(v, default). Utils: base64_encode, base64_decode, print.",
                 "inputSchema": {
                     "type": "object",
@@ -763,6 +795,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_history",
+                "title": "Script History",
                 "description": "Get version history of a script",
                 "inputSchema": {
                     "type": "object",
@@ -781,6 +814,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_rollback",
+                "title": "Rollback Script",
                 "description": "Rollback a script to a previous version (creates a new version with the old code)",
                 "inputSchema": {
                     "type": "object",
@@ -799,6 +833,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_version_get",
+                "title": "Get Script Version",
                 "description": "Get a specific version of a script",
                 "inputSchema": {
                     "type": "object",
@@ -817,6 +852,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_tags_add",
+                "title": "Add Script Tags",
                 "description": "Add tags to a script",
                 "inputSchema": {
                     "type": "object",
@@ -836,6 +872,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_tags_remove",
+                "title": "Remove Script Tags",
                 "description": "Remove tags from a script",
                 "inputSchema": {
                     "type": "object",
@@ -855,6 +892,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "script_stats",
+                "title": "Script Statistics",
                 "description": "Get execution statistics for a script",
                 "inputSchema": {
                     "type": "object",
@@ -870,6 +908,7 @@ pub fn get_tools_list() -> Value {
             // Admin Operations (require IRONBASE_ADMIN_KEY)
             {
                 "name": "admin_list_all_collections",
+                "title": "Admin: List All Collections",
                 "description": "List ALL collections including hidden/system collections. Requires IRONBASE_ADMIN_KEY env var.",
                 "inputSchema": {
                     "type": "object",
@@ -884,6 +923,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "admin_create_system_collection",
+                "title": "Admin: Create System Collection",
                 "description": "Create a system collection with protected/hidden flags. Requires IRONBASE_ADMIN_KEY env var.",
                 "inputSchema": {
                     "type": "object",
@@ -902,6 +942,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "admin_set_collection_flags",
+                "title": "Admin: Set Collection Flags",
                 "description": "Set collection flags (is_system, protected, hidden). Requires IRONBASE_ADMIN_KEY env var.",
                 "inputSchema": {
                     "type": "object",
@@ -932,6 +973,7 @@ pub fn get_tools_list() -> Value {
             },
             {
                 "name": "admin_drop_protected",
+                "title": "Admin: Drop Protected Collection",
                 "description": "Force drop a protected collection. Requires IRONBASE_ADMIN_KEY env var. USE WITH CAUTION!",
                 "inputSchema": {
                     "type": "object",
