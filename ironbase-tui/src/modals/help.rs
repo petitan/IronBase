@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 /// Total number of help lines (for scroll bounds)
-pub const HELP_LINES: usize = 28;
+pub const HELP_LINES: usize = 29;
 
 /// Render the help modal
 pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
@@ -67,6 +67,10 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
         Line::from(vec![
             Span::styled("?         ", Style::default().fg(theme.accent)),
             Span::raw("Sugo be/ki"),
+        ]),
+        Line::from(vec![
+            Span::styled("Shift+I   ", Style::default().fg(theme.accent)),
+            Span::raw("Szerver informaciok"),
         ]),
         Line::from(vec![
             Span::styled("t         ", Style::default().fg(theme.accent)),

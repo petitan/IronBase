@@ -122,6 +122,16 @@ impl DbWrapper {
         self.client.db_stats().await.map_err(|e| anyhow::anyhow!("{}", e))
     }
 
+    /// Get list of available MCP tools
+    pub async fn tools_list(&self) -> Result<Vec<Value>> {
+        self.client.tools_list().await.map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
+    /// Get list of available MCP prompts
+    pub async fn prompts_list(&self) -> Result<Vec<Value>> {
+        self.client.prompts_list().await.map_err(|e| anyhow::anyhow!("{}", e))
+    }
+
     /// Count documents matching a query
     pub async fn count_with_query(&self, collection: &str, query: &Value) -> Result<usize> {
         let count = self.client.count_documents(collection, query).await?;

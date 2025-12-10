@@ -63,6 +63,7 @@ pub enum Modal {
     ErrorDetail,
     NewCollection,
     Script,
+    ServerInfo,
 }
 
 /// Progress state for long-running operations
@@ -2081,6 +2082,10 @@ pub struct App {
     // IronRhai script editor state
     pub script_state: ScriptState,
 
+    // Server info modal state
+    pub server_info_state: crate::modals::server_info::ServerInfoState,
+    pub server_info_scroll: usize,
+
     // Config
     pub config: Config,
 
@@ -2130,6 +2135,8 @@ impl App {
             export_state: ExportState::default(),
             new_collection_state: NewCollectionState::default(),
             script_state: ScriptState::default(),
+            server_info_state: crate::modals::server_info::ServerInfoState::new(),
+            server_info_scroll: 0,
             config,
             status_message: None,
             error_message: None,
@@ -2322,6 +2329,23 @@ impl App {
     /// Open help modal
     pub fn open_help(&mut self) {
         self.modal = Some(Modal::Help);
+    }
+
+    /// Open server info modal
+    pub fn open_server_info(&mut self) {
+        self.server_info_scroll = 0;
+        self.server_info_state = crate::modals::server_info::ServerInfoState::new();
+        self.modal = Some(Modal::ServerInfo);
+    }
+
+    /// Update server info state with data from MCP server
+    pub fn update_server_info(&mut self, db_stats: serde_json::Value, tools: Vec<serde_json::Value>, prompts: Vec<serde_json::Value>) {
+        self.server_info_state.update(db_stats, tools, prompts);
+    }
+
+    /// Set server info error
+    pub fn set_server_info_error(&mut self, error: String) {
+        self.server_info_state.set_error(error);
     }
 
     /// Close current modal

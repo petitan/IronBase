@@ -308,6 +308,58 @@ impl McpClient {
         Ok(result)
     }
 
+    /// Get list of available MCP tools
+    pub async fn tools_list(&self) -> McpResult<Vec<Value>> {
+        if !self.initialized {
+            return Err(McpError::NotInitialized);
+        }
+
+        let request = JsonRpcRequest::tools_list();
+        let response = self.transport.send(&request).await?;
+
+        if let Some(error) = response.error {
+            return Err(McpError::rpc(error.code, error.message));
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| McpError::invalid_response("Missing result in response"))?;
+
+        // Extract tools array
+        let tools: Vec<Value> = result
+            .get("tools")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        Ok(tools)
+    }
+
+    /// Get list of available MCP prompts
+    pub async fn prompts_list(&self) -> McpResult<Vec<Value>> {
+        if !self.initialized {
+            return Err(McpError::NotInitialized);
+        }
+
+        let request = JsonRpcRequest::new("prompts/list", None);
+        let response = self.transport.send(&request).await?;
+
+        if let Some(error) = response.error {
+            return Err(McpError::rpc(error.code, error.message));
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| McpError::invalid_response("Missing result in response"))?;
+
+        // Extract prompts array
+        let prompts: Vec<Value> = result
+            .get("prompts")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+
+        Ok(prompts)
+    }
+
     // === IronRhai Script operations ===
 
     /// List all saved scripts
