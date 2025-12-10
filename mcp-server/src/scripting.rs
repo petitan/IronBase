@@ -684,8 +684,8 @@ impl ScriptManager {
 // Rhai Script Execution Engine
 // ============================================================
 
-/// Maximum number of operations per script (DoS protection)
-const MAX_OPERATIONS: u64 = 1_000_000;
+/// Default maximum number of operations per script (DoS protection)
+const DEFAULT_MAX_OPERATIONS: u64 = 1_000_000;
 
 /// Maximum number of log entries (DoS protection)
 const MAX_LOG_ENTRIES: usize = 10_000;
@@ -699,6 +699,36 @@ pub struct ScriptResult {
     pub execution_time_ms: u64,
 }
 
+/// Options for script execution
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScriptOptions {
+    /// Maximum number of operations (DoS protection)
+    /// Default: 1,000,000. Set to 0 for no limit (DANGEROUS!)
+    #[serde(default = "default_max_operations")]
+    pub max_operations: u64,
+}
+
+fn default_max_operations() -> u64 {
+    DEFAULT_MAX_OPERATIONS
+}
+
+impl Default for ScriptOptions {
+    fn default() -> Self {
+        Self {
+            max_operations: DEFAULT_MAX_OPERATIONS,
+        }
+    }
+}
+
+impl ScriptOptions {
+    /// Create options with custom max operations limit
+    pub fn with_max_operations(max_ops: u64) -> Self {
+        Self {
+            max_operations: max_ops,
+        }
+    }
+}
+
 /// Rhai script execution engine with IronBase bindings
 pub struct RhaiEngine {
     adapter: Arc<IronBaseAdapter>,
@@ -710,14 +740,41 @@ impl RhaiEngine {
         Self { adapter }
     }
 
-    /// Run a script with optional parameters
+    /// Run a script with optional parameters (uses default options)
     pub fn run(&self, code: &str, params: Option<Value>) -> Result<ScriptResult> {
+        self.run_with_options(code, params, ScriptOptions::default())
+    }
+
+    /// Run a script with configurable options
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The Rhai script code to execute
+    /// * `params` - Optional parameters accessible as `params` in the script
+    /// * `options` - Execution options (max operations, etc.)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Run with custom operation limit
+    /// let options = ScriptOptions::with_max_operations(100_000);
+    /// let result = engine.run_with_options("1 + 1", None, options)?;
+    /// ```
+    pub fn run_with_options(
+        &self,
+        code: &str,
+        params: Option<Value>,
+        options: ScriptOptions,
+    ) -> Result<ScriptResult> {
         use std::time::Instant;
 
         let mut engine = Engine::new();
 
-        // Security: Disable dangerous operations
-        engine.set_max_operations(MAX_OPERATIONS);
+        // Security: Disable dangerous operations with configurable limit
+        // Note: 0 means no limit (DANGEROUS for untrusted scripts!)
+        if options.max_operations > 0 {
+            engine.set_max_operations(options.max_operations);
+        }
 
         // Create logs collector (Arc<Mutex> for thread safety)
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -766,7 +823,7 @@ impl RhaiEngine {
                 if err_str.contains("operations") || err_str.contains("limit") {
                     Err(McpError::ScriptError(format!(
                         "Script exceeded maximum operations limit ({})",
-                        MAX_OPERATIONS
+                        options.max_operations
                     )))
                 } else {
                     Err(McpError::ScriptError(err_str))
@@ -811,6 +868,7 @@ impl RhaiEngine {
         });
 
         // db_find_one(collection, query) -> document or ()
+        // Note: Returns () if not found. Use is_null() to check, or use db_find_one_result() for explicit result.
         let adapter_find_one = adapter.clone();
         engine.register_fn("db_find_one", move |collection: &str, query: Map| -> Dynamic {
             let query_json = map_to_json(&query);
@@ -819,6 +877,32 @@ impl RhaiEngine {
                 Ok(None) => Dynamic::UNIT,
                 Err(e) => Dynamic::from(format!("Error: {}", e))
             }
+        });
+
+        // db_find_one_result(collection, query) -> #{found: bool, doc: document|null, error: string|null}
+        // Explicit Result type - easier to check "not found" vs "error" vs "found"
+        let adapter_find_one_result = adapter.clone();
+        engine.register_fn("db_find_one_result", move |collection: &str, query: Map| -> Dynamic {
+            let query_json = map_to_json(&query);
+            let mut result_map = Map::new();
+            match adapter_find_one_result.find_one(collection, query_json) {
+                Ok(Some(doc)) => {
+                    result_map.insert("found".into(), Dynamic::from(true));
+                    result_map.insert("doc".into(), json_to_dynamic(&doc));
+                    result_map.insert("error".into(), Dynamic::UNIT);
+                }
+                Ok(None) => {
+                    result_map.insert("found".into(), Dynamic::from(false));
+                    result_map.insert("doc".into(), Dynamic::UNIT);
+                    result_map.insert("error".into(), Dynamic::UNIT);
+                }
+                Err(e) => {
+                    result_map.insert("found".into(), Dynamic::from(false));
+                    result_map.insert("doc".into(), Dynamic::UNIT);
+                    result_map.insert("error".into(), Dynamic::from(e.to_string()));
+                }
+            }
+            Dynamic::from(result_map)
         });
 
         // db_insert_one(collection, document) -> inserted_id
@@ -935,8 +1019,56 @@ impl RhaiEngine {
         Ok(())
     }
 
-    /// Register utility functions (base64, etc.)
+    /// Register utility functions (base64, error checking, etc.)
     fn register_utility_functions(engine: &mut Engine) {
+        // ============================================================
+        // Error/Null Checking Helpers
+        // ============================================================
+
+        // is_error(value) -> bool - check if value is an error string
+        engine.register_fn("is_error", |value: Dynamic| -> bool {
+            if let Some(s) = value.clone().try_cast::<String>() {
+                s.starts_with("Error:")
+            } else {
+                false
+            }
+        });
+
+        // is_null(value) -> bool - check if value is null/unit
+        engine.register_fn("is_null", |value: Dynamic| -> bool {
+            value.is_unit()
+        });
+
+        // get_error(value) -> string - extract error message (without "Error: " prefix)
+        engine.register_fn("get_error", |value: Dynamic| -> String {
+            if let Some(s) = value.clone().try_cast::<String>() {
+                if let Some(msg) = s.strip_prefix("Error: ") {
+                    msg.to_string()
+                } else {
+                    s
+                }
+            } else {
+                String::new()
+            }
+        });
+
+        // unwrap_or(value, default) -> value if not error/null, else default
+        engine.register_fn("unwrap_or", |value: Dynamic, default: Dynamic| -> Dynamic {
+            if value.is_unit() {
+                return default;
+            }
+            if let Some(s) = value.clone().try_cast::<String>() {
+                if s.starts_with("Error:") {
+                    return default;
+                }
+            }
+            value
+        });
+
+        // ============================================================
+        // Base64 Functions
+        // ============================================================
+
         // base64_encode(string) -> base64 encoded string
         engine.register_fn("base64_encode", |s: &str| -> String {
             base64::engine::general_purpose::STANDARD.encode(s.as_bytes())
@@ -950,6 +1082,31 @@ impl RhaiEngine {
                     Err(e) => Dynamic::from(format!("Error: Invalid UTF-8: {}", e)),
                 },
                 Err(e) => Dynamic::from(format!("Error: Invalid base64: {}", e)),
+            }
+        });
+
+        // ============================================================
+        // Type Checking Helpers
+        // ============================================================
+
+        // type_of(value) -> string describing the type
+        engine.register_fn("type_name", |value: Dynamic| -> String {
+            if value.is_unit() {
+                "null".to_string()
+            } else if value.is_bool() {
+                "bool".to_string()
+            } else if value.is_int() {
+                "int".to_string()
+            } else if value.is_float() {
+                "float".to_string()
+            } else if value.is_string() {
+                "string".to_string()
+            } else if value.is_array() {
+                "array".to_string()
+            } else if value.is_map() {
+                "map".to_string()
+            } else {
+                "unknown".to_string()
             }
         });
     }
@@ -1037,7 +1194,7 @@ fn format_rhai_error(err: &EvalAltResult) -> String {
         EvalAltResult::ErrorTooManyOperations(_) => {
             format!(
                 "Script exceeded maximum operation limit ({})",
-                MAX_OPERATIONS
+                DEFAULT_MAX_OPERATIONS
             )
         }
         _ => format!("Script error: {}", err),
@@ -1224,6 +1381,33 @@ mod tests {
     }
 
     #[test]
+    fn test_rhai_db_find_one_result_found() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine.run(r#"
+            db_insert_one("users", #{ name: "Alice", age: 30 });
+            let res = db_find_one_result("users", #{ name: "Alice" });
+            [res.found, res.doc.age, is_null(res.error)]
+        "#, None).unwrap();
+
+        assert_eq!(result.result, json!([true, 30, true]));
+    }
+
+    #[test]
+    fn test_rhai_db_find_one_result_not_found() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine.run(r#"
+            let res = db_find_one_result("users", #{ name: "NonExistent" });
+            [res.found, is_null(res.doc), is_null(res.error)]
+        "#, None).unwrap();
+
+        assert_eq!(result.result, json!([false, true, true]));
+    }
+
+    #[test]
     fn test_rhai_db_update() {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
@@ -1277,11 +1461,63 @@ mod tests {
     }
 
     #[test]
+    fn test_rhai_unknown_operator_error() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        // Using invalid operator $badop should return an error string
+        // FIX IMPLEMENTED: Query::from_json() now validates operators!
+        let result = engine.run(r#"
+            db_insert_one("test", #{ name: "Alice", age: 25 });
+            let res = db_find("test", #{ age: #{ "$badop": 25 } });
+            res
+        "#, None).unwrap();
+
+        // Should now return an error string
+        assert!(result.result.is_string(), "Expected error string but got: {:?}", result.result);
+        let result_str = result.result.as_str().unwrap();
+        assert!(result_str.starts_with("Error:"), "Expected 'Error:' prefix but got: {}", result_str);
+        assert!(result_str.to_lowercase().contains("unknown"), "Error should mention 'unknown': {}", result_str);
+    }
+
+    #[test]
+    fn test_rhai_unknown_query_operator_returns_error() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        // FIX IMPLEMENTED: Unknown query operators now properly return errors
+        // This was fixed by adding operator validation in Query::from_json()
+        let result = engine.run(r#"
+            db_insert_one("test", #{ name: "Alice" });
+            let res = db_find("test", #{ name: #{ "$invalid": "value" } });
+            is_error(res)
+        "#, None).unwrap();
+
+        // Now correctly returns true - the error IS detected
+        assert_eq!(result.result, json!(true), "Unknown operators should return errors");
+    }
+
+    #[test]
+    fn test_rhai_unknown_update_operator_error() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        // Update operators ARE validated - unknown operators return errors
+        let result = engine.run(r#"
+            db_insert_one("test", #{ name: "Alice" });
+            let res = db_update_one("test", #{ name: "Alice" }, #{ "$badop": #{ x: 1 } });
+            is_error(res)
+        "#, None).unwrap();
+
+        assert_eq!(result.result, json!(true));
+    }
+
+    #[test]
     fn test_rhai_operations_limit() {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        // This should exceed the operation limit
+        // This should exceed the operation limit (default: 1,000,000)
         let result = engine.run(r#"
             let x = 0;
             loop {
@@ -1292,7 +1528,46 @@ mod tests {
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("operation limit") || err_msg.contains("Script error"));
+        assert!(err_msg.contains("1000000"), "Error should mention the default limit");
+    }
+
+    #[test]
+    fn test_rhai_custom_operations_limit() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        // With a very low custom limit, even simple loops should fail
+        let options = ScriptOptions::with_max_operations(100);
+        let result = engine.run_with_options(r#"
+            let x = 0;
+            for i in 0..1000 {
+                x += 1;
+            }
+            x
+        "#, None, options);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("100"), "Error should mention the custom limit (100)");
+    }
+
+    #[test]
+    fn test_rhai_custom_operations_limit_success() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        // With a high enough limit, the script should succeed
+        let options = ScriptOptions::with_max_operations(10_000);
+        let result = engine.run_with_options(r#"
+            let x = 0;
+            for i in 0..100 {
+                x += 1;
+            }
+            x
+        "#, None, options);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().result, json!(100));
     }
 
     // ============================================================

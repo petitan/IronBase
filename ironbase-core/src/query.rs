@@ -87,27 +87,74 @@ impl Query {
 
     /// Create a Query from a JSON value
     ///
-    /// This method performs minimal validation - it just stores the JSON.
-    /// All actual query parsing and validation happens in `matches()`.
+    /// **IMPORTANT**: This method validates all operators in the query.
+    /// Unknown operators (like `$badop`) will cause an error to be returned.
     ///
     /// # Arguments
     ///
     /// * `json` - A MongoDB query filter in JSON format
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The query contains unknown operators (e.g., `$badop`)
+    /// - The query structure is invalid
     ///
     /// # Examples
     ///
     /// ```ignore
     /// use serde_json::json;
     ///
+    /// // Valid query - succeeds
     /// let query = Query::from_json(&json!({
     ///     "age": {"$gte": 18},
     ///     "status": "active"
     /// }))?;
+    ///
+    /// // Invalid query - returns error
+    /// let result = Query::from_json(&json!({
+    ///     "name": {"$badop": "value"}  // Unknown operator!
+    /// }));
+    /// assert!(result.is_err());
     /// ```
     pub fn from_json(json: &Value) -> Result<Self> {
-        // Just store the JSON - no complex parsing needed!
-        // The new operator registry will handle everything in matches()
+        // Validate operators before storing
+        Self::validate_query_operators(json)?;
         Ok(Query { json: json.clone() })
+    }
+
+    /// Validate all operators in a query are known
+    ///
+    /// This prevents "silent failures" where unknown operators don't match anything
+    /// but don't report an error either.
+    fn validate_query_operators(json: &Value) -> Result<()> {
+        if let Some(obj) = json.as_object() {
+            for (key, value) in obj {
+                if key.starts_with('$') {
+                    // Top-level or field-level operator
+                    if !key.starts_with("$**") {
+                        // Not a wildcard - validate it's a known operator
+                        if !operators::OPERATOR_REGISTRY.contains_key(key.as_str()) {
+                            return Err(crate::MongoLiteError::InvalidQuery(format!(
+                                "Unknown query operator: {}",
+                                key
+                            )));
+                        }
+                    }
+                    // Recursively validate nested structures
+                    Self::validate_query_operators(value)?;
+                } else {
+                    // Field name - the value might contain operators
+                    Self::validate_query_operators(value)?;
+                }
+            }
+        } else if let Some(arr) = json.as_array() {
+            // Array (e.g., $and, $or conditions)
+            for item in arr {
+                Self::validate_query_operators(item)?;
+            }
+        }
+        Ok(())
     }
 
     /// Check if a document matches this query
