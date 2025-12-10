@@ -18,7 +18,7 @@ use app::{App, Modal, Pane};
 use clap::Parser;
 use config::{Config, TransportMode};
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -168,6 +168,11 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
         if event::poll(std::time::Duration::from_millis(100))? {
             match event::read()? {
                 Event::Key(key) => {
+                    // Windows sends both Press and Release events - only handle Press
+                    // This fixes the "double step" issue on Windows
+                    if key.kind != KeyEventKind::Press {
+                        continue;
+                    }
                     // Handle modal keys first
                     if app.modal.is_some() {
                         handle_modal_key_async(app, key.code, key.modifiers).await;
