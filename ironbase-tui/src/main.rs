@@ -68,6 +68,15 @@ async fn main() -> anyhow::Result<()> {
     let mut app = App::new(config.clone());
     app.set_loading("Csatlakozas az adatbazishoz...");
 
+    // Install panic hook to restore terminal on crash
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Restore terminal before showing panic message
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        original_hook(panic_info);
+    }));
+
     // Setup terminal FIRST - before DB connection (so we can show splash)
     enable_raw_mode()?;
     let mut stdout = io::stdout();
