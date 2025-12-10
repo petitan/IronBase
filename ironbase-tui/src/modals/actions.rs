@@ -105,5 +105,10 @@ fn get_context_actions(app: &App) -> Vec<ActionItem> {
             label: "Export collection",
             enabled: has_collection,
         },
+        ActionItem {
+            key: 's',
+            label: "IronRhai Scripts",
+            enabled: true,
+        },
     ]
 }

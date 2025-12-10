@@ -62,6 +62,7 @@ pub enum Modal {
     Filter,
     ErrorDetail,
     NewCollection,
+    Script,
 }
 
 /// Progress state for long-running operations
@@ -1488,6 +1489,536 @@ impl NewCollectionState {
     }
 }
 
+// ============================================================
+// IronRhai Script Editor State
+// ============================================================
+
+/// Script mode - browse, edit, new, history, inline
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScriptMode {
+    #[default]
+    Browse,
+    Edit,
+    New,
+    History,
+    Inline,
+}
+
+/// Pending confirmation action for script modal
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScriptConfirmAction {
+    /// Discard unsaved changes and go back
+    DiscardChanges,
+    /// Delete the selected script
+    DeleteScript,
+}
+
+/// Script editor focus area
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScriptFocus {
+    #[default]
+    List,
+    Name,
+    Description,
+    Tags,
+    Editor,
+    Params,
+    History,
+}
+
+/// Script info for browse list (without code)
+#[derive(Debug, Clone)]
+pub struct ScriptInfo {
+    pub name: String,
+    pub description: Option<String>,
+    pub version: u32,
+    pub tags: Vec<String>,
+    pub execution_count: u64,
+    pub last_run_at: Option<String>,
+}
+
+/// Script version for history
+#[derive(Debug, Clone)]
+pub struct ScriptVersion {
+    pub version: u32,
+    pub code: String,
+    pub description: Option<String>,
+    pub created_at: String,
+}
+
+/// Script execution result
+#[derive(Debug, Clone)]
+pub struct ScriptResult {
+    pub success: bool,
+    pub result: Value,
+    pub logs: Vec<String>,
+    pub error: Option<String>,
+    pub execution_time_ms: u64,
+}
+
+/// IronRhai script editor state
+#[derive(Debug, Clone)]
+pub struct ScriptState {
+    // Editor
+    pub lines: Vec<String>,
+    pub cursor_line: usize,
+    pub cursor_col: usize,
+    pub scroll_offset: usize,
+
+    // Metadata
+    pub name: String,
+    pub name_cursor: usize,
+    pub description: String,
+    pub desc_cursor: usize,
+    pub tags: Vec<String>,
+    pub selected_tag: usize,
+    pub tag_input: String,
+    pub tag_input_active: bool,
+    pub version: u32,
+
+    // Execution
+    pub params_input: String,
+    pub params_cursor: usize,
+    pub result: Option<ScriptResult>,
+
+    // UI state
+    pub focus: ScriptFocus,
+    pub mode: ScriptMode,
+    pub error: Option<String>,
+    pub message: Option<String>,
+    pub dirty: bool,
+    pub loading: bool,
+    pub confirm_action: Option<ScriptConfirmAction>,
+
+    // Browse mode
+    pub scripts: Vec<ScriptInfo>,
+    pub selected_script: usize,
+
+    // History mode
+    pub versions: Vec<ScriptVersion>,
+    pub selected_version: usize,
+}
+
+impl Default for ScriptState {
+    fn default() -> Self {
+        Self {
+            lines: vec!["// IronRhai script".to_string(), "".to_string()],
+            cursor_line: 1,
+            cursor_col: 0,
+            scroll_offset: 0,
+            name: String::new(),
+            name_cursor: 0,
+            description: String::new(),
+            desc_cursor: 0,
+            tags: Vec::new(),
+            selected_tag: 0,
+            tag_input: String::new(),
+            tag_input_active: false,
+            version: 0,
+            params_input: "{}".to_string(),
+            params_cursor: 2,
+            result: None,
+            focus: ScriptFocus::List,
+            mode: ScriptMode::Browse,
+            error: None,
+            message: None,
+            dirty: false,
+            loading: false,
+            confirm_action: None,
+            scripts: Vec::new(),
+            selected_script: 0,
+            versions: Vec::new(),
+            selected_version: 0,
+        }
+    }
+}
+
+impl ScriptState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reset to browse mode
+    pub fn reset_to_browse(&mut self) {
+        self.mode = ScriptMode::Browse;
+        self.focus = ScriptFocus::List;
+        self.error = None;
+        self.message = None;
+        self.dirty = false;
+        self.confirm_action = None;
+    }
+
+    /// Start new script
+    pub fn start_new(&mut self) {
+        self.mode = ScriptMode::New;
+        self.focus = ScriptFocus::Name;
+        self.lines = vec!["// IronRhai script".to_string(), "".to_string()];
+        self.cursor_line = 1;
+        self.cursor_col = 0;
+        self.scroll_offset = 0;
+        self.name.clear();
+        self.name_cursor = 0;
+        self.description.clear();
+        self.desc_cursor = 0;
+        self.tags.clear();
+        self.tag_input.clear();
+        self.tag_input_active = false;
+        self.version = 0;
+        self.params_input = "{}".to_string();
+        self.params_cursor = 2;
+        self.result = None;
+        self.error = None;
+        self.message = None;
+        self.dirty = false;
+    }
+
+    /// Load script for editing
+    pub fn load_script(&mut self, name: String, code: String, desc: Option<String>, tags: Vec<String>, version: u32) {
+        self.mode = ScriptMode::Edit;
+        self.focus = ScriptFocus::Editor;
+        self.lines = code.lines().map(String::from).collect();
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        self.cursor_line = 0;
+        self.cursor_col = 0;
+        self.scroll_offset = 0;
+        self.name = name;
+        self.name_cursor = self.name.chars().count();
+        self.description = desc.unwrap_or_default();
+        self.desc_cursor = self.description.chars().count();
+        self.tags = tags;
+        self.selected_tag = 0;
+        self.tag_input.clear();
+        self.tag_input_active = false;
+        self.version = version;
+        self.result = None;
+        self.error = None;
+        self.message = None;
+        self.dirty = false;
+    }
+
+    /// Switch to history mode
+    pub fn enter_history(&mut self) {
+        self.mode = ScriptMode::History;
+        self.focus = ScriptFocus::History;
+        self.selected_version = 0;
+    }
+
+    /// Switch to inline mode (ad-hoc execution)
+    pub fn enter_inline(&mut self) {
+        self.mode = ScriptMode::Inline;
+        self.focus = ScriptFocus::Editor;
+        self.lines = vec!["// Ad-hoc script".to_string(), "".to_string()];
+        self.cursor_line = 1;
+        self.cursor_col = 0;
+        self.scroll_offset = 0;
+        self.name = "[inline]".to_string();
+        self.description.clear();
+        self.tags.clear();
+        self.version = 0;
+        self.result = None;
+        self.error = None;
+        self.dirty = false;
+    }
+
+    // === Editor operations ===
+
+    pub fn insert_char(&mut self, c: char) {
+        match self.focus {
+            ScriptFocus::Name => {
+                let byte_pos = self.name.char_indices().nth(self.name_cursor).map(|(i, _)| i).unwrap_or(self.name.len());
+                self.name.insert(byte_pos, c);
+                self.name_cursor += 1;
+                self.dirty = true;
+            }
+            ScriptFocus::Description => {
+                let byte_pos = self.description.char_indices().nth(self.desc_cursor).map(|(i, _)| i).unwrap_or(self.description.len());
+                self.description.insert(byte_pos, c);
+                self.desc_cursor += 1;
+                self.dirty = true;
+            }
+            ScriptFocus::Tags if self.tag_input_active => {
+                self.tag_input.push(c);
+            }
+            ScriptFocus::Editor => {
+                if let Some(line) = self.lines.get_mut(self.cursor_line) {
+                    let char_count = line.chars().count();
+                    if self.cursor_col <= char_count {
+                        let byte_pos = line.char_indices().nth(self.cursor_col).map(|(i, _)| i).unwrap_or(line.len());
+                        line.insert(byte_pos, c);
+                        self.cursor_col += 1;
+                        self.dirty = true;
+                    }
+                }
+            }
+            ScriptFocus::Params => {
+                let byte_pos = self.params_input.char_indices().nth(self.params_cursor).map(|(i, _)| i).unwrap_or(self.params_input.len());
+                self.params_input.insert(byte_pos, c);
+                self.params_cursor += 1;
+            }
+            _ => {}
+        }
+        self.error = None;
+    }
+
+    pub fn backspace(&mut self) {
+        match self.focus {
+            ScriptFocus::Name if self.name_cursor > 0 => {
+                let byte_pos = self.name.char_indices().nth(self.name_cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                self.name.remove(byte_pos);
+                self.name_cursor -= 1;
+                self.dirty = true;
+            }
+            ScriptFocus::Description if self.desc_cursor > 0 => {
+                let byte_pos = self.description.char_indices().nth(self.desc_cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                self.description.remove(byte_pos);
+                self.desc_cursor -= 1;
+                self.dirty = true;
+            }
+            ScriptFocus::Tags if self.tag_input_active => {
+                self.tag_input.pop();
+            }
+            ScriptFocus::Editor => {
+                if self.cursor_col > 0 {
+                    if let Some(line) = self.lines.get_mut(self.cursor_line) {
+                        let byte_pos = line.char_indices().nth(self.cursor_col - 1).map(|(i, _)| i).unwrap_or(0);
+                        line.remove(byte_pos);
+                        self.cursor_col -= 1;
+                        self.dirty = true;
+                    }
+                } else if self.cursor_line > 0 {
+                    let current_line = self.lines.remove(self.cursor_line);
+                    self.cursor_line -= 1;
+                    if let Some(prev_line) = self.lines.get_mut(self.cursor_line) {
+                        self.cursor_col = prev_line.chars().count();
+                        prev_line.push_str(&current_line);
+                    }
+                    self.dirty = true;
+                }
+            }
+            ScriptFocus::Params if self.params_cursor > 0 => {
+                let byte_pos = self.params_input.char_indices().nth(self.params_cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                self.params_input.remove(byte_pos);
+                self.params_cursor -= 1;
+            }
+            _ => {}
+        }
+        self.error = None;
+    }
+
+    pub fn insert_newline(&mut self) {
+        if self.focus == ScriptFocus::Editor {
+            if let Some(line) = self.lines.get_mut(self.cursor_line) {
+                let byte_pos = line.char_indices().nth(self.cursor_col).map(|(i, _)| i).unwrap_or(line.len());
+                let rest = line.split_off(byte_pos);
+                self.cursor_line += 1;
+                self.lines.insert(self.cursor_line, rest);
+                self.cursor_col = 0;
+                self.dirty = true;
+            }
+        }
+        self.error = None;
+    }
+
+    pub fn insert_tab(&mut self) {
+        if self.focus == ScriptFocus::Editor {
+            self.insert_char(' ');
+            self.insert_char(' ');
+        }
+    }
+
+    // === Cursor navigation ===
+
+    pub fn cursor_left(&mut self) {
+        match self.focus {
+            ScriptFocus::Name if self.name_cursor > 0 => self.name_cursor -= 1,
+            ScriptFocus::Description if self.desc_cursor > 0 => self.desc_cursor -= 1,
+            ScriptFocus::Editor => {
+                if self.cursor_col > 0 {
+                    self.cursor_col -= 1;
+                } else if self.cursor_line > 0 {
+                    self.cursor_line -= 1;
+                    self.cursor_col = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                }
+            }
+            ScriptFocus::Params if self.params_cursor > 0 => self.params_cursor -= 1,
+            _ => {}
+        }
+    }
+
+    pub fn cursor_right(&mut self) {
+        match self.focus {
+            ScriptFocus::Name if self.name_cursor < self.name.chars().count() => self.name_cursor += 1,
+            ScriptFocus::Description if self.desc_cursor < self.description.chars().count() => self.desc_cursor += 1,
+            ScriptFocus::Editor => {
+                let char_count = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                if self.cursor_col < char_count {
+                    self.cursor_col += 1;
+                } else if self.cursor_line + 1 < self.lines.len() {
+                    self.cursor_line += 1;
+                    self.cursor_col = 0;
+                }
+            }
+            ScriptFocus::Params if self.params_cursor < self.params_input.chars().count() => self.params_cursor += 1,
+            _ => {}
+        }
+    }
+
+    pub fn cursor_up(&mut self) {
+        match self.focus {
+            ScriptFocus::Editor if self.cursor_line > 0 => {
+                self.cursor_line -= 1;
+                let char_count = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                self.cursor_col = self.cursor_col.min(char_count);
+            }
+            ScriptFocus::List if self.selected_script > 0 => self.selected_script -= 1,
+            ScriptFocus::History if self.selected_version > 0 => self.selected_version -= 1,
+            _ => {}
+        }
+    }
+
+    pub fn cursor_down(&mut self) {
+        match self.focus {
+            ScriptFocus::Editor if self.cursor_line + 1 < self.lines.len() => {
+                self.cursor_line += 1;
+                let char_count = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                self.cursor_col = self.cursor_col.min(char_count);
+            }
+            ScriptFocus::List if self.selected_script + 1 < self.scripts.len() => self.selected_script += 1,
+            ScriptFocus::History if self.selected_version + 1 < self.versions.len() => self.selected_version += 1,
+            _ => {}
+        }
+    }
+
+    // === Focus navigation ===
+
+    pub fn next_focus(&mut self) {
+        self.focus = match self.focus {
+            ScriptFocus::Name => ScriptFocus::Description,
+            ScriptFocus::Description => ScriptFocus::Tags,
+            ScriptFocus::Tags => ScriptFocus::Editor,
+            ScriptFocus::Editor => ScriptFocus::Params,
+            ScriptFocus::Params => ScriptFocus::Name,
+            other => other,
+        };
+        self.tag_input_active = false;
+    }
+
+    pub fn prev_focus(&mut self) {
+        self.focus = match self.focus {
+            ScriptFocus::Name => ScriptFocus::Params,
+            ScriptFocus::Description => ScriptFocus::Name,
+            ScriptFocus::Tags => ScriptFocus::Description,
+            ScriptFocus::Editor => ScriptFocus::Tags,
+            ScriptFocus::Params => ScriptFocus::Editor,
+            other => other,
+        };
+        self.tag_input_active = false;
+    }
+
+    pub fn cursor_home(&mut self) {
+        match self.focus {
+            ScriptFocus::Name => self.name_cursor = 0,
+            ScriptFocus::Description => self.desc_cursor = 0,
+            ScriptFocus::Editor => self.cursor_col = 0,
+            ScriptFocus::Params => self.params_cursor = 0,
+            _ => {}
+        }
+    }
+
+    pub fn cursor_end(&mut self) {
+        match self.focus {
+            ScriptFocus::Name => self.name_cursor = self.name.chars().count(),
+            ScriptFocus::Description => self.desc_cursor = self.description.chars().count(),
+            ScriptFocus::Editor => {
+                self.cursor_col = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+            }
+            ScriptFocus::Params => self.params_cursor = self.params_input.chars().count(),
+            _ => {}
+        }
+    }
+
+    pub fn delete_char(&mut self) {
+        if self.focus == ScriptFocus::Editor {
+            if let Some(line) = self.lines.get_mut(self.cursor_line) {
+                let char_count = line.chars().count();
+                if self.cursor_col < char_count {
+                    let byte_pos = line.char_indices().nth(self.cursor_col).map(|(i, _)| i).unwrap_or(line.len());
+                    let next_byte_pos = line.char_indices().nth(self.cursor_col + 1).map(|(i, _)| i).unwrap_or(line.len());
+                    line.replace_range(byte_pos..next_byte_pos, "");
+                    self.dirty = true;
+                } else if self.cursor_line + 1 < self.lines.len() {
+                    // Merge next line
+                    let next_line = self.lines.remove(self.cursor_line + 1);
+                    if let Some(current_line) = self.lines.get_mut(self.cursor_line) {
+                        current_line.push_str(&next_line);
+                    }
+                    self.dirty = true;
+                }
+            }
+        }
+        self.error = None;
+    }
+
+    // === Tag operations ===
+
+    pub fn add_tag(&mut self) {
+        if !self.tag_input.is_empty() {
+            let tag = self.tag_input.trim().to_string();
+            if !self.tags.contains(&tag) {
+                self.tags.push(tag);
+                self.dirty = true;
+            }
+            self.tag_input.clear();
+            self.tag_input_active = false;
+        }
+    }
+
+    pub fn remove_selected_tag(&mut self) {
+        if !self.tags.is_empty() && self.selected_tag < self.tags.len() {
+            self.tags.remove(self.selected_tag);
+            if self.selected_tag > 0 {
+                self.selected_tag -= 1;
+            }
+            self.dirty = true;
+        }
+    }
+
+    pub fn select_prev_tag(&mut self) {
+        if self.selected_tag > 0 {
+            self.selected_tag -= 1;
+        }
+    }
+
+    pub fn select_next_tag(&mut self) {
+        if self.selected_tag + 1 < self.tags.len() {
+            self.selected_tag += 1;
+        }
+    }
+
+    pub fn toggle_tag_input(&mut self) {
+        self.tag_input_active = !self.tag_input_active;
+        if self.tag_input_active {
+            self.tag_input.clear();
+        }
+    }
+
+    // === Utility ===
+
+    pub fn get_code(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    pub fn get_selected_script(&self) -> Option<&ScriptInfo> {
+        self.scripts.get(self.selected_script)
+    }
+
+    pub fn get_selected_version(&self) -> Option<&ScriptVersion> {
+        self.versions.get(self.selected_version)
+    }
+}
+
 /// Main application state
 pub struct App {
     // Quit flag
@@ -1547,6 +2078,9 @@ pub struct App {
     // New collection state
     pub new_collection_state: NewCollectionState,
 
+    // IronRhai script editor state
+    pub script_state: ScriptState,
+
     // Config
     pub config: Config,
 
@@ -1595,6 +2129,7 @@ impl App {
             filter_state: FilterState::default(),
             export_state: ExportState::default(),
             new_collection_state: NewCollectionState::default(),
+            script_state: ScriptState::default(),
             config,
             status_message: None,
             error_message: None,
@@ -1978,6 +2513,276 @@ impl App {
     pub fn open_new_collection(&mut self) {
         self.new_collection_state = NewCollectionState::new();
         self.modal = Some(Modal::NewCollection);
+    }
+
+    // === IronRhai Scripts ===
+
+    /// Open script modal (Browse mode)
+    pub fn open_script_modal(&mut self) {
+        self.script_state = ScriptState::new();
+        self.modal = Some(Modal::Script);
+        // Script list will be loaded in load_scripts_async
+    }
+
+    /// Load scripts from MCP server
+    pub async fn load_scripts_async(&mut self) {
+        let Some(db) = &self.db else {
+            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        match db.script_list().await {
+            Ok(scripts_json) => {
+                let scripts: Vec<ScriptInfo> = scripts_json
+                    .iter()
+                    .filter_map(|v| {
+                        let name = v.get("name")?.as_str()?.to_string();
+                        let description = v.get("description").and_then(|d| d.as_str()).map(String::from);
+                        let version = v.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                        let tags = v.get("tags")
+                            .and_then(|t| t.as_array())
+                            .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        let execution_count = v.get("execution_count").and_then(|e| e.as_u64()).unwrap_or(0);
+                        let last_run_at = v.get("last_run_at").and_then(|l| l.as_str()).map(String::from);
+                        Some(ScriptInfo {
+                            name,
+                            description,
+                            version,
+                            tags,
+                            execution_count,
+                            last_run_at,
+                        })
+                    })
+                    .collect();
+                self.script_state.scripts = scripts;
+                self.script_state.selected_script = 0;
+                self.script_state.error = None;
+            }
+            Err(e) => {
+                self.script_state.error = Some(format!("Script lista betöltése sikertelen: {}", e));
+            }
+        }
+    }
+
+    /// Load a script for editing by name
+    pub async fn load_script_for_edit_async(&mut self) {
+        let Some(script_info) = self.script_state.scripts.get(self.script_state.selected_script) else {
+            return;
+        };
+        let script_name = script_info.name.clone();
+
+        let Some(db) = &self.db else {
+            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        match db.script_get(&script_name).await {
+            Ok(script_json) => {
+                let code = script_json.get("code").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                let description = script_json.get("description").and_then(|d| d.as_str()).map(String::from);
+                let version = script_json.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                let tags = script_json.get("tags")
+                    .and_then(|t| t.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+
+                self.script_state.load_script(script_name, code, description, tags, version);
+            }
+            Err(e) => {
+                self.script_state.error = Some(format!("Script betöltése sikertelen: {}", e));
+            }
+        }
+    }
+
+    /// Save current script to MCP server
+    pub async fn save_script_async(&mut self) {
+        if self.script_state.name.trim().is_empty() {
+            self.script_state.error = Some("Script név megadása kötelező".to_string());
+            return;
+        }
+
+        let Some(db) = &self.db else {
+            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        let code = self.script_state.lines.join("\n");
+        let description = if self.script_state.description.is_empty() {
+            None
+        } else {
+            Some(self.script_state.description.as_str())
+        };
+        let tags = if self.script_state.tags.is_empty() {
+            None
+        } else {
+            Some(self.script_state.tags.as_slice())
+        };
+
+        match db.script_save(&self.script_state.name, &code, description, tags).await {
+            Ok(result) => {
+                let new_version = result.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                self.script_state.version = new_version;
+                self.script_state.dirty = false;
+                self.script_state.message = Some(format!("Script mentve (v{})", new_version));
+                self.script_state.error = None;
+            }
+            Err(e) => {
+                self.script_state.error = Some(format!("Mentés sikertelen: {}", e));
+            }
+        }
+    }
+
+    /// Delete selected script
+    pub async fn delete_script_async(&mut self) {
+        let Some(script_info) = self.script_state.scripts.get(self.script_state.selected_script) else {
+            return;
+        };
+        let script_name = script_info.name.clone();
+
+        let Some(db) = &self.db else {
+            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        match db.script_delete(&script_name).await {
+            Ok(_) => {
+                self.script_state.message = Some(format!("Script '{}' törölve", script_name));
+                // Reload list
+                self.load_scripts_async().await;
+            }
+            Err(e) => {
+                self.script_state.error = Some(format!("Törlés sikertelen: {}", e));
+            }
+        }
+    }
+
+    /// Run script (saved or inline)
+    pub async fn run_script_async(&mut self) {
+        let Some(db) = &self.db else {
+            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        // Parse params
+        let params: Option<serde_json::Value> = if self.script_state.params_input.trim().is_empty()
+            || self.script_state.params_input.trim() == "{}"
+        {
+            None
+        } else {
+            match serde_json::from_str(&self.script_state.params_input) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    self.script_state.error = Some(format!("Hibás JSON paraméterek: {}", e));
+                    return;
+                }
+            }
+        };
+
+        let start = std::time::Instant::now();
+
+        // Always execute current editor content (not saved version)
+        // This ensures "what you see is what runs"
+        let code = self.script_state.lines.join("\n");
+        let result = db.script_exec(&code, params.as_ref()).await;
+
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+
+        match result {
+            Ok(result_json) => {
+                let success = result_json.get("success").and_then(|s| s.as_bool()).unwrap_or(true);
+                let output = result_json.get("result").cloned().unwrap_or(serde_json::Value::Null);
+                let logs = result_json.get("logs")
+                    .and_then(|l| l.as_array())
+                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let error_msg = result_json.get("error").and_then(|e| e.as_str()).map(String::from);
+
+                self.script_state.result = Some(ScriptResult {
+                    success,
+                    result: output,
+                    logs,
+                    error: error_msg,
+                    execution_time_ms: elapsed_ms,
+                });
+                self.script_state.error = None;
+            }
+            Err(e) => {
+                self.script_state.result = Some(ScriptResult {
+                    success: false,
+                    result: serde_json::Value::Null,
+                    logs: vec![],
+                    error: Some(e.to_string()),
+                    execution_time_ms: elapsed_ms,
+                });
+            }
+        }
+    }
+
+    /// Load script version history
+    pub async fn load_script_history_async(&mut self) {
+        let script_name = self.script_state.name.clone();
+        if script_name.is_empty() || script_name == "[inline]" {
+            self.script_state.error = Some("Nincs kiválasztva script".to_string());
+            return;
+        }
+
+        let Some(db) = &self.db else {
+            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        match db.script_history(&script_name, Some(20)).await {
+            Ok(history_json) => {
+                let versions: Vec<ScriptVersion> = history_json
+                    .iter()
+                    .filter_map(|v| {
+                        let version = v.get("version").and_then(|n| n.as_u64())? as u32;
+                        let code = v.get("code").and_then(|c| c.as_str())?.to_string();
+                        let description = v.get("description").and_then(|d| d.as_str()).map(String::from);
+                        let created_at = v.get("created_at").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                        Some(ScriptVersion {
+                            version,
+                            code,
+                            description,
+                            created_at,
+                        })
+                    })
+                    .collect();
+                self.script_state.versions = versions;
+                self.script_state.selected_version = 0;
+                self.script_state.error = None;
+            }
+            Err(e) => {
+                self.script_state.error = Some(format!("History betöltése sikertelen: {}", e));
+            }
+        }
+    }
+
+    /// Rollback script to a specific version
+    pub async fn rollback_script_async(&mut self) {
+        let Some(version_info) = self.script_state.versions.get(self.script_state.selected_version) else {
+            self.script_state.error = Some("Nincs kiválasztva verzió".to_string());
+            return;
+        };
+        let target_version = version_info.version;
+        let script_name = self.script_state.name.clone();
+
+        let Some(db) = &self.db else {
+            self.script_state.error = Some("Nincs megnyitva adatbázis".to_string());
+            return;
+        };
+
+        match db.script_rollback(&script_name, target_version).await {
+            Ok(new_version) => {
+                self.script_state.message = Some(format!("Rollback sikeres, új verzió: v{}", new_version));
+                // Reload the script into editor
+                self.load_script_for_edit_async().await;
+            }
+            Err(e) => {
+                self.script_state.error = Some(format!("Rollback sikertelen: {}", e));
+            }
+        }
     }
 
     /// Create new collection (async)
@@ -2684,9 +3489,10 @@ impl App {
             Ok(()) => {
                 self.index_state.message = Some(format!("Index törölve: {}", index_name));
                 self.index_state.indexes = self.get_current_indexes_async().await;
-                if self.index_state.selected_index >= self.index_state.indexes.len()
-                    && !self.index_state.indexes.is_empty()
-                {
+                // Adjust selection after deletion
+                if self.index_state.indexes.is_empty() {
+                    self.index_state.selected_index = 0;
+                } else if self.index_state.selected_index >= self.index_state.indexes.len() {
                     self.index_state.selected_index = self.index_state.indexes.len() - 1;
                 }
             }

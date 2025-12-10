@@ -307,6 +307,112 @@ impl McpClient {
         let result = self.call_tool("db_stats", serde_json::json!({})).await?;
         Ok(result)
     }
+
+    // === IronRhai Script operations ===
+
+    /// List all saved scripts
+    pub async fn script_list(&self) -> McpResult<Vec<Value>> {
+        let result = self.call_tool("script_list", serde_json::json!({})).await?;
+        // Result is {"scripts": [...]}
+        let scripts: Vec<Value> = result
+            .get("scripts")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(scripts)
+    }
+
+    /// Get a script by name
+    pub async fn script_get(&self, name: &str) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "name": name
+        });
+        let result = self.call_tool("script_get", args).await?;
+        Ok(result)
+    }
+
+    /// Save a script (create or update)
+    pub async fn script_save(
+        &self,
+        name: &str,
+        code: &str,
+        description: Option<&str>,
+        tags: Option<&[String]>,
+    ) -> McpResult<Value> {
+        let mut args = serde_json::json!({
+            "name": name,
+            "code": code
+        });
+        if let Some(desc) = description {
+            args["description"] = serde_json::json!(desc);
+        }
+        if let Some(t) = tags {
+            args["tags"] = serde_json::json!(t);
+        }
+        let result = self.call_tool("script_save", args).await?;
+        Ok(result)
+    }
+
+    /// Delete a script
+    pub async fn script_delete(&self, name: &str) -> McpResult<()> {
+        let args = serde_json::json!({
+            "name": name
+        });
+        self.call_tool("script_delete", args).await?;
+        Ok(())
+    }
+
+    /// Run a saved script
+    pub async fn script_run(&self, name: &str, params: Option<&Value>) -> McpResult<Value> {
+        let mut args = serde_json::json!({
+            "name": name
+        });
+        if let Some(p) = params {
+            args["params"] = p.clone();
+        }
+        let result = self.call_tool("script_run", args).await?;
+        Ok(result)
+    }
+
+    /// Execute inline script code (not saved)
+    pub async fn script_exec(&self, code: &str, params: Option<&Value>) -> McpResult<Value> {
+        let mut args = serde_json::json!({
+            "code": code
+        });
+        if let Some(p) = params {
+            args["params"] = p.clone();
+        }
+        let result = self.call_tool("script_exec", args).await?;
+        Ok(result)
+    }
+
+    /// Get script version history
+    pub async fn script_history(&self, name: &str, limit: Option<usize>) -> McpResult<Vec<Value>> {
+        let mut args = serde_json::json!({
+            "name": name
+        });
+        if let Some(lim) = limit {
+            args["limit"] = serde_json::json!(lim);
+        }
+        let result = self.call_tool("script_history", args).await?;
+        // Result is {"history": [...], "count": N}
+        let history: Vec<Value> = result
+            .get("history")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(history)
+    }
+
+    /// Rollback script to a specific version
+    pub async fn script_rollback(&self, name: &str, version: u32) -> McpResult<u32> {
+        let args = serde_json::json!({
+            "name": name,
+            "version": version
+        });
+        let result = self.call_tool("script_rollback", args).await?;
+        // Result is {"success": true, "name": "...", "new_version": N}
+        let new_version = result.get("new_version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        Ok(new_version)
+    }
 }
 
 impl Drop for McpClient {

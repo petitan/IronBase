@@ -11,6 +11,7 @@ pub mod insert;
 pub mod new_collection;
 pub mod progress;
 pub mod query;
+pub mod script;
 pub mod search;
 pub mod splash;
 
