@@ -867,12 +867,20 @@ fn handle_database_open(app: &mut App) {
 
 /// Handle database modal keys
 async fn handle_database_key_async(app: &mut App, key: KeyCode) {
+    use crate::app::DatabaseMode;
+
     match key {
         KeyCode::Esc => {
             app.close_modal();
         }
+        KeyCode::Tab => {
+            // Toggle between Open and Create mode
+            if !app.database_state.is_http_mode {
+                app.database_state.toggle_mode();
+            }
+        }
         KeyCode::Enter => {
-            // Try to open the database
+            // Try to open/create the database
             if app.database_state.is_http_mode {
                 app.database_state.error = Some("HTTP modban nem valthatod az adatbazist.".to_string());
                 return;
@@ -884,11 +892,28 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
                 return;
             }
 
+            let path_buf = std::path::PathBuf::from(&path);
+            let file_exists = path_buf.exists();
+
+            // Validate based on mode
+            match app.database_state.mode {
+                DatabaseMode::Open => {
+                    if !file_exists {
+                        app.database_state.error = Some("A fajl nem letezik! Hasznald a 'Letrehozas' modot.".to_string());
+                        return;
+                    }
+                }
+                DatabaseMode::Create => {
+                    if file_exists {
+                        app.database_state.error = Some("A fajl mar letezik! Hasznald a 'Megnyitas' modot.".to_string());
+                        return;
+                    }
+                }
+            }
+
             app.database_state.loading = true;
             app.database_state.error = None;
 
-            // Try to connect to the new database
-            let path_buf = std::path::PathBuf::from(&path);
             let server_path = app.config.get_mcp_server_path();
 
             // Close existing connection first
@@ -897,13 +922,18 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
             }
             app.db = None;
 
-            // Connect to new database
+            // Connect to database (MCP server will create if needed)
             match DbWrapper::connect_stdio(&server_path, &path_buf).await {
                 Ok(db) => {
                     app.db = Some(db);
                     app.db_path = Some(path_buf);
                     app.database_state.loading = false;
-                    app.database_state.message = Some("Sikeresen csatlakozva!".to_string());
+
+                    let action = match app.database_state.mode {
+                        DatabaseMode::Open => "megnyitva",
+                        DatabaseMode::Create => "letrehozva",
+                    };
+                    app.database_state.message = Some(format!("Sikeresen {}!", action));
 
                     // Refresh collections
                     if let Err(e) = app.refresh_collections_async().await {
@@ -912,7 +942,7 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
 
                     // Close modal after success
                     app.close_modal();
-                    app.set_status(format!("Adatbazis megnyitva: {}", path));
+                    app.set_status(format!("Adatbazis {}: {}", action, path));
                 }
                 Err(e) => {
                     app.database_state.loading = false;

@@ -1540,6 +1540,14 @@ impl ExportState {
     }
 }
 
+/// Database open/create mode
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DatabaseMode {
+    #[default]
+    Open,
+    Create,
+}
+
 /// Database open/create state
 #[derive(Debug, Clone, Default)]
 pub struct DatabaseState {
@@ -1549,6 +1557,7 @@ pub struct DatabaseState {
     pub message: Option<String>,
     pub loading: bool,
     pub is_http_mode: bool,
+    pub mode: DatabaseMode,
 }
 
 impl DatabaseState {
@@ -1560,7 +1569,16 @@ impl DatabaseState {
             message: None,
             loading: false,
             is_http_mode: is_http,
+            mode: DatabaseMode::Open,
         }
+    }
+
+    pub fn toggle_mode(&mut self) {
+        self.mode = match self.mode {
+            DatabaseMode::Open => DatabaseMode::Create,
+            DatabaseMode::Create => DatabaseMode::Open,
+        };
+        self.error = None;
     }
 
     pub fn insert_char(&mut self, c: char) {
