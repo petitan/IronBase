@@ -42,7 +42,11 @@ impl std::error::Error for McpError {}
 
 impl From<ironbase_core::MongoLiteError> for McpError {
     fn from(err: ironbase_core::MongoLiteError) -> Self {
-        McpError::Storage(err.to_string())
+        use ironbase_core::MongoLiteError;
+        match err {
+            MongoLiteError::CollectionNotFound(name) => McpError::CollectionNotFound(name),
+            other => McpError::Storage(other.to_string()),
+        }
     }
 }
 

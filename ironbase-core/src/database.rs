@@ -519,7 +519,8 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for update operations
+                let collection = self.get_collection(collection_name)?;
 
                 // 1. Find the document BEFORE update (for WAL old_doc)
                 let old_doc = collection.find_one(query)?;
@@ -562,7 +563,8 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for update operations
+                let collection = self.get_collection(collection_name)?;
                 let old_doc = collection.find_one(query)?;
                 if old_doc.is_none() {
                     return Ok((0, 0));
@@ -599,7 +601,8 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for update operations
+                let collection = self.get_collection(collection_name)?;
                 let result = collection.update_one_raw(query, update)?;
 
                 if let Some(threshold) = auto_checkpoint_ops {
@@ -627,7 +630,8 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for delete operations
+                let collection = self.get_collection(collection_name)?;
 
                 // 1. Find the document BEFORE delete (for WAL old_doc)
                 let old_doc = collection.find_one(query)?;
@@ -665,7 +669,8 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for delete operations
+                let collection = self.get_collection(collection_name)?;
                 let old_doc = collection.find_one(query)?;
                 if old_doc.is_none() {
                     return Ok(0);
@@ -697,7 +702,8 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for delete operations
+                let collection = self.get_collection(collection_name)?;
                 let deleted = collection.delete_one_raw(query)?;
 
                 if let Some(threshold) = auto_checkpoint_ops {
@@ -859,7 +865,8 @@ impl DatabaseCore<StorageEngine> {
 
         match self.durability_mode {
             DurabilityMode::Safe => {
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for update operations
+                let collection = self.get_collection(collection_name)?;
 
                 // 1. Find all matching documents BEFORE update
                 let old_docs = collection.find(query)?;
@@ -900,7 +907,8 @@ impl DatabaseCore<StorageEngine> {
             }
 
             DurabilityMode::Batch { .. } => {
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for update operations
+                let collection = self.get_collection(collection_name)?;
                 let old_docs = collection.find(query)?;
                 if old_docs.is_empty() {
                     return Ok((0, 0));
@@ -945,7 +953,8 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Unsafe {
                 auto_checkpoint_ops,
             } => {
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for update operations
+                let collection = self.get_collection(collection_name)?;
                 let result = collection.update_many_raw(query, update)?;
 
                 if let Some(threshold) = auto_checkpoint_ops {
@@ -976,7 +985,8 @@ impl DatabaseCore<StorageEngine> {
 
         match self.durability_mode {
             DurabilityMode::Safe => {
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for delete operations
+                let collection = self.get_collection(collection_name)?;
 
                 // 1. Find all matching documents BEFORE delete
                 let old_docs = collection.find(query)?;
@@ -1019,7 +1029,8 @@ impl DatabaseCore<StorageEngine> {
             }
 
             DurabilityMode::Batch { .. } => {
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for delete operations
+                let collection = self.get_collection(collection_name)?;
                 let old_docs = collection.find(query)?;
                 if old_docs.is_empty() {
                     return Ok(0);
@@ -1059,7 +1070,8 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Unsafe {
                 auto_checkpoint_ops,
             } => {
-                let collection = self.collection(collection_name)?;
+                // Use get_collection - no implicit creation for delete operations
+                let collection = self.get_collection(collection_name)?;
                 let deleted = collection.delete_many_raw(query)?;
 
                 if let Some(threshold) = auto_checkpoint_ops {
@@ -1190,7 +1202,8 @@ impl DatabaseCore<MemoryStorage> {
         query: &Value,
         update: &Value,
     ) -> Result<(u64, u64)> {
-        let collection = self.collection(collection_name)?;
+        // Use get_collection - no implicit creation for update operations
+        let collection = self.get_collection(collection_name)?;
         collection.update_one_raw(query, update)
     }
 
@@ -1198,7 +1211,8 @@ impl DatabaseCore<MemoryStorage> {
     ///
     /// Returns deleted_count
     pub fn delete_one(&self, collection_name: &str, query: &Value) -> Result<u64> {
-        let collection = self.collection(collection_name)?;
+        // Use get_collection - no implicit creation for delete operations
+        let collection = self.get_collection(collection_name)?;
         collection.delete_one_raw(query)
     }
 
@@ -1224,7 +1238,8 @@ impl DatabaseCore<MemoryStorage> {
         query: &Value,
         update: &Value,
     ) -> Result<(u64, u64)> {
-        let collection = self.collection(collection_name)?;
+        // Use get_collection - no implicit creation for update operations
+        let collection = self.get_collection(collection_name)?;
         collection.update_many_raw(query, update)
     }
 
@@ -1232,7 +1247,8 @@ impl DatabaseCore<MemoryStorage> {
     ///
     /// Returns deleted_count
     pub fn delete_many(&self, collection_name: &str, query: &Value) -> Result<u64> {
-        let collection = self.collection(collection_name)?;
+        // Use get_collection - no implicit creation for delete operations
+        let collection = self.get_collection(collection_name)?;
         collection.delete_many_raw(query)
     }
 }
@@ -1653,6 +1669,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Get collection (creates if doesn't exist)
     ///
     /// Uses shared IndexManager to fix stale index problem.
+    /// Note: This method IMPLICITLY creates the collection if it doesn't exist.
+    /// For read-only access without creation, use `get_collection()` instead.
     pub fn collection(&self, name: &str) -> Result<CollectionCore<S>> {
         let shared_indexes = self.get_or_create_index_manager(name)?;
         CollectionCore::with_shared_indexes(
@@ -1660,6 +1678,54 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             Arc::clone(&self.storage),
             shared_indexes,
         )
+    }
+
+    /// Get collection WITHOUT implicit creation - returns error if not exists
+    ///
+    /// Use this for read operations (find, count, etc.) to avoid creating
+    /// empty collections from typos or invalid names.
+    ///
+    /// Optimized for READ operations - uses READ locks only on the hot path.
+    pub fn get_collection(&self, name: &str) -> Result<CollectionCore<S>> {
+        // Fast path: check if index manager is cached
+        let shared_indexes = {
+            let managers = self.index_managers.read();
+            match managers.get(name) {
+                Some(manager) => Arc::clone(manager),
+                None => {
+                    // No index manager = collection was never accessed via collection()
+                    // Check storage directly
+                    let storage = self.storage.read();
+                    if storage.get_collection_meta(name).is_none() {
+                        return Err(MongoLiteError::CollectionNotFound(name.to_string()));
+                    }
+                    // Collection exists in storage but no index manager yet
+                    // This can happen after database reopen - need to create manager
+                    drop(storage);
+                    drop(managers);
+                    return self.get_or_create_index_manager(name).and_then(|idx| {
+                        CollectionCore::with_shared_indexes_readonly(
+                            name.to_string(),
+                            Arc::clone(&self.storage),
+                            idx,
+                        )
+                    });
+                }
+            }
+        };
+
+        // Use readonly path - no write locks
+        CollectionCore::with_shared_indexes_readonly(
+            name.to_string(),
+            Arc::clone(&self.storage),
+            shared_indexes,
+        )
+    }
+
+    /// Check if a collection exists (without creating it)
+    pub fn collection_exists(&self, name: &str) -> bool {
+        let storage = self.storage.read();
+        storage.get_collection_meta(name).is_some()
     }
 
     /// Set or clear JSON schema for a collection
@@ -2604,5 +2670,60 @@ mod tests {
         // Verify
         let coll = db.collection("users").unwrap();
         assert_eq!(coll.count_documents(&json!({})).unwrap(), 2);
+    }
+
+    // ========== Collection Existence Tests ==========
+
+    #[test]
+    fn test_get_collection_not_found() {
+        use crate::storage::MemoryStorage;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let result = db.get_collection("nonexistent");
+        assert!(matches!(result, Err(MongoLiteError::CollectionNotFound(_))));
+    }
+
+    #[test]
+    fn test_collection_implicit_create() {
+        use crate::storage::MemoryStorage;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        // collection() still creates implicitly
+        let _coll = db.collection("new_coll").unwrap();
+        assert!(db.collection_exists("new_coll"));
+    }
+
+    #[test]
+    fn test_collection_exists_after_insert() {
+        use crate::storage::MemoryStorage;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        assert!(!db.collection_exists("users"));
+
+        // Insert creates collection implicitly
+        let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one("users", doc).unwrap();
+
+        assert!(db.collection_exists("users"));
+        // Now get_collection should work
+        assert!(db.get_collection("users").is_ok());
+    }
+
+    #[test]
+    fn test_update_on_nonexistent_collection_fails() {
+        use crate::storage::MemoryStorage;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let result = db.update_one("nonexistent", &json!({}), &json!({"$set": {"x": 1}}));
+        assert!(matches!(result, Err(MongoLiteError::CollectionNotFound(_))));
+    }
+
+    #[test]
+    fn test_delete_on_nonexistent_collection_fails() {
+        use crate::storage::MemoryStorage;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let result = db.delete_one("nonexistent", &json!({}));
+        assert!(matches!(result, Err(MongoLiteError::CollectionNotFound(_))));
     }
 }

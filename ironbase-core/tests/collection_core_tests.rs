@@ -421,6 +421,11 @@ fn test_update_one_pop() {
 fn test_update_one_not_found() {
     let (db, coll_name) = create_test_db("test");
 
+    // First create the collection with a document (update won't create collection implicitly)
+    let doc = HashMap::from([("name".to_string(), json!("setup"))]);
+    db.insert_one(&coll_name, doc).unwrap();
+
+    // Now try to update a non-existent document
     let (matched, modified) = db
         .update_one(&coll_name, &json!({"_id": 999}), &json!({"$set": {"x": 1}}))
         .unwrap();
@@ -494,6 +499,11 @@ fn test_delete_one() {
 fn test_delete_one_not_found() {
     let (db, coll_name) = create_test_db("test");
 
+    // First create the collection with a document (delete won't create collection implicitly)
+    let doc = HashMap::from([("name".to_string(), json!("setup"))]);
+    db.insert_one(&coll_name, doc).unwrap();
+
+    // Now try to delete a non-existent document
     let deleted = db.delete_one(&coll_name, &json!({"_id": 999})).unwrap();
     assert_eq!(deleted, 0);
 }

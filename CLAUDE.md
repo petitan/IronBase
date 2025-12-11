@@ -428,3 +428,4 @@ coll.find(&json!({"$**.status": "active"}}))?;
 - **maturin**: Build Python wheels
 - **ahash/dashmap**: Fast hashing
 - **thiserror**: Error handling
+- 192.168.0.136 az mcp cime általában

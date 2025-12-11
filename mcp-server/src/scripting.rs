@@ -1424,7 +1424,9 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
+        // First create the collection (find_one won't create collection implicitly)
         let result = engine.run(r#"
+            db_insert_one("users", #{ name: "Setup" });
             let res = db_find_one_result("users", #{ name: "NonExistent" });
             [res.found, is_null(res.doc), is_null(res.error)]
         "#, None).unwrap();

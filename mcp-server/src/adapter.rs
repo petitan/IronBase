@@ -238,10 +238,10 @@ impl IronBaseAdapter {
         Ok(ids.iter().map(Self::doc_id_to_string).collect())
     }
 
-    /// Find documents
+    /// Find documents (uses get_collection - no implicit creation)
     pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
 
         // Get total count before limit/skip if requested
         let total = if options.include_total {
@@ -269,10 +269,10 @@ impl IronBaseAdapter {
         Ok(FindResult { documents, total })
     }
 
-    /// Find a single document
+    /// Find a single document (uses get_collection - no implicit creation)
     pub fn find_one(&self, collection: &str, query: Value) -> Result<Option<Value>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let result = coll.find_one(&query)?;
         Ok(result)
     }
@@ -321,18 +321,18 @@ impl IronBaseAdapter {
         Ok(count)
     }
 
-    /// Count documents matching query
+    /// Count documents matching query (uses get_collection - no implicit creation)
     pub fn count_documents(&self, collection: &str, query: Value) -> Result<u64> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let count = coll.count_documents(&query)?;
         Ok(count)
     }
 
-    /// Get distinct values for a field
+    /// Get distinct values for a field (uses get_collection - no implicit creation)
     pub fn distinct(&self, collection: &str, field: &str, query: Value) -> Result<Vec<Value>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let values = coll.distinct(field, &query)?;
         Ok(values)
     }
@@ -341,10 +341,10 @@ impl IronBaseAdapter {
     // Aggregation
     // ============================================================
 
-    /// Execute aggregation pipeline
+    /// Execute aggregation pipeline (uses get_collection - no implicit creation)
     pub fn aggregate(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         // Convert Vec<Value> to Value::Array
         let pipeline_value = Value::Array(pipeline);
         let results = coll.aggregate(&pipeline_value)?;
@@ -376,31 +376,31 @@ impl IronBaseAdapter {
         Ok(name)
     }
 
-    /// List indexes on a collection
+    /// List indexes on a collection (uses get_collection - no implicit creation)
     pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let indexes = coll.list_indexes();
         Ok(indexes)
     }
 
-    /// Drop an index
+    /// Drop an index (uses get_collection - no implicit creation)
     pub fn drop_index(&self, collection: &str, index_name: &str) -> Result<()> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         coll.drop_index(index_name)?;
         Ok(())
     }
 
-    /// Explain query execution plan
+    /// Explain query execution plan (uses get_collection - no implicit creation)
     pub fn explain(&self, collection: &str, query: Value) -> Result<Value> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let plan = coll.explain(&query)?;
         Ok(plan)
     }
 
-    /// Find documents with index hint
+    /// Find documents with index hint (uses get_collection - no implicit creation)
     pub fn find_with_hint(
         &self,
         collection: &str,
@@ -408,7 +408,7 @@ impl IronBaseAdapter {
         hint: &str,
     ) -> Result<Vec<Value>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let documents = coll.find_with_hint(&query, hint)?;
         Ok(documents)
     }
@@ -436,6 +436,7 @@ impl IronBaseAdapter {
     }
 
     /// Fuzzy search using the fuzzy index (returns documents with similarity scores)
+    /// Uses get_collection - no implicit creation
     pub fn fuzzy_search(
         &self,
         collection: &str,
@@ -453,7 +454,7 @@ impl IronBaseAdapter {
         });
 
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         let results = coll.fuzzy_search(field, query, threshold, algo)?;
         Ok(results)
     }
@@ -470,10 +471,10 @@ impl IronBaseAdapter {
         Ok(())
     }
 
-    /// Get schema for a collection
+    /// Get schema for a collection (uses get_collection - no implicit creation)
     pub fn get_schema(&self, collection: &str) -> Result<Option<Value>> {
         let db = self.db.read();
-        let coll = db.collection(collection)?;
+        let coll = db.get_collection(collection)?;
         Ok(coll.get_schema())
     }
 

@@ -400,6 +400,42 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         })
     }
 
+    /// Create CollectionCore for EXISTING collection (readonly path - no creation)
+    ///
+    /// This method uses READ locks only, avoiding write lock contention.
+    /// Use this for read operations where the collection must already exist.
+    ///
+    /// Returns `CollectionNotFound` if collection doesn't exist in storage.
+    pub(crate) fn with_shared_indexes_readonly(
+        name: String,
+        storage: Arc<RwLock<S>>,
+        indexes: Arc<RwLock<IndexManager>>,
+    ) -> Result<Self> {
+        // READ lock only - no collection creation
+        let schema_definition = {
+            let storage_guard = storage.read();
+            storage_guard
+                .get_collection_meta(&name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?
+                .schema
+                .clone()
+        };
+
+        let compiled_schema = if let Some(raw_schema) = schema_definition {
+            Some(Self::compile_schema(&raw_schema)?)
+        } else {
+            None
+        };
+
+        Ok(CollectionCore {
+            name,
+            storage,
+            indexes,
+            query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
+            schema: Arc::new(RwLock::new(compiled_schema)),
+        })
+    }
+
     fn compile_schema(schema: &Value) -> Result<CompiledSchema> {
         CompiledSchema::from_value(schema)
     }
