@@ -867,6 +867,32 @@ impl InsertState {
         }
     }
 
+    /// Create insert state with template (from existing document or default)
+    pub fn with_template(collection: String, template: Option<Value>) -> Self {
+        let lines = if let Some(val) = template {
+            let json_str = serde_json::to_string_pretty(&val).unwrap_or_else(|_| "{}".to_string());
+            json_str.lines().map(String::from).collect()
+        } else {
+            // Default template for empty collection
+            vec![
+                "{".to_string(),
+                "  \"name\": \"\",".to_string(),
+                "  \"value\": \"\"".to_string(),
+                "}".to_string(),
+            ]
+        };
+
+        Self {
+            lines,
+            cursor_line: 1,
+            cursor_col: 2,
+            collection,
+            error: None,
+            mode: EditorMode::Insert,
+            original_doc_id: None,
+        }
+    }
+
     /// Create editor state for editing an existing document
     pub fn edit(collection: String, doc: &Value) -> Self {
         let json_str = serde_json::to_string_pretty(doc).unwrap_or_else(|_| "{}".to_string());
@@ -2475,8 +2501,45 @@ impl App {
             return;
         };
 
-        self.insert = InsertState::new(coll_name);
+        // Use template from existing document or default
+        let template = if let Some(doc) = self.documents.first() {
+            Self::create_empty_template(doc)
+        } else {
+            None
+        };
+
+        self.insert = InsertState::with_template(coll_name, template);
         self.modal = Some(Modal::Insert);
+    }
+
+    /// Create empty template from existing document (keep structure, clear values)
+    fn create_empty_template(doc: &Value) -> Option<Value> {
+        fn clear_values(val: &Value) -> Value {
+            match val {
+                Value::Object(map) => {
+                    let mut new_map = serde_json::Map::new();
+                    for (k, v) in map {
+                        if k == "_id" {
+                            // Skip _id - will be auto-generated
+                            continue;
+                        }
+                        new_map.insert(k.clone(), clear_values(v));
+                    }
+                    Value::Object(new_map)
+                }
+                Value::Array(_) => Value::Array(vec![]),
+                Value::String(_) => Value::String(String::new()),
+                Value::Number(_) => Value::Number(0.into()),
+                Value::Bool(_) => Value::Bool(false),
+                Value::Null => Value::Null,
+            }
+        }
+
+        if let Value::Object(_) = doc {
+            Some(clear_values(doc))
+        } else {
+            None
+        }
     }
 
     /// Open edit document modal for selected document
