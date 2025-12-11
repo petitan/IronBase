@@ -15,7 +15,7 @@ struct ActionItem {
 
 /// Render the actions modal
 pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Akciok", theme, 40, 40);
+    let inner = render_modal_frame(frame, area, "Akciok", theme, 45, 55);
 
     let actions = get_context_actions(app);
 
