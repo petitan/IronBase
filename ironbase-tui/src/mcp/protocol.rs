@@ -113,7 +113,7 @@ impl std::error::Error for JsonRpcError {}
 #[derive(Debug, Clone, Deserialize)]
 pub struct ToolCallResult {
     pub content: Vec<ToolContent>,
-    #[serde(default)]
+    #[serde(default, rename = "isError")]
     pub is_error: bool,
 }
 
