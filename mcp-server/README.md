@@ -60,6 +60,180 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server
 IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 ```
 
+## MCP Tools Reference
+
+### Database Management
+
+| Tool | Description |
+|------|-------------|
+| `db_open` | Open or create a database file (switches current database) |
+| `db_stats` | Get database statistics (collection count, names) |
+| `db_compact` | Compact database file, remove deleted documents |
+| `db_checkpoint` | Force checkpoint - flush pending writes to disk |
+
+**Example - Open/Create Database:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "db_open",
+    "arguments": {
+      "path": "/path/to/database.mlite",
+      "create": true
+    }
+  }
+}
+```
+
+### Collection Management
+
+| Tool | Description |
+|------|-------------|
+| `collection_list` | List all collections in the database |
+| `collection_create` | Create a new collection |
+| `collection_drop` | Drop (delete) a collection and all its documents |
+
+**Example - Create Collection:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "collection_create",
+    "arguments": {
+      "name": "users"
+    }
+  }
+}
+```
+
+### Document CRUD
+
+| Tool | Description |
+|------|-------------|
+| `insert_one` | Insert a single document |
+| `insert_many` | Insert multiple documents |
+| `find` | Find documents matching query (with pagination, sort, projection) |
+| `find_one` | Find first matching document |
+| `update_one` | Update first matching document |
+| `update_many` | Update all matching documents |
+| `delete_one` | Delete first matching document |
+| `delete_many` | Delete all matching documents |
+
+**Example - Insert Document:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "insert_one",
+    "arguments": {
+      "collection": "users",
+      "document": {"name": "Alice", "age": 30}
+    }
+  }
+}
+```
+
+**Example - Find with Pagination:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "find",
+    "arguments": {
+      "collection": "users",
+      "query": {"age": {"$gte": 18}},
+      "sort": {"name": 1},
+      "skip": 0,
+      "limit": 10,
+      "include_total": true
+    }
+  }
+}
+```
+
+### Query Features
+
+| Tool | Description |
+|------|-------------|
+| `count_documents` | Count documents matching query |
+| `distinct` | Get distinct values for a field |
+| `aggregate` | Run aggregation pipeline |
+| `fuzzy_search` | Fuzzy text search with configurable algorithm |
+
+**Example - Aggregation:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "aggregate",
+    "arguments": {
+      "collection": "orders",
+      "pipeline": [
+        {"$match": {"status": "completed"}},
+        {"$group": {"_id": "$customer_id", "total": {"$sum": "$amount"}}}
+      ]
+    }
+  }
+}
+```
+
+### Index Management
+
+| Tool | Description |
+|------|-------------|
+| `index_create` | Create single-field or compound index |
+| `index_create_fuzzy` | Create fuzzy text index |
+| `index_list` | List indexes for a collection |
+| `index_drop` | Drop an index |
+| `explain` | Explain query execution plan |
+| `find_with_hint` | Find with index hint |
+
+**Example - Create Index:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "index_create",
+    "arguments": {
+      "collection": "users",
+      "field": "email",
+      "unique": true
+    }
+  }
+}
+```
+
+### Schema Validation
+
+| Tool | Description |
+|------|-------------|
+| `schema_set` | Set JSON schema for collection validation |
+| `schema_get` | Get current schema for a collection |
+
+**Example - Set Schema:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "schema_set",
+    "arguments": {
+      "collection": "users",
+      "schema": {
+        "type": "object",
+        "required": ["name", "email"],
+        "properties": {
+          "name": {"type": "string"},
+          "email": {"type": "string", "format": "email"},
+          "age": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
 ## Stored Scripts System
 
 The MCP server includes a powerful stored scripts feature using Rhai scripting language.

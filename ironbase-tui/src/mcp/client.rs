@@ -107,7 +107,7 @@ impl McpClient {
     /// Create a new collection
     pub async fn create_collection(&self, name: &str) -> McpResult<()> {
         let args = serde_json::json!({
-            "collection": name
+            "name": name
         });
         self.call_tool("collection_create", args).await?;
         Ok(())
@@ -116,7 +116,7 @@ impl McpClient {
     /// Drop a collection
     pub async fn drop_collection(&self, name: &str) -> McpResult<()> {
         let args = serde_json::json!({
-            "collection": name
+            "name": name
         });
         self.call_tool("collection_drop", args).await?;
         Ok(())

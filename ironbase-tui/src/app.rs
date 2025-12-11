@@ -67,98 +67,6 @@ pub enum Modal {
     Update,
     Database,
 }
-
-/// Progress state for long-running operations
-#[derive(Debug, Clone)]
-pub enum ProgressState {
-    /// Indeterminate progress (spinner) - for unknown duration tasks
-    Indeterminate { message: String, frame: usize },
-    /// Determinate progress (bar) - for tasks with known total
-    Determinate {
-        message: String,
-        current: usize,
-        total: usize,
-    },
-}
-
-impl ProgressState {
-    /// Create new indeterminate progress
-    pub fn indeterminate(message: impl Into<String>) -> Self {
-        Self::Indeterminate {
-            message: message.into(),
-            frame: 0,
-        }
-    }
-
-    /// Create new determinate progress
-    pub fn determinate(message: impl Into<String>, current: usize, total: usize) -> Self {
-        Self::Determinate {
-            message: message.into(),
-            current,
-            total,
-        }
-    }
-
-    /// Update message
-    pub fn set_message(&mut self, msg: impl Into<String>) {
-        match self {
-            Self::Indeterminate { message, .. } => *message = msg.into(),
-            Self::Determinate { message, .. } => *message = msg.into(),
-        }
-    }
-
-    /// Update progress (for determinate)
-    pub fn set_progress(&mut self, current: usize, total: usize) {
-        if let Self::Determinate {
-            current: c,
-            total: t,
-            ..
-        } = self
-        {
-            *c = current;
-            *t = total;
-        }
-    }
-
-    /// Tick animation frame (for indeterminate)
-    pub fn tick(&mut self) {
-        if let Self::Indeterminate { frame, .. } = self {
-            *frame = frame.wrapping_add(1);
-        }
-    }
-
-    /// Get percentage (for determinate, 0-100)
-    pub fn percentage(&self) -> Option<u8> {
-        match self {
-            Self::Determinate { current, total, .. } if *total > 0 => {
-                Some(((*current as f64 / *total as f64) * 100.0) as u8)
-            }
-            _ => None,
-        }
-    }
-
-    /// Get the message
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Indeterminate { message, .. } => message,
-            Self::Determinate { message, .. } => message,
-        }
-    }
-
-    /// Get spinner frame (for indeterminate)
-    pub fn frame(&self) -> usize {
-        match self {
-            Self::Indeterminate { frame, .. } => *frame,
-            _ => 0,
-        }
-    }
-
-    /// Check if determinate
-    pub fn is_determinate(&self) -> bool {
-        matches!(self, Self::Determinate { .. })
-    }
-}
-
 /// Search mode - collections or document content
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SearchMode {
@@ -2287,12 +2195,6 @@ pub struct App {
     pub status_message: Option<String>,
     pub error_message: Option<String>,
     pub error_scroll: usize,
-
-    // Progress state for long-running operations
-    pub progress: Option<ProgressState>,
-
-    // Startup phase (splash screen)
-    pub startup: bool,
 }
 
 impl App {
@@ -2337,49 +2239,6 @@ impl App {
             status_message: None,
             error_message: None,
             error_scroll: 0,
-            progress: None,
-            startup: true,
-        }
-    }
-
-    // === Progress state ===
-
-    /// Set indeterminate progress (spinner) with message
-    pub fn set_loading(&mut self, msg: impl Into<String>) {
-        self.progress = Some(ProgressState::indeterminate(msg));
-    }
-
-    /// Set determinate progress (bar) with current/total
-    pub fn set_progress(&mut self, msg: impl Into<String>, current: usize, total: usize) {
-        self.progress = Some(ProgressState::determinate(msg, current, total));
-    }
-
-    /// Update progress values (for determinate progress)
-    pub fn update_progress(&mut self, current: usize, total: usize) {
-        if let Some(ref mut progress) = self.progress {
-            progress.set_progress(current, total);
-        }
-    }
-
-    /// Clear progress state
-    pub fn clear_loading(&mut self) {
-        self.progress = None;
-    }
-
-    /// Check if loading/progress active
-    pub fn is_loading(&self) -> bool {
-        self.progress.is_some()
-    }
-
-    /// Get progress state reference
-    pub fn get_progress(&self) -> Option<&ProgressState> {
-        self.progress.as_ref()
-    }
-
-    /// Advance progress animation frame
-    pub fn tick_loading(&mut self) {
-        if let Some(ref mut progress) = self.progress {
-            progress.tick();
         }
     }
 
@@ -3083,6 +2942,18 @@ impl App {
         self.error_message = None;
     }
 
+    /// Reset UI state for database switch (clear documents, filters, selections)
+    pub fn reset_for_new_database(&mut self) {
+        self.documents.clear();
+        self.selected_collection = 0;
+        self.selected_document = 0;
+        self.doc_scroll_offset = 0;
+        self.detail_scroll = 0;
+        self.total_docs = 0;
+        self.active_filter = None;
+        self.active_sort = None;
+    }
+
     /// Copy selected document JSON to clipboard
     pub fn copy_document_to_clipboard(&mut self) {
         let Some(doc) = self.get_selected_document() else {
@@ -3140,10 +3011,7 @@ impl App {
 
     /// Refresh collections list (async)
     pub async fn refresh_collections_async(&mut self) -> anyhow::Result<()> {
-        self.set_loading("Kollekciok betoltese...");
-        let result = self.refresh_collections_inner().await;
-        self.clear_loading();
-        result
+        self.refresh_collections_inner().await
     }
 
     async fn refresh_collections_inner(&mut self) -> anyhow::Result<()> {
@@ -3168,10 +3036,7 @@ impl App {
         if coll_name.is_empty() {
             return Ok(());
         }
-        self.set_loading(format!("Dokumentumok betoltese: {}...", coll_name));
-        let result = self.refresh_documents_inner().await;
-        self.clear_loading();
-        result
+        self.refresh_documents_inner().await
     }
 
     async fn refresh_documents_inner(&mut self) -> anyhow::Result<()> {
@@ -3754,11 +3619,7 @@ impl App {
 
         let collection = self.query_state.collection.clone();
 
-        // Show loading indicator (before db borrow)
-        self.set_loading("Lekérdezés...");
-
         let Some(db) = &self.db else {
-            self.clear_loading();
             self.set_error("Nincs megnyitva adatbázis");
             return;
         };
@@ -3784,7 +3645,6 @@ impl App {
                 self.query_state.error = Some(format!("Lekérdezés hiba: {}", e));
             }
         }
-        self.clear_loading();
     }
 
     /// Apply the current query as a filter and close modal
@@ -3834,14 +3694,10 @@ impl App {
             }
         };
 
-        // Show loading indicator (before db borrow)
-        self.set_loading("Szűrés...");
-
         // Build sort from filter state
         let sort = self.filter_state.build_sort();
 
         let Some(db) = &self.db else {
-            self.clear_loading();
             self.filter_state.error = Some("Nincs megnyitva adatbázis".to_string());
             return;
         };
@@ -3850,7 +3706,6 @@ impl App {
         let total_count = match db.count_with_query(&collection, &query).await {
             Ok(c) => c,
             Err(e) => {
-                self.clear_loading();
                 self.filter_state.error = Some(format!("Szamlalas hiba: {}", e));
                 return;
             }
@@ -3858,7 +3713,6 @@ impl App {
 
         if total_count == 0 {
             // 0 eredmény - maradjon nyitva a modal, mutassa a query-t
-            self.clear_loading();
             self.filter_state.result_count = 0;
             self.filter_state.results = Some(vec![]);
             self.filter_state.error = Some(format!(
@@ -3895,7 +3749,6 @@ impl App {
                 self.filter_state.error = Some(format!("Szures hiba: {}", e));
             }
         }
-        self.clear_loading();
     }
 
     // === Async Export ===
@@ -3927,19 +3780,14 @@ impl App {
         };
         let mut writer = BufWriter::new(file);
 
-        // Set determinate progress before db borrow
-        self.set_progress("Exportálás", 0, total_docs);
-
         let Some(db) = &self.db else {
             self.set_error("Nincs megnyitva adatbázis");
-            self.clear_loading();
             return;
         };
 
         let result: Result<usize, String> = match format {
             ExportFormat::Json => {
                 if let Err(e) = writeln!(writer, "[") {
-                    self.clear_loading();
                     return self.export_state.error = Some(format!("Írási hiba: {}", e));
                 }
 
@@ -3955,7 +3803,6 @@ impl App {
                         Ok(d) => d,
                         Err(e) => {
                             self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
-                            self.clear_loading();
                             return;
                         }
                     };
@@ -3972,26 +3819,22 @@ impl App {
                             Ok(j) => j,
                             Err(e) => {
                                 self.export_state.error = Some(format!("JSON hiba: {}", e));
-                                self.clear_loading();
                                 return;
                             }
                         };
 
                         if let Err(e) = write!(writer, "{}{}", prefix, json) {
                             self.export_state.error = Some(format!("Írási hiba: {}", e));
-                            self.clear_loading();
                             return;
                         }
                     }
 
                     exported += docs.len();
                     offset += docs.len();
-                    // Note: self.update_progress not called here due to db borrow conflict
                 }
 
                 if let Err(e) = writeln!(writer, "\n]") {
                     self.export_state.error = Some(format!("Írási hiba: {}", e));
-                    self.clear_loading();
                     return;
                 }
 
@@ -4005,14 +3848,12 @@ impl App {
                     Ok(d) => d,
                     Err(e) => {
                         self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
-                        self.clear_loading();
                         return;
                     }
                 };
 
                 if sample.is_empty() {
                     self.export_state.error = Some("Nincs exportálandó dokumentum".to_string());
-                    self.clear_loading();
                     return;
                 }
 
@@ -4029,7 +3870,6 @@ impl App {
 
                 if let Err(e) = writeln!(writer, "{}", fields.join(",")) {
                     self.export_state.error = Some(format!("Írási hiba: {}", e));
-                    self.clear_loading();
                     return;
                 }
 
@@ -4044,7 +3884,6 @@ impl App {
                         Ok(d) => d,
                         Err(e) => {
                             self.export_state.error = Some(format!("Lekérdezés hiba: {}", e));
-                            self.clear_loading();
                             return;
                         }
                     };
@@ -4074,14 +3913,12 @@ impl App {
 
                         if let Err(e) = writeln!(writer, "{}", row.join(",")) {
                             self.export_state.error = Some(format!("Írási hiba: {}", e));
-                            self.clear_loading();
                             return;
                         }
                     }
 
                     exported += docs.len();
                     offset += docs.len();
-                    // Note: self.update_progress not called here due to db borrow conflict
                 }
 
                 Ok(exported)
@@ -4090,12 +3927,8 @@ impl App {
 
         if let Err(e) = writer.flush() {
             self.export_state.error = Some(format!("Flush hiba: {}", e));
-            self.clear_loading();
             return;
         }
-
-        // Clear progress
-        self.clear_loading();
 
         match result {
             Ok(count) => {

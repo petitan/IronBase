@@ -10,12 +10,10 @@ pub mod help;
 pub mod index;
 pub mod insert;
 pub mod new_collection;
-pub mod progress;
 pub mod query;
 pub mod script;
 pub mod search;
 pub mod server_info;
-pub mod splash;
 pub mod update;
 
 use crate::theme::Theme;

@@ -64,9 +64,8 @@ async fn main() -> anyhow::Result<()> {
     // Get db_path for later use
     let db_path = cli.database.or_else(|| config.last_db_path.clone());
 
-    // Initialize app (without db yet, startup mode = splash screen)
+    // Initialize app
     let mut app = App::new(config.clone());
-    app.set_loading("Csatlakozas az adatbazishoz...");
 
     // Install panic hook to restore terminal on crash
     let original_hook = std::panic::take_hook();
@@ -131,9 +130,6 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // DB connection done - exit startup/splash mode
-    app.startup = false;
-    app.clear_loading();
 
     // Run app
     let result = run_app(&mut terminal, &mut app).await;
@@ -185,7 +181,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
                 }
                 Event::Resize(_, height) => {
                     // Update page_size when terminal is resized
-                    if app.update_page_size(height) && !app.startup {
+                    if app.update_page_size(height) {
                         // Refresh documents with new page size
                         let _ = app.refresh_documents_async().await;
                     }
@@ -291,21 +287,6 @@ fn handle_error_modal_key(app: &mut App, key: KeyCode) {
 fn render_ui(frame: &mut Frame, app: &App) {
     let theme = app.theme.clone();
 
-    // Show splash screen during startup
-    if app.startup {
-        if let Some(progress) = app.get_progress() {
-            const LOGO: &str = r#"
-  ___                 ____
- |_ _|_ __ ___  _ __ | __ )  __ _ ___  ___
-  | || '__/ _ \| '_ \|  _ \ / _` / __|/ _ \
-  | || | | (_) | | | | |_) | (_| \__ \  __/
- |___|_|  \___/|_| |_|____/ \__,_|___/\___|
-"#;
-            modals::progress::render_splash(frame, frame.area(), progress, &theme, LOGO);
-        }
-        return;
-    }
-
     // Main layout: Header + Content + Command Bar
     let layout = Layout::vertical([
         Constraint::Length(1), // Header
@@ -394,10 +375,6 @@ fn render_ui(frame: &mut Frame, app: &App) {
         }
     }
 
-    // Render progress overlay (on top of modals) for ALL progress types
-    if let Some(progress) = app.get_progress() {
-        modals::progress::render(frame, frame.area(), progress, &theme);
-    }
 }
 
 /// Render the header bar
@@ -428,36 +405,6 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::raw(" | "),
         Span::styled(pane_name, Style::default().fg(theme.fg)),
     ];
-
-    // Add loading/progress indicator
-    if let Some(progress) = app.get_progress() {
-        const SPINNERS: [char; 8] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧'];
-        spans.push(Span::raw(" | "));
-        match progress {
-            crate::app::ProgressState::Indeterminate { message, frame } => {
-                let spinner = SPINNERS[*frame % SPINNERS.len()];
-                spans.push(Span::styled(
-                    format!("{} {}", spinner, message),
-                    Style::default().fg(theme.warning).bold(),
-                ));
-            }
-            crate::app::ProgressState::Determinate {
-                message,
-                current,
-                total,
-            } => {
-                let pct = if *total > 0 {
-                    (*current as f64 / *total as f64 * 100.0) as u8
-                } else {
-                    0
-                };
-                spans.push(Span::styled(
-                    format!("{} ({}/{}) {}%", message, current, total, pct),
-                    Style::default().fg(theme.warning).bold(),
-                ));
-            }
-        }
-    }
 
     let line = Line::from(spans).patch_style(header_style);
 
@@ -901,7 +848,8 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
                             let action = if create { "letrehozva" } else { "megnyitva" };
                             app.database_state.message = Some(format!("Sikeresen {}!", action));
 
-                            // Refresh collections
+                            // Reset UI state and refresh collections
+                            app.reset_for_new_database();
                             if let Err(e) = app.refresh_collections_async().await {
                                 app.set_error(format!("Kollekcio betoltes hiba: {}", e));
                             }
@@ -965,7 +913,8 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
                     };
                     app.database_state.message = Some(format!("Sikeresen {}!", action));
 
-                    // Refresh collections
+                    // Reset UI state and refresh collections
+                    app.reset_for_new_database();
                     if let Err(e) = app.refresh_collections_async().await {
                         app.set_error(format!("Kollekcio betoltes hiba: {}", e));
                     }
