@@ -122,6 +122,15 @@ impl DbWrapper {
         self.client.db_stats().await.map_err(|e| anyhow::anyhow!("{}", e))
     }
 
+    /// Open or create a database file (switches the current database)
+    pub async fn db_open(&self, path: &str, create: bool) -> Result<()> {
+        self.client
+            .db_open(path, create)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        Ok(())
+    }
+
     /// Get list of available MCP tools
     pub async fn tools_list(&self) -> Result<Vec<Value>> {
         self.client.tools_list().await.map_err(|e| anyhow::anyhow!("{}", e))

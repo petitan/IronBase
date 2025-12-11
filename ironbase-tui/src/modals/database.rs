@@ -36,54 +36,45 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
 
-    // Mode selector (only if not HTTP mode)
-    if !state.is_http_mode {
-        let open_style = if state.mode == DatabaseMode::Open {
-            Style::default().fg(theme.bg).bg(theme.accent).bold()
-        } else {
-            Style::default().fg(theme.muted)
-        };
-        let create_style = if state.mode == DatabaseMode::Create {
-            Style::default().fg(theme.bg).bg(theme.accent).bold()
-        } else {
-            Style::default().fg(theme.muted)
-        };
+    // Mode selector
+    let open_style = if state.mode == DatabaseMode::Open {
+        Style::default().fg(theme.bg).bg(theme.accent).bold()
+    } else {
+        Style::default().fg(theme.muted)
+    };
+    let create_style = if state.mode == DatabaseMode::Create {
+        Style::default().fg(theme.bg).bg(theme.accent).bold()
+    } else {
+        Style::default().fg(theme.muted)
+    };
 
-        let mode_line = Line::from(vec![
-            Span::raw(" Mod: "),
-            Span::styled(" Megnyitas ", open_style),
-            Span::raw("  "),
-            Span::styled(" Letrehozas ", create_style),
-        ]);
-        frame.render_widget(Paragraph::new(mode_line), chunks[1]);
-    }
+    let mode_line = Line::from(vec![
+        Span::raw(" Mod: "),
+        Span::styled(" Megnyitas ", open_style),
+        Span::raw("  "),
+        Span::styled(" Letrehozas ", create_style),
+    ]);
+    frame.render_widget(Paragraph::new(mode_line), chunks[1]);
 
     // Info text
-    let info_text = if state.is_http_mode {
-        "HTTP modban nem valthatod az adatbazist.".to_string()
-    } else {
-        match state.mode {
-            DatabaseMode::Open => "Add meg egy letezo adatbazis fajl utvonalat.".to_string(),
-            DatabaseMode::Create => "Add meg az uj adatbazis fajl utvonalat.\nA fajl nem letezhet meg!".to_string(),
-        }
+    let info_text = match state.mode {
+        DatabaseMode::Open => "Add meg egy letezo adatbazis fajl utvonalat.".to_string(),
+        DatabaseMode::Create => "Add meg az uj adatbazis fajl utvonalat.\nA fajl nem letezhet meg!".to_string(),
     };
-    let info = Paragraph::new(info_text)
-        .style(Style::default().fg(if state.is_http_mode { theme.warning } else { theme.fg }));
+    let info = Paragraph::new(info_text).style(Style::default().fg(theme.fg));
     frame.render_widget(info, chunks[2]);
 
-    // Path input (only if not HTTP mode)
-    if !state.is_http_mode {
-        let before: String = state.path.chars().take(state.cursor).collect();
-        let after: String = state.path.chars().skip(state.cursor).collect();
+    // Path input
+    let before: String = state.path.chars().take(state.cursor).collect();
+    let after: String = state.path.chars().skip(state.cursor).collect();
 
-        let path_line = Line::from(vec![
-            Span::styled(" Utvonal: ", Style::default().fg(theme.accent)),
-            Span::styled(before, Style::default().fg(theme.fg)),
-            Span::styled("|", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
-            Span::styled(after, Style::default().fg(theme.fg)),
-        ]);
-        frame.render_widget(Paragraph::new(path_line), chunks[3]);
-    }
+    let path_line = Line::from(vec![
+        Span::styled(" Utvonal: ", Style::default().fg(theme.accent)),
+        Span::styled(before, Style::default().fg(theme.fg)),
+        Span::styled("|", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(after, Style::default().fg(theme.fg)),
+    ]);
+    frame.render_widget(Paragraph::new(path_line), chunks[3]);
 
     // Status/error line
     let status_text = if let Some(ref err) = state.error {

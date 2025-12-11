@@ -140,6 +140,26 @@ pub fn get_tools_list() -> Value {
         "tools": [
             // Database Management
             {
+                "name": "db_open",
+                "title": "Open Database",
+                "description": "Open or create a database file. Closes the current database and switches to the new one.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the database file (.mlite)"
+                        },
+                        "create": {
+                            "type": "boolean",
+                            "description": "If true, creates new database (path must not exist). If false, opens existing (path must exist).",
+                            "default": false
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            {
                 "name": "db_stats",
                 "title": "Database Statistics",
                 "description": "Get database statistics including collection count and names",
@@ -1122,6 +1142,21 @@ pub fn get_tools_list() -> Value {
 pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     match name {
         // Database Management
+        "db_open" => {
+            let path = get_string(&params, "path")?;
+            let create = params
+                .get("create")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let new_path = adapter.switch_database(&path, create)?;
+
+            Ok(json!({
+                "success": true,
+                "path": new_path,
+                "message": if create { "Database created" } else { "Database opened" }
+            }))
+        }
         "db_stats" => Ok(adapter.stats()),
         "db_compact" => adapter.compact(),
         "db_checkpoint" => {

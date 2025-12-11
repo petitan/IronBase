@@ -110,5 +110,10 @@ fn get_context_actions(app: &App) -> Vec<ActionItem> {
             label: "IronRhai Scriptek",
             enabled: true,
         },
+        ActionItem {
+            key: 'b',
+            label: "Adatbazis megnyitas/letrehozas",
+            enabled: true,
+        },
     ]
 }

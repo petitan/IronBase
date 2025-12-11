@@ -77,10 +77,6 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
             Span::raw("Frissites ellenorzes"),
         ]),
         Line::from(vec![
-            Span::styled("Shift+O   ", Style::default().fg(theme.accent)),
-            Span::raw("Adatbazis megnyitas/letrehozas"),
-        ]),
-        Line::from(vec![
             Span::styled("r         ", Style::default().fg(theme.accent)),
             Span::raw("Adatok ujratoltese"),
         ]),

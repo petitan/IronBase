@@ -251,6 +251,10 @@ async fn handle_actions_key_async(app: &mut App, key: KeyCode) {
             app.open_script_modal();
             app.load_scripts_async().await;
         }
+        KeyCode::Char('b') => {
+            app.close_modal();
+            handle_database_open(app);
+        }
         _ => {}
     }
 }
@@ -609,7 +613,6 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char('?'), _) => app.open_help(),
         (KeyCode::Char('I'), KeyModifiers::SHIFT) => handle_server_info_open(app).await,
         (KeyCode::Char('U'), KeyModifiers::SHIFT) => handle_update_open(app).await,
-        (KeyCode::Char('O'), KeyModifiers::SHIFT) => handle_database_open(app),
         (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
 
         // Error detail modal (if error present, 'e' opens error details)
@@ -875,23 +878,50 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
         }
         KeyCode::Tab => {
             // Toggle between Open and Create mode
-            if !app.database_state.is_http_mode {
-                app.database_state.toggle_mode();
-            }
+            app.database_state.toggle_mode();
         }
         KeyCode::Enter => {
-            // Try to open/create the database
-            if app.database_state.is_http_mode {
-                app.database_state.error = Some("HTTP modban nem valthatod az adatbazist.".to_string());
-                return;
-            }
-
             let path = app.database_state.path.trim().to_string();
             if path.is_empty() {
                 app.database_state.error = Some("Az utvonal nem lehet ures!".to_string());
                 return;
             }
 
+            let create = app.database_state.mode == DatabaseMode::Create;
+
+            // HTTP mode: use db_open MCP tool
+            if app.database_state.is_http_mode {
+                if let Some(ref db) = app.db {
+                    app.database_state.loading = true;
+                    app.database_state.error = None;
+
+                    match db.db_open(&path, create).await {
+                        Ok(()) => {
+                            app.database_state.loading = false;
+                            let action = if create { "letrehozva" } else { "megnyitva" };
+                            app.database_state.message = Some(format!("Sikeresen {}!", action));
+
+                            // Refresh collections
+                            if let Err(e) = app.refresh_collections_async().await {
+                                app.set_error(format!("Kollekcio betoltes hiba: {}", e));
+                            }
+
+                            // Close modal after success
+                            app.close_modal();
+                            app.set_status(format!("Adatbazis {}: {}", action, path));
+                        }
+                        Err(e) => {
+                            app.database_state.loading = false;
+                            app.database_state.error = Some(format!("{}", e));
+                        }
+                    }
+                } else {
+                    app.database_state.error = Some("Nincs aktiv kapcsolat!".to_string());
+                }
+                return;
+            }
+
+            // Stdio mode: restart MCP server with new database
             let path_buf = std::path::PathBuf::from(&path);
             let file_exists = path_buf.exists();
 
@@ -951,19 +981,13 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
             }
         }
         KeyCode::Char(c) => {
-            if !app.database_state.is_http_mode {
-                app.database_state.insert_char(c);
-            }
+            app.database_state.insert_char(c);
         }
         KeyCode::Backspace => {
-            if !app.database_state.is_http_mode {
-                app.database_state.backspace();
-            }
+            app.database_state.backspace();
         }
         KeyCode::Delete => {
-            if !app.database_state.is_http_mode {
-                app.database_state.delete();
-            }
+            app.database_state.delete();
         }
         KeyCode::Left => {
             app.database_state.move_left();

@@ -39,8 +39,8 @@ pub struct UpdateResult {
 /// IronBase Adapter
 pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,
-    /// Database file path (stored for stats)
-    db_path: std::path::PathBuf,
+    /// Database file path (stored for stats, wrapped in RwLock for dynamic switching)
+    db_path: RwLock<std::path::PathBuf>,
 }
 
 /// Scripts collection name
@@ -56,7 +56,7 @@ impl IronBaseAdapter {
         let db = DatabaseCore::open(&db_path)?;
         let adapter = Self {
             db: Arc::new(RwLock::new(db)),
-            db_path,
+            db_path: RwLock::new(db_path),
         };
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
@@ -107,11 +107,69 @@ impl IronBaseAdapter {
     /// Get database statistics
     pub fn stats(&self) -> Value {
         let db = self.db.read();
+        let db_path = self.db_path.read();
         serde_json::json!({
-            "database_path": self.db_path.display().to_string(),
+            "database_path": db_path.display().to_string(),
             "collections": db.list_collections(),
             "collection_count": db.list_collections().len(),
         })
+    }
+
+    /// Get current database path
+    pub fn get_db_path(&self) -> String {
+        self.db_path.read().display().to_string()
+    }
+
+    /// Switch to a different database file
+    /// Returns the new database path on success
+    pub fn switch_database(&self, new_path: &str, create_if_missing: bool) -> Result<String> {
+        use crate::error::McpError;
+        let path = std::path::Path::new(new_path);
+
+        // Validate path
+        if !create_if_missing && !path.exists() {
+            return Err(McpError::InvalidParams(format!(
+                "Database file does not exist: {}",
+                new_path
+            )));
+        }
+
+        if create_if_missing && path.exists() {
+            return Err(McpError::InvalidParams(format!(
+                "Database file already exists: {}",
+                new_path
+            )));
+        }
+
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    McpError::Internal(format!("Failed to create directory: {}", e))
+                })?;
+            }
+        }
+
+        // Open new database (creates if needed)
+        let new_db = DatabaseCore::open(path)
+            .map_err(|e| McpError::Internal(format!("Failed to open database: {}", e)))?;
+
+        // Swap the database (write lock)
+        {
+            let mut db_guard = self.db.write();
+            *db_guard = new_db;
+        }
+
+        // Update path
+        {
+            let mut path_guard = self.db_path.write();
+            *path_guard = path.to_path_buf();
+        }
+
+        // Ensure system collections exist in new database
+        self.ensure_system_collections()?;
+
+        Ok(new_path.to_string())
     }
 
     /// Compact the database

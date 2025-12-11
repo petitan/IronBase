@@ -308,6 +308,16 @@ impl McpClient {
         Ok(result)
     }
 
+    /// Open or create a database file (switches the current database)
+    pub async fn db_open(&self, path: &str, create: bool) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "path": path,
+            "create": create
+        });
+        let result = self.call_tool("db_open", args).await?;
+        Ok(result)
+    }
+
     /// Get server info (version, etc.)
     pub async fn server_info(&self) -> McpResult<Value> {
         // Try to get URL from transport and fetch /health endpoint
