@@ -1171,8 +1171,7 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
         }
         "collection_create" => {
             let name = get_string(&params, "name")?;
-            // Collections are created implicitly on first insert
-            // Just return success
+            adapter.create_collection(&name)?;
             Ok(json!({"success": true, "collection": name}))
         }
         "collection_drop" => {

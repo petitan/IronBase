@@ -97,6 +97,14 @@ impl IronBaseAdapter {
         db.list_collections()
     }
 
+    /// Create a new collection
+    pub fn create_collection(&self, name: &str) -> Result<()> {
+        let db = self.db.read();
+        // Use collection() which creates the collection if it doesn't exist
+        let _ = db.collection(name)?;
+        Ok(())
+    }
+
     /// Drop a collection
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         let db = self.db.write();
