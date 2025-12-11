@@ -2,6 +2,7 @@
 
 pub mod actions;
 pub mod confirm;
+pub mod database;
 pub mod error;
 pub mod export;
 pub mod filter;

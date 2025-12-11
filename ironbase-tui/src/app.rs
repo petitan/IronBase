@@ -65,6 +65,7 @@ pub enum Modal {
     Script,
     ServerInfo,
     Update,
+    Database,
 }
 
 /// Progress state for long-running operations
@@ -1539,6 +1540,71 @@ impl ExportState {
     }
 }
 
+/// Database open/create state
+#[derive(Debug, Clone, Default)]
+pub struct DatabaseState {
+    pub path: String,
+    pub cursor: usize,
+    pub error: Option<String>,
+    pub message: Option<String>,
+    pub loading: bool,
+    pub is_http_mode: bool,
+}
+
+impl DatabaseState {
+    pub fn new(current_path: Option<&str>, is_http: bool) -> Self {
+        Self {
+            path: current_path.unwrap_or("").to_string(),
+            cursor: current_path.map(|p| p.len()).unwrap_or(0),
+            error: None,
+            message: None,
+            loading: false,
+            is_http_mode: is_http,
+        }
+    }
+
+    pub fn insert_char(&mut self, c: char) {
+        self.path.insert(self.cursor, c);
+        self.cursor += 1;
+        self.error = None;
+    }
+
+    pub fn backspace(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+            self.path.remove(self.cursor);
+            self.error = None;
+        }
+    }
+
+    pub fn delete(&mut self) {
+        if self.cursor < self.path.len() {
+            self.path.remove(self.cursor);
+            self.error = None;
+        }
+    }
+
+    pub fn move_left(&mut self) {
+        if self.cursor > 0 {
+            self.cursor -= 1;
+        }
+    }
+
+    pub fn move_right(&mut self) {
+        if self.cursor < self.path.len() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn home(&mut self) {
+        self.cursor = 0;
+    }
+
+    pub fn end(&mut self) {
+        self.cursor = self.path.len();
+    }
+}
+
 /// New collection state
 #[derive(Debug, Clone, Default)]
 pub struct NewCollectionState {
@@ -2193,6 +2259,9 @@ pub struct App {
     // Update modal state
     pub update_state: crate::modals::update::UpdateState,
 
+    // Database open/create modal state
+    pub database_state: DatabaseState,
+
     // Config
     pub config: Config,
 
@@ -2245,6 +2314,7 @@ impl App {
             server_info_state: crate::modals::server_info::ServerInfoState::new(),
             server_info_scroll: 0,
             update_state: crate::modals::update::UpdateState::default(),
+            database_state: DatabaseState::default(),
             config,
             status_message: None,
             error_message: None,

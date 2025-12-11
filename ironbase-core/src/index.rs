@@ -378,12 +378,12 @@ impl BPlusTree {
             // Take current root and wrap it as left child of new root
             let old_root = std::mem::take(&mut self.root);
 
-            // Create new root with the split result
-            self.root = Box::new(BTreeNode::Internal(InternalNode {
+            // Create new root with the split result (reuse Box allocation)
+            *self.root = BTreeNode::Internal(InternalNode {
                 keys: vec![separator],
                 children: vec![old_root, right_child],
                 children_offsets: Vec::new(),
-            }));
+            });
             self.metadata.tree_height += 1;
         }
 

@@ -1,0 +1,61 @@
+_collection,_id,content,level,title
+"szolgaltatas_arlista.sections",1,"| Név                                     | Termékcsoport                               | Lista ár 2025       | Név                                        | Termékcsoport         | Lista ár 2025   |
+|-----------------------------------------|---------------------------------------------|---------------------|--------------------------------------------|-----------------------|-----------------|
+| KALIBRÁLÁS                              |                                             |                     | HITELESÍTÉS                                |                       |                 |
+| Fékerőmérő berendezés                   | Kalibrálás 6 hó                             | 27 400 Ft           | Gázelemző hitelesítés többgázos            | Hitelesítés 1 év      | 40 500 Ft       |
+| Lengéscsillapító vizsgáló               | Kalibrálás 6 hó                             | 20 200 Ft           | Hitelesítésre felkészítés, átvizsg.,beáll. | egyéb díj             | 12 200 Ft       |
+| Gázelemző készülék (több gázos)         | Kalibrálás 6 hó                             | 23 400 Ft           | Guminyomásmérő hitelesítés                 | Hitelesítés 2 év      | 10 400 Ft       |
+| Diesel füstölésmérő                     | Kalibrálás 6 hó                             | 17 300 Ft           | Légakku hitelesítése                       | Hitelesítés 2 év      | 10 700 Ft       |
+| Fényszóróbeállító                       | Kalibrálás 6 hó                             | 10 000 Ft           | Zajszintmérő hitelesítés                   | Hitelesítés 2 év      | 66 200 Ft       |
+| Motorteszter                            | Kalibrálás 12 hó                            | 9 400 Ft            | Integráló zajszintmérő hitelesítés         | Hitelesítés 2 év      | 122 900 Ft      |
+| Futóműállító                            | Kalibrálás 6 hó                             | 22 000 Ft           | Súly hitelesítés                           | Hitelesítés           | 3 000 Ft        |
+| Kerékcentírozó                          | Kalibrálás 6 hó                             | 19 200 Ft           |                                            |                       |                 |
+| Nyomatékkulcs                           | Kalibrálás 12 hó                            | 25 500 Ft           | KÜLSŐ KALIBRÁLÁS                           |                       |                 |
+| Lassulásmérő                            | Kalibrálás 12 hó                            | 32 100 Ft           |                                            |                       |                 |
+| Nyomásmérő                              | Kalibrálás 12 hó                            | 9 200 Ft            | Stopperóra kalibrálás                      | Külső kalibrálás 5 év | 30 200 Ft       |
+| Fordulatszámmérő                        | Kalibrálás 12 hó                            | 9 500 Ft            | Menetíró kalibrálás                        | Külső kalibrálás 1 év | 108 700 Ft      |
+| Stroboszkópos gyújtásvizsgáló           | Kalibrálás 12 hó                            | 9 500 Ft            | Üvegszűrő etalon kalibrálás                | Külső kalibrálás 1 év | 20 000 Ft       |
+| Oszcilloszkóp                           | Kalibrálás 12 hó                            | 7 200 Ft            | Fénymérő kalibrálás                        | Külső kalibrálás 3 év | 58 300 Ft       |
+| Oszcilloszkópos motorteszter            | Kalibrálás 12 hó                            | 15 600 Ft           | Tintmeter                                  | Külső kalibrálás 3 év | 38 000 Ft       |
+| Gázelemző készülék (egy gázos)          | Kalibrálás 6 hó                             | 10 100 Ft           |                                            |                       |                 |
+| Gázszivárgás érzékelő                   | Kalibrálás 12 hó                            | 11 800 Ft           | EMELŐS VIZSGÁLATOK                         |                       |                 |
+| Gázszivárgás érzékelő (telepített)      | Kalibrálás 12 hó                            | 26 400              | Ft                                         |                       |                 |
+|                                         |                                             |                     | Egyoszlopos csápos emelő                   | Szerkezet vizsg. 4 hó | 16 200 Ft       |
+| Akkuteszter                             | Külső kalibrálás                            | 57 700 Ft           | Kétoszlopos csápos emelő                   | Szerkezet vizsg. 4 hó | 20 400 Ft       |
+| Digitális nyomásmérő                    | Külső kalibrálás 12 hó                      | 17 700 Ft           | Négyoszlopos emelő                         | Szerkezet vizsg. 4 hó | 21 600 Ft       |
+| Etalon gömbfej                          | Külső kalibrálás 5 év                       | 13 300 Ft           | Aknaperem emelő                            | Szerkezet vizsg. 4 hó | 9 900 Ft        |
+| Etalon gyűrű                            | Külső kalibrálás 5 év                       | 11 000 Ft           | Kézi működtetésű emelő, bak                | Szerkezet vizsg. 4 hó | 6 300 Ft        |
+| Fékfolyadék forráspont ellenőrző        | Kalibrálás 5 év                             | 18 500 Ft           | Pneumatikus működtetésű emelő              | Szerkezet vizsg. 4 hó | 9 000 Ft        |
+| Fékfolyadék forráspont ellenőrző EBT-03 | Külső kalibrálás 5 év                       | 49 200 Ft           | Kis ollós emelő                            | Szerkezet vizsg. 4 hó | 16 200 Ft       |
+| Idomszer villa, gyűrű kétoldalas        |                                             | 16 100 Ft           | Nagy ollós emelő                           | Szerkezet vizsg. 4 hó | 21 400 Ft       |
+| Mélységmérő                             | Külső kalibrálás 5 év                       | 14 500 Ft           |                                            |                       |                 |
+| Multiméter                              | Külső kalibrálás 2 év                       | 32 500 Ft           | Fővizsgálat gépi működtetésű eszk.         | Fővizsgálat 1-3 év    | 35 800 Ft       |
+| Nyomaték csavarhúzó                     | Külső kalibrálás 12 hó                      | 29 900 Ft           | Fővizsgálat kézi működtetésű eszk.         | Fővizsgálat 1-3 év    | 8 300 Ft        |
+| Szigetelésvizsgáló                      | Külső kalibrálás 12 hó                      | 52 600 Ft           |                                            |                       |                 |
+| Szögmérő                                | Külső kalibrálás 5 év                       | 16 100 Ft           | EGYÉB SZOLGÁLTATÁSOK                       |                       |                 |
+| Szögsablon                              | Külső kalibrálás 5 év                       | 19 900 Ft           |                                            |                       |                 |
+| Tolómérő (0-200mm)                      | Külső kalibrálás 5 év                       | 12 700 Ft           | Javítási óradíj óra/fő                     | egyéb díj             | 22 700 Ft       |
+| Vákum-nyomásmérő                        | Külső kalibrálás 12 hó                      | 35 500 Ft           | Javítási óradíj óra/fő eseti               | egyéb díj             | 24 000 Ft       |
+| Anyagfolytonosság vizsgáló              | Külső kalibrálás                            | 38 300 Ft           | Javítási óradíj óra/fő sürgősségi          | egyéb díj             | 38 800 Ft       |
+| Élvonalzó kalibrálás (100mm)            | Külső kalibrálás 5 év                       | 17 900 Ft           | Kiszállás Budapest                         | egyéb díj             | 14 600 Ft       |
+| Frekvencia generátor                    | Külső kalibrálás                            | 153 200 Ft          | Kiszállás É-K-i agglomeráció max. 20 km    | egyéb díj             | 18 900 Ft       |
+| Furatintó készlet                       | Külső kalibrálás 5 év                       | 60 000 Ft           | Kiszállás vidék                            | egyéb díj             | 31 600 Ft       |
+| Hézagmérő                               | Külső kalibrálás 5 év                       | 47 000 Ft           | Eseti kiszállási díj                       | egyéb díj             | 60 700 Ft       |
+| Mérőóra (indikátor óra)                 | Külső kalibrálás 5 év                       | 16 000 Ft           | Távsegítség (minden megkezdett óra)        | egyéb díj             | 22 600 Ft       |
+| Mikrométer                              | Külső kalibrálás 5 év                       | 10 800 Ft           | Hatósági és egyéb ügyintézési díj          | egyéb díj             | 12 200 Ft       |
+| Párhuzamvonalzó                         | Külső kalibrálás 5 év                       | 41 700 Ft           | Csomagküldés 3kg-ig                        | egyéb díj             | 3 900 Ft        |
+| Refraktométer                           | Külső kalibrálás                            | 61 200 Ft           | Csomagküldés 3kg felett                    | egyéb díj             | 5 100 Ft        |
+| Rétegvastagságmérő (Elmatronic)         | Külső kalibrálás                            | 22 400 Ft           | Számlaküldés postai úton levelenként       | egyéb díj             | 600 Ft          |
+| Rétegvastagságmérő (Minicheck)          | Külső kalibrálás                            | 34 600              | Ft                                         |                       |                 |
+| Rétegvastagságmérő (Quanix )            | Külső kalibrálás                            | 57 000              | BÉRLETI DÍJ Ft                             |                       |                 |
+| Rúdmikrométer Távolságmérő              | Külső kalibrálás 5 év Külső kalibrálás 5 év | 28 700 Ft 30 100 Ft | Csereműszerek költsége / 10 munkanap       | bérleti díj           | 10 300 Ft       |
+| Tengely libella                         | Külső kalibrálás 2 év                       | 73 100 Ft           |                                            |                       |                 |
+| Tolómérő (200-600mm)                    | Külső kalibrálás 5 év                       | 12 700 Ft           |                                            |                       |                 |
+
+….
+
+Az előre nem tervezhető költségek miatt az árak 3 havonta felülvizsgálatra kerülnek !
+
+Az árak bármikor változhatnak a hatósági emelés mértékében !
+
+A táblázatban megadott árak az Áfa-t nem tartalmazzák!",2,"CENTROP-KALIBRÁLÓ Kft. szolgáltatási árai 2025.01.02-től"

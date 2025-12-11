@@ -384,6 +384,9 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Update => {
                 modals::update::render(frame, frame.area(), &app.update_state, &theme);
             }
+            Modal::Database => {
+                modals::database::render(frame, frame.area(), &app.database_state, &theme);
+            }
         }
     }
 
@@ -569,6 +572,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::Script) => handle_script_key_async(app, key, modifiers).await,
         Some(Modal::ServerInfo) => handle_server_info_key(app, key),
         Some(Modal::Update) => handle_update_key(app, key),
+        Some(Modal::Database) => handle_database_key_async(app, key).await,
         None => {}
     }
 }
@@ -605,6 +609,7 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char('?'), _) => app.open_help(),
         (KeyCode::Char('I'), KeyModifiers::SHIFT) => handle_server_info_open(app).await,
         (KeyCode::Char('U'), KeyModifiers::SHIFT) => handle_update_open(app).await,
+        (KeyCode::Char('O'), KeyModifiers::SHIFT) => handle_database_open(app),
         (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
 
         // Error detail modal (if error present, 'e' opens error details)
@@ -850,6 +855,100 @@ async fn fetch_github_latest_release() -> Result<(String, String, Option<String>
         .map(|s| s.to_string());
 
     Ok((tag_name, html_url, body))
+}
+
+/// Open database modal
+fn handle_database_open(app: &mut App) {
+    let is_http = app.config.transport == TransportMode::Http;
+    let current_path = app.db_path.as_ref().map(|p| p.display().to_string());
+    app.database_state = crate::app::DatabaseState::new(current_path.as_deref(), is_http);
+    app.modal = Some(Modal::Database);
+}
+
+/// Handle database modal keys
+async fn handle_database_key_async(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => {
+            app.close_modal();
+        }
+        KeyCode::Enter => {
+            // Try to open the database
+            if app.database_state.is_http_mode {
+                app.database_state.error = Some("HTTP modban nem valthatod az adatbazist.".to_string());
+                return;
+            }
+
+            let path = app.database_state.path.trim().to_string();
+            if path.is_empty() {
+                app.database_state.error = Some("Az utvonal nem lehet ures!".to_string());
+                return;
+            }
+
+            app.database_state.loading = true;
+            app.database_state.error = None;
+
+            // Try to connect to the new database
+            let path_buf = std::path::PathBuf::from(&path);
+            let server_path = app.config.get_mcp_server_path();
+
+            // Close existing connection first
+            if let Some(ref db) = app.db {
+                let _ = db.close().await;
+            }
+            app.db = None;
+
+            // Connect to new database
+            match DbWrapper::connect_stdio(&server_path, &path_buf).await {
+                Ok(db) => {
+                    app.db = Some(db);
+                    app.db_path = Some(path_buf);
+                    app.database_state.loading = false;
+                    app.database_state.message = Some("Sikeresen csatlakozva!".to_string());
+
+                    // Refresh collections
+                    if let Err(e) = app.refresh_collections_async().await {
+                        app.set_error(format!("Kollekcio betoltes hiba: {}", e));
+                    }
+
+                    // Close modal after success
+                    app.close_modal();
+                    app.set_status(format!("Adatbazis megnyitva: {}", path));
+                }
+                Err(e) => {
+                    app.database_state.loading = false;
+                    app.database_state.error = Some(format!("Kapcsolodasi hiba: {}", e));
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            if !app.database_state.is_http_mode {
+                app.database_state.insert_char(c);
+            }
+        }
+        KeyCode::Backspace => {
+            if !app.database_state.is_http_mode {
+                app.database_state.backspace();
+            }
+        }
+        KeyCode::Delete => {
+            if !app.database_state.is_http_mode {
+                app.database_state.delete();
+            }
+        }
+        KeyCode::Left => {
+            app.database_state.move_left();
+        }
+        KeyCode::Right => {
+            app.database_state.move_right();
+        }
+        KeyCode::Home => {
+            app.database_state.home();
+        }
+        KeyCode::End => {
+            app.database_state.end();
+        }
+        _ => {}
+    }
 }
 
 /// Async search key handler
