@@ -57,57 +57,57 @@ fn get_context_actions(app: &App) -> Vec<ActionItem> {
     vec![
         ActionItem {
             key: 'i',
-            label: "Insert document",
+            label: "Dokumentum beszurasa",
             enabled: has_collection,
         },
         ActionItem {
             key: 'e',
-            label: "Edit document",
+            label: "Dokumentum szerkesztese",
             enabled: has_document,
         },
         ActionItem {
             key: 'd',
-            label: "Delete document",
+            label: "Dokumentum torlese",
             enabled: has_document,
         },
         ActionItem {
             key: 'y',
-            label: "Yank (copy) document",
+            label: "Dokumentum masolasa",
             enabled: has_document,
         },
         ActionItem {
             key: 'c',
-            label: "Create collection",
+            label: "Kollekció letrehozasa",
             enabled: true,
         },
         ActionItem {
             key: 'D',
-            label: "Delete collection",
+            label: "Kollekció torlese",
             enabled: has_collection,
         },
         ActionItem {
             key: 'x',
-            label: "Index management",
+            label: "Index kezeles",
             enabled: has_collection,
         },
         ActionItem {
             key: 'r',
-            label: "Run query (JSON)",
+            label: "Query (JSON)",
             enabled: has_collection,
         },
         ActionItem {
             key: 'f',
-            label: "Filter (visual)",
+            label: "Szuro (vizualis)",
             enabled: has_collection,
         },
         ActionItem {
             key: 'o',
-            label: "Export collection",
+            label: "Kollekció exportalasa",
             enabled: has_collection,
         },
         ActionItem {
             key: 's',
-            label: "IronRhai Scripts",
+            label: "IronRhai Scriptek",
             enabled: true,
         },
     ]

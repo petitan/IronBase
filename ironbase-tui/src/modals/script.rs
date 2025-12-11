@@ -108,7 +108,7 @@ fn render_loading_overlay(frame: &mut Frame, area: Rect, theme: &Theme) {
 
 /// Browse mode - script list
 fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "IronRhai Scripts", theme, 80, 70);
+    let inner = render_modal_frame(frame, area, "IronRhai Scriptek", theme, 80, 70);
 
     let chunks = Layout::vertical([
         Constraint::Length(2), // Help
@@ -127,12 +127,12 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
         Span::raw(" Szerk  "),
         Span::styled("[d]", Style::default().fg(theme.accent)),
         Span::raw(" Torol  "),
-        Span::styled("[F5]", Style::default().fg(theme.accent)),
+        Span::styled("[^S]", Style::default().fg(theme.accent)),
         Span::raw(" Futtat  "),
         Span::styled("[h]", Style::default().fg(theme.accent)),
-        Span::raw(" History  "),
+        Span::raw(" Elozmeny  "),
         Span::styled("[i]", Style::default().fg(theme.accent)),
-        Span::raw(" Inline  "),
+        Span::raw(" Azonnali  "),
         Span::styled("[r]", Style::default().fg(theme.accent)),
         Span::raw(" Frissit"),
     ]))
@@ -175,7 +175,7 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
                 Span::styled(format!(" v{:<3}", script.version), Style::default().fg(theme.muted)),
                 Span::styled(format!(" {:<20}", tags_str), Style::default().fg(theme.secondary)),
                 Span::styled(
-                    format!("{:>5} runs", script.execution_count),
+                    format!("{:>5} futtas", script.execution_count),
                     Style::default().fg(theme.muted),
                 ),
             ]);
@@ -208,8 +208,8 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 fn render_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
     let title = match state.mode {
         ScriptMode::New => "IronRhai - Uj script",
-        ScriptMode::Inline => "IronRhai - Inline exec",
-        _ => "IronRhai Editor",
+        ScriptMode::Inline => "IronRhai - Azonnali",
+        _ => "IronRhai Szerkeszto",
     };
     let inner = render_modal_frame(frame, area, title, theme, 85, 80);
 
@@ -227,14 +227,12 @@ fn render_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
         Span::raw(" Vissza  "),
-        Span::styled("[F5]", Style::default().fg(theme.accent)),
-        Span::raw(" Futtat  "),
-        Span::styled("[Ctrl+S]", Style::default().fg(theme.accent)),
-        Span::raw(" Ment  "),
+        Span::styled("[^S]", Style::default().fg(theme.accent)),
+        Span::raw(" Ment/Futtat  "),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
         Span::raw(" Fokusz  "),
         Span::styled("[h]", Style::default().fg(theme.accent)),
-        Span::raw(" History"),
+        Span::raw(" Elozmeny"),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -515,7 +513,7 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
         ]);
         frame.render_widget(text, area);
     } else {
-        let placeholder = Paragraph::new("Eredmeny: (nyomj F5-ot a futtatashoz)")
+        let placeholder = Paragraph::new("Eredmeny: (nyomj ^S-t a futtatashoz)")
             .style(Style::default().fg(theme.muted));
         frame.render_widget(placeholder, area);
     }
@@ -550,7 +548,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 
 /// History mode - version list
 fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
-    let title = format!("IronRhai History: {}", state.name);
+    let title = format!("IronRhai Elozmeny: {}", state.name);
     let inner = render_modal_frame(frame, area, &title, theme, 80, 70);
 
     let chunks = Layout::vertical([
@@ -567,7 +565,7 @@ fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Th
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
         Span::raw(" Megtekint  "),
         Span::styled("[r]", Style::default().fg(theme.accent)),
-        Span::raw(" Rollback"),
+        Span::raw(" Visszaallas"),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);
@@ -585,7 +583,7 @@ fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Th
         for (idx, ver) in state.versions.iter().enumerate().take(visible_height) {
             let is_selected = idx == state.selected_version;
             let prefix = if is_selected { "> " } else { "  " };
-            let current_marker = if idx == 0 { " (current)" } else { "" };
+            let current_marker = if idx == 0 { " (aktualis)" } else { "" };
 
             let desc = ver.description.as_deref().unwrap_or("");
             let line = Line::from(vec![

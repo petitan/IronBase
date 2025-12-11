@@ -67,7 +67,7 @@ fn render_help(frame: &mut Frame, area: Rect, theme: &Theme) {
         Span::raw(" Valassz mezot  "),
         Span::styled("[Tab/Enter]", Style::default().fg(theme.accent)),
         Span::raw(" Tovabb  "),
-        Span::styled("[F5]", Style::default().fg(theme.accent)),
+        Span::styled("[^S]", Style::default().fg(theme.accent)),
         Span::raw(" Kereses  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
         Span::raw(" Bezar"),
@@ -265,19 +265,19 @@ fn render_add_hint(frame: &mut Frame, area: Rect, state: &FilterState, theme: &T
             ("Enter: feltetel hozzaadasa (ertek nem kell)", theme.accent)
         }
         FilterFocus::Value if state.value_input.is_empty() => (
-            "Irj be keresett erteket, vagy F5 az azonnali kereseshez",
+            "Irj be keresett erteket, vagy ^S az azonnali kereseshez",
             theme.muted,
         ),
         FilterFocus::Value => (
-            "Enter: feltetel hozzaadasa | F5: azonnali kereses",
+            "Enter: feltetel hozzaadasa | ^S: azonnali kereses",
             theme.accent,
         ),
         FilterFocus::Filters => (
-            "Enter: szerk | Del: torol | Ctrl+↑↓: mozgat | F5: kereses",
+            "Enter: szerk | Del: torol | Ctrl+↑↓: mozgat | ^S: kereses",
             theme.accent,
         ),
         FilterFocus::SortField => (
-            "←/→: mezo valasztas | Space: irany | F5: kereses",
+            "←/→: mezo valasztas | Space: irany | ^S: kereses",
             theme.accent,
         ),
     };
@@ -381,7 +381,7 @@ fn render_status(frame: &mut Frame, area: Rect, state: &FilterState, theme: &The
         )])
     } else if !state.filters.is_empty() {
         Line::from(Span::styled(
-            "Nyomd meg F5-t a kereséshez",
+            "Nyomd meg ^S-t a kereséshez",
             Style::default().fg(theme.muted),
         ))
     } else {

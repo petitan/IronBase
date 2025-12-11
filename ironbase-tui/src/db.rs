@@ -132,6 +132,16 @@ impl DbWrapper {
         self.client.prompts_list().await.map_err(|e| anyhow::anyhow!("{}", e))
     }
 
+    /// Get server version from MCP server info
+    pub async fn get_server_version(&self) -> Result<String> {
+        let info = self.client.server_info().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let version = info.get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        Ok(version)
+    }
+
     /// Count documents matching a query
     pub async fn count_with_query(&self, collection: &str, query: &Value) -> Result<usize> {
         let count = self.client.count_documents(collection, query).await?;

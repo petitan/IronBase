@@ -25,9 +25,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &InsertState, theme: &Theme)
 
     // Help text
     let help = Paragraph::new(Line::from(vec![
-        Span::styled("[Ctrl+S]", Style::default().fg(theme.accent)),
-        Span::raw(" / "),
-        Span::styled("[F5]", Style::default().fg(theme.accent)),
+        Span::styled("[^S]", Style::default().fg(theme.accent)),
         Span::raw(" Mentes  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
         Span::raw(" Megse  "),

@@ -17,6 +17,11 @@ pub trait Transport: Send + Sync {
 
     /// Close the transport connection
     async fn close(&self) -> McpResult<()>;
+
+    /// Get base URL if this is an HTTP transport (for health check)
+    fn get_base_url(&self) -> Option<String> {
+        None
+    }
 }
 
 /// HTTP transport for MCP communication
@@ -71,6 +76,10 @@ impl Transport for HttpTransport {
     async fn close(&self) -> McpResult<()> {
         // HTTP is stateless, nothing to close
         Ok(())
+    }
+
+    fn get_base_url(&self) -> Option<String> {
+        Some(self.base_url.clone())
     }
 }
 

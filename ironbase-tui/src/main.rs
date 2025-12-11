@@ -166,11 +166,6 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
     app.update_page_size(size.height);
 
     loop {
-        // Tick loading animation
-        if app.is_loading() {
-            app.tick_loading();
-        }
-
         terminal.draw(|f| render_ui(f, app))?;
 
         // Use poll with timeout for non-blocking check
@@ -178,7 +173,6 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
             match event::read()? {
                 Event::Key(key) => {
                     // Windows sends both Press and Release events - only handle Press
-                    // This fixes the "double step" issue on Windows
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
@@ -387,6 +381,9 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Modal::ServerInfo => {
                 modals::server_info::render(frame, frame.area(), &app.server_info_state, app.server_info_scroll, &theme);
             }
+            Modal::Update => {
+                modals::update::render(frame, frame.area(), &app.update_state, &theme);
+            }
         }
     }
 
@@ -453,12 +450,6 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 ));
             }
         }
-    } else {
-        spans.push(Span::raw(" | "));
-        spans.push(Span::styled("[/]", Style::default().fg(theme.accent)));
-        spans.push(Span::raw(" Search "));
-        spans.push(Span::styled("[?]", Style::default().fg(theme.accent)));
-        spans.push(Span::raw(" Help"));
     }
 
     let line = Line::from(spans).patch_style(header_style);
@@ -473,35 +464,48 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     let bar_style = Style::default().bg(theme.header_bg).fg(theme.fg);
 
     // Context-dependent commands based on active pane
-    let commands = match app.active_pane {
+    let commands: Vec<(&str, String)> = match app.active_pane {
         Pane::Collections => vec![
-            ("Tab", "Panel"),
-            ("j/k", "Navigate"),
-            ("Enter", "Select"),
-            ("f", "Filter"),
-            ("/", "Search"),
-            ("a", "Actions"),
-            ("q", "Quit"),
+            ("Tab", "Panel".into()),
+            ("j/k", "Navigate".into()),
+            ("Enter", "Select".into()),
+            ("f", "Filter".into()),
+            ("/", "Search".into()),
+            ("r", "Refresh".into()),
+            ("a", "Actions".into()),
+            ("q", "Quit".into()),
         ],
         Pane::Documents => vec![
-            ("Tab", "Panel"),
-            ("j/k", "Navigate"),
-            ("PgUp/Dn", "Page"),
-            ("f", "Filter"),
-            ("/", "Search"),
-            ("a", "Actions"),
-            ("q", "Quit"),
+            ("Tab", "Panel".into()),
+            ("j/k", "Navigate".into()),
+            ("PgUp/Dn", "Page".into()),
+            ("f", "Filter".into()),
+            ("/", "Search".into()),
+            ("r", "Refresh".into()),
+            ("a", "Actions".into()),
+            ("q", "Quit".into()),
         ],
-        Pane::Detail => vec![
-            ("Tab", "Panel"),
-            ("j/k", "Scroll"),
-            ("/", "Search"),
-            ("n/N", "Match"),
-            ("e", "Edit"),
-            ("d", "Delete"),
-            ("y", "Copy"),
-            ("q", "Quit"),
-        ],
+        Pane::Detail => {
+            let mut cmds = vec![
+                ("Tab", "Panel".into()),
+                ("j/k", "Scroll".into()),
+                ("/", "Search".into()),
+            ];
+            // Only show n/N if there are search matches
+            if !app.search.doc_matches.is_empty() {
+                let current = app.search.current_match + 1;
+                let total = app.search.doc_matches.len();
+                cmds.push(("n/N", format!("{}/{}", current, total)));
+            }
+            cmds.extend([
+                ("e", "Edit".into()),
+                ("d", "Delete".into()),
+                ("y", "Copy".into()),
+                ("r", "Refresh".into()),
+                ("q", "Quit".into()),
+            ]);
+            cmds
+        }
     };
 
     let mut spans = Vec::new();
@@ -564,6 +568,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::NewCollection) => handle_new_collection_key_async(app, key).await,
         Some(Modal::Script) => handle_script_key_async(app, key, modifiers).await,
         Some(Modal::ServerInfo) => handle_server_info_key(app, key),
+        Some(Modal::Update) => handle_update_key(app, key),
         None => {}
     }
 }
@@ -599,6 +604,7 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char('a'), _) => app.open_actions(),
         (KeyCode::Char('?'), _) => app.open_help(),
         (KeyCode::Char('I'), KeyModifiers::SHIFT) => handle_server_info_open(app).await,
+        (KeyCode::Char('U'), KeyModifiers::SHIFT) => handle_update_open(app).await,
         (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
 
         // Error detail modal (if error present, 'e' opens error details)
@@ -654,6 +660,12 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
 
         // Theme
         (KeyCode::Char('t'), _) => app.next_theme(),
+
+        // Refresh (r) - reload collections and documents (detail updates automatically)
+        (KeyCode::Char('r'), _) => {
+            let _ = app.refresh_collections_async().await;
+            let _ = app.refresh_documents_async().await;
+        }
 
         // Clear filter (Escape in Documents pane when filter is active)
         (KeyCode::Esc, _) if app.active_filter.is_some() => {
@@ -762,6 +774,82 @@ async fn handle_server_info_open(app: &mut App) {
     } else {
         app.set_server_info_error("Nincs adatbazis kapcsolat".to_string());
     }
+}
+
+/// Handle update modal keys
+fn handle_update_key(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('U') => {
+            app.close_modal();
+        }
+        _ => {}
+    }
+}
+
+/// Open update check modal and fetch latest version from GitHub
+async fn handle_update_open(app: &mut App) {
+    // Get current version from MCP server
+    let current_version = if let Some(ref db) = app.db {
+        match db.get_server_version().await {
+            Ok(version) => version,
+            Err(_) => "unknown".to_string(),
+        }
+    } else {
+        "unknown".to_string()
+    };
+
+    app.open_update(current_version);
+
+    // Fetch latest version from GitHub API
+    match fetch_github_latest_release().await {
+        Ok((latest_version, download_url, release_notes)) => {
+            app.update_update_state(latest_version, download_url, release_notes);
+        }
+        Err(e) => {
+            app.set_update_error(format!("GitHub API hiba: {}", e));
+        }
+    }
+}
+
+/// Fetch latest release info from GitHub
+async fn fetch_github_latest_release() -> Result<(String, String, Option<String>), String> {
+    let url = "https://api.github.com/repos/petitan/IronBase/releases/latest";
+
+    let client = reqwest::Client::builder()
+        .user_agent("IronBase-TUI")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let tag_name = json.get("tag_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let html_url = json.get("html_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("https://github.com/petitan/IronBase/releases")
+        .to_string();
+
+    let body = json.get("body")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok((tag_name, html_url, body))
 }
 
 /// Async search key handler
@@ -884,9 +972,6 @@ async fn handle_insert_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
             app.execute_insert_async().await;
         }
-        (KeyCode::F(5), _) => {
-            app.execute_insert_async().await;
-        }
         (KeyCode::Enter, KeyModifiers::NONE) => {
             app.insert.insert_newline();
         }
@@ -955,17 +1040,49 @@ async fn handle_index_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
 
 /// Async query key handler
 async fn handle_query_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
+    // Handle template mode separately
+    if app.query_state.show_templates {
+        match key {
+            KeyCode::Esc => app.query_state.show_templates = false,
+            KeyCode::Tab => app.query_state.show_templates = false,
+            KeyCode::Up | KeyCode::Char('k') => app.query_state.template_up(),
+            KeyCode::Down | KeyCode::Char('j') => app.query_state.template_down(),
+            KeyCode::Enter => app.query_state.apply_template(),
+            _ => {}
+        }
+        return;
+    }
+
     match (key, modifiers) {
         (KeyCode::Esc, _) => app.close_modal(),
-        (KeyCode::Char('s'), KeyModifiers::CONTROL) | (KeyCode::F(5), _) => {
+        // Ctrl+S = Run query
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
             app.execute_query_async().await;
         }
+        // Enter = Apply filter (ha van eredmény) VAGY newline (ha nincs)
         (KeyCode::Enter, KeyModifiers::NONE) => {
-            app.query_state.insert_newline();
+            if app.query_state.has_results() {
+                app.apply_query_as_filter().await;
+            } else {
+                app.query_state.insert_newline();
+            }
         }
+        // Tab = Insert 2 spaces
         (KeyCode::Tab, _) => {
             app.query_state.insert_tab();
         }
+        // Ctrl+T = Templates
+        (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+            app.query_state.toggle_templates();
+        }
+        // Ctrl+j/k = Navigate results
+        (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+            app.query_state.result_down();
+        }
+        (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+            app.query_state.result_up();
+        }
+        // Arrow keys = cursor movement
         (KeyCode::Backspace, _) => {
             app.query_state.backspace();
         }
@@ -981,6 +1098,7 @@ async fn handle_query_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         (KeyCode::Down, _) => {
             app.query_state.cursor_down();
         }
+        // All other chars = insert
         (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) => {
             app.query_state.insert_char(c);
         }
@@ -1024,8 +1142,8 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         // Close modal
         (KeyCode::Esc, _) => app.close_modal(),
 
-        // Execute filter search
-        (KeyCode::F(5), _) => {
+        // Execute filter search (Ctrl+S)
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
             app.execute_filter_async().await;
         }
 
@@ -1241,7 +1359,7 @@ async fn handle_script_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
     }
 
     match app.script_state.mode {
-        ScriptMode::Browse => handle_script_browse_key(app, key).await,
+        ScriptMode::Browse => handle_script_browse_key(app, key, modifiers).await,
         ScriptMode::Edit | ScriptMode::New | ScriptMode::Inline => {
             handle_script_edit_key(app, key, modifiers).await
         }
@@ -1250,44 +1368,44 @@ async fn handle_script_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
 }
 
 /// Handle keys in Browse mode (script list)
-async fn handle_script_browse_key(app: &mut App, key: KeyCode) {
-    match key {
-        KeyCode::Esc | KeyCode::Char('q') => app.close_modal(),
-        KeyCode::Up | KeyCode::Char('k') => {
+async fn handle_script_browse_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
+    match (key, modifiers) {
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => app.close_modal(),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
             if app.script_state.selected_script > 0 {
                 app.script_state.selected_script -= 1;
             }
         }
-        KeyCode::Down | KeyCode::Char('j') => {
+        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
             if app.script_state.selected_script + 1 < app.script_state.scripts.len() {
                 app.script_state.selected_script += 1;
             }
         }
-        KeyCode::Enter => {
+        (KeyCode::Enter, _) => {
             // Open selected script for editing (load full script from MCP)
             if !app.script_state.scripts.is_empty() {
                 app.load_script_for_edit_async().await;
             }
         }
-        KeyCode::Char('n') => {
+        (KeyCode::Char('n'), _) => {
             // New script
             app.script_state.start_new();
         }
-        KeyCode::Char('d') | KeyCode::Delete => {
+        (KeyCode::Char('d'), _) | (KeyCode::Delete, _) => {
             // Delete selected script (with confirmation)
             if !app.script_state.scripts.is_empty() {
                 app.script_state.confirm_action = Some(crate::app::ScriptConfirmAction::DeleteScript);
             }
         }
-        KeyCode::F(5) => {
-            // Run selected script directly from browse
+        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+            // Run selected script directly from browse (Ctrl+S)
             if !app.script_state.scripts.is_empty() {
                 // Load the script first, then run
                 app.load_script_for_edit_async().await;
                 app.run_script_async().await;
             }
         }
-        KeyCode::Char('h') => {
+        (KeyCode::Char('h'), _) => {
             // Show history for selected script
             if !app.script_state.scripts.is_empty() {
                 // First load the script to get the name
@@ -1297,11 +1415,11 @@ async fn handle_script_browse_key(app: &mut App, key: KeyCode) {
                 app.script_state.enter_history();
             }
         }
-        KeyCode::Char('i') => {
+        (KeyCode::Char('i'), _) => {
             // Inline mode (ad-hoc script)
             app.script_state.enter_inline();
         }
-        KeyCode::Char('r') => {
+        (KeyCode::Char('r'), _) => {
             // Refresh script list
             app.load_scripts_async().await;
         }
@@ -1324,16 +1442,14 @@ async fn handle_script_edit_key(app: &mut App, key: KeyCode, modifiers: KeyModif
             }
         }
 
-        // Save (Ctrl+S)
+        // Save & Run (Ctrl+S)
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
-            app.save_script_async().await;
-            // Refresh list after save
-            app.load_scripts_async().await;
-        }
-
-        // Run (F5)
-        (KeyCode::F(5), _) => {
-            // For Inline mode, just execute; for saved script, run by name
+            // Save first (if not inline)
+            if app.script_state.mode != crate::app::ScriptMode::Inline {
+                app.save_script_async().await;
+                app.load_scripts_async().await;
+            }
+            // Then run
             app.run_script_async().await;
         }
 

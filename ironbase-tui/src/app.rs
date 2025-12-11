@@ -64,6 +64,7 @@ pub enum Modal {
     NewCollection,
     Script,
     ServerInfo,
+    Update,
 }
 
 /// Progress state for long-running operations
@@ -1208,7 +1209,29 @@ pub struct QueryState {
     pub cursor_col: usize,
     pub error: Option<String>,
     pub results: Option<Vec<Value>>,
+    /// Show template selector
+    pub show_templates: bool,
+    /// Selected template index
+    pub template_index: usize,
+    /// Selected result index for navigation
+    pub result_index: usize,
+    /// Total result count (may be > results.len() if truncated)
+    pub total_count: usize,
 }
+
+/// Query templates
+pub const QUERY_TEMPLATES: &[(&str, &str)] = &[
+    ("Osszes", "{}"),
+    ("ID alapjan", "{\"_id\": \"\"}"),
+    ("Egyenloseg", "{\"field\": \"value\"}"),
+    ("Nagyobb mint", "{\"field\": {\"$gt\": 0}}"),
+    ("Kisebb mint", "{\"field\": {\"$lt\": 100}}"),
+    ("Tartalmazza", "{\"field\": {\"$in\": [\"a\", \"b\"]}}"),
+    ("Letezik", "{\"field\": {\"$exists\": true}}"),
+    ("Regex", "{\"field\": {\"$regex\": \"pattern\"}}"),
+    ("AND", "{\"$and\": [{\"a\": 1}, {\"b\": 2}]}"),
+    ("OR", "{\"$or\": [{\"a\": 1}, {\"b\": 2}]}"),
+];
 
 impl Default for QueryState {
     fn default() -> Self {
@@ -1219,6 +1242,10 @@ impl Default for QueryState {
             cursor_col: 1,
             error: None,
             results: None,
+            show_templates: false,
+            template_index: 0,
+            result_index: 0,
+            total_count: 0,
         }
     }
 }
@@ -1232,10 +1259,81 @@ impl QueryState {
             cursor_col: 2,
             error: None,
             results: None,
+            show_templates: false,
+            template_index: 0,
+            result_index: 0,
+            total_count: 0,
+        }
+    }
+
+    /// Check if we have results to navigate
+    pub fn has_results(&self) -> bool {
+        self.results.as_ref().map(|r| !r.is_empty()).unwrap_or(false)
+    }
+
+    /// Navigate to next result
+    pub fn result_down(&mut self) {
+        if let Some(ref results) = self.results {
+            if self.result_index + 1 < results.len() {
+                self.result_index += 1;
+            }
+        }
+    }
+
+    /// Navigate to previous result
+    pub fn result_up(&mut self) {
+        if self.result_index > 0 {
+            self.result_index -= 1;
+        }
+    }
+
+    /// Get current query string
+    pub fn get_query_string(&self) -> String {
+        self.lines.join("\n")
+    }
+
+    /// Clear results (when user edits query)
+    pub fn clear_results(&mut self) {
+        self.results = None;
+        self.result_index = 0;
+        self.total_count = 0;
+    }
+
+    /// Toggle template selector
+    pub fn toggle_templates(&mut self) {
+        self.show_templates = !self.show_templates;
+        self.template_index = 0;
+    }
+
+    /// Select next template
+    pub fn template_down(&mut self) {
+        if self.template_index + 1 < QUERY_TEMPLATES.len() {
+            self.template_index += 1;
+        }
+    }
+
+    /// Select previous template
+    pub fn template_up(&mut self) {
+        if self.template_index > 0 {
+            self.template_index -= 1;
+        }
+    }
+
+    /// Apply selected template
+    pub fn apply_template(&mut self) {
+        if let Some((_, template)) = QUERY_TEMPLATES.get(self.template_index) {
+            self.lines = vec![template.to_string()];
+            self.cursor_line = 0;
+            self.cursor_col = template.chars().count();
+            self.show_templates = false;
+            self.error = None;
         }
     }
 
     pub fn insert_char(&mut self, c: char) {
+        // Clear results when editing
+        self.clear_results();
+
         if let Some(line) = self.lines.get_mut(self.cursor_line) {
             let char_count = line.chars().count();
             if self.cursor_col <= char_count {
@@ -1253,6 +1351,9 @@ impl QueryState {
     }
 
     pub fn backspace(&mut self) {
+        // Clear results when editing
+        self.clear_results();
+
         if self.cursor_col > 0 {
             if let Some(line) = self.lines.get_mut(self.cursor_line) {
                 // Convert character position to byte position for UTF-8 safety
@@ -1276,6 +1377,9 @@ impl QueryState {
     }
 
     pub fn insert_newline(&mut self) {
+        // Clear results when editing
+        self.clear_results();
+
         if let Some(line) = self.lines.get_mut(self.cursor_line) {
             // Convert character position to byte position for UTF-8 safety
             let byte_pos = line
@@ -2086,6 +2190,9 @@ pub struct App {
     pub server_info_state: crate::modals::server_info::ServerInfoState,
     pub server_info_scroll: usize,
 
+    // Update modal state
+    pub update_state: crate::modals::update::UpdateState,
+
     // Config
     pub config: Config,
 
@@ -2137,6 +2244,7 @@ impl App {
             script_state: ScriptState::default(),
             server_info_state: crate::modals::server_info::ServerInfoState::new(),
             server_info_scroll: 0,
+            update_state: crate::modals::update::UpdateState::default(),
             config,
             status_message: None,
             error_message: None,
@@ -2346,6 +2454,22 @@ impl App {
     /// Set server info error
     pub fn set_server_info_error(&mut self, error: String) {
         self.server_info_state.set_error(error);
+    }
+
+    /// Open update check modal
+    pub fn open_update(&mut self, current_version: String) {
+        self.update_state = crate::modals::update::UpdateState::new(current_version);
+        self.modal = Some(Modal::Update);
+    }
+
+    /// Update the update state with GitHub data
+    pub fn update_update_state(&mut self, latest_version: String, download_url: String, release_notes: Option<String>) {
+        self.update_state.update_from_github(latest_version, download_url, release_notes);
+    }
+
+    /// Set update check error
+    pub fn set_update_error(&mut self, error: String) {
+        self.update_state.set_error(error);
     }
 
     /// Close current modal
@@ -3557,6 +3681,9 @@ impl App {
         {
             Ok(docs) => {
                 let count = docs.len();
+                // Store total_count (may be more than returned if limit hit)
+                self.query_state.total_count = count;
+                self.query_state.result_index = 0;
                 self.query_state.results = Some(docs);
                 self.query_state.error = None;
                 if count >= QUERY_LIMIT {
@@ -3570,6 +3697,28 @@ impl App {
             }
         }
         self.clear_loading();
+    }
+
+    /// Apply the current query as a filter and close modal
+    pub async fn apply_query_as_filter(&mut self) {
+        let query = match self.query_state.parse_query() {
+            Ok(q) => q,
+            Err(e) => {
+                self.query_state.error = Some(format!("JSON hiba: {}", e));
+                return;
+            }
+        };
+
+        // Set active filter
+        self.active_filter = Some(query);
+        self.selected_document = 0;
+        self.doc_scroll_offset = 0;
+
+        // Close modal
+        self.close_modal();
+
+        // Refresh documents with filter
+        let _ = self.refresh_documents_async().await;
     }
 
     // === Async Filter ===

@@ -308,6 +308,22 @@ impl McpClient {
         Ok(result)
     }
 
+    /// Get server info (version, etc.)
+    pub async fn server_info(&self) -> McpResult<Value> {
+        // Try to get URL from transport and fetch /health endpoint
+        if let Some(url) = self.transport.get_base_url() {
+            let health_url = format!("{}/health", url.trim_end_matches("/mcp"));
+            let client = reqwest::Client::new();
+            if let Ok(response) = client.get(&health_url).send().await {
+                if let Ok(json) = response.json::<Value>().await {
+                    return Ok(json);
+                }
+            }
+        }
+        // Fallback: return empty object
+        Ok(serde_json::json!({"version": "unknown"}))
+    }
+
     /// Get list of available MCP tools
     pub async fn tools_list(&self) -> McpResult<Vec<Value>> {
         if !self.initialized {

@@ -73,6 +73,14 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
             Span::raw("Szerver informaciok"),
         ]),
         Line::from(vec![
+            Span::styled("Shift+U   ", Style::default().fg(theme.accent)),
+            Span::raw("Frissites ellenorzes"),
+        ]),
+        Line::from(vec![
+            Span::styled("r         ", Style::default().fg(theme.accent)),
+            Span::raw("Adatok ujratoltese"),
+        ]),
+        Line::from(vec![
             Span::styled("t         ", Style::default().fg(theme.accent)),
             Span::raw("Tema valtas"),
         ]),

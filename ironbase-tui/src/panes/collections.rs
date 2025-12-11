@@ -31,7 +31,7 @@ fn render_collections_list(frame: &mut Frame, area: Rect, app: &App, theme: &The
     };
 
     let block = Block::default()
-        .title(" Collections ")
+        .title(" Kollekcio ")
         .title_style(title_style)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));

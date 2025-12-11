@@ -22,13 +22,13 @@ pub fn render(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) 
     // Help text
     let help = Paragraph::new(Line::from(vec![
         Span::styled("[j/k]", Style::default().fg(theme.accent)),
-        Span::raw(" Navigate  "),
+        Span::raw(" Navigacio  "),
         Span::styled("[d]", Style::default().fg(theme.accent)),
-        Span::raw(" Delete  "),
+        Span::raw(" Torles  "),
         Span::styled("[Tab]", Style::default().fg(theme.accent)),
-        Span::raw(" New index  "),
+        Span::raw(" Uj index  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(" Bezar"),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);

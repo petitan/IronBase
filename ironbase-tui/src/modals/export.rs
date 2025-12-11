@@ -27,9 +27,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ExportState, theme: &Theme)
         Span::styled("[Shift+J/C]", Style::default().fg(theme.accent)),
         Span::raw(" JSON/CSV  "),
         Span::styled("[Enter]", Style::default().fg(theme.accent)),
-        Span::raw(" Export  "),
+        Span::raw(" Exportalas  "),
         Span::styled("[Esc]", Style::default().fg(theme.accent)),
-        Span::raw(" Close"),
+        Span::raw(" Bezar"),
     ]))
     .style(Style::default().fg(theme.muted));
     frame.render_widget(help, chunks[0]);

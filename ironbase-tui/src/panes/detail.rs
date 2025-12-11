@@ -22,12 +22,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     // Show match info in title if searching
     let title = if !app.search.doc_matches.is_empty() {
         format!(
-            " Detail [{}/{}] ",
+            " Reszletek [{}/{}] ",
             app.search.current_match + 1,
             app.search.doc_matches.len()
         )
     } else {
-        " Detail ".to_string()
+        " Reszletek ".to_string()
     };
 
     let block = Block::default()
