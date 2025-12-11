@@ -474,8 +474,8 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ("Enter", "Select".into()),
             ("f", "Filter".into()),
             ("/", "Search".into()),
-            ("r", "Refresh".into()),
             ("a", "Actions".into()),
+            ("?", "Sugo".into()),
             ("q", "Quit".into()),
         ],
         Pane::Documents => vec![
@@ -484,8 +484,8 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ("PgUp/Dn", "Page".into()),
             ("f", "Filter".into()),
             ("/", "Search".into()),
-            ("r", "Refresh".into()),
             ("a", "Actions".into()),
+            ("?", "Sugo".into()),
             ("q", "Quit".into()),
         ],
         Pane::Detail => {
@@ -504,7 +504,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
                 ("e", "Edit".into()),
                 ("d", "Delete".into()),
                 ("y", "Copy".into()),
-                ("r", "Refresh".into()),
+                ("?", "Sugo".into()),
                 ("q", "Quit".into()),
             ]);
             cmds
