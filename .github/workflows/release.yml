@@ -18,6 +18,15 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Setting version to $VERSION"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" mcp-server/Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" ironbase-tui/Cargo.toml
+          cat mcp-server/Cargo.toml | head -5
+
       - name: Build MCP Server (Windows)
         run: |
           cd mcp-server
@@ -58,6 +67,14 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Sync version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Setting version to $VERSION"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" mcp-server/Cargo.toml
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" ironbase-tui/Cargo.toml
+          cat mcp-server/Cargo.toml | head -5
+
       - name: Build MCP Server (Linux)
         run: |
           cd mcp-server
@@ -97,6 +114,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Sync version from tag
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "Setting version to $VERSION"
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" mcp-server/Cargo.toml
+          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" ironbase-tui/Cargo.toml
+          cat mcp-server/Cargo.toml | head -5
 
       - name: Build MCP Server (macOS)
         run: |
