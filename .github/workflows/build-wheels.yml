@@ -22,10 +22,14 @@ jobs:
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          # GitHub token to avoid rate limiting when downloading maturin
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           target: ${{ matrix.target }}
           args: --release --out dist --manifest-path bindings/python/Cargo.toml
           manylinux: auto
+          sccache: 'true'
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
