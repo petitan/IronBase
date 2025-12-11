@@ -1,7 +1,10 @@
 # Rust
 target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock for libraries (binaries should commit their own)
+/Cargo.lock
+!ironbase-tui/Cargo.lock
+!mcp-server/Cargo.lock
 
 # Python
 venv/

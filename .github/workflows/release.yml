@@ -22,9 +22,9 @@ jobs:
         shell: bash
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Setting version to $VERSION"
+          echo "Setting MCP server version to $VERSION"
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" mcp-server/Cargo.toml
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" ironbase-tui/Cargo.toml
+          # TUI has its own independent version - do NOT override
           cat mcp-server/Cargo.toml | head -5
 
       - name: Build MCP Server (Windows)
@@ -70,9 +70,9 @@ jobs:
       - name: Sync version from tag
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Setting version to $VERSION"
+          echo "Setting MCP server version to $VERSION"
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" mcp-server/Cargo.toml
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" ironbase-tui/Cargo.toml
+          # TUI has its own independent version - do NOT override
           cat mcp-server/Cargo.toml | head -5
 
       - name: Build MCP Server (Linux)
@@ -118,9 +118,9 @@ jobs:
       - name: Sync version from tag
         run: |
           VERSION=${GITHUB_REF#refs/tags/v}
-          echo "Setting version to $VERSION"
+          echo "Setting MCP server version to $VERSION"
           sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" mcp-server/Cargo.toml
-          sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" ironbase-tui/Cargo.toml
+          # TUI has its own independent version - do NOT override
           cat mcp-server/Cargo.toml | head -5
 
       - name: Build MCP Server (macOS)
