@@ -15,6 +15,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `IndexKey::MaxKey` sentinel for upper bounds
   - `build_prefix_range()` method for compound prefix bounds
   - `IndexPrefixInfo` struct for QueryPlanner compound awareness
+- **Explicit Collection Existence Checks**: `get_collection()` now returns error if collection doesn't exist
+  - Prevents typos from creating empty collections (e.g., `find("uusers")`)
+  - Insert operations still create collections implicitly (MongoDB-compatible)
+  - New `CollectionNotFound` error type propagates through MCP layer
+
+### Changed
+- **Performance Optimization**: `get_collection()` now uses READ locks only
+  - Hot path reduced from 4 locks (incl. WRITE) to 2 READ locks
+  - New `with_shared_indexes_readonly()` method for existing collections
+  - Significantly reduces lock contention under high concurrency
+  - Storage WRITE lock no longer needed for read operations
+
+### Fixed
+- **MCP `collection_create` tool**: Now actually creates the collection
+  - Previously returned success without performing any operation
+  - Root cause: tool handler was a no-op, relying on implicit creation that never happened
 
 ### Removed
 - **FileStorage**: Removed deprecated wrapper around StorageEngine

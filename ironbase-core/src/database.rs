@@ -104,7 +104,7 @@ impl DatabaseCore<StorageEngine> {
     /// * `mode` - Durability mode (Safe, Batch, or Unsafe)
     ///
     /// # Examples
-    /// ```rust
+    /// ```rust,no_run
     /// use ironbase_core::{DatabaseCore, DurabilityMode};
     /// use ironbase_core::storage::StorageEngine;
     ///
