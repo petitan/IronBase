@@ -11,6 +11,7 @@ use crate::document::{Document, DocumentId};
 use crate::error::{MongoLiteError, Result};
 use crate::transaction::Transaction;
 use crate::wal::WriteAheadLog;
+use fs2::FileExt;
 use memmap2::{MmapMut, MmapOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -164,6 +165,11 @@ impl StorageEngine {
             .write(true)
             .create(true)
             .open(&path)?;
+
+        // Acquire exclusive file lock (non-blocking) to prevent multi-process corruption
+        // This is deadlock-free: try_lock returns immediately with error if locked
+        file.try_lock_exclusive()
+            .map_err(|_| MongoLiteError::DatabaseLocked(path_str.clone()))?;
 
         let (header, collections) = if exists && file.metadata()?.len() > 0 {
             // Load existing database

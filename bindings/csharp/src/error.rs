@@ -65,6 +65,9 @@ pub enum IronBaseErrorCode {
     /// Operation not allowed (e.g., dropping protected collection)
     OperationNotAllowed = -16,
 
+    /// Database is locked by another process
+    DatabaseLocked = -17,
+
     /// Unknown/internal error
     Unknown = -99,
 }
@@ -86,6 +89,7 @@ impl From<&MongoLiteError> for IronBaseErrorCode {
             MongoLiteError::TransactionCommitted => IronBaseErrorCode::TransactionCommitted,
             MongoLiteError::TransactionAborted(_) => IronBaseErrorCode::TransactionAborted,
             MongoLiteError::WALCorruption => IronBaseErrorCode::WalCorruption,
+            MongoLiteError::DatabaseLocked(_) => IronBaseErrorCode::DatabaseLocked,
             MongoLiteError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
             MongoLiteError::Unknown(_) => IronBaseErrorCode::Unknown,
         }

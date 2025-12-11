@@ -45,6 +45,9 @@ pub enum MongoLiteError {
     #[error("WAL corruption detected")]
     WALCorruption,
 
+    #[error("Database '{0}' is locked by another process")]
+    DatabaseLocked(String),
+
     #[error("Operation not allowed: {0}")]
     OperationNotAllowed(String),
 

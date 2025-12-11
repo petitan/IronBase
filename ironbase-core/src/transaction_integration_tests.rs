@@ -172,30 +172,26 @@ mod integration_tests {
 
     #[test]
     fn test_concurrent_readers_during_transaction() {
+        use std::sync::Arc;
+
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.mlite");
 
-        // Setup: Create database and collection
-        {
-            let db = DatabaseCore::open(&db_path).unwrap();
-            db.collection("concurrent_test").unwrap();
-        }
+        // Create shared database instance (correct pattern with file locking)
+        let db = Arc::new(DatabaseCore::open(&db_path).unwrap());
+        db.collection("concurrent_test").unwrap();
 
-        let db_path_clone = db_path.clone();
+        let db_reader = Arc::clone(&db);
 
-        // Spawn reader thread
+        // Spawn reader thread - uses SAME database instance
         let reader_handle = thread::spawn(move || {
-            let db = DatabaseCore::open(&db_path_clone).unwrap();
-
-            // Readers should be able to open database
-            // even if there are active (uncommitted) transactions
-            let collections = db.list_collections();
+            // Readers can access the shared database during active transactions
+            let collections = db_reader.list_collections();
             assert!(collections.contains(&"concurrent_test".to_string()));
         });
 
         // Main thread: Start transaction but don't commit yet
         {
-            let db = DatabaseCore::open(&db_path).unwrap();
             let tx_id = db.begin_transaction();
             let mut tx = db.get_transaction(tx_id).unwrap();
 
@@ -402,5 +398,44 @@ mod integration_tests {
             let tx = db.begin_transaction();
             db.commit_transaction(tx).unwrap();
         }
+    }
+
+    #[test]
+    fn test_file_lock_prevents_double_open() {
+        use crate::error::MongoLiteError;
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+
+        // First open succeeds
+        let _db1 = DatabaseCore::open(&db_path).unwrap();
+
+        // Second open on SAME file should fail with DatabaseLocked
+        let result = DatabaseCore::open(&db_path);
+
+        match result {
+            Err(MongoLiteError::DatabaseLocked(path)) => {
+                assert!(path.contains("test.mlite"));
+            }
+            Ok(_) => panic!("Expected DatabaseLocked error, got Ok"),
+            Err(e) => panic!("Expected DatabaseLocked error, got: {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_file_lock_released_on_drop() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+
+        // Open and close database
+        {
+            let db = DatabaseCore::open(&db_path).unwrap();
+            db.collection("test").unwrap();
+        } // db is dropped here, lock should be released
+
+        // Now we should be able to open it again
+        let db2 = DatabaseCore::open(&db_path).unwrap();
+        let collections = db2.list_collections();
+        assert!(collections.contains(&"test".to_string()));
     }
 }

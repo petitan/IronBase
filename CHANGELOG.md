@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Cross-Process File Locking**: Prevents database corruption from multiple processes
+  - Uses `fs2` crate for OS-level exclusive file locks
+  - Non-blocking `try_lock_exclusive()` - returns error immediately if locked (deadlock-free)
+  - Automatic lock release on process exit or crash
+  - New `DatabaseLocked` error type for clear error messages
 - Full GitHub publication readiness (CONTRIBUTING, CODE_OF_CONDUCT, SECURITY)
 - CI/CD workflows for all platforms
 - **Compound Index Prefix Queries**: Queries on first field of compound index now use index
