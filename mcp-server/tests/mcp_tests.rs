@@ -1218,8 +1218,14 @@ fn test_script_get_existing() {
 
     // script_get returns script fields directly
     assert_eq!(value.get("name"), Some(&json!("test_script")));
-    assert_eq!(value.get("code"), Some(&json!("let result = 10 * 5; result")));
-    assert_eq!(value.get("description"), Some(&json!("Multiplication test")));
+    assert_eq!(
+        value.get("code"),
+        Some(&json!("let result = 10 * 5; result"))
+    );
+    assert_eq!(
+        value.get("description"),
+        Some(&json!("Multiplication test"))
+    );
 }
 
 #[test]
@@ -1394,7 +1400,10 @@ fn test_tools_list_contains_script_tools() {
     assert!(tool_names.contains(&"script_save"), "Missing script_save");
     assert!(tool_names.contains(&"script_list"), "Missing script_list");
     assert!(tool_names.contains(&"script_get"), "Missing script_get");
-    assert!(tool_names.contains(&"script_delete"), "Missing script_delete");
+    assert!(
+        tool_names.contains(&"script_delete"),
+        "Missing script_delete"
+    );
     assert!(tool_names.contains(&"script_run"), "Missing script_run");
 }
 
@@ -1566,7 +1575,11 @@ fn test_script_run_db_update_delete() {
 #[test]
 fn test_script_run_nonexistent() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_run", json!({"name": "nonexistent_script"}), &adapter);
+    let result = dispatch_tool(
+        "script_run",
+        json!({"name": "nonexistent_script"}),
+        &adapter,
+    );
     assert!(result.is_err());
 }
 

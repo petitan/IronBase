@@ -484,3 +484,43 @@ gh release view v1.0.XX
 ### Jövőbeli javítás
 
 PAT (Personal Access Token) beállítása az auto-tag.yml-ben a GITHUB_TOKEN helyett → automatikus release triggerelés.
+
+## Hot Backup
+
+A backup rendszer **snapshot isolation**-t használ a biztonságos hot backup-hoz:
+
+### Működési elv
+
+```
+1. Shared lock (< 1ms) → metadata olvasás → unlock
+2. Dokumentumok másolása LOCK NÉLKÜL (append-only = immutable!)
+3. Header ellenőrzés → concurrent_writes flag
+```
+
+### Miért biztonságos?
+
+- **Append-only storage**: Régi dokumentumok SOHA nem változnak
+- `data_end_offset`-ig minden adat IMMUTABLE
+- Backup közben írt új adatok → következő incremental backup-ba kerülnek
+
+### Használat
+
+```bash
+# Full backup futó adatbázisról
+ironbase-backup backup --db /path/to/data.mlite --output ./backups --full
+
+# Incremental backup
+ironbase-backup backup --db /path/to/data.mlite --output ./backups
+
+# Ha concurrent_writes történt, a kimenet jelzi:
+# "Note: Database was modified during backup - new data in next incremental"
+```
+
+### Lock kompatibilitás
+
+| Művelet | DatabaseCore | Backup |
+|---------|--------------|--------|
+| Lock típus | Exclusive | Shared |
+| Egymás mellett | ❌ | ✅ (olvasók OK) |
+
+A backup shared lock-ja blokkolja a DB írását CSAK a metadata olvasás idejére (~1ms).

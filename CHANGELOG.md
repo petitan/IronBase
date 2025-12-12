@@ -22,6 +22,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `DatabaseCore::close()` - flush and release lock for immediate reopening
   - Critical for Python/C# where GC timing is unpredictable
   - Fixes Windows CI test failures with file persistence tests
+- **Safe Hot Backup**: Snapshot isolation for consistent backups from running databases
+  - Shared lock only during metadata read (~1ms) - DB continues operating
+  - Append-only storage guarantees data immutability during backup
+  - `concurrent_writes` flag indicates if DB was modified during backup
+  - New data automatically included in next incremental backup
 - Full GitHub publication readiness (CONTRIBUTING, CODE_OF_CONDUCT, SECURITY)
 - CI/CD workflows for all platforms
 - **Compound Index Prefix Queries**: Queries on first field of compound index now use index

@@ -390,10 +390,8 @@ impl ScriptManager {
     /// Delete a script by name (also deletes version history)
     pub fn delete(&self, name: &str) -> Result<bool> {
         // Delete version history first
-        self.adapter.delete_many(
-            SCRIPT_VERSIONS_COLLECTION,
-            json!({"script_name": name}),
-        )?;
+        self.adapter
+            .delete_many(SCRIPT_VERSIONS_COLLECTION, json!({"script_name": name}))?;
 
         // Delete the script
         let count = self
@@ -476,9 +474,9 @@ impl ScriptManager {
                     description: current.description,
                     tags: current.tags,
                     dependencies: current.dependencies,
-                    created_at: current.updated_at.unwrap_or_else(|| {
-                        current.created_at.unwrap_or_default()
-                    }),
+                    created_at: current
+                        .updated_at
+                        .unwrap_or_else(|| current.created_at.unwrap_or_default()),
                 }));
             }
         }
@@ -493,19 +491,38 @@ impl ScriptManager {
             Some(doc) => Ok(Some(ScriptVersion {
                 script_name: name.to_string(),
                 version: doc.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32,
-                code: doc.get("code").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                description: doc.get("description").and_then(|v| v.as_str()).map(String::from),
+                code: doc
+                    .get("code")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                description: doc
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
                 tags: doc
                     .get("tags")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 dependencies: doc
                     .get("dependencies")
                     .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
-                created_at: doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                created_at: doc
+                    .get("created_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
             })),
             None => Ok(None),
         }
@@ -660,9 +677,9 @@ impl ScriptManager {
         options: Option<ScriptOptions>,
     ) -> Result<ScriptResult> {
         // Get the script
-        let script = self.get(name)?.ok_or_else(|| {
-            McpError::ScriptError(format!("Script '{}' not found", name))
-        })?;
+        let script = self
+            .get(name)?
+            .ok_or_else(|| McpError::ScriptError(format!("Script '{}' not found", name)))?;
 
         // Resolve dependencies
         let dep_order = self.resolve_dependencies(name)?;
@@ -876,142 +893,181 @@ impl RhaiEngine {
     }
 
     /// Register database functions into the engine
-    fn register_db_functions(&self, engine: &mut Engine, adapter: Arc<IronBaseAdapter>) -> Result<()> {
+    fn register_db_functions(
+        &self,
+        engine: &mut Engine,
+        adapter: Arc<IronBaseAdapter>,
+    ) -> Result<()> {
         // db_find(collection, query) -> array of documents
         let adapter_find = adapter.clone();
         engine.register_fn("db_find", move |collection: &str, query: Map| -> Dynamic {
             let query_json = map_to_json(&query);
             match adapter_find.find(collection, query_json, AdapterFindOptions::default()) {
                 Ok(result) => {
-                    let docs: Vec<Dynamic> = result.documents.into_iter()
+                    let docs: Vec<Dynamic> = result
+                        .documents
+                        .into_iter()
                         .map(|d| json_to_dynamic(&d))
                         .collect();
                     Dynamic::from(docs)
                 }
-                Err(e) => Dynamic::from(format!("Error: {}", e))
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
             }
         });
 
         // db_find_one(collection, query) -> document or ()
         // Note: Returns () if not found. Use is_null() to check, or use db_find_one_result() for explicit result.
         let adapter_find_one = adapter.clone();
-        engine.register_fn("db_find_one", move |collection: &str, query: Map| -> Dynamic {
-            let query_json = map_to_json(&query);
-            match adapter_find_one.find_one(collection, query_json) {
-                Ok(Some(doc)) => json_to_dynamic(&doc),
-                Ok(None) => Dynamic::UNIT,
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+        engine.register_fn(
+            "db_find_one",
+            move |collection: &str, query: Map| -> Dynamic {
+                let query_json = map_to_json(&query);
+                match adapter_find_one.find_one(collection, query_json) {
+                    Ok(Some(doc)) => json_to_dynamic(&doc),
+                    Ok(None) => Dynamic::UNIT,
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
 
         // db_find_one_result(collection, query) -> #{found: bool, doc: document|null, error: string|null}
         // Explicit Result type - easier to check "not found" vs "error" vs "found"
         let adapter_find_one_result = adapter.clone();
-        engine.register_fn("db_find_one_result", move |collection: &str, query: Map| -> Dynamic {
-            let query_json = map_to_json(&query);
-            let mut result_map = Map::new();
-            match adapter_find_one_result.find_one(collection, query_json) {
-                Ok(Some(doc)) => {
-                    result_map.insert("found".into(), Dynamic::from(true));
-                    result_map.insert("doc".into(), json_to_dynamic(&doc));
-                    result_map.insert("error".into(), Dynamic::UNIT);
+        engine.register_fn(
+            "db_find_one_result",
+            move |collection: &str, query: Map| -> Dynamic {
+                let query_json = map_to_json(&query);
+                let mut result_map = Map::new();
+                match adapter_find_one_result.find_one(collection, query_json) {
+                    Ok(Some(doc)) => {
+                        result_map.insert("found".into(), Dynamic::from(true));
+                        result_map.insert("doc".into(), json_to_dynamic(&doc));
+                        result_map.insert("error".into(), Dynamic::UNIT);
+                    }
+                    Ok(None) => {
+                        result_map.insert("found".into(), Dynamic::from(false));
+                        result_map.insert("doc".into(), Dynamic::UNIT);
+                        result_map.insert("error".into(), Dynamic::UNIT);
+                    }
+                    Err(e) => {
+                        result_map.insert("found".into(), Dynamic::from(false));
+                        result_map.insert("doc".into(), Dynamic::UNIT);
+                        result_map.insert("error".into(), Dynamic::from(e.to_string()));
+                    }
                 }
-                Ok(None) => {
-                    result_map.insert("found".into(), Dynamic::from(false));
-                    result_map.insert("doc".into(), Dynamic::UNIT);
-                    result_map.insert("error".into(), Dynamic::UNIT);
-                }
-                Err(e) => {
-                    result_map.insert("found".into(), Dynamic::from(false));
-                    result_map.insert("doc".into(), Dynamic::UNIT);
-                    result_map.insert("error".into(), Dynamic::from(e.to_string()));
-                }
-            }
-            Dynamic::from(result_map)
-        });
+                Dynamic::from(result_map)
+            },
+        );
 
         // db_insert_one(collection, document) -> inserted_id
         let adapter_insert = adapter.clone();
-        engine.register_fn("db_insert_one", move |collection: &str, doc: Map| -> Dynamic {
-            let doc_json = map_to_json(&doc);
-            match adapter_insert.insert_one(collection, doc_json) {
-                Ok(id) => Dynamic::from(id), // insert_one returns String directly
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+        engine.register_fn(
+            "db_insert_one",
+            move |collection: &str, doc: Map| -> Dynamic {
+                let doc_json = map_to_json(&doc);
+                match adapter_insert.insert_one(collection, doc_json) {
+                    Ok(id) => Dynamic::from(id), // insert_one returns String directly
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
 
         // db_insert_many(collection, documents_array) -> {inserted_count, inserted_ids}
         let adapter_insert_many = adapter.clone();
-        engine.register_fn("db_insert_many", move |collection: &str, docs: rhai::Array| -> Dynamic {
-            // Convert Rhai Array to Vec<Value>
-            let docs_vec: Vec<Value> = docs.iter()
-                .map(dynamic_to_json)
-                .collect();
-            match adapter_insert_many.insert_many(collection, docs_vec) {
-                Ok(ids) => {
-                    let mut map = Map::new();
-                    map.insert("inserted_count".into(), Dynamic::from(ids.len() as i64));
-                    let id_dynamics: Vec<Dynamic> = ids.into_iter()
-                        .map(Dynamic::from)
-                        .collect();
-                    map.insert("inserted_ids".into(), Dynamic::from(id_dynamics));
-                    Dynamic::from(map)
+        engine.register_fn(
+            "db_insert_many",
+            move |collection: &str, docs: rhai::Array| -> Dynamic {
+                // Convert Rhai Array to Vec<Value>
+                let docs_vec: Vec<Value> = docs.iter().map(dynamic_to_json).collect();
+                match adapter_insert_many.insert_many(collection, docs_vec) {
+                    Ok(ids) => {
+                        let mut map = Map::new();
+                        map.insert("inserted_count".into(), Dynamic::from(ids.len() as i64));
+                        let id_dynamics: Vec<Dynamic> =
+                            ids.into_iter().map(Dynamic::from).collect();
+                        map.insert("inserted_ids".into(), Dynamic::from(id_dynamics));
+                        Dynamic::from(map)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
                 }
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+            },
+        );
 
         // db_update_one(collection, filter, update) -> {matched_count, modified_count}
         let adapter_update_one = adapter.clone();
-        engine.register_fn("db_update_one", move |collection: &str, filter: Map, update: Map| -> Dynamic {
-            let filter_json = map_to_json(&filter);
-            let update_json = map_to_json(&update);
-            match adapter_update_one.update_one(collection, filter_json, update_json) {
-                Ok(result) => {
-                    let mut map = Map::new();
-                    map.insert("matched_count".into(), Dynamic::from(result.matched_count as i64));
-                    map.insert("modified_count".into(), Dynamic::from(result.modified_count as i64));
-                    Dynamic::from(map)
+        engine.register_fn(
+            "db_update_one",
+            move |collection: &str, filter: Map, update: Map| -> Dynamic {
+                let filter_json = map_to_json(&filter);
+                let update_json = map_to_json(&update);
+                match adapter_update_one.update_one(collection, filter_json, update_json) {
+                    Ok(result) => {
+                        let mut map = Map::new();
+                        map.insert(
+                            "matched_count".into(),
+                            Dynamic::from(result.matched_count as i64),
+                        );
+                        map.insert(
+                            "modified_count".into(),
+                            Dynamic::from(result.modified_count as i64),
+                        );
+                        Dynamic::from(map)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
                 }
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+            },
+        );
 
         // db_update_many(collection, filter, update) -> {matched_count, modified_count}
         let adapter_update_many = adapter.clone();
-        engine.register_fn("db_update_many", move |collection: &str, filter: Map, update: Map| -> Dynamic {
-            let filter_json = map_to_json(&filter);
-            let update_json = map_to_json(&update);
-            match adapter_update_many.update_many(collection, filter_json, update_json) {
-                Ok(result) => {
-                    let mut map = Map::new();
-                    map.insert("matched_count".into(), Dynamic::from(result.matched_count as i64));
-                    map.insert("modified_count".into(), Dynamic::from(result.modified_count as i64));
-                    Dynamic::from(map)
+        engine.register_fn(
+            "db_update_many",
+            move |collection: &str, filter: Map, update: Map| -> Dynamic {
+                let filter_json = map_to_json(&filter);
+                let update_json = map_to_json(&update);
+                match adapter_update_many.update_many(collection, filter_json, update_json) {
+                    Ok(result) => {
+                        let mut map = Map::new();
+                        map.insert(
+                            "matched_count".into(),
+                            Dynamic::from(result.matched_count as i64),
+                        );
+                        map.insert(
+                            "modified_count".into(),
+                            Dynamic::from(result.modified_count as i64),
+                        );
+                        Dynamic::from(map)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
                 }
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+            },
+        );
 
         // db_delete_one(collection, filter) -> deleted_count
         let adapter_delete_one = adapter.clone();
-        engine.register_fn("db_delete_one", move |collection: &str, filter: Map| -> Dynamic {
-            let filter_json = map_to_json(&filter);
-            match adapter_delete_one.delete_one(collection, filter_json) {
-                Ok(count) => Dynamic::from(count as i64),
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+        engine.register_fn(
+            "db_delete_one",
+            move |collection: &str, filter: Map| -> Dynamic {
+                let filter_json = map_to_json(&filter);
+                match adapter_delete_one.delete_one(collection, filter_json) {
+                    Ok(count) => Dynamic::from(count as i64),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
 
         // db_delete_many(collection, filter) -> deleted_count
         let adapter_delete_many = adapter.clone();
-        engine.register_fn("db_delete_many", move |collection: &str, filter: Map| -> Dynamic {
-            let filter_json = map_to_json(&filter);
-            match adapter_delete_many.delete_many(collection, filter_json) {
-                Ok(count) => Dynamic::from(count as i64),
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+        engine.register_fn(
+            "db_delete_many",
+            move |collection: &str, filter: Map| -> Dynamic {
+                let filter_json = map_to_json(&filter);
+                match adapter_delete_many.delete_many(collection, filter_json) {
+                    Ok(count) => Dynamic::from(count as i64),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
 
         // db_count(collection, query) -> count
         let adapter_count = adapter.clone();
@@ -1019,27 +1075,27 @@ impl RhaiEngine {
             let query_json = map_to_json(&query);
             match adapter_count.count_documents(collection, query_json) {
                 Ok(count) => Dynamic::from(count as i64),
-                Err(e) => Dynamic::from(format!("Error: {}", e))
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
             }
         });
 
         // db_aggregate(collection, pipeline) -> array of documents
         let adapter_agg = adapter.clone();
-        engine.register_fn("db_aggregate", move |collection: &str, pipeline: rhai::Array| -> Dynamic {
-            // Convert Rhai Array to Vec<Value>
-            let pipeline_vec: Vec<Value> = pipeline.iter()
-                .map(dynamic_to_json)
-                .collect();
-            match adapter_agg.aggregate(collection, pipeline_vec) {
-                Ok(docs) => {
-                    let result: Vec<Dynamic> = docs.into_iter()
-                        .map(|d| json_to_dynamic(&d))
-                        .collect();
-                    Dynamic::from(result)
+        engine.register_fn(
+            "db_aggregate",
+            move |collection: &str, pipeline: rhai::Array| -> Dynamic {
+                // Convert Rhai Array to Vec<Value>
+                let pipeline_vec: Vec<Value> = pipeline.iter().map(dynamic_to_json).collect();
+                match adapter_agg.aggregate(collection, pipeline_vec) {
+                    Ok(docs) => {
+                        let result: Vec<Dynamic> =
+                            docs.into_iter().map(|d| json_to_dynamic(&d)).collect();
+                        Dynamic::from(result)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
                 }
-                Err(e) => Dynamic::from(format!("Error: {}", e))
-            }
-        });
+            },
+        );
 
         Ok(())
     }
@@ -1060,9 +1116,7 @@ impl RhaiEngine {
         });
 
         // is_null(value) -> bool - check if value is null/unit
-        engine.register_fn("is_null", |value: Dynamic| -> bool {
-            value.is_unit()
-        });
+        engine.register_fn("is_null", |value: Dynamic| -> bool { value.is_unit() });
 
         // get_error(value) -> string - extract error message (without "Error: " prefix)
         engine.register_fn("get_error", |value: Dynamic| -> String {
@@ -1246,7 +1300,13 @@ mod tests {
 
         // Save a script
         let version = manager
-            .save("test_script", "let x = 1 + 1;", Some("Test script"), None, None)
+            .save(
+                "test_script",
+                "let x = 1 + 1;",
+                Some("Test script"),
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(version, 1);
 
@@ -1264,8 +1324,12 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save multiple scripts
-        manager.save("script1", "code1", Some("First"), None, None).unwrap();
-        manager.save("script2", "code2", Some("Second"), None, None).unwrap();
+        manager
+            .save("script1", "code1", Some("First"), None, None)
+            .unwrap();
+        manager
+            .save("script2", "code2", Some("Second"), None, None)
+            .unwrap();
 
         // List them
         let scripts = manager.list(None).unwrap();
@@ -1282,11 +1346,15 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save initial version
-        let v1 = manager.save("updatable", "v1", Some("Version 1"), None, None).unwrap();
+        let v1 = manager
+            .save("updatable", "v1", Some("Version 1"), None, None)
+            .unwrap();
         assert_eq!(v1, 1);
 
         // Update it
-        let v2 = manager.save("updatable", "v2", Some("Version 2"), None, None).unwrap();
+        let v2 = manager
+            .save("updatable", "v2", Some("Version 2"), None, None)
+            .unwrap();
         assert_eq!(v2, 2);
 
         // Get updated version
@@ -1355,7 +1423,9 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        let result = engine.run("params.x + params.y", Some(json!({"x": 10, "y": 5}))).unwrap();
+        let result = engine
+            .run("params.x + params.y", Some(json!({"x": 10, "y": 5})))
+            .unwrap();
         assert_eq!(result.result, json!(15));
     }
 
@@ -1364,11 +1434,16 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             print("Hello");
             print("World");
             42
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!(42));
         assert_eq!(result.logs.len(), 2);
@@ -1381,12 +1456,17 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             let doc = #{ name: "Alice", age: 30 };
             let id = db_insert_one("users", doc);
             let found = db_find("users", #{});
             found.len()
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!(1));
     }
@@ -1396,11 +1476,16 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("users", #{ name: "Bob", age: 25 });
             let user = db_find_one("users", #{ name: "Bob" });
             user.age
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!(25));
     }
@@ -1410,11 +1495,16 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("users", #{ name: "Alice", age: 30 });
             let res = db_find_one_result("users", #{ name: "Alice" });
             [res.found, res.doc.age, is_null(res.error)]
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!([true, 30, true]));
     }
@@ -1425,11 +1515,16 @@ mod tests {
         let engine = RhaiEngine::new(adapter);
 
         // First create the collection (find_one won't create collection implicitly)
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("users", #{ name: "Setup" });
             let res = db_find_one_result("users", #{ name: "NonExistent" });
             [res.found, is_null(res.doc), is_null(res.error)]
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!([false, true, true]));
     }
@@ -1453,12 +1548,17 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("users", #{ name: "Dave" });
             db_insert_one("users", #{ name: "Eve" });
             let deleted = db_delete_one("users", #{ name: "Dave" });
             deleted
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!(1));
     }
@@ -1468,12 +1568,17 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let engine = RhaiEngine::new(adapter);
 
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("items", #{ type: "A" });
             db_insert_one("items", #{ type: "B" });
             db_insert_one("items", #{ type: "A" });
             db_count("items", #{ type: "A" })
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!(2));
     }
@@ -1494,17 +1599,34 @@ mod tests {
 
         // Using invalid operator $badop should return an error string
         // FIX IMPLEMENTED: Query::from_json() now validates operators!
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("test", #{ name: "Alice", age: 25 });
             let res = db_find("test", #{ age: #{ "$badop": 25 } });
             res
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         // Should now return an error string
-        assert!(result.result.is_string(), "Expected error string but got: {:?}", result.result);
+        assert!(
+            result.result.is_string(),
+            "Expected error string but got: {:?}",
+            result.result
+        );
         let result_str = result.result.as_str().unwrap();
-        assert!(result_str.starts_with("Error:"), "Expected 'Error:' prefix but got: {}", result_str);
-        assert!(result_str.to_lowercase().contains("unknown"), "Error should mention 'unknown': {}", result_str);
+        assert!(
+            result_str.starts_with("Error:"),
+            "Expected 'Error:' prefix but got: {}",
+            result_str
+        );
+        assert!(
+            result_str.to_lowercase().contains("unknown"),
+            "Error should mention 'unknown': {}",
+            result_str
+        );
     }
 
     #[test]
@@ -1514,14 +1636,23 @@ mod tests {
 
         // FIX IMPLEMENTED: Unknown query operators now properly return errors
         // This was fixed by adding operator validation in Query::from_json()
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("test", #{ name: "Alice" });
             let res = db_find("test", #{ name: #{ "$invalid": "value" } });
             is_error(res)
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         // Now correctly returns true - the error IS detected
-        assert_eq!(result.result, json!(true), "Unknown operators should return errors");
+        assert_eq!(
+            result.result,
+            json!(true),
+            "Unknown operators should return errors"
+        );
     }
 
     #[test]
@@ -1530,11 +1661,16 @@ mod tests {
         let engine = RhaiEngine::new(adapter);
 
         // Update operators ARE validated - unknown operators return errors
-        let result = engine.run(r#"
+        let result = engine
+            .run(
+                r#"
             db_insert_one("test", #{ name: "Alice" });
             let res = db_update_one("test", #{ name: "Alice" }, #{ "$badop": #{ x: 1 } });
             is_error(res)
-        "#, None).unwrap();
+        "#,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(result.result, json!(true));
     }
@@ -1545,17 +1681,23 @@ mod tests {
         let engine = RhaiEngine::new(adapter);
 
         // This should exceed the operation limit (default: 1,000,000)
-        let result = engine.run(r#"
+        let result = engine.run(
+            r#"
             let x = 0;
             loop {
                 x += 1;
             }
             x
-        "#, None);
+        "#,
+            None,
+        );
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("1000000"), "Error should mention the default limit");
+        assert!(
+            err_msg.contains("1000000"),
+            "Error should mention the default limit"
+        );
     }
 
     #[test]
@@ -1565,17 +1707,24 @@ mod tests {
 
         // With a very low custom limit, even simple loops should fail
         let options = ScriptOptions::with_max_operations(100);
-        let result = engine.run_with_options(r#"
+        let result = engine.run_with_options(
+            r#"
             let x = 0;
             for i in 0..1000 {
                 x += 1;
             }
             x
-        "#, None, options);
+        "#,
+            None,
+            options,
+        );
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("100"), "Error should mention the custom limit (100)");
+        assert!(
+            err_msg.contains("100"),
+            "Error should mention the custom limit (100)"
+        );
     }
 
     #[test]
@@ -1585,13 +1734,17 @@ mod tests {
 
         // With a high enough limit, the script should succeed
         let options = ScriptOptions::with_max_operations(10_000);
-        let result = engine.run_with_options(r#"
+        let result = engine.run_with_options(
+            r#"
             let x = 0;
             for i in 0..100 {
                 x += 1;
             }
             x
-        "#, None, options);
+        "#,
+            None,
+            options,
+        );
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().result, json!(100));
@@ -1607,15 +1760,21 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // First save -> version 1
-        let v1 = manager.save("versioned", "code_v1", Some("First"), None, None).unwrap();
+        let v1 = manager
+            .save("versioned", "code_v1", Some("First"), None, None)
+            .unwrap();
         assert_eq!(v1, 1);
 
         // Second save -> version 2
-        let v2 = manager.save("versioned", "code_v2", Some("Second"), None, None).unwrap();
+        let v2 = manager
+            .save("versioned", "code_v2", Some("Second"), None, None)
+            .unwrap();
         assert_eq!(v2, 2);
 
         // Third save -> version 3
-        let v3 = manager.save("versioned", "code_v3", Some("Third"), None, None).unwrap();
+        let v3 = manager
+            .save("versioned", "code_v3", Some("Third"), None, None)
+            .unwrap();
         assert_eq!(v3, 3);
 
         // Current version should be 3
@@ -1630,9 +1789,15 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Create multiple versions
-        manager.save("history_test", "v1_code", Some("V1"), None, None).unwrap();
-        manager.save("history_test", "v2_code", Some("V2"), None, None).unwrap();
-        manager.save("history_test", "v3_code", Some("V3"), None, None).unwrap();
+        manager
+            .save("history_test", "v1_code", Some("V1"), None, None)
+            .unwrap();
+        manager
+            .save("history_test", "v2_code", Some("V2"), None, None)
+            .unwrap();
+        manager
+            .save("history_test", "v3_code", Some("V3"), None, None)
+            .unwrap();
 
         // Get full history
         let history = manager.get_history("history_test", None).unwrap();
@@ -1650,7 +1815,9 @@ mod tests {
 
         // Create 5 versions
         for i in 1..=5 {
-            manager.save("limit_test", &format!("v{}", i), None, None, None).unwrap();
+            manager
+                .save("limit_test", &format!("v{}", i), None, None, None)
+                .unwrap();
         }
 
         // Get only 2 most recent versions
@@ -1666,9 +1833,15 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Create versions
-        manager.save("specific_version", "code_v1", Some("V1"), None, None).unwrap();
-        manager.save("specific_version", "code_v2", Some("V2"), None, None).unwrap();
-        manager.save("specific_version", "code_v3", Some("V3"), None, None).unwrap();
+        manager
+            .save("specific_version", "code_v1", Some("V1"), None, None)
+            .unwrap();
+        manager
+            .save("specific_version", "code_v2", Some("V2"), None, None)
+            .unwrap();
+        manager
+            .save("specific_version", "code_v3", Some("V3"), None, None)
+            .unwrap();
 
         // Get version 1
         let v1 = manager.get_version("specific_version", 1).unwrap();
@@ -1693,9 +1866,15 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Create versions
-        manager.save("rollback_test", "v1_code", Some("V1"), None, None).unwrap();
-        manager.save("rollback_test", "v2_code", Some("V2"), None, None).unwrap();
-        manager.save("rollback_test", "v3_code", Some("V3"), None, None).unwrap();
+        manager
+            .save("rollback_test", "v1_code", Some("V1"), None, None)
+            .unwrap();
+        manager
+            .save("rollback_test", "v2_code", Some("V2"), None, None)
+            .unwrap();
+        manager
+            .save("rollback_test", "v3_code", Some("V3"), None, None)
+            .unwrap();
 
         // Rollback to version 1 - creates version 4
         let new_version = manager.rollback("rollback_test", 1).unwrap();
@@ -1712,7 +1891,9 @@ mod tests {
         let (adapter, _temp) = create_test_adapter();
         let manager = ScriptManager::new(adapter);
 
-        manager.save("rollback_err", "code", None, None, None).unwrap();
+        manager
+            .save("rollback_err", "code", None, None, None)
+            .unwrap();
 
         // Try to rollback to non-existent version
         let result = manager.rollback("rollback_err", 99);
@@ -1729,13 +1910,15 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save with tags
-        manager.save(
-            "tagged_script",
-            "code",
-            Some("Description"),
-            Some(vec!["utility".to_string(), "report".to_string()]),
-            None,
-        ).unwrap();
+        manager
+            .save(
+                "tagged_script",
+                "code",
+                Some("Description"),
+                Some(vec!["utility".to_string(), "report".to_string()]),
+                None,
+            )
+            .unwrap();
 
         // Check tags are saved
         let script = manager.get("tagged_script").unwrap().unwrap();
@@ -1750,10 +1933,17 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save without tags
-        manager.save("add_tags_test", "code", None, None, None).unwrap();
+        manager
+            .save("add_tags_test", "code", None, None, None)
+            .unwrap();
 
         // Add tags
-        manager.add_tags("add_tags_test", vec!["new_tag".to_string(), "another".to_string()]).unwrap();
+        manager
+            .add_tags(
+                "add_tags_test",
+                vec!["new_tag".to_string(), "another".to_string()],
+            )
+            .unwrap();
 
         // Verify tags added
         let script = manager.get("add_tags_test").unwrap().unwrap();
@@ -1767,16 +1957,20 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save with tags
-        manager.save(
-            "remove_tags_test",
-            "code",
-            None,
-            Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
-            None,
-        ).unwrap();
+        manager
+            .save(
+                "remove_tags_test",
+                "code",
+                None,
+                Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]),
+                None,
+            )
+            .unwrap();
 
         // Remove some tags
-        manager.remove_tags("remove_tags_test", vec!["b".to_string()]).unwrap();
+        manager
+            .remove_tags("remove_tags_test", vec!["b".to_string()])
+            .unwrap();
 
         // Verify tag removed
         let script = manager.get("remove_tags_test").unwrap().unwrap();
@@ -1791,13 +1985,19 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save with duplicate tags
-        manager.save(
-            "dup_tags",
-            "code",
-            None,
-            Some(vec!["tag1".to_string(), "tag1".to_string(), "tag2".to_string()]),
-            None,
-        ).unwrap();
+        manager
+            .save(
+                "dup_tags",
+                "code",
+                None,
+                Some(vec![
+                    "tag1".to_string(),
+                    "tag1".to_string(),
+                    "tag2".to_string(),
+                ]),
+                None,
+            )
+            .unwrap();
 
         // Duplicates should be deduplicated
         let script = manager.get("dup_tags").unwrap().unwrap();
@@ -1811,10 +2011,42 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Create scripts with different tags
-        manager.save("script_a", "code", None, Some(vec!["util".to_string()]), None).unwrap();
-        manager.save("script_b", "code", None, Some(vec!["report".to_string()]), None).unwrap();
-        manager.save("script_c", "code", None, Some(vec!["util".to_string(), "report".to_string()]), None).unwrap();
-        manager.save("script_d", "code", None, Some(vec!["other".to_string()]), None).unwrap();
+        manager
+            .save(
+                "script_a",
+                "code",
+                None,
+                Some(vec!["util".to_string()]),
+                None,
+            )
+            .unwrap();
+        manager
+            .save(
+                "script_b",
+                "code",
+                None,
+                Some(vec!["report".to_string()]),
+                None,
+            )
+            .unwrap();
+        manager
+            .save(
+                "script_c",
+                "code",
+                None,
+                Some(vec!["util".to_string(), "report".to_string()]),
+                None,
+            )
+            .unwrap();
+        manager
+            .save(
+                "script_d",
+                "code",
+                None,
+                Some(vec!["other".to_string()]),
+                None,
+            )
+            .unwrap();
 
         // Filter by "util" OR "report"
         let filter = ScriptListFilter {
@@ -1837,9 +2069,33 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Create scripts with different tags
-        manager.save("script_a", "code", None, Some(vec!["util".to_string()]), None).unwrap();
-        manager.save("script_b", "code", None, Some(vec!["report".to_string()]), None).unwrap();
-        manager.save("script_c", "code", None, Some(vec!["util".to_string(), "report".to_string()]), None).unwrap();
+        manager
+            .save(
+                "script_a",
+                "code",
+                None,
+                Some(vec!["util".to_string()]),
+                None,
+            )
+            .unwrap();
+        manager
+            .save(
+                "script_b",
+                "code",
+                None,
+                Some(vec!["report".to_string()]),
+                None,
+            )
+            .unwrap();
+        manager
+            .save(
+                "script_c",
+                "code",
+                None,
+                Some(vec!["util".to_string(), "report".to_string()]),
+                None,
+            )
+            .unwrap();
 
         // Filter by "util" AND "report"
         let filter = ScriptListFilter {
@@ -1873,7 +2129,9 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save a script
-        manager.save("stats_test", "1 + 1", None, None, None).unwrap();
+        manager
+            .save("stats_test", "1 + 1", None, None, None)
+            .unwrap();
 
         // Check initial stats
         let stats = manager.get_stats("stats_test").unwrap().unwrap();
@@ -1889,7 +2147,9 @@ mod tests {
         let engine = RhaiEngine::new(adapter_clone);
 
         // Save and run a script
-        manager.save("stats_run_test", "1 + 1", None, None, None).unwrap();
+        manager
+            .save("stats_run_test", "1 + 1", None, None, None)
+            .unwrap();
         manager.run_script("stats_run_test", None, &engine).unwrap();
 
         // Check stats after run
@@ -1908,7 +2168,9 @@ mod tests {
         let engine = RhaiEngine::new(adapter_clone);
 
         // Save and run multiple times
-        manager.save("multi_run", "1 + 1", None, None, None).unwrap();
+        manager
+            .save("multi_run", "1 + 1", None, None, None)
+            .unwrap();
         manager.run_script("multi_run", None, &engine).unwrap();
         manager.run_script("multi_run", None, &engine).unwrap();
         manager.run_script("multi_run", None, &engine).unwrap();
@@ -1930,16 +2192,20 @@ mod tests {
         let engine = RhaiEngine::new(adapter_clone);
 
         // Create helper script
-        manager.save("helper", "fn add(a, b) { a + b }", None, None, None).unwrap();
+        manager
+            .save("helper", "fn add(a, b) { a + b }", None, None, None)
+            .unwrap();
 
         // Create main script that depends on helper
-        manager.save(
-            "main",
-            "add(10, 20)",
-            None,
-            None,
-            Some(vec!["helper".to_string()]),
-        ).unwrap();
+        manager
+            .save(
+                "main",
+                "add(10, 20)",
+                None,
+                None,
+                Some(vec!["helper".to_string()]),
+            )
+            .unwrap();
 
         // Run main with dependencies
         let result = manager.run_script("main", None, &engine).unwrap();
@@ -1954,9 +2220,27 @@ mod tests {
         let engine = RhaiEngine::new(adapter_clone);
 
         // Create chain: level1 <- level2 <- level3
-        manager.save("level1", "fn l1() { 1 }", None, None, None).unwrap();
-        manager.save("level2", "fn l2() { l1() + 1 }", None, None, Some(vec!["level1".to_string()])).unwrap();
-        manager.save("level3", "l2() + 1", None, None, Some(vec!["level2".to_string()])).unwrap();
+        manager
+            .save("level1", "fn l1() { 1 }", None, None, None)
+            .unwrap();
+        manager
+            .save(
+                "level2",
+                "fn l2() { l1() + 1 }",
+                None,
+                None,
+                Some(vec!["level1".to_string()]),
+            )
+            .unwrap();
+        manager
+            .save(
+                "level3",
+                "l2() + 1",
+                None,
+                None,
+                Some(vec!["level2".to_string()]),
+            )
+            .unwrap();
 
         // Run level3
         let result = manager.run_script("level3", None, &engine).unwrap();
@@ -1969,11 +2253,27 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Create circular dependency: a -> b -> a
-        manager.save("a", "fn a_fn() { 1 }", None, None, None).unwrap();
-        manager.save("b", "fn b_fn() { a_fn() }", None, None, Some(vec!["a".to_string()])).unwrap();
+        manager
+            .save("a", "fn a_fn() { 1 }", None, None, None)
+            .unwrap();
+        manager
+            .save(
+                "b",
+                "fn b_fn() { a_fn() }",
+                None,
+                None,
+                Some(vec!["a".to_string()]),
+            )
+            .unwrap();
 
         // Try to update 'a' to depend on 'b' - should fail
-        let result = manager.save("a", "fn a_fn() { b_fn() }", None, None, Some(vec!["b".to_string()]));
+        let result = manager.save(
+            "a",
+            "fn a_fn() { b_fn() }",
+            None,
+            None,
+            Some(vec!["b".to_string()]),
+        );
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.to_lowercase().contains("circular"));
@@ -2002,8 +2302,12 @@ mod tests {
 
         // Create: a <- b <- c (c depends on b, b depends on a)
         manager.save("dep_a", "// a", None, None, None).unwrap();
-        manager.save("dep_b", "// b", None, None, Some(vec!["dep_a".to_string()])).unwrap();
-        manager.save("dep_c", "// c", None, None, Some(vec!["dep_b".to_string()])).unwrap();
+        manager
+            .save("dep_b", "// b", None, None, Some(vec!["dep_a".to_string()]))
+            .unwrap();
+        manager
+            .save("dep_c", "// c", None, None, Some(vec!["dep_b".to_string()]))
+            .unwrap();
 
         // Resolve dependencies for c
         let order = manager.resolve_dependencies("dep_c").unwrap();
@@ -2025,7 +2329,9 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save with empty tags array
-        manager.save("empty_tags", "code", None, Some(vec![]), None).unwrap();
+        manager
+            .save("empty_tags", "code", None, Some(vec![]), None)
+            .unwrap();
 
         let script = manager.get("empty_tags").unwrap().unwrap();
         assert!(script.tags.is_empty());
@@ -2037,9 +2343,15 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Create multiple versions
-        manager.save("delete_history", "v1", None, None, None).unwrap();
-        manager.save("delete_history", "v2", None, None, None).unwrap();
-        manager.save("delete_history", "v3", None, None, None).unwrap();
+        manager
+            .save("delete_history", "v1", None, None, None)
+            .unwrap();
+        manager
+            .save("delete_history", "v2", None, None, None)
+            .unwrap();
+        manager
+            .save("delete_history", "v3", None, None, None)
+            .unwrap();
 
         // Delete the script
         manager.delete("delete_history").unwrap();
@@ -2055,13 +2367,15 @@ mod tests {
         let manager = ScriptManager::new(adapter);
 
         // Save with all new fields
-        manager.save(
-            "full_info",
-            "code",
-            Some("Description"),
-            Some(vec!["tag1".to_string()]),
-            None,
-        ).unwrap();
+        manager
+            .save(
+                "full_info",
+                "code",
+                Some("Description"),
+                Some(vec!["tag1".to_string()]),
+                None,
+            )
+            .unwrap();
 
         // List and check ScriptInfo
         let scripts = manager.list(None).unwrap();

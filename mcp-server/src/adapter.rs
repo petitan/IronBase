@@ -426,12 +426,7 @@ impl IronBaseAdapter {
     }
 
     /// Find documents with index hint (uses get_collection - no implicit creation)
-    pub fn find_with_hint(
-        &self,
-        collection: &str,
-        query: Value,
-        hint: &str,
-    ) -> Result<Vec<Value>> {
+    pub fn find_with_hint(&self, collection: &str, query: Value, hint: &str) -> Result<Vec<Value>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let documents = coll.find_with_hint(&query, hint)?;
@@ -530,9 +525,7 @@ impl IronBaseAdapter {
     ) -> Result<()> {
         let db = self.db.read();
         // Get existing flags first
-        let mut flags = db
-            .get_collection_flags(collection)
-            .unwrap_or_default();
+        let mut flags = db.get_collection_flags(collection).unwrap_or_default();
 
         // Only update flags that are explicitly set
         if let Some(v) = is_system {

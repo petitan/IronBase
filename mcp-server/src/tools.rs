@@ -55,7 +55,10 @@ fn parse_limit(params: &Value) -> Option<usize> {
 
 /// Validate and parse skip
 fn parse_skip(params: &Value) -> Option<usize> {
-    params.get("skip").and_then(|v| v.as_u64()).map(|v| v as usize)
+    params
+        .get("skip")
+        .and_then(|v| v.as_u64())
+        .map(|v| v as usize)
 }
 
 /// Parse sort parameter - returns None if missing, null, or empty
@@ -104,12 +107,10 @@ fn parse_sort(params: &Value) -> Option<Vec<(String, i32)>> {
 /// Validate threshold is in range [0.0, 1.0]
 fn parse_threshold(params: &Value) -> Result<Option<f64>> {
     match params.get("threshold").and_then(|v| v.as_f64()) {
-        Some(t) if !(0.0..=1.0).contains(&t) => {
-            Err(McpError::InvalidParams(format!(
-                "threshold must be between 0.0 and 1.0, got: {}",
-                t
-            )))
-        }
+        Some(t) if !(0.0..=1.0).contains(&t) => Err(McpError::InvalidParams(format!(
+            "threshold must be between 0.0 and 1.0, got: {}",
+            t
+        ))),
         t => Ok(t),
     }
 }
@@ -117,7 +118,9 @@ fn parse_threshold(params: &Value) -> Result<Option<f64>> {
 /// Validate collection name
 fn validate_collection_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(McpError::InvalidParams("Collection name cannot be empty".into()));
+        return Err(McpError::InvalidParams(
+            "Collection name cannot be empty".into(),
+        ));
     }
     if name.len() > MAX_COLLECTION_NAME_LEN {
         return Err(McpError::InvalidParams(format!(
@@ -126,7 +129,10 @@ fn validate_collection_name(name: &str) -> Result<()> {
         )));
     }
     // Check for invalid characters (allow alphanumeric, underscore, dot, hyphen)
-    if !name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+    {
         return Err(McpError::InvalidParams(
             "Collection name can only contain alphanumeric characters, underscores, dots, and hyphens".into()
         ));
@@ -1234,7 +1240,8 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let limit = parse_limit(&params);
 
             // Use the real fuzzy search with index
-            let mut results = adapter.fuzzy_search(&collection, &field, &query, threshold, algorithm)?;
+            let mut results =
+                adapter.fuzzy_search(&collection, &field, &query, threshold, algorithm)?;
 
             // Apply limit if specified (capped at MAX_QUERY_LIMIT)
             if let Some(lim) = limit {
@@ -1400,12 +1407,16 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let description = params.get("description").and_then(|v| v.as_str());
             let tags: Option<Vec<String>> = params.get("tags").and_then(|v| {
                 v.as_array().map(|arr| {
-                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
                 })
             });
             let dependencies: Option<Vec<String>> = params.get("dependencies").and_then(|v| {
                 v.as_array().map(|arr| {
-                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
                 })
             });
             let manager = ScriptManager::new(Arc::clone(adapter));
@@ -1418,12 +1429,20 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let filter = {
                 let tags: Option<Vec<String>> = params.get("tags").and_then(|v| {
                     v.as_array().map(|arr| {
-                        arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
                     })
                 });
-                let match_all = params.get("match_all").and_then(|v| v.as_bool()).unwrap_or(false);
+                let match_all = params
+                    .get("match_all")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 if tags.is_some() {
-                    Some(ScriptListFilter { tags, match_all_tags: match_all })
+                    Some(ScriptListFilter {
+                        tags,
+                        match_all_tags: match_all,
+                    })
                 } else {
                     None
                 }
@@ -1445,7 +1464,10 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
                     "tags": script.tags,
                     "dependencies": script.dependencies
                 })),
-                None => Err(McpError::InvalidParams(format!("Script '{}' not found", name))),
+                None => Err(McpError::InvalidParams(format!(
+                    "Script '{}' not found",
+                    name
+                ))),
             }
         }
         "script_delete" => {
@@ -1455,13 +1477,17 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             if deleted {
                 Ok(json!({"success": true, "deleted": name}))
             } else {
-                Err(McpError::InvalidParams(format!("Script '{}' not found", name)))
+                Err(McpError::InvalidParams(format!(
+                    "Script '{}' not found",
+                    name
+                )))
             }
         }
         "script_run" => {
             let name = get_string(&params, "name")?;
             let script_params = params.get("params").cloned();
-            let options = params.get("max_operations")
+            let options = params
+                .get("max_operations")
                 .and_then(|v| v.as_u64())
                 .map(ScriptOptions::with_max_operations);
 
@@ -1480,7 +1506,8 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
         "script_exec" => {
             let code = get_string(&params, "code")?;
             let script_params = params.get("params").cloned();
-            let options = params.get("max_operations")
+            let options = params
+                .get("max_operations")
                 .and_then(|v| v.as_u64())
                 .map(ScriptOptions::with_max_operations);
 
@@ -1501,25 +1528,32 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
         // Version Management
         "script_history" => {
             let name = get_string(&params, "name")?;
-            let limit = params.get("limit").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let limit = params
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
             let manager = ScriptManager::new(Arc::clone(adapter));
             let history = manager.get_history(&name, limit)?;
             Ok(json!({"history": history, "count": history.len()}))
         }
         "script_rollback" => {
             let name = get_string(&params, "name")?;
-            let version = params.get("version").and_then(|v| v.as_u64()).ok_or_else(|| {
-                McpError::InvalidParams("version is required".to_string())
-            })? as u32;
+            let version = params
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| McpError::InvalidParams("version is required".to_string()))?
+                as u32;
             let manager = ScriptManager::new(Arc::clone(adapter));
             let new_version = manager.rollback(&name, version)?;
             Ok(json!({"success": true, "name": name, "new_version": new_version}))
         }
         "script_version_get" => {
             let name = get_string(&params, "name")?;
-            let version = params.get("version").and_then(|v| v.as_u64()).ok_or_else(|| {
-                McpError::InvalidParams("version is required".to_string())
-            })? as u32;
+            let version = params
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| McpError::InvalidParams("version is required".to_string()))?
+                as u32;
             let manager = ScriptManager::new(Arc::clone(adapter));
             match manager.get_version(&name, version)? {
                 Some(v) => Ok(json!({
@@ -1532,29 +1566,40 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
                     "created_at": v.created_at
                 })),
                 None => Err(McpError::InvalidParams(format!(
-                    "Version {} of script '{}' not found", version, name
+                    "Version {} of script '{}' not found",
+                    version, name
                 ))),
             }
         }
         // Tag Management
         "script_tags_add" => {
             let name = get_string(&params, "name")?;
-            let tags: Vec<String> = params.get("tags").and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+            let tags: Vec<String> = params
+                .get("tags")
+                .and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                 })
-            }).ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
+                .ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
             let manager = ScriptManager::new(Arc::clone(adapter));
             manager.add_tags(&name, tags.clone())?;
             Ok(json!({"success": true, "name": name, "added_tags": tags}))
         }
         "script_tags_remove" => {
             let name = get_string(&params, "name")?;
-            let tags: Vec<String> = params.get("tags").and_then(|v| {
-                v.as_array().map(|arr| {
-                    arr.iter().filter_map(|v| v.as_str().map(String::from)).collect()
+            let tags: Vec<String> = params
+                .get("tags")
+                .and_then(|v| {
+                    v.as_array().map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                 })
-            }).ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
+                .ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
             let manager = ScriptManager::new(Arc::clone(adapter));
             manager.remove_tags(&name, tags.clone())?;
             Ok(json!({"success": true, "name": name, "removed_tags": tags}))
@@ -1572,7 +1617,10 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
                     "total_execution_time_ms": stats.total_execution_time_ms,
                     "avg_execution_time_ms": stats.avg_execution_time_ms
                 })),
-                None => Err(McpError::InvalidParams(format!("Script '{}' not found", name))),
+                None => Err(McpError::InvalidParams(format!(
+                    "Script '{}' not found",
+                    name
+                ))),
             }
         }
 
@@ -1586,7 +1634,9 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             verify_admin_key(&params)?;
             let name = get_string(&params, "name")?;
             adapter.create_system_collection(&name)?;
-            Ok(json!({"success": true, "collection": name, "flags": {"is_system": true, "protected": true, "hidden": false}}))
+            Ok(
+                json!({"success": true, "collection": name, "flags": {"is_system": true, "protected": true, "hidden": false}}),
+            )
         }
         "admin_set_collection_flags" => {
             verify_admin_key(&params)?;
@@ -1595,7 +1645,9 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let protected = params.get("protected").and_then(|v| v.as_bool());
             let hidden = params.get("hidden").and_then(|v| v.as_bool());
             adapter.set_collection_flags(&collection, is_system, protected, hidden)?;
-            Ok(json!({"success": true, "collection": collection, "flags": {"is_system": is_system, "protected": protected, "hidden": hidden}}))
+            Ok(
+                json!({"success": true, "collection": collection, "flags": {"is_system": is_system, "protected": protected, "hidden": hidden}}),
+            )
         }
         "admin_drop_protected" => {
             verify_admin_key(&params)?;
@@ -1706,7 +1758,8 @@ fn get_array(params: &Value, key: &str) -> Result<Vec<Value>> {
 
 /// Parse transaction_id from params (can be string or number)
 fn parse_transaction_id(params: &Value) -> Result<u64> {
-    let tx_param = params.get("transaction_id")
+    let tx_param = params
+        .get("transaction_id")
         .ok_or_else(|| McpError::InvalidParams("transaction_id parameter is required".into()))?;
 
     // Accept both string and number formats
@@ -1716,6 +1769,8 @@ fn parse_transaction_id(params: &Value) -> Result<u64> {
     } else if let Some(n) = tx_param.as_u64() {
         Ok(n)
     } else {
-        Err(McpError::InvalidParams("transaction_id must be a string or number".into()))
+        Err(McpError::InvalidParams(
+            "transaction_id must be a string or number".into(),
+        ))
     }
 }

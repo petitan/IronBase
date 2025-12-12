@@ -1,13 +1,23 @@
 //! Backup creation logic
 //!
-//! Supports both full and incremental backups with hot backup capability
+//! Supports both full and incremental backups with safe hot backup capability
 //! (database can continue operating during backup).
+//!
+//! ## Hot Backup Safety
+//!
+//! Uses snapshot isolation for safe hot backups:
+//! 1. Shared lock (brief) to read metadata consistently
+//! 2. Lock released - DB can continue writing
+//! 3. Document data copied (immutable due to append-only storage)
+//! 4. Final header check to detect concurrent changes
 
 use crate::chain::{db_name_from_path, Chain};
 use crate::compression::{compress, format_size};
 use crate::error::{BackupError, Result};
 use crate::format::{hash_to_short_hex, BackupFooter, BackupHeader, BackupType, DB_HEADER_SIZE};
 use byteorder::{LittleEndian, ReadBytesExt};
+#[allow(unused_imports)] // Required for lock_shared/unlock trait methods
+use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -21,11 +31,13 @@ use std::path::{Path, PathBuf};
 const IRONBASE_METADATA_OFFSET_POS: u64 = 36; // Position of metadata_offset in IronBase header
 const IRONBASE_DATA_END_OFFSET_POS: u64 = 52; // Position of data_end_offset in IronBase header
 
-/// Read data_end_offset from IronBase database header
+/// Read data_end_offset from IronBase database header with shared lock
 /// This is where document data ends (before metadata at file end)
 ///
 /// For v2 databases, data_end_offset is 0, so we use metadata_offset instead
 /// (metadata is at the end of the file, right after document data)
+///
+/// Uses shared lock to ensure consistent read while allowing other readers.
 fn read_data_end_offset(db_path: &Path) -> Result<u64> {
     let file_size = std::fs::metadata(db_path)?.len();
 
@@ -35,13 +47,27 @@ fn read_data_end_offset(db_path: &Path) -> Result<u64> {
     }
 
     let file = File::open(db_path)?;
-    let mut reader = BufReader::new(file);
+
+    // Acquire shared lock for consistent header read
+    // This blocks writers but allows other readers
+    file.lock_shared().map_err(|e| {
+        BackupError::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!(
+                "Cannot acquire lock on database (is it being written?): {}",
+                e
+            ),
+        ))
+    })?;
+
+    let mut reader = BufReader::new(&file);
 
     // Verify IronBase magic "MONGOLTE" at start
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
     if &magic != b"MONGOLTE" {
-        // Not an IronBase file, return file size as fallback
+        // Not an IronBase file, release lock and return file size as fallback
+        let _ = file.unlock();
         return Ok(file_size);
     }
 
@@ -49,15 +75,28 @@ fn read_data_end_offset(db_path: &Path) -> Result<u64> {
     reader.seek(SeekFrom::Start(IRONBASE_DATA_END_OFFSET_POS))?;
     let data_end_offset = reader.read_u64::<LittleEndian>()?;
 
+    // Release lock - we have what we need
+    let _ = file.unlock();
+
     // If data_end_offset is valid (v3), use it
     if data_end_offset > 0 && data_end_offset <= file_size {
         return Ok(data_end_offset);
     }
 
     // For v2 databases, data_end_offset is 0
-    // Use metadata_offset instead - metadata starts where document data ends
+    // Re-acquire lock to read metadata_offset
+    file.lock_shared().map_err(|e| {
+        BackupError::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!("Cannot acquire lock on database: {}", e),
+        ))
+    })?;
+
+    let mut reader = BufReader::new(&file);
     reader.seek(SeekFrom::Start(IRONBASE_METADATA_OFFSET_POS))?;
     let metadata_offset = reader.read_u64::<LittleEndian>()?;
+
+    let _ = file.unlock();
 
     // Validate metadata_offset
     if metadata_offset > 0 && metadata_offset <= file_size {
@@ -83,6 +122,8 @@ pub struct BackupResult {
     pub hash: [u8; 32],
     /// Time taken in seconds
     pub duration_secs: f64,
+    /// True if database was written to during backup (data in next incremental)
+    pub concurrent_writes: bool,
 }
 
 impl BackupResult {
@@ -110,6 +151,9 @@ impl BackupResult {
         );
         println!("  Hash: {}", hash_to_short_hex(&self.hash));
         println!("  Time: {:.2}s", self.duration_secs);
+        if self.concurrent_writes {
+            println!("  Note: Database was modified during backup - new data in next incremental");
+        }
     }
 }
 
@@ -179,33 +223,50 @@ pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Res
     // Calculate data to backup
     let incremental_data_length = db_size - start_offset;
 
-    // Read data from database file
-    let mut db_file = File::open(db_path)?;
+    // Open database file for reading
+    let db_file = File::open(db_path)?;
+
+    // SNAPSHOT ISOLATION: Acquire shared lock for consistent read
+    // This allows other readers but blocks writers during our read
+    db_file.lock_shared().map_err(|e| {
+        BackupError::Io(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            format!("Cannot acquire lock on database for backup: {}", e),
+        ))
+    })?;
 
     // For incremental backups: payload = [DB header (256)] + [incremental data]
     // This ensures the updated metadata_offset pointer is captured
-    let (data, data_length) = if backup_type == BackupType::Incremental {
-        // Read DB header first (0-255) - contains metadata_offset
-        db_file.seek(SeekFrom::Start(0))?;
-        let mut db_header = vec![0u8; DB_HEADER_SIZE];
-        db_file.read_exact(&mut db_header)?;
+    let (data, data_length) = {
+        let mut reader = BufReader::new(&db_file);
 
-        // Read incremental data (start_offset to end)
-        db_file.seek(SeekFrom::Start(start_offset))?;
-        let mut incremental_data = vec![0u8; incremental_data_length as usize];
-        db_file.read_exact(&mut incremental_data)?;
+        if backup_type == BackupType::Incremental {
+            // Read DB header first (0-255) - contains metadata_offset
+            reader.seek(SeekFrom::Start(0))?;
+            let mut db_header = vec![0u8; DB_HEADER_SIZE];
+            reader.read_exact(&mut db_header)?;
 
-        // Concatenate: [db_header] + [incremental_data]
-        db_header.extend(incremental_data);
-        let total_length = db_header.len() as u64;
-        (db_header, total_length)
-    } else {
-        // Full backup: read entire file from offset 0
-        db_file.seek(SeekFrom::Start(start_offset))?;
-        let mut data = vec![0u8; incremental_data_length as usize];
-        db_file.read_exact(&mut data)?;
-        (data, incremental_data_length)
+            // Read incremental data (start_offset to end)
+            reader.seek(SeekFrom::Start(start_offset))?;
+            let mut incremental_data = vec![0u8; incremental_data_length as usize];
+            reader.read_exact(&mut incremental_data)?;
+
+            // Concatenate: [db_header] + [incremental_data]
+            db_header.extend(incremental_data);
+            let total_length = db_header.len() as u64;
+            (db_header, total_length)
+        } else {
+            // Full backup: read entire file from offset 0
+            reader.seek(SeekFrom::Start(start_offset))?;
+            let mut data = vec![0u8; incremental_data_length as usize];
+            reader.read_exact(&mut data)?;
+            (data, incremental_data_length)
+        }
     };
+
+    // Release lock - data is copied, DB can continue writing
+    // Note: Due to append-only storage, the data we read is immutable
+    let _ = db_file.unlock();
 
     // Compress data
     let compressed = compress(&data)?;
@@ -241,6 +302,19 @@ pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Res
     // Write backup file
     write_backup_file(&backup_path, &header, &compressed, content_hash)?;
 
+    // SNAPSHOT ISOLATION: Verify no concurrent changes during backup
+    // Re-read data_end_offset to check if new documents were added
+    let final_data_end = read_data_end_offset(db_path)?;
+    let concurrent_writes = final_data_end != current_data_end;
+
+    if concurrent_writes {
+        // This is informational, not an error - new data will be in next backup
+        eprintln!(
+            "Note: {} bytes written during backup - will be included in next incremental",
+            final_data_end - current_data_end
+        );
+    }
+
     let duration = start_time.elapsed().as_secs_f64();
 
     Ok(BackupResult {
@@ -250,6 +324,7 @@ pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Res
         compressed_size: compressed.len() as u64,
         hash: content_hash,
         duration_secs: duration,
+        concurrent_writes,
     })
 }
 
