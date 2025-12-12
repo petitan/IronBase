@@ -429,3 +429,58 @@ coll.find(&json!({"$**.status": "active"}}))?;
 - **ahash/dashmap**: Fast hashing
 - **thiserror**: Error handling
 - 192.168.0.136 az mcp cime általában
+
+## Release folyamat (FONTOS!)
+
+### Verzió frissítés KÖTELEZŐ lépései
+
+Minden feature/bugfix commit után **KÖTELEZŐ** a verzió frissítése:
+
+1. **mcp-server verzió** (fő verzió): `mcp-server/Cargo.toml` → `version = "1.0.XX"`
+2. **core verzió**: `Cargo.toml` (workspace) → `version = "0.3.X"`
+
+### CI/CD folyamat és ISMERT KORLÁTOZÁS
+
+```
+[Push to master]
+    ↓
+[auto-tag.yml] - Cargo.toml verzió változás → tag létrehozás (v1.0.XX)
+    ↓
+[release.yml] - Tag push → build + GitHub Release létrehozás
+    ↓
+[PROBLÉMA!] A release.yml NEM TRIGGERELŐDIK automatikusan!
+```
+
+**Gyökérok (Root Cause):**
+A GitHub Actions biztonsági korlátozása: ha egy workflow (auto-tag.yml) GITHUB_TOKEN-nel hoz létre tag-et, az NEM triggerel másik workflow-t (release.yml). Ez rekurzió elleni védelem.
+
+### MANUÁLIS release létrehozás (amíg nincs PAT beállítva)
+
+Verzió bump után KÖTELEZŐ manuálisan létrehozni a release-t:
+
+```bash
+# 1. Letölteni az artifact-ot a Windows build CI-ból
+gh run download <RUN_ID> -n ironbase-mcp-server-windows -D /tmp/win-pkg
+
+# 2. Átnevezni és release létrehozni
+mv /tmp/win-pkg/mcp-ironbase-server.exe /tmp/win-pkg/mcp-ironbase-server-windows.exe
+gh release create v1.0.XX \
+  --title "IronBase MCP Server v1.0.XX" \
+  --generate-notes \
+  /tmp/win-pkg/mcp-ironbase-server-windows.exe \
+  /tmp/win-pkg/install.ps1
+```
+
+### Ellenőrzés
+
+```bash
+# Release létrejött-e?
+gh release list --limit 3
+
+# Helyes verzió?
+gh release view v1.0.XX
+```
+
+### Jövőbeli javítás
+
+PAT (Personal Access Token) beállítása az auto-tag.yml-ben a GITHUB_TOKEN helyett → automatikus release triggerelés.
