@@ -152,6 +152,9 @@ pub struct StorageEngine {
     file_path: String,
     wal: WriteAheadLog,
     metadata_dirty: bool,
+    /// Separate lock file to allow other processes to read the DB during backup
+    /// On Windows, file locks are mandatory and prevent ALL access including reads
+    lock_file: File,
 }
 
 impl StorageEngine {
@@ -160,16 +163,27 @@ impl StorageEngine {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let exists = path.as_ref().exists();
 
+        // Create separate lock file to allow other processes to READ the DB (hot backup)
+        // On Windows, file locks are mandatory and block ALL access including reads
+        // By locking a separate .lock file, we allow backup tools to read the DB file
+        let lock_path = PathBuf::from(&path_str).with_extension("mlite.lock");
+        let lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&lock_path)?;
+
+        // Acquire exclusive lock on the LOCK FILE (not the database file)
+        // This is deadlock-free: try_lock returns immediately with error if locked
+        lock_file
+            .try_lock_exclusive()
+            .map_err(|_| MongoLiteError::DatabaseLocked(path_str.clone()))?;
+
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .open(&path)?;
-
-        // Acquire exclusive file lock (non-blocking) to prevent multi-process corruption
-        // This is deadlock-free: try_lock returns immediately with error if locked
-        file.try_lock_exclusive()
-            .map_err(|_| MongoLiteError::DatabaseLocked(path_str.clone()))?;
 
         let (header, collections) = if exists && file.metadata()?.len() > 0 {
             // Load existing database
@@ -202,6 +216,7 @@ impl StorageEngine {
             file_path: path_str,
             wal,
             metadata_dirty: false,
+            lock_file,
         };
 
         // NOTE: WAL recovery is now handled by DatabaseCore::open() for index atomicity
@@ -835,7 +850,7 @@ impl StorageEngine {
     /// This is primarily used by language bindings (Python, C#) where the
     /// garbage collector timing is unpredictable and explicit close() is needed.
     pub fn release_lock(&self) -> Result<()> {
-        self.file.unlock().map_err(MongoLiteError::Io)
+        self.lock_file.unlock().map_err(MongoLiteError::Io)
     }
 }
 
