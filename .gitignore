@@ -18,6 +18,7 @@ build/
 # Database files
 *.db
 *.mlite
+*.mlite.lock
 *.wal
 *.idx
 
