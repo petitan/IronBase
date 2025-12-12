@@ -93,10 +93,13 @@ impl IronBase {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
-    /// Close and flush database
+    /// Close the database: flush all changes and release the file lock.
+    ///
+    /// After calling close(), another process can open the same database file.
+    /// The database instance should not be used after calling close().
     fn close(&self) -> PyResult<()> {
         self.db
-            .flush()
+            .close()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
     }
 

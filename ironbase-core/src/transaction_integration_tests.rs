@@ -438,4 +438,22 @@ mod integration_tests {
         let collections = db2.list_collections();
         assert!(collections.contains(&"test".to_string()));
     }
+
+    #[test]
+    fn test_file_lock_released_on_close() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+
+        // Open database and create a collection
+        let db1 = DatabaseCore::open(&db_path).unwrap();
+        db1.collection("test").unwrap();
+
+        // Explicitly close - should release lock
+        db1.close().unwrap();
+
+        // Now we should be able to open it again (db1 still exists but lock is released)
+        let db2 = DatabaseCore::open(&db_path).unwrap();
+        let collections = db2.list_collections();
+        assert!(collections.contains(&"test".to_string()));
+    }
 }

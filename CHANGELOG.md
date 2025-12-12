@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Non-blocking `try_lock_exclusive()` - returns error immediately if locked (deadlock-free)
   - Automatic lock release on process exit or crash
   - New `DatabaseLocked` error type for clear error messages
+- **Explicit `close()` Method**: Release file lock without waiting for GC/Drop
+  - `DatabaseCore::close()` - flush and release lock for immediate reopening
+  - Critical for Python/C# where GC timing is unpredictable
+  - Fixes Windows CI test failures with file persistence tests
 - Full GitHub publication readiness (CONTRIBUTING, CODE_OF_CONDUCT, SECURITY)
 - CI/CD workflows for all platforms
 - **Compound Index Prefix Queries**: Queries on first field of compound index now use index

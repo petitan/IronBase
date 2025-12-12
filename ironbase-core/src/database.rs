@@ -1119,6 +1119,35 @@ impl DatabaseCore<StorageEngine> {
             crate::transaction::Operation::Delete { collection, .. } => collection.clone(),
         })
     }
+
+    /// Close the database: flush all changes and release the file lock.
+    ///
+    /// This method is primarily useful for language bindings (Python, C#) where
+    /// the garbage collector timing is unpredictable. After calling `close()`,
+    /// another process can open the same database file immediately.
+    ///
+    /// Note: The database instance should not be used after calling `close()`.
+    /// While the struct remains valid, the file lock is released and concurrent
+    /// access from other processes is possible.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// use ironbase_core::DatabaseCore;
+    /// use ironbase_core::storage::StorageEngine;
+    ///
+    /// let db = DatabaseCore::<StorageEngine>::open("data.mlite")?;
+    /// db.collection("users")?; // Create collection
+    /// db.close()?; // Flush and release lock - now safe to reopen
+    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// ```
+    pub fn close(&self) -> Result<()> {
+        // Flush all pending changes to disk
+        self.flush()?;
+
+        // Release the exclusive file lock so other processes can open the database
+        let storage = self.storage.read();
+        storage.release_lock()
+    }
 }
 
 // ============================================================================

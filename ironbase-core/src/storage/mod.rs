@@ -827,6 +827,16 @@ impl StorageEngine {
 
         Ok(())
     }
+
+    /// Release the exclusive file lock without dropping the StorageEngine.
+    /// This allows other processes to open the database while this instance
+    /// remains in memory (but should no longer be used for writes).
+    ///
+    /// This is primarily used by language bindings (Python, C#) where the
+    /// garbage collector timing is unpredictable and explicit close() is needed.
+    pub fn release_lock(&self) -> Result<()> {
+        self.file.unlock().map_err(MongoLiteError::Io)
+    }
 }
 
 // Automatic cleanup on drop
