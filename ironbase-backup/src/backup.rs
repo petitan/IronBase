@@ -5,19 +5,17 @@
 //!
 //! ## Hot Backup Safety
 //!
-//! Uses snapshot isolation for safe hot backups:
-//! 1. Shared lock (brief) to read metadata consistently
-//! 2. Lock released - DB can continue writing
-//! 3. Document data copied (immutable due to append-only storage)
-//! 4. Final header check to detect concurrent changes
+//! NO LOCKS NEEDED - append-only storage guarantees safety:
+//! 1. Read header to get data_end_offset (quick atomic read)
+//! 2. Copy document data (immutable - never modified after write)
+//! 3. Check header again to detect concurrent writes
+//! 4. New data written during backup → included in next incremental
 
 use crate::chain::{db_name_from_path, Chain};
 use crate::compression::{compress, format_size};
 use crate::error::{BackupError, Result};
 use crate::format::{hash_to_short_hex, BackupFooter, BackupHeader, BackupType, DB_HEADER_SIZE};
 use byteorder::{LittleEndian, ReadBytesExt};
-#[allow(unused_imports)] // Required for lock_shared/unlock trait methods
-use fs2::FileExt;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
@@ -47,27 +45,16 @@ fn read_data_end_offset(db_path: &Path) -> Result<u64> {
     }
 
     let file = File::open(db_path)?;
-
-    // Acquire shared lock for consistent header read
-    // This blocks writers but allows other readers
-    file.lock_shared().map_err(|e| {
-        BackupError::Io(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            format!(
-                "Cannot acquire lock on database (is it being written?): {}",
-                e
-            ),
-        ))
-    })?;
-
     let mut reader = BufReader::new(&file);
+
+    // NO LOCK NEEDED: Append-only storage guarantees data immutability
+    // Header read is atomic enough for our purposes (just need offsets)
 
     // Verify IronBase magic "MONGOLTE" at start
     let mut magic = [0u8; 8];
     reader.read_exact(&mut magic)?;
     if &magic != b"MONGOLTE" {
-        // Not an IronBase file, release lock and return file size as fallback
-        let _ = file.unlock();
+        // Not an IronBase file, return file size as fallback
         return Ok(file_size);
     }
 
@@ -75,28 +62,14 @@ fn read_data_end_offset(db_path: &Path) -> Result<u64> {
     reader.seek(SeekFrom::Start(IRONBASE_DATA_END_OFFSET_POS))?;
     let data_end_offset = reader.read_u64::<LittleEndian>()?;
 
-    // Release lock - we have what we need
-    let _ = file.unlock();
-
     // If data_end_offset is valid (v3), use it
     if data_end_offset > 0 && data_end_offset <= file_size {
         return Ok(data_end_offset);
     }
 
-    // For v2 databases, data_end_offset is 0
-    // Re-acquire lock to read metadata_offset
-    file.lock_shared().map_err(|e| {
-        BackupError::Io(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            format!("Cannot acquire lock on database: {}", e),
-        ))
-    })?;
-
-    let mut reader = BufReader::new(&file);
+    // For v2 databases, data_end_offset is 0, use metadata_offset
     reader.seek(SeekFrom::Start(IRONBASE_METADATA_OFFSET_POS))?;
     let metadata_offset = reader.read_u64::<LittleEndian>()?;
-
-    let _ = file.unlock();
 
     // Validate metadata_offset
     if metadata_offset > 0 && metadata_offset <= file_size {
@@ -224,16 +197,9 @@ pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Res
     let incremental_data_length = db_size - start_offset;
 
     // Open database file for reading
+    // NO LOCK NEEDED: Append-only storage guarantees data immutability
+    // The DB can continue writing - new data will be in next incremental backup
     let db_file = File::open(db_path)?;
-
-    // SNAPSHOT ISOLATION: Acquire shared lock for consistent read
-    // This allows other readers but blocks writers during our read
-    db_file.lock_shared().map_err(|e| {
-        BackupError::Io(std::io::Error::new(
-            std::io::ErrorKind::WouldBlock,
-            format!("Cannot acquire lock on database for backup: {}", e),
-        ))
-    })?;
 
     // For incremental backups: payload = [DB header (256)] + [incremental data]
     // This ensures the updated metadata_offset pointer is captured
@@ -263,10 +229,6 @@ pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Res
             (data, incremental_data_length)
         }
     };
-
-    // Release lock - data is copied, DB can continue writing
-    // Note: Due to append-only storage, the data we read is immutable
-    let _ = db_file.unlock();
 
     // Compress data
     let compressed = compress(&data)?;
