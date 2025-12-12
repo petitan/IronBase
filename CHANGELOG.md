@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **MCP System Collections Hidden Flag**: `ensure_system_collections()` now fixes flags on existing collections
+  - Legacy databases where `_system.scripts` was created before flag system now get `hidden: true`
+  - Auto-migrates on MCP server startup - no manual intervention needed
+
 ### Added
 - **Cross-Process File Locking**: Prevents database corruption from multiple processes
   - Uses `fs2` crate for OS-level exclusive file locks

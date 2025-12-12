@@ -63,25 +63,50 @@ impl IronBaseAdapter {
         Ok(adapter)
     }
 
-    /// Ensure system collections exist (_system.scripts, _system.script_versions)
+    /// Ensure system collections exist with correct flags (_system.scripts, _system.script_versions)
     fn ensure_system_collections(&self) -> Result<()> {
         let db = self.db.read();
         let collections = db.list_all_collections();
 
-        // Check if scripts collection exists
-        let needs_scripts = !collections.contains(&SCRIPTS_COLLECTION.to_string());
-        // Check if script_versions collection exists
-        let needs_versions = !collections.contains(&SCRIPT_VERSIONS_COLLECTION.to_string());
+        let scripts_exists = collections.contains(&SCRIPTS_COLLECTION.to_string());
+        let versions_exists = collections.contains(&SCRIPT_VERSIONS_COLLECTION.to_string());
 
-        if needs_scripts || needs_versions {
+        // Check flags on existing collections - fix if hidden != true
+        let scripts_needs_flags = scripts_exists
+            && db
+                .get_collection_flags(SCRIPTS_COLLECTION)
+                .map(|f| !f.hidden)
+                .unwrap_or(true);
+        let versions_needs_flags = versions_exists
+            && db
+                .get_collection_flags(SCRIPT_VERSIONS_COLLECTION)
+                .map(|f| !f.hidden)
+                .unwrap_or(true);
+
+        if !scripts_exists || !versions_exists || scripts_needs_flags || versions_needs_flags {
             drop(db); // Release read lock
-            let db = self.db.write(); // Need write lock to create collections
+            let db = self.db.write(); // Need write lock to create/modify collections
 
-            if needs_scripts {
+            // Create if missing
+            if !scripts_exists {
                 db.create_system_collection(SCRIPTS_COLLECTION)?;
             }
-            if needs_versions {
+            if !versions_exists {
                 db.create_system_collection(SCRIPT_VERSIONS_COLLECTION)?;
+            }
+
+            // Fix flags on existing collections (legacy data migration)
+            use ironbase_core::storage::CollectionFlags;
+            let system_flags = CollectionFlags {
+                is_system: true,
+                protected: true,
+                hidden: true,
+            };
+            if scripts_needs_flags {
+                db.set_collection_flags(SCRIPTS_COLLECTION, system_flags)?;
+            }
+            if versions_needs_flags {
+                db.set_collection_flags(SCRIPT_VERSIONS_COLLECTION, system_flags)?;
             }
         }
         Ok(())
