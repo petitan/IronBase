@@ -525,6 +525,8 @@ fn test_random_bit_flips() {
                 "Offset {} caused panic",
                 offset
             );
+            // Drop result to release file lock before restoring
+            drop(result);
 
             // Restore original
             corrupt_bytes_at(&db_path, offset, &original).unwrap();
@@ -555,7 +557,8 @@ fn test_header_corruption_sweep() {
 
         // Try to open - verify no panic
         let result = StorageEngine::open(&db_path);
-        let _ = result; // We don't care if it succeeds or fails, just no panic
+        // Drop result to release file lock before restoring
+        drop(result); // We don't care if it succeeds or fails, just no panic
 
         // Restore
         corrupt_bytes_at(&db_path, offset, &original).unwrap();
