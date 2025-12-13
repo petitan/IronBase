@@ -154,6 +154,38 @@ ironbase-tui
 
 The MCP server supports API key authentication for secure access.
 
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `IRONBASE_API_KEY` | API key for client authentication |
+| `IRONBASE_ADMIN_KEY` | Admin key for managing API keys (create/revoke/delete) |
+
+### Quick Start with API Keys
+
+```bash
+# 1. Start the MCP server with admin key
+export IRONBASE_ADMIN_KEY="your-secret-admin-key"
+./mcp-ironbase-server
+
+# 2. Initialize session and create first API key
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cli","version":"1.0"}}}'
+
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"admin_apikey_create","arguments":{"admin_key":"your-secret-admin-key","name":"production"}}}'
+
+# Response: {"key": "sk-abc123...", "id": 1, "name": "production", ...}
+
+# 3. Use the API key for authentication
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-abc123..." \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"collection_list","arguments":{}}}'
+```
+
 ### Server Configuration (`config.toml`)
 
 ```toml
@@ -162,34 +194,91 @@ require_api_key = true      # Enable API key requirement
 api_key_cache_ttl = 60      # Cache TTL in seconds
 ```
 
-### Environment Variables
+### Managing API Keys via MCP Tools
 
-| Variable | Description |
-|----------|-------------|
-| `IRONBASE_API_KEY` | API key for client authentication |
-| `IRONBASE_ADMIN_KEY` | Admin key for managing API keys |
+| Tool | Description |
+|------|-------------|
+| `admin_apikey_create` | Create new API key (returns full key once) |
+| `admin_apikey_list` | List all keys (shows masked preview only) |
+| `admin_apikey_revoke` | Disable a key (can be re-enabled) |
+| `admin_apikey_delete` | Permanently delete a key |
 
-### Managing API Keys
-
-```bash
-# Set admin key
-export IRONBASE_ADMIN_KEY="your-secret-admin-key"
-
-# API keys are managed via MCP tools:
-# - admin_apikey_create: Create new API key
-# - admin_apikey_list: List all keys (masked)
-# - admin_apikey_revoke: Disable a key
-# - admin_apikey_delete: Permanently delete a key
-```
-
-### HTTP Requests with API Key
-
+**Create API Key:**
 ```bash
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk-your-api-key" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+  -d '{
+    "jsonrpc":"2.0","id":1,"method":"tools/call",
+    "params":{"name":"admin_apikey_create","arguments":{"admin_key":"your-admin-key","name":"my-app"}}
+  }'
+# Response: {"key":"sk-cfc3e4633b6feb9056e382c2742d4170","id":1,"name":"my-app",...}
 ```
+
+**List API Keys:**
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0","id":1,"method":"tools/call",
+    "params":{"name":"admin_apikey_list","arguments":{"admin_key":"your-admin-key"}}
+  }'
+# Response: {"keys":[{"_id":1,"name":"my-app","key_preview":"sk-cfc...4170","enabled":true}],...}
+```
+
+**Revoke API Key:**
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0","id":1,"method":"tools/call",
+    "params":{"name":"admin_apikey_revoke","arguments":{"admin_key":"your-admin-key","id":1}}
+  }'
+```
+
+**Delete API Key:**
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{
+    "jsonrpc":"2.0","id":1,"method":"tools/call",
+    "params":{"name":"admin_apikey_delete","arguments":{"admin_key":"your-admin-key","id":1}}
+  }'
+```
+
+### TUI API Key Management
+
+The TUI provides a graphical interface for managing API keys:
+
+```bash
+# Start TUI with admin access
+export IRONBASE_API_KEY="sk-your-api-key"
+export IRONBASE_ADMIN_KEY="your-admin-key"
+ironbase-tui --http http://localhost:8080
+```
+
+Press `Shift+K` to open the API Key modal:
+
+```
+┌─ API Keys ─────────────────────────────────────────┐
+│                                                     │
+│  ID   Name          Key              Enabled        │
+│  ─────────────────────────────────────────────────  │
+│ > 1   production    sk-cfc...4170    ✓             │
+│   2   development   sk-296...d3a8    ✓             │
+│   3   old-key       sk-abc...xyz     ✗             │
+│                                                     │
+│  [n]New [r]Revoke [d]Delete [c]Copy [Esc]Close     │
+└─────────────────────────────────────────────────────┘
+```
+
+| Key | Action |
+|-----|--------|
+| `n` | Create new API key |
+| `r` | Revoke selected key |
+| `d` | Delete selected key |
+| `c` | Copy new key to clipboard |
+| `j/k` | Navigate list |
+| `Esc` | Close modal |
 
 ## HTTPS/TLS Support
 
