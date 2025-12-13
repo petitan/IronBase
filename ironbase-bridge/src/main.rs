@@ -18,6 +18,15 @@ use std::io::Write;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+/// Parse boolean from env var - accepts "1", "true", "yes" (case-insensitive)
+fn parse_bool_flexible(s: &str) -> Result<bool, String> {
+    match s.to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        _ => Err(format!("Invalid boolean value: '{}'. Use true/false/1/0", s)),
+    }
+}
+
 // ============================================================================
 // CLI Arguments
 // ============================================================================
@@ -34,12 +43,12 @@ struct Args {
     #[arg(short = 'k', long, env = "IRONBASE_API_KEY")]
     api_key: Option<String>,
 
-    /// Accept invalid/self-signed certificates
-    #[arg(long, env = "MCP_INSECURE")]
+    /// Accept invalid/self-signed certificates (env: 1/true/yes)
+    #[arg(long, env = "MCP_INSECURE", value_parser = parse_bool_flexible, default_value = "false")]
     insecure: bool,
 
-    /// Enable debug logging
-    #[arg(short, long, env = "MCP_DEBUG")]
+    /// Enable debug logging (env: 1/true/yes)
+    #[arg(short, long, env = "MCP_DEBUG", value_parser = parse_bool_flexible, default_value = "false")]
     debug: bool,
 
     /// Health check retries before giving up (0 = skip health check)

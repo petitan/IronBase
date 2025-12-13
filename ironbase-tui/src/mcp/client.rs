@@ -16,7 +16,16 @@ pub struct McpClient {
 impl McpClient {
     /// Connect via HTTP transport
     pub async fn connect_http(url: &str, api_key: Option<String>) -> McpResult<Self> {
-        let transport = HttpTransport::new(url, api_key)?;
+        Self::connect_http_with_options(url, api_key, false).await
+    }
+
+    /// Connect via HTTP transport with TLS options
+    pub async fn connect_http_with_options(
+        url: &str,
+        api_key: Option<String>,
+        insecure: bool,
+    ) -> McpResult<Self> {
+        let transport = HttpTransport::with_options(url, api_key, insecure)?;
         let mut client = Self {
             transport: Arc::new(transport),
             initialized: false,

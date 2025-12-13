@@ -56,7 +56,16 @@ pub struct DbWrapper {
 impl DbWrapper {
     /// Connect via HTTP transport
     pub async fn connect_http(url: &str, api_key: Option<String>) -> Result<Self> {
-        let client = McpClient::connect_http(url, api_key).await?;
+        Self::connect_http_with_options(url, api_key, false).await
+    }
+
+    /// Connect via HTTP transport with TLS options
+    pub async fn connect_http_with_options(
+        url: &str,
+        api_key: Option<String>,
+        insecure: bool,
+    ) -> Result<Self> {
+        let client = McpClient::connect_http_with_options(url, api_key, insecure).await?;
         Ok(Self { client })
     }
 

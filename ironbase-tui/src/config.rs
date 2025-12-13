@@ -45,6 +45,10 @@ pub struct Config {
 
     /// MCP server API key (for Http transport authentication)
     pub mcp_api_key: Option<String>,
+
+    /// Accept self-signed/invalid TLS certificates (for HTTPS)
+    #[serde(default)]
+    pub mcp_insecure: bool,
 }
 
 fn default_mcp_url() -> String {
@@ -62,6 +66,7 @@ impl Default for Config {
             mcp_url: default_mcp_url(),
             mcp_server_path: None,
             mcp_api_key: None,
+            mcp_insecure: false,
         }
     }
 }

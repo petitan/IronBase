@@ -40,6 +40,10 @@ struct Cli {
     #[arg(long)]
     http: Option<String>,
 
+    /// Accept self-signed/invalid TLS certificates (for HTTPS with self-signed certs)
+    #[arg(long)]
+    insecure: bool,
+
     /// MCP server executable path for stdio transport
     #[arg(long)]
     server: Option<PathBuf>,
@@ -56,6 +60,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(url) = cli.http {
         config.mcp_url = url;
         config.transport = TransportMode::Http;
+    }
+    if cli.insecure {
+        config.mcp_insecure = true;
     }
     if cli.server.is_some() {
         config.transport = TransportMode::Stdio;
@@ -95,7 +102,7 @@ async fn main() -> anyhow::Result<()> {
         TransportMode::Http => {
             // HTTP transport - connect to external MCP server
             let api_key = config.get_mcp_api_key();
-            match DbWrapper::connect_http(&config.mcp_url, api_key).await {
+            match DbWrapper::connect_http_with_options(&config.mcp_url, api_key, config.mcp_insecure).await {
                 Ok(db) => {
                     app.db = Some(db);
                     // Fetch database path from MCP server

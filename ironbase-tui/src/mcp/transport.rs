@@ -34,8 +34,24 @@ pub struct HttpTransport {
 impl HttpTransport {
     /// Create a new HTTP transport
     pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> McpResult<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120)) // Longer timeout for large collections
+        Self::with_options(base_url, api_key, false)
+    }
+
+    /// Create a new HTTP transport with TLS options
+    pub fn with_options(
+        base_url: impl Into<String>,
+        api_key: Option<String>,
+        insecure: bool,
+    ) -> McpResult<Self> {
+        let mut builder = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120)); // Longer timeout for large collections
+
+        // Accept self-signed certificates if insecure mode is enabled
+        if insecure {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+
+        let client = builder
             .build()
             .map_err(|e| McpError::connection(format!("Failed to create HTTP client: {}", e)))?;
 
