@@ -28,11 +28,12 @@ pub trait Transport: Send + Sync {
 pub struct HttpTransport {
     client: reqwest::Client,
     base_url: String,
+    api_key: Option<String>,
 }
 
 impl HttpTransport {
     /// Create a new HTTP transport
-    pub fn new(base_url: impl Into<String>) -> McpResult<Self> {
+    pub fn new(base_url: impl Into<String>, api_key: Option<String>) -> McpResult<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120)) // Longer timeout for large collections
             .build()
@@ -41,6 +42,7 @@ impl HttpTransport {
         Ok(Self {
             client,
             base_url: base_url.into(),
+            api_key,
         })
     }
 
@@ -53,12 +55,21 @@ impl HttpTransport {
 #[async_trait]
 impl Transport for HttpTransport {
     async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
-        let response = self
-            .client
-            .post(&self.mcp_url())
-            .json(request)
-            .send()
-            .await?;
+        let mut req = self.client.post(&self.mcp_url()).json(request);
+
+        // Add Authorization header if API key is set
+        if let Some(key) = &self.api_key {
+            req = req.header("Authorization", format!("Bearer {}", key));
+        }
+
+        let response = req.send().await?;
+
+        // Handle specific HTTP errors
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(McpError::connection(
+                "Unauthorized: Invalid or missing API key. Check your mcp_api_key in config or IRONBASE_API_KEY env var.",
+            ));
+        }
 
         if !response.status().is_success() {
             return Err(McpError::connection(format!(

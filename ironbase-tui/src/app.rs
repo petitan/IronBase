@@ -66,6 +66,7 @@ pub enum Modal {
     ServerInfo,
     Update,
     Database,
+    ApiKey,
 }
 /// Search mode - collections or document content
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2214,6 +2215,9 @@ pub struct App {
     // Database open/create modal state
     pub database_state: DatabaseState,
 
+    // API Key modal state
+    pub api_key_state: crate::modals::api_key::ApiKeyState,
+
     // Config
     pub config: Config,
 
@@ -2261,6 +2265,7 @@ impl App {
             server_info_scroll: 0,
             update_state: crate::modals::update::UpdateState::default(),
             database_state: DatabaseState::default(),
+            api_key_state: crate::modals::api_key::ApiKeyState::new(),
             config,
             status_message: None,
             error_message: None,

@@ -15,8 +15,8 @@ pub struct McpClient {
 
 impl McpClient {
     /// Connect via HTTP transport
-    pub async fn connect_http(url: &str) -> McpResult<Self> {
-        let transport = HttpTransport::new(url)?;
+    pub async fn connect_http(url: &str, api_key: Option<String>) -> McpResult<Self> {
+        let transport = HttpTransport::new(url, api_key)?;
         let mut client = Self {
             transport: Arc::new(transport),
             initialized: false,
@@ -490,6 +490,55 @@ impl McpClient {
         // Result is {"success": true, "name": "...", "new_version": N}
         let new_version = result.get("new_version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
         Ok(new_version)
+    }
+
+    // === API Key Management (admin operations) ===
+
+    /// List all API keys (requires admin key)
+    pub async fn list_api_keys(&self, admin_key: &str) -> McpResult<Vec<Value>> {
+        let args = serde_json::json!({
+            "admin_key": admin_key
+        });
+        let result = self.call_tool("admin_apikey_list", args).await?;
+        // Result is {"keys": [...]}
+        let keys: Vec<Value> = result
+            .get("keys")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(keys)
+    }
+
+    /// Create a new API key (requires admin key)
+    /// Returns the full key (only shown once)
+    pub async fn create_api_key(&self, admin_key: &str, name: &str) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "admin_key": admin_key,
+            "name": name
+        });
+        let result = self.call_tool("admin_apikey_create", args).await?;
+        Ok(result)
+    }
+
+    /// Revoke (disable) an API key by ID (requires admin key)
+    pub async fn revoke_api_key(&self, admin_key: &str, id: u64) -> McpResult<bool> {
+        let args = serde_json::json!({
+            "admin_key": admin_key,
+            "id": id
+        });
+        let result = self.call_tool("admin_apikey_revoke", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+
+    /// Delete an API key by ID (requires admin key)
+    pub async fn delete_api_key(&self, admin_key: &str, id: u64) -> McpResult<bool> {
+        let args = serde_json::json!({
+            "admin_key": admin_key,
+            "id": id
+        });
+        let result = self.call_tool("admin_apikey_delete", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
     }
 }
 

@@ -94,7 +94,8 @@ async fn main() -> anyhow::Result<()> {
     match config.transport {
         TransportMode::Http => {
             // HTTP transport - connect to external MCP server
-            match DbWrapper::connect_http(&config.mcp_url).await {
+            let api_key = config.get_mcp_api_key();
+            match DbWrapper::connect_http(&config.mcp_url, api_key).await {
                 Ok(db) => {
                     app.db = Some(db);
                     // Fetch database path from MCP server
@@ -372,6 +373,9 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Database => {
                 modals::database::render(frame, frame.area(), &app.database_state, &theme);
             }
+            Modal::ApiKey => {
+                modals::api_key::render(frame, frame.area(), &app.api_key_state, &theme);
+            }
         }
     }
 
@@ -524,6 +528,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::ServerInfo) => handle_server_info_key(app, key),
         Some(Modal::Update) => handle_update_key(app, key),
         Some(Modal::Database) => handle_database_key_async(app, key).await,
+        Some(Modal::ApiKey) => handle_api_key_key_async(app, key).await,
         None => {}
     }
 }
@@ -615,6 +620,32 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
 
         // Theme
         (KeyCode::Char('t'), _) => app.next_theme(),
+
+        // API Key management (Shift+K)
+        (KeyCode::Char('K'), KeyModifiers::SHIFT) => {
+            app.api_key_state = modals::api_key::ApiKeyState::new();
+            app.modal = Some(Modal::ApiKey);
+            // Load API keys if admin key is available
+            if let Some(ref admin_key) = app.api_key_state.admin_key {
+                if let Some(ref db) = app.db {
+                    app.api_key_state.loading = true;
+                    match db.list_api_keys(admin_key).await {
+                        Ok(keys) => {
+                            let infos: Vec<_> = keys
+                                .iter()
+                                .filter_map(modals::api_key::ApiKeyInfo::from_value)
+                                .collect();
+                            app.api_key_state.set_keys(infos);
+                            app.api_key_state.loading = false;
+                        }
+                        Err(e) => {
+                            app.api_key_state.set_error(format!("Failed to load keys: {}", e));
+                            app.api_key_state.loading = false;
+                        }
+                    }
+                }
+            }
+        }
 
         // Refresh (r) - reload collections and documents (detail updates automatically)
         (KeyCode::Char('r'), _) => {
@@ -951,6 +982,148 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
             app.database_state.end();
         }
         _ => {}
+    }
+}
+
+/// Handle API Key modal keys
+async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
+    use crate::modals::api_key::{ApiKeyModalMode, ConfirmAction};
+
+    match app.api_key_state.mode {
+        ApiKeyModalMode::List => match key {
+            KeyCode::Esc => {
+                app.close_modal();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.api_key_state.select_next();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.api_key_state.select_prev();
+            }
+            KeyCode::Char('n') if app.api_key_state.has_admin_key() => {
+                app.api_key_state.start_create();
+            }
+            KeyCode::Char('r') if app.api_key_state.has_admin_key() => {
+                app.api_key_state.start_revoke();
+            }
+            KeyCode::Char('d') if app.api_key_state.has_admin_key() => {
+                app.api_key_state.start_delete();
+            }
+            KeyCode::Char('c') => {
+                // Copy new key to clipboard (if available)
+                if let Some(ref key) = app.api_key_state.new_key {
+                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                        if clipboard.set_text(key.clone()).is_ok() {
+                            app.api_key_state.set_success("Key copied to clipboard!".to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
+        ApiKeyModalMode::Create => match key {
+            KeyCode::Esc => {
+                app.api_key_state.cancel();
+            }
+            KeyCode::Enter => {
+                let name = app.api_key_state.input.trim().to_string();
+                if name.is_empty() {
+                    app.api_key_state.set_error("Name cannot be empty".to_string());
+                    return;
+                }
+
+                if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
+                    if let Some(ref db) = app.db {
+                        match db.create_api_key(&admin_key, &name).await {
+                            Ok(result) => {
+                                // Extract the full key from the result
+                                if let Some(key) = result.get("key").and_then(|v| v.as_str()) {
+                                    app.api_key_state.new_key = Some(key.to_string());
+                                }
+                                app.api_key_state.set_success(format!("API key '{}' created!", name));
+                                app.api_key_state.mode = ApiKeyModalMode::List;
+                                app.api_key_state.input.clear();
+
+                                // Refresh the keys list
+                                if let Ok(keys) = db.list_api_keys(&admin_key).await {
+                                    let infos: Vec<_> = keys
+                                        .iter()
+                                        .filter_map(modals::api_key::ApiKeyInfo::from_value)
+                                        .collect();
+                                    app.api_key_state.set_keys(infos);
+                                }
+                            }
+                            Err(e) => {
+                                app.api_key_state.set_error(format!("Failed to create: {}", e));
+                            }
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                app.api_key_state.input.push(c);
+            }
+            KeyCode::Backspace => {
+                app.api_key_state.input.pop();
+            }
+            _ => {}
+        },
+        ApiKeyModalMode::Confirm => match key {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.api_key_state.cancel();
+            }
+            KeyCode::Char('y') => {
+                if let Some(selected) = app.api_key_state.get_selected() {
+                    let id = selected.id;
+                    let name = selected.name.clone();
+
+                    if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
+                        if let Some(ref db) = app.db {
+                            let result = match app.api_key_state.confirm_action {
+                                Some(ConfirmAction::Revoke) => {
+                                    db.revoke_api_key(&admin_key, id).await
+                                }
+                                Some(ConfirmAction::Delete) => {
+                                    db.delete_api_key(&admin_key, id).await
+                                }
+                                None => Ok(false),
+                            };
+
+                            match result {
+                                Ok(true) => {
+                                    let action = match app.api_key_state.confirm_action {
+                                        Some(ConfirmAction::Revoke) => "revoked",
+                                        Some(ConfirmAction::Delete) => "deleted",
+                                        None => "modified",
+                                    };
+                                    app.api_key_state.set_success(format!("Key '{}' {}!", name, action));
+                                    app.api_key_state.mode = ApiKeyModalMode::List;
+                                    app.api_key_state.confirm_action = None;
+
+                                    // Refresh the keys list
+                                    if let Ok(keys) = db.list_api_keys(&admin_key).await {
+                                        let infos: Vec<_> = keys
+                                            .iter()
+                                            .filter_map(modals::api_key::ApiKeyInfo::from_value)
+                                            .collect();
+                                        app.api_key_state.set_keys(infos);
+                                    }
+                                }
+                                Ok(false) => {
+                                    app.api_key_state.set_error("Key not found".to_string());
+                                    app.api_key_state.cancel();
+                                }
+                                Err(e) => {
+                                    app.api_key_state.set_error(format!("Failed: {}", e));
+                                    app.api_key_state.cancel();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
     }
 }
 

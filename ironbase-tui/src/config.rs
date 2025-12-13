@@ -42,6 +42,9 @@ pub struct Config {
 
     /// MCP server binary path (for Stdio transport)
     pub mcp_server_path: Option<PathBuf>,
+
+    /// MCP server API key (for Http transport authentication)
+    pub mcp_api_key: Option<String>,
 }
 
 fn default_mcp_url() -> String {
@@ -58,6 +61,7 @@ impl Default for Config {
             transport: TransportMode::Http,
             mcp_url: default_mcp_url(),
             mcp_server_path: None,
+            mcp_api_key: None,
         }
     }
 }
@@ -123,11 +127,18 @@ impl Config {
         Ok(())
     }
 
-    /// Get API key from config or environment
+    /// Get Anthropic API key from config or environment
     pub fn get_api_key(&self) -> Option<String> {
         self.anthropic_api_key
             .clone()
             .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+    }
+
+    /// Get MCP API key from config or environment
+    pub fn get_mcp_api_key(&self) -> Option<String> {
+        self.mcp_api_key
+            .clone()
+            .or_else(|| std::env::var("IRONBASE_API_KEY").ok())
     }
 
     /// Get recipes directory (creates if needed)

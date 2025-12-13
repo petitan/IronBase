@@ -1,6 +1,7 @@
 //! Modal dialogs - overlays for search, actions, etc.
 
 pub mod actions;
+pub mod api_key;
 pub mod confirm;
 pub mod database;
 pub mod error;

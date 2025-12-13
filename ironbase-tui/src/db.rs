@@ -55,8 +55,8 @@ pub struct DbWrapper {
 
 impl DbWrapper {
     /// Connect via HTTP transport
-    pub async fn connect_http(url: &str) -> Result<Self> {
-        let client = McpClient::connect_http(url).await?;
+    pub async fn connect_http(url: &str, api_key: Option<String>) -> Result<Self> {
+        let client = McpClient::connect_http(url, api_key).await?;
         Ok(Self { client })
     }
 
@@ -375,6 +375,32 @@ impl DbWrapper {
     pub async fn script_rollback(&self, name: &str, version: u32) -> Result<u32> {
         let new_version = self.client.script_rollback(name, version).await?;
         Ok(new_version)
+    }
+
+    // === API Key Management ===
+
+    /// List all API keys (requires admin key)
+    pub async fn list_api_keys(&self, admin_key: &str) -> Result<Vec<Value>> {
+        let keys = self.client.list_api_keys(admin_key).await?;
+        Ok(keys)
+    }
+
+    /// Create a new API key (requires admin key)
+    pub async fn create_api_key(&self, admin_key: &str, name: &str) -> Result<Value> {
+        let result = self.client.create_api_key(admin_key, name).await?;
+        Ok(result)
+    }
+
+    /// Revoke (disable) an API key by ID (requires admin key)
+    pub async fn revoke_api_key(&self, admin_key: &str, id: u64) -> Result<bool> {
+        let success = self.client.revoke_api_key(admin_key, id).await?;
+        Ok(success)
+    }
+
+    /// Delete an API key by ID (requires admin key)
+    pub async fn delete_api_key(&self, admin_key: &str, id: u64) -> Result<bool> {
+        let success = self.client.delete_api_key(admin_key, id).await?;
+        Ok(success)
     }
 }
 
