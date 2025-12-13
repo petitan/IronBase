@@ -1039,11 +1039,15 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                 // Extract the full key from the result
                                 if let Some(key) = result.get("key").and_then(|v| v.as_str()) {
                                     app.api_key_state.new_key = Some(key.to_string());
-                                    // Save key to temp file for easy copying
-                                    let key_file = "/tmp/ironbase_new_key.txt";
-                                    let _ = std::fs::write(key_file, format!("{}\n", key));
+                                    // Save key to config directory for easy copying
+                                    if let Some(config_dir) = dirs::config_dir() {
+                                        let tui_dir = config_dir.join("ironbase-tui");
+                                        let _ = std::fs::create_dir_all(&tui_dir);
+                                        let key_file = tui_dir.join("new_key.txt");
+                                        let _ = std::fs::write(&key_file, format!("{}\n", key));
+                                    }
                                 }
-                                app.api_key_state.set_success(format!("API key '{}' created! Saved to /tmp/ironbase_new_key.txt", name));
+                                app.api_key_state.set_success(format!("API key '{}' created! Saved to ~/.config/ironbase-tui/new_key.txt", name));
                                 app.api_key_state.mode = ApiKeyModalMode::List;
                                 app.api_key_state.input.clear();
 
