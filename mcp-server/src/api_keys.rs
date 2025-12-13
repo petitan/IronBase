@@ -48,21 +48,41 @@ impl ApiKeyCache {
         self.required
     }
 
-    /// Refresh cache from database if TTL expired
+    /// Refresh cache from database if TTL expired (double-checked locking)
     pub fn refresh_if_needed(&self, adapter: &Arc<IronBaseAdapter>) {
         let now = Instant::now();
-        let needs_refresh = {
-            let last = self.last_refresh.read();
-            now.duration_since(*last) > self.ttl
-        };
 
-        if needs_refresh {
-            self.refresh(adapter);
+        // Quick check with read lock
+        {
+            let last = self.last_refresh.read();
+            if now.duration_since(*last) <= self.ttl {
+                return;
+            }
         }
+
+        // Acquire write lock and double-check (another thread may have refreshed)
+        {
+            let mut last_refresh = self.last_refresh.write();
+            if now.duration_since(*last_refresh) <= self.ttl {
+                // Another thread refreshed while we waited for the lock
+                return;
+            }
+            // Mark as refreshed NOW to prevent other threads from also refreshing
+            *last_refresh = now;
+        }
+
+        // Do the actual refresh (lock released, so other threads won't block)
+        self.do_refresh(adapter);
     }
 
     /// Force refresh cache from database
     pub fn refresh(&self, adapter: &Arc<IronBaseAdapter>) {
+        *self.last_refresh.write() = Instant::now();
+        self.do_refresh(adapter);
+    }
+
+    /// Internal refresh implementation
+    fn do_refresh(&self, adapter: &Arc<IronBaseAdapter>) {
         // Ensure the _system.api_keys collection exists
         let _ = adapter.create_system_collection("_system.api_keys");
 
@@ -84,7 +104,6 @@ impl ApiKeyCache {
                         keys.insert(key.to_string());
                     }
                 }
-                *self.last_refresh.write() = Instant::now();
                 tracing::debug!("API key cache refreshed: {} keys loaded", keys.len());
             }
             Err(e) => {
