@@ -53,6 +53,11 @@ jobs:
           cd ironbase-tui
           cargo build --release
 
+      - name: Build Bridge (Windows)
+        run: |
+          cd ironbase-bridge
+          cargo build --release
+
       - name: Upload Windows MCP artifact
         uses: actions/upload-artifact@v4
         with:
@@ -70,6 +75,12 @@ jobs:
         with:
           name: ironbase-tui-windows
           path: ironbase-tui/target/release/ironbase-tui.exe
+
+      - name: Upload Windows Bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironbase-bridge-windows
+          path: ironbase-bridge/target/release/ironbase-bridge.exe
 
   build-linux:
     name: Build Linux
@@ -108,6 +119,11 @@ jobs:
           cd ironbase-tui
           cargo build --release
 
+      - name: Build Bridge (Linux)
+        run: |
+          cd ironbase-bridge
+          cargo build --release
+
       - name: Upload Linux MCP artifact
         uses: actions/upload-artifact@v4
         with:
@@ -125,6 +141,12 @@ jobs:
         with:
           name: ironbase-tui-linux
           path: ironbase-tui/target/release/ironbase-tui
+
+      - name: Upload Linux Bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironbase-bridge-linux
+          path: ironbase-bridge/target/release/ironbase-bridge
 
   build-macos:
     name: Build macOS
@@ -163,6 +185,11 @@ jobs:
           cd ironbase-tui
           cargo build --release
 
+      - name: Build Bridge (macOS)
+        run: |
+          cd ironbase-bridge
+          cargo build --release
+
       - name: Upload macOS MCP artifact
         uses: actions/upload-artifact@v4
         with:
@@ -180,6 +207,12 @@ jobs:
         with:
           name: ironbase-tui-macos
           path: ironbase-tui/target/release/ironbase-tui
+
+      - name: Upload macOS Bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironbase-bridge-macos
+          path: ironbase-bridge/target/release/ironbase-bridge
 
   create-release:
     name: Create Release
@@ -243,6 +276,20 @@ jobs:
              release-assets/ironbase-tui-macos
           chmod +x release-assets/ironbase-tui-macos
 
+          # Bridge - Windows
+          cp artifacts/ironbase-bridge-windows/ironbase-bridge.exe \
+             release-assets/ironbase-bridge-windows.exe
+
+          # Bridge - Linux
+          cp artifacts/ironbase-bridge-linux/ironbase-bridge \
+             release-assets/ironbase-bridge-linux
+          chmod +x release-assets/ironbase-bridge-linux
+
+          # Bridge - macOS
+          cp artifacts/ironbase-bridge-macos/ironbase-bridge \
+             release-assets/ironbase-bridge-macos
+          chmod +x release-assets/ironbase-bridge-macos
+
           # Copy installer scripts
           cp mcp-server/scripts/install.ps1 release-assets/
           cp mcp-server/scripts/install.sh release-assets/
@@ -277,6 +324,9 @@ jobs:
             release-assets/ironbase-tui-windows.exe
             release-assets/ironbase-tui-linux
             release-assets/ironbase-tui-macos
+            release-assets/ironbase-bridge-windows.exe
+            release-assets/ironbase-bridge-linux
+            release-assets/ironbase-bridge-macos
             release-assets/install.ps1
             release-assets/install.sh
           body: |
@@ -305,6 +355,14 @@ jobs:
             | Windows | `ironbase-tui-windows.exe` |
             | Linux | `ironbase-tui-linux` |
             | macOS | `ironbase-tui-macos` |
+
+            ### MCP Bridge (STDIO to HTTP proxy for Claude Desktop)
+
+            | Platform | File |
+            |----------|------|
+            | Windows | `ironbase-bridge-windows.exe` |
+            | Linux | `ironbase-bridge-linux` |
+            | macOS | `ironbase-bridge-macos` |
 
             ### Quick Install MCP Server (Windows)
 
