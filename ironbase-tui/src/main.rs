@@ -1045,32 +1045,48 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                         let tui_dir = config_dir.join("ironbase-tui");
                                         let _ = std::fs::create_dir_all(&tui_dir);
                                         let key_file = tui_dir.join("new_key.txt");
-                                        let _ = std::fs::write(&key_file, format!("{}\n", key));
-                                        saved_path = Some(key_file.display().to_string());
-                                        // Set restrictive permissions (owner read/write only)
-                                        #[cfg(unix)]
-                                        {
-                                            use std::os::unix::fs::PermissionsExt;
-                                            let _ = std::fs::set_permissions(
-                                                &key_file,
-                                                std::fs::Permissions::from_mode(0o600),
-                                            );
-                                        }
-                                        #[cfg(windows)]
-                                        {
-                                            // Use icacls to set owner-only permissions
-                                            use std::os::windows::process::CommandExt;
-                                            if let Some(path_str) = key_file.to_str() {
-                                                if let Ok(username) = std::env::var("USERNAME") {
-                                                    let _ = std::process::Command::new("icacls")
-                                                        .args([
-                                                            path_str,
-                                                            "/inheritance:r",
-                                                            "/grant:r",
-                                                            &format!("{}:F", username),
-                                                        ])
-                                                        .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                                                        .output();
+
+                                        // Write file with restrictive permissions from the start
+                                        let write_result = {
+                                            #[cfg(unix)]
+                                            {
+                                                use std::fs::OpenOptions;
+                                                use std::io::Write;
+                                                use std::os::unix::fs::OpenOptionsExt;
+                                                OpenOptions::new()
+                                                    .write(true)
+                                                    .create(true)
+                                                    .truncate(true)
+                                                    .mode(0o600)
+                                                    .open(&key_file)
+                                                    .and_then(|mut f| f.write_all(format!("{}\n", key).as_bytes()))
+                                            }
+                                            #[cfg(not(unix))]
+                                            {
+                                                std::fs::write(&key_file, format!("{}\n", key))
+                                            }
+                                        };
+
+                                        if write_result.is_ok() {
+                                            saved_path = Some(key_file.display().to_string());
+
+                                            #[cfg(windows)]
+                                            {
+                                                // Use icacls to set owner-only permissions
+                                                use std::os::windows::process::CommandExt;
+                                                if let Some(path_str) = key_file.to_str() {
+                                                    if let Ok(username) = std::env::var("USERNAME") {
+                                                        // Quote the path for spaces
+                                                        let _ = std::process::Command::new("icacls")
+                                                            .args([
+                                                                &format!("\"{}\"", path_str),
+                                                                "/inheritance:r",
+                                                                "/grant:r",
+                                                                &format!("\"{}\":F", username),
+                                                            ])
+                                                            .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                                                            .output();
+                                                    }
                                                 }
                                             }
                                         }

@@ -135,8 +135,8 @@ pub fn generate_api_key() -> String {
 
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
 
     // RandomState uses OS entropy for its SipHasher seed
     let random_state = RandomState::new();
