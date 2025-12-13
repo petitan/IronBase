@@ -281,7 +281,13 @@ Press `Shift+K` to open the API Key modal:
 | `j/k` | Navigate list |
 | `Esc` | Close modal |
 
-**Note:** When creating a new API key, it is automatically saved to `~/.config/ironbase-tui/new_key.txt` for easy copying from another terminal.
+**Note:** When creating a new API key, it is automatically saved to `new_key.txt` for easy copying from another terminal:
+
+| Platform | Path | Permissions |
+|----------|------|-------------|
+| Linux | `~/.config/ironbase-tui/new_key.txt` | `chmod 600` |
+| macOS | `~/Library/Application Support/ironbase-tui/new_key.txt` | `chmod 600` |
+| Windows | `%APPDATA%\ironbase-tui\new_key.txt` | Owner-only ACL |
 
 ## HTTPS/TLS Support
 

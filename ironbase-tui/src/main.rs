@@ -1037,6 +1037,7 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                         match db.create_api_key(&admin_key, &name).await {
                             Ok(result) => {
                                 // Extract the full key from the result
+                                let mut saved_path: Option<String> = None;
                                 if let Some(key) = result.get("key").and_then(|v| v.as_str()) {
                                     app.api_key_state.new_key = Some(key.to_string());
                                     // Save key to config directory for easy copying
@@ -1045,6 +1046,7 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                         let _ = std::fs::create_dir_all(&tui_dir);
                                         let key_file = tui_dir.join("new_key.txt");
                                         let _ = std::fs::write(&key_file, format!("{}\n", key));
+                                        saved_path = Some(key_file.display().to_string());
                                         // Set restrictive permissions (owner read/write only)
                                         #[cfg(unix)]
                                         {
@@ -1074,7 +1076,11 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                         }
                                     }
                                 }
-                                app.api_key_state.set_success(format!("API key '{}' created! Saved to ~/.config/ironbase-tui/new_key.txt", name));
+                                let msg = match saved_path {
+                                    Some(path) => format!("API key '{}' created! Saved to {}", name, path),
+                                    None => format!("API key '{}' created!", name),
+                                };
+                                app.api_key_state.set_success(msg);
                                 app.api_key_state.mode = ApiKeyModalMode::List;
                                 app.api_key_state.input.clear();
 

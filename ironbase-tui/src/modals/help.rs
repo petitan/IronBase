@@ -138,7 +138,7 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::raw("Uj kulcs: ~/.config/ironbase-tui/new_key.txt"),
+            Span::raw("Uj kulcs: <config_dir>/ironbase-tui/new_key.txt"),
         ]),
     ];
 
