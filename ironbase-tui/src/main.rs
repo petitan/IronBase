@@ -1045,6 +1045,15 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                         let _ = std::fs::create_dir_all(&tui_dir);
                                         let key_file = tui_dir.join("new_key.txt");
                                         let _ = std::fs::write(&key_file, format!("{}\n", key));
+                                        // Set restrictive permissions (owner read/write only)
+                                        #[cfg(unix)]
+                                        {
+                                            use std::os::unix::fs::PermissionsExt;
+                                            let _ = std::fs::set_permissions(
+                                                &key_file,
+                                                std::fs::Permissions::from_mode(0o600),
+                                            );
+                                        }
                                     }
                                 }
                                 app.api_key_state.set_success(format!("API key '{}' created! Saved to ~/.config/ironbase-tui/new_key.txt", name));
