@@ -1054,6 +1054,24 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                                 std::fs::Permissions::from_mode(0o600),
                                             );
                                         }
+                                        #[cfg(windows)]
+                                        {
+                                            // Use icacls to set owner-only permissions
+                                            use std::os::windows::process::CommandExt;
+                                            if let Some(path_str) = key_file.to_str() {
+                                                if let Ok(username) = std::env::var("USERNAME") {
+                                                    let _ = std::process::Command::new("icacls")
+                                                        .args([
+                                                            path_str,
+                                                            "/inheritance:r",
+                                                            "/grant:r",
+                                                            &format!("{}:F", username),
+                                                        ])
+                                                        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+                                                        .output();
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                                 app.api_key_state.set_success(format!("API key '{}' created! Saved to ~/.config/ironbase-tui/new_key.txt", name));
