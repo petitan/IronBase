@@ -125,12 +125,14 @@ ironbase-backup verify --dir ./backups
 ## TUI Usage
 
 ```bash
-# Connect to HTTP mode MCP server
+# Connect to HTTP mode MCP server (overrides config.toml)
 ironbase-tui --http http://localhost:8080
 
 # Connect via stdio (spawns MCP server)
-ironbase-tui --server ./mcp-ironbase-server --db mydata.mlite
+ironbase-tui --server ./mcp-ironbase-server mydata.mlite
 ```
+
+**Note:** Command line arguments (`--http`, `--server`) override `~/.config/ironbase-tui/config.toml` settings.
 
 ### TUI with API Key Authentication
 

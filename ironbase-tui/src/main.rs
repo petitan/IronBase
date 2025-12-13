@@ -36,13 +36,13 @@ struct Cli {
     #[arg()]
     database: Option<PathBuf>,
 
-    /// MCP server URL (for HTTP transport)
-    #[arg(long, short = 'u')]
-    mcp_url: Option<String>,
-
-    /// Use HTTP transport instead of stdio
+    /// MCP server URL for HTTP transport (e.g. --http http://localhost:8080)
     #[arg(long)]
-    http: bool,
+    http: Option<String>,
+
+    /// MCP server executable path for stdio transport
+    #[arg(long)]
+    server: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -53,12 +53,12 @@ async fn main() -> anyhow::Result<()> {
     let mut config = Config::load();
 
     // CLI overrides config
-    if cli.http {
-        config.transport = TransportMode::Http;
-    }
-    if let Some(url) = cli.mcp_url {
+    if let Some(url) = cli.http {
         config.mcp_url = url;
         config.transport = TransportMode::Http;
+    }
+    if cli.server.is_some() {
+        config.transport = TransportMode::Stdio;
     }
 
     // Get db_path for later use
@@ -112,7 +112,7 @@ async fn main() -> anyhow::Result<()> {
         TransportMode::Stdio => {
             // Stdio transport - spawn MCP server
             if let Some(ref path) = db_path {
-                let server_path = config.get_mcp_server_path();
+                let server_path = cli.server.clone().unwrap_or_else(|| config.get_mcp_server_path());
                 match DbWrapper::connect_stdio(&server_path, path).await {
                     Ok(db) => {
                         app.db = Some(db);
