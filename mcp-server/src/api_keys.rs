@@ -127,8 +127,10 @@ fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     result == 0
 }
 
-/// Generate a random API key
+/// Generate a random API key using OS entropy via RandomState
 pub fn generate_api_key() -> String {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let timestamp = SystemTime::now()
@@ -136,11 +138,21 @@ pub fn generate_api_key() -> String {
         .unwrap()
         .as_nanos();
 
-    // Simple random generation using timestamp and random-ish values
-    let random_part: u64 = (timestamp as u64) ^ (timestamp.wrapping_mul(0x5851f42d4c957f2d) as u64);
-    let random_part2: u64 = random_part.wrapping_mul(0x14057b7ef767814f);
+    // RandomState uses OS entropy for its SipHasher seed
+    let random_state = RandomState::new();
+    let mut hasher = random_state.build_hasher();
+    hasher.write_u128(timestamp);
+    hasher.write_usize(std::process::id() as usize);
+    let part1 = hasher.finish();
 
-    format!("sk-{:016x}{:016x}", random_part, random_part2)
+    // Second round with fresh RandomState for more entropy
+    let random_state2 = RandomState::new();
+    let mut hasher2 = random_state2.build_hasher();
+    hasher2.write_u64(part1);
+    hasher2.write_u128(timestamp.wrapping_mul(0x517cc1b727220a95));
+    let part2 = hasher2.finish();
+
+    format!("sk-{:016x}{:016x}", part1, part2)
 }
 
 /// Create a new API key in the database
