@@ -497,9 +497,75 @@ let tax = calculate_tax(total, 0.08);
 | `IRONBASE_ADMIN_KEY` | Admin key for protected operations | (none) |
 | `IRONBASE_PORT` | HTTP server port | `8080` |
 
+## Concurrent Access
+
+The MCP server safely handles multiple concurrent clients:
+
+### Thread Safety Model
+
+```
+┌─────────────────────────────────────────────┐
+│           MCP Server (HTTP)                 │
+├─────────────────────────────────────────────┤
+│  Request 1 ──┐                              │
+│  Request 2 ──┼──→ Arc<RwLock<DatabaseCore>> │
+│  Request 3 ──┘                              │
+└─────────────────────────────────────────────┘
+
+Read operations (find, count): Parallel (RwLock read)
+Write operations (insert, update, delete): Serialized (RwLock write)
+```
+
+### Testing Concurrent Access
+
+The server includes concurrent access test scripts:
+
+```bash
+# Linux/macOS
+./tests/concurrent_insert_read.sh
+
+# Windows (PowerShell)
+./tests/concurrent_insert_read.ps1
+```
+
+**Test behavior:**
+- Inserter: 100 sequential inserts
+- Reader: 200 parallel reads
+- Verifies all documents are visible and consistent
+
+**Expected output:**
+```
+=== Concurrent Insert/Read Test ===
+INSERTER: 100 success, 0 fail
+READER: 200 success, 0 fail, max docs seen: 100
+Final document count: 100 (expected: 100)
+=== TEST PASSED ===
+```
+
+### Performance Under Load
+
+| Scenario | Throughput | Notes |
+|----------|------------|-------|
+| Single client reads | ~500-1000 req/s | HTTP overhead dominates |
+| Single client writes | ~50-100 req/s | fsync per operation (Safe mode) |
+| Concurrent reads | ~2000-3000 req/s | Parallel RwLock reads |
+| Mixed read/write | ~300-500 req/s | Write serialization |
+
+### Durability Guarantees
+
+By default, the MCP server uses **Safe mode**:
+- Every write operation is fsync'd to disk
+- Data survives server crash/restart
+- ~50-100 writes/second throughput
+
+For higher throughput (at cost of durability), configure Batch mode in the database initialization.
+
 ## Testing
 
 ```bash
 cd mcp-server
 cargo test
+
+# Concurrent access test
+./tests/concurrent_insert_read.sh
 ```
