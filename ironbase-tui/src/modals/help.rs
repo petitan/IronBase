@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 /// Total number of help lines (for scroll bounds)
-pub const HELP_LINES: usize = 34;
+pub const HELP_LINES: usize = 39;
 
 /// Render the help modal
 pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
@@ -123,6 +123,22 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
         Line::from(vec![
             Span::styled("Shift+K   ", Style::default().fg(theme.accent)),
             Span::raw("API Key modal megnyitasa"),
+        ]),
+        Line::from(vec![
+            Span::styled("  n       ", Style::default().fg(theme.accent)),
+            Span::raw("Uj kulcs letrehozasa"),
+        ]),
+        Line::from(vec![
+            Span::styled("  r       ", Style::default().fg(theme.accent)),
+            Span::raw("Kulcs visszavonasa"),
+        ]),
+        Line::from(vec![
+            Span::styled("  d       ", Style::default().fg(theme.accent)),
+            Span::raw("Kulcs torlese"),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("Uj kulcs: ~/.config/ironbase-tui/new_key.txt"),
         ]),
     ];
 
