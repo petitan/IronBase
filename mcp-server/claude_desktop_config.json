@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "ironbase": {
-      "command": "python",
-      "args": ["\\\\wsl$\\Ubuntu\\home\\petitan\\MongoLite\\mcp-server\\mcp_bridge_simple.py"]
+      "command": "C:\\Program Files\\IronBase\\ironbase-bridge.exe",
+      "env": {
+        "MCP_SERVER_URL": "http://localhost:8080/mcp",
+        "IRONBASE_API_KEY": ""
+      }
     }
   }
 }

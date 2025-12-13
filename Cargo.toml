@@ -10,6 +10,7 @@ members = [
 exclude = [
     "mcp-server",
     "ironbase-tui",
+    "ironbase-bridge",
 ]
 
 [workspace.package]

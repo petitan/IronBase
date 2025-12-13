@@ -106,6 +106,34 @@ curl -sSL https://github.com/petitan/IronBase/releases/download/v1.0.17/install.
 
 Full release assets list and checksums available on the release page: https://github.com/petitan/IronBase/releases/tag/v1.0.17
 
+## MCP Bridge (for Claude/ChatGPT Desktop)
+
+The `ironbase-bridge` binary provides a STDIO to HTTP bridge for MCP clients like Claude Desktop and ChatGPT Desktop.
+
+```bash
+# Basic usage
+ironbase-bridge --server http://localhost:8080/mcp
+
+# With API key and self-signed cert (WSL/dev)
+ironbase-bridge --server https://192.168.0.136:8080/mcp --api-key sk-xxx --insecure
+```
+
+**Client Configuration (Claude Desktop / ChatGPT Desktop):**
+
+```json
+{
+  "mcpServers": {
+    "ironbase": {
+      "command": "C:\\Program Files\\IronBase\\ironbase-bridge.exe",
+      "env": {
+        "MCP_SERVER_URL": "http://localhost:8080/mcp",
+        "IRONBASE_API_KEY": "sk-your-key"
+      }
+    }
+  }
+}
+```
+
 ## Backup CLI Usage
 
 ```bash
