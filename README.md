@@ -269,7 +269,7 @@ Press `Shift+K` to open the API Key modal:
 │   2   development   sk-296...d3a8    ✓             │
 │   3   old-key       sk-abc...xyz     ✗             │
 │                                                     │
-│  [n]New [r]Revoke [d]Delete [c]Copy [Esc]Close     │
+│  [n]New [r]Revoke [d]Delete [Esc]Close             │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -278,9 +278,10 @@ Press `Shift+K` to open the API Key modal:
 | `n` | Create new API key |
 | `r` | Revoke selected key |
 | `d` | Delete selected key |
-| `c` | Copy new key to clipboard |
 | `j/k` | Navigate list |
 | `Esc` | Close modal |
+
+**Note:** When creating a new API key, it is automatically saved to `~/.config/ironbase-tui/new_key.txt` for easy copying from another terminal.
 
 ## HTTPS/TLS Support
 
