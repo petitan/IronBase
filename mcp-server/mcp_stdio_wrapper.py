@@ -10,13 +10,14 @@ and writes responses to stdout.
 """
 
 import sys
+import os
 import json
 import requests
 from typing import Dict, Any
 
 # Server configuration
-SERVER_URL = "http://127.0.0.1:8080/mcp"
-API_KEY = "dev_key_12345"  # Change this to match your config.toml
+SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8080/mcp")
+API_KEY = os.environ.get("IRONBASE_API_KEY", "")
 
 
 def log_error(message: str):
@@ -27,13 +28,13 @@ def log_error(message: str):
 def forward_request(request: Dict[str, Any]) -> Dict[str, Any]:
     """Forward JSON-RPC request to HTTP server"""
     try:
+        headers = {"Content-Type": "application/json"}
+        if API_KEY:
+            headers["Authorization"] = f"Bearer {API_KEY}"
         response = requests.post(
             SERVER_URL,
             json=request,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {API_KEY}",
-            },
+            headers=headers,
             timeout=30,
         )
         response.raise_for_status()

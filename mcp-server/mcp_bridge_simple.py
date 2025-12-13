@@ -86,6 +86,7 @@ def main():
 
     SERVER_HOST = "localhost"
     SERVER_PORT = 8080
+    API_KEY = os.environ.get("IRONBASE_API_KEY", "")
 
     log("=== MCP Bridge started ===")
     log(f"Platform: {sys.platform}")
@@ -101,10 +102,12 @@ def main():
             body = json.dumps(request_data)
             log(f"Sending {'notification' if notification else 'request'}: {body[:200]}...")
 
+            auth_header = f"Authorization: Bearer {API_KEY}\r\n" if API_KEY else ""
             http_request = (
                 f"POST /mcp HTTP/1.1\r\n"
                 f"Host: {SERVER_HOST}:{SERVER_PORT}\r\n"
                 f"Content-Type: application/json\r\n"
+                f"{auth_header}"
                 f"Content-Length: {len(body)}\r\n"
                 f"Connection: close\r\n"
                 f"\r\n"

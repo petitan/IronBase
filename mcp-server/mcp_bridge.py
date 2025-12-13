@@ -21,8 +21,9 @@ Claude Desktop Configuration (Windows):
     }
 
 Environment Variables:
-    MCP_SERVER_URL - Override server URL (default: http://localhost:8080/mcp)
-    MCP_DEBUG      - Set to "1" for debug logging
+    MCP_SERVER_URL   - Override server URL (default: http://localhost:8080/mcp)
+    IRONBASE_API_KEY - API key for authentication (optional)
+    MCP_DEBUG        - Set to "1" for debug logging
 """
 
 import sys
@@ -33,6 +34,7 @@ from typing import Dict, Any
 
 # Configuration
 MCP_SERVER_URL = os.environ.get("MCP_SERVER_URL", "http://localhost:8080/mcp")
+API_KEY = os.environ.get("IRONBASE_API_KEY", "")
 DEBUG = os.environ.get("MCP_DEBUG", "0") == "1"
 
 def log_debug(message: str):
@@ -72,10 +74,13 @@ def process_request(request_line: str) -> Dict[str, Any]:
         log_debug(f"Forwarding request: {method} (id: {request_id})")
 
         # Forward to Rust HTTP server (handles all MCP protocol logic)
+        headers = {"Content-Type": "application/json"}
+        if API_KEY:
+            headers["Authorization"] = f"Bearer {API_KEY}"
         response = requests.post(
             MCP_SERVER_URL,
             json=request,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             timeout=30  # 30 second timeout
         )
 
