@@ -3,6 +3,7 @@
 #![recursion_limit = "512"]
 
 pub mod adapter;
+pub mod api_keys;
 pub mod error;
 pub mod http_server;
 pub mod prompts;
@@ -13,6 +14,7 @@ pub mod tools;
 
 // Re-export main types
 pub use adapter::{FindOptions, IronBaseAdapter, UpdateResult};
+pub use api_keys::ApiKeyCache;
 pub use error::{McpError, Result};
 pub use prompts::{get_prompt_content, get_prompts_list};
 pub use scripting::{RhaiEngine, ScriptManager, ScriptResult};

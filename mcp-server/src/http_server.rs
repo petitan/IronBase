@@ -2,7 +2,7 @@
 //!
 //! Provides HTTP server functionality that can be started with custom shutdown signals.
 
-use crate::{shutdown, IronBaseAdapter, VERSION};
+use crate::{shutdown, ApiKeyCache, IronBaseAdapter, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,6 +16,16 @@ pub struct Config {
     pub port: u16,
     pub database_path: PathBuf,
     pub max_body_size: usize,
+    /// If true, API key is required for all tool calls
+    pub require_api_key: bool,
+    /// Cache TTL for API keys in seconds
+    pub api_key_cache_ttl: u64,
+    /// If true, use HTTPS instead of HTTP
+    pub tls_enabled: bool,
+    /// Path to TLS certificate file
+    pub tls_cert_file: Option<String>,
+    /// Path to TLS key file
+    pub tls_key_file: Option<String>,
 }
 
 /// Parse human-readable size strings like "1GB", "500MB", "10KB"
@@ -82,6 +92,62 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
+/// Load TLS configuration from certificate and key files
+fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tls_rustls::RustlsConfig, Box<dyn std::error::Error>> {
+    use std::io::BufReader;
+
+    // Install ring crypto provider (required for rustls 0.23+ with no-provider feature)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Read certificate file
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| format!("Failed to open certificate file '{}': {}", cert_path, e))?;
+    let mut cert_reader = BufReader::new(cert_file);
+    let certs: Vec<_> = rustls_pemfile::certs(&mut cert_reader)
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if certs.is_empty() {
+        return Err(format!("No valid certificates found in '{}'", cert_path).into());
+    }
+
+    // Read private key file - try PKCS8 first
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| format!("Failed to open key file '{}': {}", key_path, e))?;
+    let mut key_reader = BufReader::new(key_file);
+
+    let pkcs8_keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let key_der: Vec<u8> = if !pkcs8_keys.is_empty() {
+        pkcs8_keys.into_iter().next().unwrap().secret_pkcs8_der().to_vec()
+    } else {
+        // Try RSA key format
+        let key_file = std::fs::File::open(key_path)?;
+        let mut key_reader = BufReader::new(key_file);
+        let rsa_keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut key_reader)
+            .filter_map(|r| r.ok())
+            .collect();
+
+        if rsa_keys.is_empty() {
+            return Err(format!("No valid private keys found in '{}'", key_path).into());
+        }
+        rsa_keys.into_iter().next().unwrap().secret_pkcs1_der().to_vec()
+    };
+
+    // Build rustls config
+    let config = axum_server::tls_rustls::RustlsConfig::from_der(
+        certs.into_iter().map(|c| c.to_vec()).collect(),
+        key_der,
+    );
+
+    // Block on the async config creation
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(config)
+    }).map_err(|e| format!("Failed to create TLS config: {}", e).into())
+}
+
 /// Load configuration from environment or config file
 pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
@@ -105,6 +171,11 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             port: toml_config.server.port,
             database_path: PathBuf::from(toml_config.database.path),
             max_body_size,
+            require_api_key: toml_config.security.require_api_key,
+            api_key_cache_ttl: toml_config.security.api_key_cache_ttl,
+            tls_enabled: toml_config.tls.enabled,
+            tls_cert_file: toml_config.tls.cert_file,
+            tls_key_file: toml_config.tls.key_file,
         })
     } else {
         // Check for IRONBASE_PATH env var
@@ -115,6 +186,11 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             port: 8080,
             database_path: PathBuf::from(db_path),
             max_body_size: DEFAULT_MAX_BODY_SIZE,
+            require_api_key: false,
+            api_key_cache_ttl: 60,
+            tls_enabled: false,
+            tls_cert_file: None,
+            tls_key_file: None,
         })
     }
 }
@@ -123,6 +199,10 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
 struct TomlConfig {
     server: ServerConfig,
     database: DatabaseConfig,
+    #[serde(default)]
+    security: SecurityConfig,
+    #[serde(default)]
+    tls: TlsConfig,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -137,6 +217,33 @@ struct ServerConfig {
 #[derive(Debug, serde::Deserialize)]
 struct DatabaseConfig {
     path: String,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct SecurityConfig {
+    /// If true, API key is required for all tool calls
+    #[serde(default)]
+    require_api_key: bool,
+    /// Cache TTL for API keys in seconds (default: 60)
+    #[serde(default = "default_cache_ttl")]
+    api_key_cache_ttl: u64,
+}
+
+fn default_cache_ttl() -> u64 {
+    60
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct TlsConfig {
+    /// If true, server uses HTTPS instead of HTTP
+    #[serde(default)]
+    enabled: bool,
+    /// Path to TLS certificate file (PEM format)
+    #[serde(default)]
+    cert_file: Option<String>,
+    /// Path to TLS private key file (PEM format)
+    #[serde(default)]
+    key_file: Option<String>,
 }
 
 /// Run HTTP server with default signal-based shutdown
@@ -194,17 +301,39 @@ async fn run_http_server_internal(
         }
     };
 
+    // Create API key cache
+    let api_key_cache = ApiKeyCache::new(config.api_key_cache_ttl, config.require_api_key);
+
+    // Pre-load API keys if required
+    if config.require_api_key {
+        api_key_cache.refresh(&adapter);
+        info!("API key authentication enabled (cache TTL: {}s)", config.api_key_cache_ttl);
+    }
+
     let app_state = Arc::new(HttpAppState {
         adapter: adapter.clone(),
         initialized: std::sync::atomic::AtomicBool::new(false),
+        api_key_cache,
+        require_api_key: config.require_api_key,
     });
 
     // HTTP request handler
     async fn http_handle_mcp_request(
         State(state): State<Arc<HttpAppState>>,
+        headers: axum::http::HeaderMap,
         Json(request): Json<McpRequest>,
     ) -> Response {
-        match handle_request(&request, &state.adapter, &state.initialized) {
+        // Extract API key from Authorization header or JSON params
+        let api_key = extract_api_key(&headers, &request.params);
+
+        match handle_request(
+            &request,
+            &state.adapter,
+            &state.initialized,
+            api_key.as_deref(),
+            &state.api_key_cache,
+            state.require_api_key,
+        ) {
             Some(response) => (StatusCode::OK, Json(response)).into_response(),
             None => {
                 // Notification - no response body per JSON-RPC spec
@@ -212,6 +341,32 @@ async fn run_http_server_internal(
                 StatusCode::NO_CONTENT.into_response()
             }
         }
+    }
+
+    /// Extract API key from Authorization header or JSON params
+    fn extract_api_key(headers: &axum::http::HeaderMap, params: &serde_json::Value) -> Option<String> {
+        // Try Authorization: Bearer header first
+        if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+            if let Ok(auth_str) = auth_header.to_str() {
+                if let Some(key) = auth_str.strip_prefix("Bearer ") {
+                    return Some(key.to_string());
+                }
+            }
+        }
+
+        // Fallback: check params.api_key
+        if let Some(key) = params.get("api_key").and_then(|v| v.as_str()) {
+            return Some(key.to_string());
+        }
+
+        // For tools/call, also check params.arguments.api_key
+        if let Some(args) = params.get("arguments") {
+            if let Some(key) = args.get("api_key").and_then(|v| v.as_str()) {
+                return Some(key.to_string());
+            }
+        }
+
+        None
     }
 
     async fn health_check() -> impl IntoResponse {
@@ -231,19 +386,6 @@ async fn run_http_server_internal(
         .with_state(app_state);
 
     let addr = format!("{}:{}", host, port);
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("Failed to bind to {}: {}", addr, e);
-            std::process::exit(1);
-        }
-    };
-
-    info!(
-        "Server listening on {} (max body size: {})",
-        addr,
-        format_size(max_body_size)
-    );
 
     // Create shutdown future based on source
     #[cfg(windows)]
@@ -260,12 +402,85 @@ async fn run_http_server_internal(
     #[cfg(not(windows))]
     let shutdown_future = shutdown::shutdown_signal();
 
-    // Run server with graceful shutdown
-    if let Err(e) = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_future)
-        .await
-    {
-        tracing::error!("Server error: {}", e);
+    // Run server - TLS or plain HTTP based on config
+    if config.tls_enabled {
+        // TLS mode with axum-server - validate config first
+        let cert_file = match config.tls_cert_file.as_ref() {
+            Some(path) => path,
+            None => {
+                tracing::error!("TLS enabled but tls.cert_file not set in config");
+                std::process::exit(1);
+            }
+        };
+        let key_file = match config.tls_key_file.as_ref() {
+            Some(path) => path,
+            None => {
+                tracing::error!("TLS enabled but tls.key_file not set in config");
+                std::process::exit(1);
+            }
+        };
+
+        let rustls_config = match load_rustls_config(cert_file, key_file) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to load TLS config: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        info!(
+            "Server listening on https://{} (TLS enabled, max body size: {})",
+            addr,
+            format_size(max_body_size)
+        );
+
+        // Use Handle for graceful shutdown with axum-server
+        let handle = axum_server::Handle::new();
+        let shutdown_handle = handle.clone();
+
+        // Spawn a task to wait for shutdown signal
+        tokio::spawn(async move {
+            shutdown_future.await;
+            shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
+
+        let socket_addr = match addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Invalid address '{}': {}", addr, e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Err(e) = axum_server::bind_rustls(socket_addr, rustls_config)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await
+        {
+            tracing::error!("Server error: {}", e);
+        }
+    } else {
+        // Plain HTTP mode with axum::serve
+        let listener = match TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!("Failed to bind to {}: {}", addr, e);
+                std::process::exit(1);
+            }
+        };
+
+        info!(
+            "Server listening on http://{} (max body size: {})",
+            addr,
+            format_size(max_body_size)
+        );
+
+        if let Err(e) = axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_future)
+            .await
+        {
+            tracing::error!("Server error: {}", e);
+        }
     }
 
     // Graceful shutdown: checkpoint database
@@ -281,6 +496,10 @@ struct HttpAppState {
     /// MCP lifecycle state: track if initialize has been called
     /// Per spec: "The initialization phase MUST be the first interaction"
     initialized: std::sync::atomic::AtomicBool,
+    /// API key cache for validation
+    api_key_cache: ApiKeyCache,
+    /// Whether API key is required for tool calls
+    require_api_key: bool,
 }
 
 // MCP Request/Response types (duplicated from main.rs for lib independence)
@@ -360,6 +579,9 @@ fn handle_request(
     request: &McpRequest,
     adapter: &Arc<IronBaseAdapter>,
     initialized: &std::sync::atomic::AtomicBool,
+    api_key: Option<&str>,
+    api_key_cache: &ApiKeyCache,
+    require_api_key: bool,
 ) -> Option<McpResponse> {
     use crate::{dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list};
     use std::sync::atomic::Ordering;
@@ -378,6 +600,37 @@ fn handle_request(
             "Server not initialized. Call 'initialize' first.",
             request.id.clone(),
         ));
+    }
+
+    // API key validation for tools/call (except admin operations which use admin_key)
+    if require_api_key && request.method == "tools/call" {
+        // Check if this is an admin operation (these use admin_key, not api_key)
+        let is_admin_op = request.params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(|name| name.starts_with("admin_"))
+            .unwrap_or(false);
+
+        if !is_admin_op {
+            match api_key {
+                None => {
+                    return Some(create_error_response(
+                        -32001, // Authentication required
+                        "API key required. Provide via 'Authorization: Bearer <key>' header or 'api_key' parameter.",
+                        request.id.clone(),
+                    ));
+                }
+                Some(key) => {
+                    if !api_key_cache.validate(key, adapter) {
+                        return Some(create_error_response(
+                            -32001, // Invalid authentication
+                            "Invalid API key.",
+                            request.id.clone(),
+                        ));
+                    }
+                }
+            }
+        }
     }
 
     match request.method.as_str() {
@@ -428,7 +681,7 @@ fn handle_request(
 
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
-            match dispatch_tool(&params.name, arguments, adapter) {
+            match dispatch_tool(&params.name, arguments, adapter, Some(api_key_cache)) {
                 Ok(result) => {
                     let response = serde_json::json!({
                         "content": [{

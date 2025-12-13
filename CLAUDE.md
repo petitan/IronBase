@@ -270,6 +270,7 @@ cd mcp-server && cargo build --release
 - `schema_get`, `schema_set` - JSON schema validation
 - `db_stats` - Database statistics
 - `script_save`, `script_list`, `script_get`, `script_delete`, `script_run` - Rhai scripting
+- `admin_apikey_create`, `admin_apikey_list`, `admin_apikey_revoke`, `admin_apikey_delete` - API key management
 
 ### Testing HTTP Mode
 ```bash
@@ -331,6 +332,58 @@ count  // Return value
 - Max execution time: 60 seconds
 - Max operations: 1,000,000
 - No file I/O or network access
+
+### Security & Authentication
+
+The MCP server supports API key authentication and HTTPS/TLS encryption (both optional).
+
+**Configuration (config.toml):**
+```toml
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[database]
+path = "ironbase_data.mlite"
+
+[security]
+require_api_key = true          # Enable API key authentication (default: false)
+api_key_cache_ttl = 60          # Cache TTL in seconds (default: 60)
+
+[tls]
+enabled = true                  # Enable HTTPS (default: false)
+cert_file = "/path/to/cert.pem"
+key_file = "/path/to/key.pem"
+```
+
+**Environment Variables:**
+- `IRONBASE_ADMIN_KEY` - Admin key for system table operations (create API keys, manage collections)
+- `MCP_CONFIG` - Path to config.toml (default: "config.toml")
+
+**API Key Management Tools (require admin_key):**
+- `admin_apikey_create(name)` - Create new API key, returns full key (save it!)
+- `admin_apikey_list()` - List all keys (masked preview)
+- `admin_apikey_revoke(id)` - Disable an API key
+- `admin_apikey_delete(id)` - Permanently delete an API key
+
+**Using API Keys:**
+```bash
+# Via HTTP header (preferred)
+curl -X POST http://127.0.0.1:8080/mcp \
+  -H "Authorization: Bearer sk-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find","arguments":{...}}}'
+
+# Via JSON parameter (fallback)
+curl -X POST http://127.0.0.1:8080/mcp \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"find","arguments":{"api_key":"sk-...","collection":"users"}}}'
+```
+
+**Notes:**
+- API keys are stored in `_system.api_keys` collection
+- Admin operations (admin_*) use `IRONBASE_ADMIN_KEY`, not API keys
+- API key validation uses constant-time comparison to prevent timing attacks
 
 ## Testing Strategy
 

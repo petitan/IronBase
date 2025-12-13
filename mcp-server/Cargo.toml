@@ -15,8 +15,13 @@ parking_lot = "0.12"
 
 # HTTP server (axum 0.7 with graceful shutdown support)
 axum = "0.7"
+axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
+
+# TLS support (using ring for better Windows compatibility - no cmake required)
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pemfile = "2"
 
 # Configuration
 toml = "0.7"

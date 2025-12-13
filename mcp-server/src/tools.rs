@@ -1139,13 +1139,94 @@ pub fn get_tools_list() -> Value {
                     },
                     "required": ["admin_key", "name"]
                 }
+            },
+            // API Key Management (require IRONBASE_ADMIN_KEY)
+            {
+                "name": "admin_apikey_create",
+                "title": "Admin: Create API Key",
+                "description": "Create a new API key for accessing the MCP server. Requires IRONBASE_ADMIN_KEY env var.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Name/description for this API key"
+                        }
+                    },
+                    "required": ["admin_key", "name"]
+                }
+            },
+            {
+                "name": "admin_apikey_list",
+                "title": "Admin: List API Keys",
+                "description": "List all API keys (key values are masked). Requires IRONBASE_ADMIN_KEY env var.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        }
+                    },
+                    "required": ["admin_key"]
+                }
+            },
+            {
+                "name": "admin_apikey_revoke",
+                "title": "Admin: Revoke API Key",
+                "description": "Revoke (disable) an API key by ID. Requires IRONBASE_ADMIN_KEY env var.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        },
+                        "id": {
+                            "type": "integer",
+                            "description": "API key ID to revoke"
+                        }
+                    },
+                    "required": ["admin_key", "id"]
+                }
+            },
+            {
+                "name": "admin_apikey_delete",
+                "title": "Admin: Delete API Key",
+                "description": "Permanently delete an API key by ID. Requires IRONBASE_ADMIN_KEY env var.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "admin_key": {
+                            "type": "string",
+                            "description": "Admin key (must match IRONBASE_ADMIN_KEY env var)"
+                        },
+                        "id": {
+                            "type": "integer",
+                            "description": "API key ID to delete"
+                        }
+                    },
+                    "required": ["admin_key", "id"]
+                }
             }
         ]
     })
 }
 
 /// Dispatch a tool call to the appropriate handler
-pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+///
+/// The `api_key_cache` parameter is optional and used to invalidate the cache
+/// when API keys are created, revoked, or deleted.
+pub fn dispatch_tool(
+    name: &str,
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    api_key_cache: Option<&crate::ApiKeyCache>,
+) -> Result<Value> {
     match name {
         // Database Management
         "db_open" => {
@@ -1654,6 +1735,91 @@ pub fn dispatch_tool(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) 
             let name = get_string(&params, "name")?;
             adapter.force_drop_collection(&name)?;
             Ok(json!({"success": true, "dropped": name}))
+        }
+
+        // API Key Management (require IRONBASE_ADMIN_KEY)
+        "admin_apikey_create" => {
+            verify_admin_key(&params)?;
+            let name = get_string(&params, "name")?;
+
+            // Use provided cache or create temporary one (for stdio mode)
+            let temp_cache;
+            let cache = match api_key_cache {
+                Some(c) => c,
+                None => {
+                    temp_cache = crate::api_keys::ApiKeyCache::new(60, false);
+                    &temp_cache
+                }
+            };
+
+            match crate::api_keys::create_api_key(adapter, &name, cache) {
+                Ok(api_key) => Ok(json!({
+                    "success": true,
+                    "id": api_key._id,
+                    "key": api_key.key,
+                    "name": api_key.name,
+                    "created_at": api_key.created_at,
+                    "note": "Save this key now - it cannot be retrieved later!"
+                })),
+                Err(e) => Err(McpError::Internal(e)),
+            }
+        }
+        "admin_apikey_list" => {
+            verify_admin_key(&params)?;
+            match crate::api_keys::list_api_keys(adapter) {
+                Ok(keys) => Ok(json!({
+                    "success": true,
+                    "keys": keys,
+                    "count": keys.len()
+                })),
+                Err(e) => Err(McpError::Internal(e)),
+            }
+        }
+        "admin_apikey_revoke" => {
+            verify_admin_key(&params)?;
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| McpError::InvalidParams("id parameter is required".into()))?;
+
+            // Use provided cache or create temporary one (for stdio mode)
+            let temp_cache;
+            let cache = match api_key_cache {
+                Some(c) => c,
+                None => {
+                    temp_cache = crate::api_keys::ApiKeyCache::new(60, false);
+                    &temp_cache
+                }
+            };
+
+            match crate::api_keys::revoke_api_key(adapter, id, cache) {
+                Ok(true) => Ok(json!({"success": true, "id": id, "status": "revoked"})),
+                Ok(false) => Ok(json!({"success": false, "id": id, "error": "API key not found"})),
+                Err(e) => Err(McpError::Internal(e)),
+            }
+        }
+        "admin_apikey_delete" => {
+            verify_admin_key(&params)?;
+            let id = params
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| McpError::InvalidParams("id parameter is required".into()))?;
+
+            // Use provided cache or create temporary one (for stdio mode)
+            let temp_cache;
+            let cache = match api_key_cache {
+                Some(c) => c,
+                None => {
+                    temp_cache = crate::api_keys::ApiKeyCache::new(60, false);
+                    &temp_cache
+                }
+            };
+
+            match crate::api_keys::delete_api_key(adapter, id, cache) {
+                Ok(true) => Ok(json!({"success": true, "id": id, "status": "deleted"})),
+                Ok(false) => Ok(json!({"success": false, "id": id, "error": "API key not found"})),
+                Err(e) => Err(McpError::Internal(e)),
+            }
         }
 
         // Transaction Management
