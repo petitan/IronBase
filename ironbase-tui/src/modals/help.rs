@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::Paragraph;
 
 /// Total number of help lines (for scroll bounds)
-pub const HELP_LINES: usize = 30;
+pub const HELP_LINES: usize = 34;
 
 /// Render the help modal
 pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
@@ -113,6 +113,16 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
         Line::from(vec![
             Span::styled("x         ", Style::default().fg(theme.accent)),
             Span::raw("Index kezeles"),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "API Key kezeles",
+            Style::default().fg(theme.accent).bold(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Shift+K   ", Style::default().fg(theme.accent)),
+            Span::raw("API Key modal megnyitasa"),
         ]),
     ];
 
