@@ -572,6 +572,12 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char('?'), _) => app.open_help(),
         (KeyCode::Char('I'), KeyModifiers::SHIFT) => handle_server_info_open(app).await,
         (KeyCode::Char('U'), KeyModifiers::SHIFT) => handle_update_open(app).await,
+        (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
+            // Refresh collections
+            if let Err(e) = app.refresh_collections_async().await {
+                app.set_error(format!("Refresh failed: {}", e));
+            }
+        }
         (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
 
         // Error detail modal (if error present, 'e' opens error details)
