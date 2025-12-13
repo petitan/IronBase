@@ -132,6 +132,75 @@ ironbase-tui --http http://localhost:8080
 ironbase-tui --server ./mcp-ironbase-server --db mydata.mlite
 ```
 
+### TUI with API Key Authentication
+
+```bash
+# Set API key via environment variable
+export IRONBASE_API_KEY="sk-your-api-key"
+ironbase-tui
+
+# Or configure in ~/.config/ironbase-tui/config.toml
+# mcp_api_key = "sk-your-api-key"
+```
+
+**Keyboard shortcuts:**
+- `Shift+K` - Open API Key management modal
+- `n` - Create new API key (requires `IRONBASE_ADMIN_KEY`)
+- `r` - Revoke key
+- `d` - Delete key
+- `c` - Copy new key to clipboard
+
+## API Key Authentication
+
+The MCP server supports API key authentication for secure access.
+
+### Server Configuration (`config.toml`)
+
+```toml
+[security]
+require_api_key = true      # Enable API key requirement
+api_key_cache_ttl = 60      # Cache TTL in seconds
+```
+
+### Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `IRONBASE_API_KEY` | API key for client authentication |
+| `IRONBASE_ADMIN_KEY` | Admin key for managing API keys |
+
+### Managing API Keys
+
+```bash
+# Set admin key
+export IRONBASE_ADMIN_KEY="your-secret-admin-key"
+
+# API keys are managed via MCP tools:
+# - admin_apikey_create: Create new API key
+# - admin_apikey_list: List all keys (masked)
+# - admin_apikey_revoke: Disable a key
+# - admin_apikey_delete: Permanently delete a key
+```
+
+### HTTP Requests with API Key
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-your-api-key" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+```
+
+## HTTPS/TLS Support
+
+```toml
+# config.toml
+[tls]
+enabled = true
+cert_file = "/path/to/cert.pem"
+key_file = "/path/to/key.pem"
+```
+
 ## Manual Installation
 
 1. Download the appropriate binary for your platform from the release page
