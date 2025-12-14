@@ -36,6 +36,15 @@ pub struct UpdateResult {
     pub modified_count: u64,
 }
 
+/// Full-text search options
+#[derive(Debug, Default)]
+pub struct FulltextSearchOptions {
+    pub limit: Option<usize>,
+    pub skip: Option<usize>,
+    pub min_score: Option<f64>,
+    pub projection: Option<HashMap<String, i32>>,
+}
+
 /// IronBase Adapter
 pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,
@@ -476,6 +485,52 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let results = coll.fuzzy_search(field, query, threshold, algo)?;
+        Ok(results)
+    }
+
+    // ============================================================
+    // Full-Text Search
+    // ============================================================
+
+    /// Create a full-text index with language support
+    pub fn create_fulltext_index(
+        &self,
+        collection: &str,
+        field: &str,
+        language: &str,
+        min_word_length: Option<usize>,
+        accent_folding: Option<bool>,
+    ) -> Result<String> {
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        let name = coll.create_fulltext_index(
+            field.to_string(),
+            language,
+            min_word_length,
+            accent_folding,
+        )?;
+        Ok(name)
+    }
+
+    /// Full-text search using the fulltext index (returns documents with scores and matched tokens)
+    /// Uses get_collection - no implicit creation
+    pub fn fulltext_search(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        options: FulltextSearchOptions,
+    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let results = coll.fulltext_search(
+            field,
+            query,
+            options.limit,
+            options.skip,
+            options.min_score,
+            options.projection,
+        )?;
         Ok(results)
     }
 

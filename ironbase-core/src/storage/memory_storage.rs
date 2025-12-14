@@ -207,6 +207,7 @@ impl Storage for MemoryStorage {
             document_catalog: HashMap::new(),
             indexes: Vec::new(),
             fuzzy_indexes: Vec::new(),
+            fulltext_indexes: Vec::new(),
             schema: None,
             flags: CollectionFlags::default(),
         };

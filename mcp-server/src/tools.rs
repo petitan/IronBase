@@ -1,6 +1,6 @@
 //! MCP Tool definitions and handlers for IronBase
 
-use crate::adapter::{FindOptions, IronBaseAdapter};
+use crate::adapter::{FindOptions, FulltextSearchOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
 use crate::scripting::{RhaiEngine, ScriptManager, ScriptOptions};
 use serde_json::{json, Value};
@@ -590,6 +590,82 @@ pub fn get_tools_list() -> Value {
                         }
                     },
                     "required": ["collection", "field"]
+                }
+            },
+            {
+                "name": "index_create_fulltext",
+                "title": "Create Full-Text Index",
+                "description": "Create a full-text search index with language-aware stemming, stop words, and TF-IDF scoring. Supports Hungarian, English, German, and language-neutral modes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "field": {
+                            "type": "string",
+                            "description": "Field name to index for full-text search"
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "Language for stemming and stop words: 'hungarian', 'english', 'german', 'none' (default: 'none')",
+                            "enum": ["hungarian", "english", "german", "none"],
+                            "default": "none"
+                        },
+                        "min_word_length": {
+                            "type": "integer",
+                            "description": "Minimum word length to index (default: 2)",
+                            "default": 2
+                        },
+                        "accent_folding": {
+                            "type": "boolean",
+                            "description": "Whether to apply accent folding (á→a, ő→o, etc.) (default: true)",
+                            "default": true
+                        }
+                    },
+                    "required": ["collection", "field"]
+                }
+            },
+            {
+                "name": "fulltext_search",
+                "title": "Full-Text Search",
+                "description": "Search documents using full-text index with TF-IDF relevance scoring. Returns documents sorted by relevance score.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        },
+                        "field": {
+                            "type": "string",
+                            "description": "Field name with full-text index"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search query text (will be tokenized and searched)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of results (default: 10)",
+                            "default": 10
+                        },
+                        "skip": {
+                            "type": "integer",
+                            "description": "Number of results to skip for pagination (default: 0)",
+                            "default": 0
+                        },
+                        "min_score": {
+                            "type": "number",
+                            "description": "Minimum TF-IDF score threshold (default: no threshold)"
+                        },
+                        "projection": {
+                            "type": "object",
+                            "description": "Fields to include (1) or exclude (0). Example: {\"full_text\": 0} to exclude, or {\"title\": 1, \"_id\": 1} to include only specific fields"
+                        }
+                    },
+                    "required": ["collection", "field", "query"]
                 }
             },
             {
@@ -1445,6 +1521,102 @@ pub fn dispatch_tool(
                 "algorithm": algorithm,
                 "threshold": threshold
             }))
+        }
+        "index_create_fulltext" => {
+            let collection = get_string(&params, "collection")?;
+            let field = get_string(&params, "field")?;
+            let language = params
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none");
+            let min_word_length = params
+                .get("min_word_length")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let accent_folding = params.get("accent_folding").and_then(|v| v.as_bool());
+            let name = adapter.create_fulltext_index(
+                &collection,
+                &field,
+                language,
+                min_word_length,
+                accent_folding,
+            )?;
+            Ok(json!({
+                "index_name": name,
+                "field": field,
+                "language": language,
+                "min_word_length": min_word_length.unwrap_or(2),
+                "accent_folding": accent_folding.unwrap_or(true)
+            }))
+        }
+        "fulltext_search" => {
+            let collection = get_string(&params, "collection")?;
+            validate_collection_name(&collection)?;
+            let field = get_string(&params, "field")?;
+            let query = get_string(&params, "query")?;
+            let limit = parse_limit(&params);
+            let skip = parse_skip(&params);
+            let min_score = params.get("min_score").and_then(|v| v.as_f64());
+
+            // Parse projection: {"field": 1} or {"field": 0}
+            // Accepts integers and floats (1.0 → 1), rejects strings and other types
+            let projection: Option<std::collections::HashMap<String, i32>> =
+                if let Some(proj_value) = params.get("projection") {
+                    if proj_value.is_null() {
+                        None
+                    } else if let Some(obj) = proj_value.as_object() {
+                        let mut map = std::collections::HashMap::new();
+                        for (k, v) in obj {
+                            let int_val = if let Some(i) = v.as_i64() {
+                                i as i32
+                            } else if let Some(f) = v.as_f64() {
+                                f as i32 // 1.0 → 1, 0.0 → 0
+                            } else {
+                                return Err(McpError::InvalidParams(format!(
+                                    "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                                    k, v
+                                )));
+                            };
+                            if int_val != 0 && int_val != 1 {
+                                return Err(McpError::InvalidParams(format!(
+                                    "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                    k, int_val
+                                )));
+                            }
+                            map.insert(k.clone(), int_val);
+                        }
+                        Some(map)
+                    } else {
+                        return Err(McpError::InvalidParams(
+                            "projection must be an object like {\"field\": 1} or {\"field\": 0}"
+                                .into(),
+                        ));
+                    }
+                } else {
+                    None
+                };
+
+            let options = FulltextSearchOptions {
+                limit,
+                skip,
+                min_score,
+                projection,
+            };
+            let results = adapter.fulltext_search(&collection, &field, &query, options)?;
+
+            // Format results with scores and matched tokens
+            let documents: Vec<Value> = results
+                .into_iter()
+                .map(|(doc, score, matched_tokens)| {
+                    json!({
+                        "document": doc,
+                        "score": score,
+                        "matched_tokens": matched_tokens
+                    })
+                })
+                .collect();
+
+            Ok(json!({"results": documents, "count": documents.len()}))
         }
         "index_drop" => {
             let collection = get_string(&params, "collection")?;

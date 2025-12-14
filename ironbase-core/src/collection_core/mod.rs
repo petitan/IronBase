@@ -1404,7 +1404,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         drop(indexes); // Release lock
 
-        // Remove from persisted metadata (both B+ tree and fuzzy indexes)
+        // Remove from persisted metadata (B+ tree, fuzzy, and fulltext indexes)
         {
             let mut storage = self.storage.write();
             if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
@@ -1412,6 +1412,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 meta.indexes.retain(|idx| idx.name != index_name);
                 // Remove from fuzzy indexes
                 meta.fuzzy_indexes.retain(|idx| idx.name != index_name);
+                // Remove from fulltext indexes
+                meta.fulltext_indexes.retain(|idx| idx.name != index_name);
                 storage.flush()?;
             }
         }
@@ -1550,6 +1552,169 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         Ok(results)
+    }
+
+    // ========== FULL-TEXT SEARCH OPERATIONS ==========
+
+    /// Create a full-text search index with language support
+    ///
+    /// # Arguments
+    /// * `field` - Field to index (supports dot notation for nested fields)
+    /// * `language` - Language for stemming and stop words ("hungarian", "english", "german", "none")
+    /// * `min_word_length` - Minimum word length to index (default: 2)
+    /// * `accent_folding` - Whether to apply accent folding (default: true)
+    ///
+    /// # Returns
+    /// The name of the created index (format: `{collection}_{field}_fts`)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// collection.create_fulltext_index(
+    ///     "content".to_string(),
+    ///     "hungarian",
+    ///     None,
+    ///     None,
+    /// )?;
+    /// ```
+    pub fn create_fulltext_index(
+        &self,
+        field: String,
+        language: &str,
+        min_word_length: Option<usize>,
+        accent_folding: Option<bool>,
+    ) -> Result<String> {
+        use crate::fulltext::FtsLanguage;
+
+        let index_name = format!("{}_{}_fts", self.name, field);
+        let lang = FtsLanguage::from_str(language);
+
+        // Step 1: Create the fulltext index in IndexManager
+        {
+            let mut indexes = self.indexes.write();
+            indexes.create_fulltext_index(
+                index_name.clone(),
+                field.clone(),
+                lang,
+                min_word_length,
+                accent_folding,
+            )?;
+        }
+
+        // Step 2: Scan existing documents (requires storage lock internally)
+        let docs_by_id = self.scan_documents_via_catalog()?;
+
+        // Step 3: Populate index with existing documents AND get metadata for persistence
+        let metadata = {
+            let mut indexes = self.indexes.write();
+            if let Some(index) = indexes.get_fulltext_index_mut(&index_name) {
+                for (doc_id, doc) in &docs_by_id {
+                    if let Some(value) = get_nested_value(doc, &field) {
+                        if let Some(s) = value.as_str() {
+                            index.insert(doc_id, s);
+                        }
+                    }
+                }
+            }
+            // Get metadata while we still have the lock (avoids extra read lock)
+            indexes
+                .get_fulltext_index(&index_name)
+                .map(|i| i.metadata())
+        };
+
+        // Step 4: Store fulltext index metadata in storage
+        if let Some(meta) = metadata {
+            let mut storage = self.storage.write();
+            if let Some(coll_meta) = storage.get_collection_meta_mut(&self.name) {
+                coll_meta.fulltext_indexes.push(meta);
+            }
+        }
+
+        Ok(index_name)
+    }
+
+    /// Search documents using a full-text index with TF-IDF scoring
+    ///
+    /// # Arguments
+    /// * `field` - Field with fulltext index
+    /// * `query` - Search query text
+    /// * `limit` - Maximum number of results (default: 10)
+    /// * `skip` - Number of results to skip (default: 0)
+    /// * `min_score` - Minimum TF-IDF score threshold (default: None)
+    /// * `projection` - Optional projection to include/exclude fields (default: None = all fields)
+    ///
+    /// # Returns
+    /// Vector of tuples (document, score, matched_tokens)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use std::collections::HashMap;
+    ///
+    /// // Search with projection (exclude full_text field)
+    /// let mut projection = HashMap::new();
+    /// projection.insert("full_text".to_string(), 0);
+    ///
+    /// let results = collection.fulltext_search(
+    ///     "content",
+    ///     "rust programming",
+    ///     Some(10),
+    ///     None,
+    ///     None,
+    ///     Some(projection),
+    /// )?;
+    /// for (doc, score, tokens) in results {
+    ///     println!("Score: {:.2}, Tokens: {:?}", score, tokens);
+    /// }
+    /// ```
+    pub fn fulltext_search(
+        &self,
+        field: &str,
+        query: &str,
+        limit: Option<usize>,
+        skip: Option<usize>,
+        min_score: Option<f64>,
+        projection: Option<std::collections::HashMap<String, i32>>,
+    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+        let indexes = self.indexes.read();
+
+        // Find fulltext index for this field
+        let fulltext_index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            crate::error::MongoLiteError::IndexError(format!(
+                "No fulltext index found for field '{}'",
+                field
+            ))
+        })?;
+
+        // Perform search
+        let search_results =
+            fulltext_index.search(query, limit.unwrap_or(10), skip.unwrap_or(0), min_score);
+
+        drop(indexes);
+
+        // Fetch documents for matched IDs and apply projection if specified
+        let mut results = Vec::with_capacity(search_results.len());
+        for result in search_results {
+            if let Some(doc) = self.read_document_by_id(&result.doc_id)? {
+                let projected_doc = if let Some(ref proj) = projection {
+                    crate::find_options::apply_projection(&doc, proj)
+                } else {
+                    doc
+                };
+                results.push((projected_doc, result.score, result.matched_tokens));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// List all fulltext indexes for this collection
+    pub fn list_fulltext_indexes(&self) -> Vec<crate::fulltext::FulltextIndexMetadata> {
+        let indexes = self.indexes.read();
+        indexes
+            .list_fulltext_indexes()
+            .into_iter()
+            .filter(|idx| idx.name.starts_with(&format!("{}_", self.name)))
+            .map(|idx| idx.metadata())
+            .collect()
     }
 
     // ========== TRANSACTION OPERATIONS ==========

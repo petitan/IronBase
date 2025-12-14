@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **IronBase** is a high-performance embedded NoSQL document database written in Rust with Python and C# bindings. It provides a MongoDB-compatible API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
 
 **Key Stats:**
-- 744+ tests passing (unit + integration + doctest)
+- 760+ tests passing (unit + integration + doctest)
 - Python (PyO3), C# (.NET 8), Rust APIs
 - 21 query operators (including $fuzzy), 7 update operators
 - Full aggregation pipeline with dot notation
@@ -15,6 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - LRU query cache with collection-level invalidation
 - MCP server for AI assistant integration (HTTP + stdio modes)
 - Fuzzy text search with Jaro-Winkler, Levenshtein, Damerau-Levenshtein algorithms
+- Full-text search with TF-IDF scoring, stemming, and multi-language support (Hungarian, English, German)
 
 ## Build and Development Commands
 
@@ -267,6 +268,8 @@ cd mcp-server && cargo build --release
 - `create_index`, `drop_index` - Index management
 - `index_create_fuzzy` - Create fuzzy text indexes
 - `fuzzy_search` - Execute fuzzy text queries
+- `index_create_fulltext` - Create full-text search indexes with language support
+- `fulltext_search` - Execute full-text search with TF-IDF scoring and projection
 - `schema_get`, `schema_set` - JSON schema validation
 - `db_stats` - Database statistics
 - `script_save`, `script_list`, `script_get`, `script_delete`, `script_run` - Rhai scripting
@@ -449,6 +452,70 @@ coll.find(&json!({"name": {"$fuzzy": {
 
 // Create fuzzy index for faster queries
 coll.create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.8)?;
+```
+
+### Full-Text Search (TF-IDF)
+```rust
+// Create fulltext index with language support
+// Languages: "hungarian", "english", "german", "none"
+coll.create_fulltext_index(
+    "content".to_string(),
+    "hungarian",      // language for stemming and stop words
+    None,             // min_word_length (default: 2)
+    None              // accent_folding (default: true)
+)?;
+
+// Basic fulltext search
+let results = coll.fulltext_search(
+    "content",        // field
+    "király",         // query
+    Some(10),         // limit
+    None,             // skip
+    None,             // min_score
+    None              // projection
+)?;
+// Returns: Vec<(Document, score, matched_tokens)>
+
+// Search with projection (reduces response size for large documents)
+let mut projection = HashMap::new();
+projection.insert("title".to_string(), 1);
+projection.insert("_id".to_string(), 1);
+let results = coll.fulltext_search(
+    "content", "király", Some(10), None, None,
+    Some(projection)  // Only return title and _id
+)?;
+
+// Exclude large fields
+let mut proj = HashMap::new();
+proj.insert("full_text".to_string(), 0);  // Exclude full_text field
+let results = coll.fulltext_search("content", "query", Some(10), None, None, Some(proj))?;
+```
+
+**Features:**
+- TF-IDF scoring (term frequency × inverse document frequency)
+- Hungarian, English, German stop words
+- Snowball stemming (15+ languages via rust-stemmers)
+- Unicode accent folding (áéíóú → aeiou)
+- Pagination (limit/skip) and min_score filtering
+- Projection support for reduced response size
+
+**MCP Usage:**
+```json
+// Create index
+{"name": "index_create_fulltext", "arguments": {
+  "collection": "articles",
+  "field": "content",
+  "language": "hungarian"
+}}
+
+// Search with projection
+{"name": "fulltext_search", "arguments": {
+  "collection": "articles",
+  "field": "content",
+  "query": "király",
+  "limit": 10,
+  "projection": {"title": 1, "_id": 1}
+}}
 ```
 
 ### $** Wildcard Operator (Recursive Descent)

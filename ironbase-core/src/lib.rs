@@ -36,6 +36,7 @@ pub mod document;
 pub mod durability;
 pub mod error;
 pub mod find_options;
+pub mod fulltext;
 pub mod query;
 pub mod storage;
 pub mod transaction;
@@ -87,3 +88,8 @@ pub use wal::{
 
 // Fuzzy text index exports
 pub use index::{FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata};
+
+// Full-text search exports
+pub use fulltext::{
+    FtsLanguage, FtsOptions, FtsSearchResult, FulltextIndex, FulltextIndexMetadata,
+};

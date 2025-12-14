@@ -93,7 +93,10 @@ fn format_size(bytes: usize) -> String {
 }
 
 /// Load TLS configuration from certificate and key files
-fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tls_rustls::RustlsConfig, Box<dyn std::error::Error>> {
+fn load_rustls_config(
+    cert_path: &str,
+    key_path: &str,
+) -> Result<axum_server::tls_rustls::RustlsConfig, Box<dyn std::error::Error>> {
     use std::io::BufReader;
 
     // Install ring crypto provider (required for rustls 0.23+ with no-provider feature)
@@ -121,7 +124,12 @@ fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tl
         .collect();
 
     let key_der: Vec<u8> = if !pkcs8_keys.is_empty() {
-        pkcs8_keys.into_iter().next().unwrap().secret_pkcs8_der().to_vec()
+        pkcs8_keys
+            .into_iter()
+            .next()
+            .unwrap()
+            .secret_pkcs8_der()
+            .to_vec()
     } else {
         // Try RSA key format
         let key_file = std::fs::File::open(key_path)?;
@@ -133,7 +141,12 @@ fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tl
         if rsa_keys.is_empty() {
             return Err(format!("No valid private keys found in '{}'", key_path).into());
         }
-        rsa_keys.into_iter().next().unwrap().secret_pkcs1_der().to_vec()
+        rsa_keys
+            .into_iter()
+            .next()
+            .unwrap()
+            .secret_pkcs1_der()
+            .to_vec()
     };
 
     // Build rustls config
@@ -143,9 +156,8 @@ fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tl
     );
 
     // Block on the async config creation
-    tokio::task::block_in_place(|| {
-        tokio::runtime::Handle::current().block_on(config)
-    }).map_err(|e| format!("Failed to create TLS config: {}", e).into())
+    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(config))
+        .map_err(|e| format!("Failed to create TLS config: {}", e).into())
 }
 
 /// Load configuration from environment or config file
@@ -323,7 +335,10 @@ async fn run_http_server_internal(
     // Pre-load API keys if required
     if config.require_api_key {
         api_key_cache.refresh(&adapter);
-        info!("API key authentication enabled (cache TTL: {}s)", config.api_key_cache_ttl);
+        info!(
+            "API key authentication enabled (cache TTL: {}s)",
+            config.api_key_cache_ttl
+        );
     }
 
     let app_state = Arc::new(HttpAppState {
@@ -380,7 +395,10 @@ async fn run_http_server_internal(
     }
 
     /// Extract API key from Authorization header or JSON params
-    fn extract_api_key(headers: &axum::http::HeaderMap, params: &serde_json::Value) -> Option<String> {
+    fn extract_api_key(
+        headers: &axum::http::HeaderMap,
+        params: &serde_json::Value,
+    ) -> Option<String> {
         // Try Authorization: Bearer header first
         if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
             if let Ok(auth_str) = auth_header.to_str() {
@@ -641,7 +659,8 @@ fn handle_request(
     // API key validation for tools/call (except admin operations which use admin_key)
     if require_api_key && request.method == "tools/call" {
         // Check if this is an admin operation (these use admin_key, not api_key)
-        let is_admin_op = request.params
+        let is_admin_op = request
+            .params
             .get("name")
             .and_then(|v| v.as_str())
             .map(|name| name.starts_with("admin_"))

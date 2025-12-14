@@ -1,8 +1,9 @@
 // src/index.rs
-// B+ Tree Index Implementation + Fuzzy Text Index
+// B+ Tree Index Implementation + Fuzzy Text Index + Full-Text Search Index
 
 use crate::document::DocumentId;
 use crate::error::{MongoLiteError, Result};
+use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
 use crate::value_utils::get_nested_value;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -1358,6 +1359,8 @@ pub struct IndexManager {
     legacy_indexes: HashMap<String, Index>,
     /// Fuzzy text indexes for similarity search
     fuzzy_indexes: HashMap<String, FuzzyIndex>,
+    /// Full-text search indexes with TF-IDF scoring
+    fulltext_indexes: HashMap<String, FulltextIndex>,
     /// File paths for persistent indexes (for two-phase commit)
     index_file_paths: HashMap<String, PathBuf>,
 }
@@ -1368,6 +1371,7 @@ impl IndexManager {
             btree_indexes: HashMap::new(),
             legacy_indexes: HashMap::new(),
             fuzzy_indexes: HashMap::new(),
+            fulltext_indexes: HashMap::new(),
             index_file_paths: HashMap::new(),
         }
     }
@@ -1454,7 +1458,8 @@ impl IndexManager {
     pub fn drop_index(&mut self, name: &str) -> Result<()> {
         let removed = self.btree_indexes.remove(name).is_some()
             || self.legacy_indexes.remove(name).is_some()
-            || self.fuzzy_indexes.remove(name).is_some();
+            || self.fuzzy_indexes.remove(name).is_some()
+            || self.fulltext_indexes.remove(name).is_some();
 
         if !removed {
             return Err(MongoLiteError::IndexError(format!(
@@ -1500,6 +1505,7 @@ impl IndexManager {
             .keys()
             .chain(self.legacy_indexes.keys())
             .chain(self.fuzzy_indexes.keys())
+            .chain(self.fulltext_indexes.keys())
             .cloned()
             .collect();
         names.sort();
@@ -1595,6 +1601,7 @@ impl IndexManager {
         if self.btree_indexes.contains_key(&name)
             || self.legacy_indexes.contains_key(&name)
             || self.fuzzy_indexes.contains_key(&name)
+            || self.fulltext_indexes.contains_key(&name)
         {
             return Err(MongoLiteError::IndexError(format!(
                 "Index already exists: {}",
@@ -1633,6 +1640,75 @@ impl IndexManager {
     pub fn add_loaded_fuzzy_index(&mut self, index: FuzzyIndex) {
         let name = index.metadata.name.clone();
         self.fuzzy_indexes.insert(name, index);
+    }
+
+    // ========== FULL-TEXT INDEX METHODS ==========
+
+    /// Create full-text search index with language support
+    ///
+    /// # Arguments
+    /// * `name` - Unique index name
+    /// * `field` - Field to index (supports dot notation)
+    /// * `language` - Language for stemming and stop words
+    /// * `min_word_length` - Minimum word length to index (default: 2)
+    /// * `accent_folding` - Whether to apply accent folding (default: true)
+    pub fn create_fulltext_index(
+        &mut self,
+        name: String,
+        field: String,
+        language: FtsLanguage,
+        min_word_length: Option<usize>,
+        accent_folding: Option<bool>,
+    ) -> Result<()> {
+        // Check if any index with this name already exists
+        if self.btree_indexes.contains_key(&name)
+            || self.legacy_indexes.contains_key(&name)
+            || self.fuzzy_indexes.contains_key(&name)
+            || self.fulltext_indexes.contains_key(&name)
+        {
+            return Err(MongoLiteError::IndexError(format!(
+                "Index already exists: {}",
+                name
+            )));
+        }
+
+        let options = FtsOptions::with_settings(
+            language,
+            min_word_length.unwrap_or(2),
+            accent_folding.unwrap_or(true),
+        );
+
+        let index = FulltextIndex::new(&name, &field, options);
+        self.fulltext_indexes.insert(name, index);
+        Ok(())
+    }
+
+    /// Get fulltext index by name
+    pub fn get_fulltext_index(&self, name: &str) -> Option<&FulltextIndex> {
+        self.fulltext_indexes.get(name)
+    }
+
+    /// Get fulltext index by name (mutable)
+    pub fn get_fulltext_index_mut(&mut self, name: &str) -> Option<&mut FulltextIndex> {
+        self.fulltext_indexes.get_mut(name)
+    }
+
+    /// Get fulltext index for a field (if one exists)
+    pub fn get_fulltext_index_for_field(&self, field: &str) -> Option<&FulltextIndex> {
+        self.fulltext_indexes
+            .values()
+            .find(|idx| idx.field == field)
+    }
+
+    /// List all fulltext indexes
+    pub fn list_fulltext_indexes(&self) -> Vec<&FulltextIndex> {
+        self.fulltext_indexes.values().collect()
+    }
+
+    /// Add a pre-loaded FulltextIndex
+    pub fn add_loaded_fulltext_index(&mut self, index: FulltextIndex) {
+        let name = index.name.clone();
+        self.fulltext_indexes.insert(name, index);
     }
 
     // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========
@@ -1696,6 +1772,26 @@ impl IndexManager {
             }
         }
 
+        // Fulltext indexes
+        let fulltext_names: Vec<String> = self.fulltext_indexes.keys().cloned().collect();
+
+        for index_name in fulltext_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.fulltext_indexes.get_mut(&index_name) {
+                // Get field value - only index string values
+                if let Some(value) = get_nested_value(doc, &index.field) {
+                    if let Some(s) = value.as_str() {
+                        index.insert(doc_id, s);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1749,6 +1845,21 @@ impl IndexManager {
             }
 
             if let Some(index) = self.fuzzy_indexes.get_mut(&index_name) {
+                index.remove(doc_id);
+            }
+        }
+
+        // Fulltext indexes - remove by document ID
+        let fulltext_names: Vec<String> = self.fulltext_indexes.keys().cloned().collect();
+
+        for index_name in fulltext_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.fulltext_indexes.get_mut(&index_name) {
                 index.remove(doc_id);
             }
         }

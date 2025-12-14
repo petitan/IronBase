@@ -1516,6 +1516,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             .map(|idx| (idx.metadata.name.clone(), idx.metadata.field.clone()))
             .collect();
 
+        // Pre-collect fulltext index info to avoid repeated lookups in the loop
+        let fulltext_info: Vec<_> = index_manager
+            .list_fulltext_indexes()
+            .iter()
+            .map(|idx| (idx.name.clone(), idx.field.clone()))
+            .collect();
+
         for (_id_key, offset) in catalog.iter() {
             // Read document from disk
             let doc_bytes = match storage.read_document_at(collection_name, *offset) {
@@ -1599,6 +1606,18 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     }
                 }
             }
+
+            // Rebuild fulltext indexes (using pre-collected info from outside the loop)
+            for (index_name, field) in &fulltext_info {
+                if let Some(value) = crate::value_utils::get_nested_value(&doc, field) {
+                    if let Some(s) = value.as_str() {
+                        if let Some(index) = index_manager.get_fulltext_index_mut(index_name) {
+                            index.insert(&doc_id, s);
+                            rebuilt_count += 1;
+                        }
+                    }
+                }
+            }
         }
 
         Ok(rebuilt_count)
@@ -1634,13 +1653,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let catalog = meta.document_catalog.clone();
         let persisted_indexes = meta.indexes.clone();
         let persisted_fuzzy_indexes = meta.fuzzy_indexes.clone();
+        let persisted_fulltext_indexes = meta.fulltext_indexes.clone();
 
         log_debug!(
-            "Collection '{}' - catalog size: {}, persisted indexes: {}, fuzzy indexes: {}",
+            "Collection '{}' - catalog size: {}, persisted indexes: {}, fuzzy indexes: {}, fulltext indexes: {}",
             name,
             catalog.len(),
             persisted_indexes.len(),
-            persisted_fuzzy_indexes.len()
+            persisted_fuzzy_indexes.len(),
+            persisted_fulltext_indexes.len()
         );
 
         // Get db_path for .idx file loading
@@ -1667,6 +1688,23 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 log_debug!(
                     "Warning: Failed to recreate fuzzy index '{}': {}",
                     fuzzy_meta.name,
+                    e
+                );
+            }
+        }
+
+        // Create fulltext indexes from persisted metadata (data will be rebuilt from documents)
+        for fts_meta in &persisted_fulltext_indexes {
+            if let Err(e) = index_manager.create_fulltext_index(
+                fts_meta.name.clone(),
+                fts_meta.field.clone(),
+                fts_meta.language,
+                Some(fts_meta.min_word_length),
+                Some(fts_meta.accent_folding),
+            ) {
+                log_debug!(
+                    "Warning: Failed to recreate fulltext index '{}': {}",
+                    fts_meta.name,
                     e
                 );
             }

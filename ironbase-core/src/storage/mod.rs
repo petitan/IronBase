@@ -127,6 +127,11 @@ pub struct CollectionMeta {
     #[serde(default)]
     pub fuzzy_indexes: Vec<crate::index::FuzzyIndexMetadata>,
 
+    /// Persisted fulltext index metadata for this collection
+    /// Note: Only metadata is persisted, index data is rebuilt from documents on load
+    #[serde(default)]
+    pub fulltext_indexes: Vec<crate::fulltext::FulltextIndexMetadata>,
+
     /// Optional JSON schema for validation
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
@@ -242,6 +247,7 @@ impl StorageEngine {
             document_catalog: HashMap::new(), // Initialize empty catalog
             indexes: Vec::new(),              // Initialize empty index list
             fuzzy_indexes: Vec::new(),        // Initialize empty fuzzy index list
+            fulltext_indexes: Vec::new(),     // Initialize empty fulltext index list
             schema: None,
             flags: CollectionFlags::default(),
         };
@@ -786,6 +792,7 @@ impl StorageEngine {
                                     document_catalog: HashMap::new(),
                                     indexes: Vec::new(),
                                     fuzzy_indexes: Vec::new(),
+                                    fulltext_indexes: Vec::new(),
                                     schema: None,
                                     flags: CollectionFlags::default(),
                                 });

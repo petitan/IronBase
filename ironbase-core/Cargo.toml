@@ -27,6 +27,8 @@ lru = "0.12"       # For query result caching
 regex = "1.10"     # For full $regex operator support
 strsim = "0.11"    # For fuzzy text search ($fuzzy operator)
 fs2 = "0.4"        # Cross-platform file locking
+rust-stemmers = "1.2"           # For full-text search stemming (15+ languages)
+unicode-normalization = "0.1"   # For accent folding in full-text search
 
 [dev-dependencies]
 tempfile = { workspace = true }

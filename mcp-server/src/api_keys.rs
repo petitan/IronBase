@@ -190,17 +190,10 @@ pub fn create_api_key(
         ..Default::default()
     };
 
-    let next_id = match adapter.find(
-        "_system.api_keys",
-        serde_json::json!({}),
-        options,
-    ) {
+    let next_id = match adapter.find("_system.api_keys", serde_json::json!({}), options) {
         Ok(result) => {
             if let Some(doc) = result.documents.first() {
-                doc.get("_id")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0)
-                    + 1
+                doc.get("_id").and_then(|v| v.as_u64()).unwrap_or(0) + 1
             } else {
                 1
             }
@@ -239,13 +232,10 @@ pub fn list_api_keys(adapter: &Arc<IronBaseAdapter>) -> Result<Vec<serde_json::V
         ..Default::default()
     };
 
-    match adapter.find(
-        "_system.api_keys",
-        serde_json::json!({}),
-        options,
-    ) {
+    match adapter.find("_system.api_keys", serde_json::json!({}), options) {
         Ok(result) => {
-            let masked: Vec<serde_json::Value> = result.documents
+            let masked: Vec<serde_json::Value> = result
+                .documents
                 .into_iter()
                 .map(|doc| {
                     let id = doc.get("_id").cloned().unwrap_or(serde_json::Value::Null);
@@ -342,7 +332,7 @@ mod tests {
         assert!(key1.starts_with("sk-"));
         assert!(key2.starts_with("sk-"));
         assert_eq!(key1.len(), 35); // "sk-" + 32 hex chars
-        // Keys should be different (high probability)
+                                    // Keys should be different (high probability)
         assert_ne!(key1, key2);
     }
 

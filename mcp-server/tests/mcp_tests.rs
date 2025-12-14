@@ -1060,7 +1060,12 @@ fn test_concurrent_index_operations() {
     }
 
     // Verify indexes were created
-    let list_result = dispatch_tool("index_list", json!({"collection": "index_test"}), &adapter, None);
+    let list_result = dispatch_tool(
+        "index_list",
+        json!({"collection": "index_test"}),
+        &adapter,
+        None,
+    );
     assert!(list_result.is_ok());
 }
 
@@ -1403,7 +1408,12 @@ fn test_script_delete_existing() {
     .unwrap();
 
     // Delete it
-    let result = dispatch_tool("script_delete", json!({"name": "to_delete"}), &adapter, None);
+    let result = dispatch_tool(
+        "script_delete",
+        json!({"name": "to_delete"}),
+        &adapter,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
     assert_eq!(value.get("success"), Some(&json!(true)));
@@ -1417,7 +1427,12 @@ fn test_script_delete_existing() {
 #[test]
 fn test_script_delete_nonexistent() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_delete", json!({"name": "nonexistent"}), &adapter, None);
+    let result = dispatch_tool(
+        "script_delete",
+        json!({"name": "nonexistent"}),
+        &adapter,
+        None,
+    );
     // script_delete returns error for non-existent script
     assert!(result.is_err());
 }
@@ -1546,7 +1561,12 @@ fn test_script_run_with_print() {
     )
     .unwrap();
 
-    let result = dispatch_tool("script_run", json!({"name": "logging_script"}), &adapter, None);
+    let result = dispatch_tool(
+        "script_run",
+        json!({"name": "logging_script"}),
+        &adapter,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
     assert_eq!(value.get("result"), Some(&json!(30)));
@@ -1667,7 +1687,12 @@ fn test_script_run_syntax_error() {
     )
     .unwrap();
 
-    let result = dispatch_tool("script_run", json!({"name": "broken_script"}), &adapter, None);
+    let result = dispatch_tool(
+        "script_run",
+        json!({"name": "broken_script"}),
+        &adapter,
+        None,
+    );
     assert!(result.is_err());
 }
 
