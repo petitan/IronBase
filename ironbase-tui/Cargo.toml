@@ -1,6 +1,6 @@
 [package]
 name = "ironbase-tui"
-version = "0.2.7"
+version = "0.2.9"
 edition = "2021"
 description = "Intelligent TUI for IronBase NoSQL database"
 license = "MIT"
@@ -21,7 +21,7 @@ ratatui = "0.28"
 crossterm = "0.28"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

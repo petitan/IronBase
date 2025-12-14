@@ -3,62 +3,108 @@
 // A lightweight MCP server that wraps IronBase document database.
 // Supports both stdio (for Claude Desktop) and HTTP modes.
 // Can be installed as a system service on Windows (Service), Linux (systemd), and macOS (launchd).
-//
-// Usage:
-//   mcp-ironbase-server                  # HTTP server mode (default)
-//   mcp-ironbase-server --stdio          # Claude Desktop mode (stdin/stdout)
-//   mcp-ironbase-server install          # Install as system service
-//   mcp-ironbase-server uninstall        # Uninstall system service
-//   mcp-ironbase-server start            # Start the service
-//   mcp-ironbase-server stop             # Stop the service
-//   mcp-ironbase-server status           # Check service status
 
+use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use mcp_docjl::{
+use mcp_ironbase::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, http_server, service,
     IronBaseAdapter, VERSION,
 };
 
+// ============================================================
+// CLI Definition
+// ============================================================
+
+#[derive(Parser)]
+#[command(name = "mcp-ironbase-server")]
+#[command(author, version = VERSION, about = "MCP server for IronBase document database")]
+struct Cli {
+    /// Config file path
+    #[arg(short, long, env = "MCP_CONFIG", default_value = "config.toml")]
+    config: PathBuf,
+
+    /// Server port (overrides config)
+    #[arg(short, long, env = "MCP_PORT")]
+    port: Option<u16>,
+
+    /// Server host (overrides config)
+    #[arg(short = 'H', long, env = "MCP_HOST")]
+    host: Option<String>,
+
+    /// Database file path (overrides config)
+    #[arg(short, long, env = "IRONBASE_PATH")]
+    db: Option<PathBuf>,
+
+    /// Admin key for protected operations
+    #[arg(long, env = "IRONBASE_ADMIN_KEY")]
+    admin_key: Option<String>,
+
+    /// Run in stdio mode (for Claude Desktop)
+    #[arg(long)]
+    stdio: bool,
+
+    /// Run as Windows service (internal use)
+    #[arg(long, hide = true)]
+    service: bool,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Install as system service
+    Install,
+    /// Uninstall system service
+    Uninstall,
+    /// Start the service
+    Start,
+    /// Stop the service
+    Stop,
+    /// Check service status
+    Status,
+}
+
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
 
-    // Handle service commands
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "install" => match service::install() {
+    // Handle subcommands first
+    if let Some(cmd) = cli.command {
+        match cmd {
+            Commands::Install => match service::install() {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("Error installing service: {}", e);
                     std::process::exit(1);
                 }
             },
-            "uninstall" => match service::uninstall() {
+            Commands::Uninstall => match service::uninstall() {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("Error uninstalling service: {}", e);
                     std::process::exit(1);
                 }
             },
-            "start" => match service::start() {
+            Commands::Start => match service::start() {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("Error starting service: {}", e);
                     std::process::exit(1);
                 }
             },
-            "stop" => match service::stop() {
+            Commands::Stop => match service::stop() {
                 Ok(()) => std::process::exit(0),
                 Err(e) => {
                     eprintln!("Error stopping service: {}", e);
                     std::process::exit(1);
                 }
             },
-            "status" => match service::status() {
+            Commands::Status => match service::status() {
                 Ok(status) => {
                     println!("Service status: {}", status);
                     std::process::exit(0);
@@ -68,73 +114,49 @@ async fn main() {
                     std::process::exit(1);
                 }
             },
-            "--stdio" => {
-                run_stdio_server();
-                return;
-            }
-            "--service" => {
-                // Windows Service mode - called by SCM
-                #[cfg(windows)]
-                {
-                    if let Err(e) = service::windows::run_as_service() {
-                        eprintln!("Service error: {}", e);
-                        std::process::exit(1);
-                    }
-                    std::process::exit(0);
-                }
-                #[cfg(not(windows))]
-                {
-                    eprintln!("--service flag is only available on Windows");
-                    std::process::exit(1);
-                }
-            }
-            "--help" | "-h" => {
-                print_help();
-                std::process::exit(0);
-            }
-            "--version" | "-V" => {
-                println!("mcp-ironbase-server v{}", VERSION);
-                std::process::exit(0);
-            }
-            arg => {
-                eprintln!("Unknown command: {}", arg);
-                print_help();
-                std::process::exit(1);
-            }
         }
     }
 
+    // Handle --service flag (Windows SCM)
+    if cli.service {
+        #[cfg(windows)]
+        {
+            if let Err(e) = service::windows::run_as_service() {
+                eprintln!("Service error: {}", e);
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
+        #[cfg(not(windows))]
+        {
+            eprintln!("--service flag is only available on Windows");
+            std::process::exit(1);
+        }
+    }
+
+    // Handle --stdio mode
+    if cli.stdio {
+        run_stdio_server(&cli);
+        return;
+    }
+
+    // Set environment variables for HTTP server to pick up
+    if let Some(port) = cli.port {
+        std::env::set_var("MCP_PORT", port.to_string());
+    }
+    if let Some(host) = &cli.host {
+        std::env::set_var("MCP_HOST", host);
+    }
+    if let Some(db) = &cli.db {
+        std::env::set_var("IRONBASE_PATH", db.to_string_lossy().to_string());
+    }
+    if let Some(admin_key) = &cli.admin_key {
+        std::env::set_var("IRONBASE_ADMIN_KEY", admin_key);
+    }
+    std::env::set_var("MCP_CONFIG", cli.config.to_string_lossy().to_string());
+
     // Default: run HTTP server
     http_server::run_http_server().await;
-}
-
-fn print_help() {
-    println!("IronBase MCP Server v{}", VERSION);
-    println!();
-    println!("USAGE:");
-    println!("    mcp-ironbase-server [COMMAND]");
-    println!();
-    println!("COMMANDS:");
-    println!("    (none)      Start HTTP server (default)");
-    println!("    --stdio     Start in stdio mode (for Claude Desktop)");
-    println!("    install     Install as system service");
-    println!("    uninstall   Uninstall system service");
-    println!("    start       Start the service");
-    println!("    stop        Stop the service");
-    println!("    status      Check service status");
-    println!("    --help      Show this help message");
-    println!("    --version   Show version");
-    println!();
-    println!("ENVIRONMENT:");
-    println!("    IRONBASE_PATH       Database file path");
-    println!("                        Default (Windows): %LOCALAPPDATA%\\IronBase\\data\\ironbase_data.mlite");
-    println!("                        Default (Linux):   /var/lib/ironbase/ironbase_data.mlite");
-    println!(
-        "                        Default (macOS):   /usr/local/var/ironbase/ironbase_data.mlite"
-    );
-    println!("    MCP_CONFIG          Config file path (default: config.toml)");
-    println!("    IRONBASE_ADMIN_KEY  Admin key for protected operations (admin_* tools)");
-    println!("                        If not set, admin operations are disabled");
 }
 
 // ============================================================
@@ -186,12 +208,17 @@ fn get_default_db_path() -> String {
 // STDIO MODE (for Claude Desktop)
 // ============================================================
 
-fn run_stdio_server() {
+fn run_stdio_server(cli: &Cli) {
     // Stderr for logging (stdout is for MCP protocol)
     eprintln!("MCP IronBase Server v{} (stdio mode)", VERSION);
 
-    // Get database path from env or use platform-specific default
-    let db_path = std::env::var("IRONBASE_PATH").unwrap_or_else(|_| get_default_db_path());
+    // Get database path: CLI > env > platform default
+    let db_path = cli
+        .db
+        .as_ref()
+        .map(|p| p.to_string_lossy().to_string())
+        .or_else(|| std::env::var("IRONBASE_PATH").ok())
+        .unwrap_or_else(get_default_db_path);
 
     eprintln!("Database path: {}", db_path);
 

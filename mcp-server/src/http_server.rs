@@ -149,10 +149,11 @@ fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<axum_server::tl
 }
 
 /// Load configuration from environment or config file
+/// Priority: CLI args (via env vars) > config file > defaults
 pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
 
-    if std::path::Path::new(&config_path).exists() {
+    let mut config = if std::path::Path::new(&config_path).exists() {
         let content = std::fs::read_to_string(&config_path)?;
         // Normalize Windows CRLF to LF for TOML parsing
         let content = content.replace("\r\n", "\n");
@@ -166,7 +167,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             None => DEFAULT_MAX_BODY_SIZE,
         };
 
-        Ok(Config {
+        Config {
             host: toml_config.server.host,
             port: toml_config.server.port,
             database_path: PathBuf::from(toml_config.database.path),
@@ -176,12 +177,12 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_enabled: toml_config.tls.enabled,
             tls_cert_file: toml_config.tls.cert_file,
             tls_key_file: toml_config.tls.key_file,
-        })
+        }
     } else {
         // Check for IRONBASE_PATH env var
         let db_path =
             std::env::var("IRONBASE_PATH").unwrap_or_else(|_| "ironbase_data.mlite".to_string());
-        Ok(Config {
+        Config {
             host: "0.0.0.0".to_string(),
             port: 8080,
             database_path: PathBuf::from(db_path),
@@ -191,8 +192,23 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_enabled: false,
             tls_cert_file: None,
             tls_key_file: None,
-        })
+        }
+    };
+
+    // CLI overrides via environment variables (set by main.rs from CLI args)
+    if let Ok(port) = std::env::var("MCP_PORT") {
+        if let Ok(p) = port.parse::<u16>() {
+            config.port = p;
+        }
     }
+    if let Ok(host) = std::env::var("MCP_HOST") {
+        config.host = host;
+    }
+    if let Ok(db_path) = std::env::var("IRONBASE_PATH") {
+        config.database_path = PathBuf::from(db_path);
+    }
+
+    Ok(config)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -321,8 +337,22 @@ async fn run_http_server_internal(
     async fn http_handle_mcp_request(
         State(state): State<Arc<HttpAppState>>,
         headers: axum::http::HeaderMap,
-        Json(request): Json<McpRequest>,
+        body: axum::body::Bytes,
     ) -> Response {
+        // RAW request logging
+        let body_str = String::from_utf8_lossy(&body);
+        tracing::debug!(">>> MCP REQUEST: {}", body_str);
+
+        // Parse JSON
+        let request: McpRequest = match serde_json::from_slice(&body) {
+            Ok(req) => req,
+            Err(e) => {
+                let error_response = format!("Failed to parse the request body as JSON: {}", e);
+                tracing::error!("<<< MCP PARSE ERROR: {}", error_response);
+                return (StatusCode::BAD_REQUEST, error_response).into_response();
+            }
+        };
+
         // Extract API key from Authorization header or JSON params
         let api_key = extract_api_key(&headers, &request.params);
 
@@ -334,10 +364,16 @@ async fn run_http_server_internal(
             &state.api_key_cache,
             state.require_api_key,
         ) {
-            Some(response) => (StatusCode::OK, Json(response)).into_response(),
+            Some(response) => {
+                // RAW response logging
+                if let Ok(json) = serde_json::to_string(&response) {
+                    tracing::debug!("<<< MCP RESPONSE: {}", json);
+                }
+                (StatusCode::OK, Json(response)).into_response()
+            }
             None => {
                 // Notification - no response body per JSON-RPC spec
-                // Return 204 No Content for HTTP
+                tracing::debug!("<<< MCP RESPONSE: (204 No Content - notification)");
                 StatusCode::NO_CONTENT.into_response()
             }
         }

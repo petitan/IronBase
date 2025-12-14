@@ -5,7 +5,7 @@
 //! - Prompts (get_prompts_list, get_prompt_content)
 //! - Adapter (IronBaseAdapter CRUD operations)
 
-use mcp_docjl::{
+use mcp_ironbase::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, IronBaseAdapter,
 };
 use serde_json::json;

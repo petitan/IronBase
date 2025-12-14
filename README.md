@@ -106,20 +106,97 @@ curl -sSL https://github.com/petitan/IronBase/releases/download/v1.0.17/install.
 
 Full release assets list and checksums available on the release page: https://github.com/petitan/IronBase/releases/tag/v1.0.17
 
-## MCP Bridge (for Claude/ChatGPT Desktop)
-
-The `ironbase-bridge` binary provides a STDIO to HTTP bridge for MCP clients like Claude Desktop and ChatGPT Desktop.
+## MCP Server Usage
 
 ```bash
-# Basic usage
-ironbase-bridge --server http://localhost:8080/mcp
+# HTTP mode (default)
+mcp-ironbase-server
 
-# With API key and self-signed cert (WSL/dev)
-ironbase-bridge --server https://192.168.0.136:8080/mcp --api-key sk-xxx --insecure
+# Custom port and host
+mcp-ironbase-server -p 9090 -H 0.0.0.0
+
+# Custom database path
+mcp-ironbase-server -d /path/to/data.mlite
+
+# stdio mode (for Claude Desktop direct integration)
+mcp-ironbase-server --stdio
+
+# Service commands (requires admin/root)
+mcp-ironbase-server install    # Install as system service
+mcp-ironbase-server uninstall  # Uninstall service
+mcp-ironbase-server start      # Start service
+mcp-ironbase-server stop       # Stop service
+mcp-ironbase-server status     # Check service status
 ```
 
-**Client Configuration (Claude Desktop / ChatGPT Desktop):**
+### MCP Server CLI Options
 
+| Option | Environment Variable | Default | Description |
+|--------|---------------------|---------|-------------|
+| `-c, --config` | `MCP_CONFIG` | `config.toml` | Config file path |
+| `-p, --port` | `MCP_PORT` | 8080 | Server port |
+| `-H, --host` | `MCP_HOST` | `0.0.0.0` | Server host |
+| `-d, --db` | `IRONBASE_PATH` | platform default | Database file path |
+| `--admin-key` | `IRONBASE_ADMIN_KEY` | - | Admin key for protected operations |
+| `--stdio` | - | - | Run in stdio mode (for Claude Desktop) |
+
+**Platform Default Database Paths:**
+- Windows: `%LOCALAPPDATA%\IronBase\data\ironbase_data.mlite`
+- Linux: `/var/lib/ironbase/ironbase_data.mlite`
+- macOS: `/usr/local/var/ironbase/ironbase_data.mlite`
+
+## MCP Bridge (for Claude/ChatGPT Desktop)
+
+The `ironbase-bridge` binary provides a STDIO to HTTP/HTTPS bridge for MCP clients.
+
+**Compatible with:**
+- Claude Desktop (Anthropic)
+- ChatGPT Desktop (OpenAI)
+- VS Code Copilot
+- JetBrains AI Assistant
+- Cursor
+- Any MCP-compatible client
+
+**Features:**
+- Connection pooling with keep-alive
+- Self-signed certificate support (`--insecure`)
+- Graceful shutdown (SIGINT/SIGTERM)
+- Health check with retry logic
+- JSON-RPC 2.0 batch request support
+- Cross-platform (Windows, Linux, macOS)
+
+### CLI Options
+
+| Option | Environment Variable | Default | Description |
+|--------|---------------------|---------|-------------|
+| `-s, --server` | `MCP_SERVER_URL` | `http://localhost:8080/mcp` | Server URL |
+| `-k, --api-key` | `IRONBASE_API_KEY` | - | API key for authentication |
+| `--insecure` | `MCP_INSECURE` | false | Accept self-signed certificates |
+| `-d, --debug` | `MCP_DEBUG` | false | Enable debug logging |
+| `--health-retries` | - | 3 | Health check retry count (0=skip) |
+
+### Usage Examples
+
+```bash
+# Basic usage (localhost)
+ironbase-bridge
+
+# Remote server with HTTPS
+ironbase-bridge --server https://192.168.0.136:8080/mcp --api-key sk-xxx
+
+# Self-signed certificate (WSL/dev environment)
+ironbase-bridge --server https://localhost:8080/mcp --insecure
+
+# Using environment variables
+MCP_SERVER_URL=https://myserver:8080/mcp IRONBASE_API_KEY=sk-xxx ironbase-bridge
+
+# Debug mode
+ironbase-bridge --debug
+```
+
+### Client Configuration
+
+**Claude Desktop** (`claude_desktop_config.json`):
 ```json
 {
   "mcpServers": {
@@ -128,6 +205,24 @@ ironbase-bridge --server https://192.168.0.136:8080/mcp --api-key sk-xxx --insec
       "env": {
         "MCP_SERVER_URL": "http://localhost:8080/mcp",
         "IRONBASE_API_KEY": "sk-your-key"
+      }
+    }
+  }
+}
+```
+
+**ChatGPT Desktop** - same configuration format (MCP standard).
+
+**Linux/macOS:**
+```json
+{
+  "mcpServers": {
+    "ironbase": {
+      "command": "/usr/local/bin/ironbase-bridge",
+      "env": {
+        "MCP_SERVER_URL": "https://192.168.0.136:8080/mcp",
+        "IRONBASE_API_KEY": "sk-your-key",
+        "MCP_INSECURE": "1"
       }
     }
   }
@@ -153,19 +248,37 @@ ironbase-backup verify --dir ./backups
 ## TUI Usage
 
 ```bash
-# Connect to HTTP mode MCP server (overrides config.toml)
-ironbase-tui --http http://localhost:8080
+# Connect to HTTP/HTTPS MCP server
+ironbase-tui --url http://localhost:8080/mcp
+
+# With API key
+ironbase-tui --url https://192.168.0.136:8080/mcp -k sk-your-key
+
+# Self-signed certificate (WSL/dev)
+ironbase-tui --url https://localhost:8080/mcp --insecure
 
 # Connect via stdio (spawns MCP server)
 ironbase-tui --server ./mcp-ironbase-server mydata.mlite
 ```
 
-**Note:** Command line arguments (`--http`, `--server`) override `~/.config/ironbase-tui/config.toml` settings.
+### TUI CLI Options
+
+| Option | Environment Variable | Description |
+|--------|---------------------|-------------|
+| `--url` (alias: `--http`) | - | MCP server URL |
+| `-k, --api-key` | `IRONBASE_API_KEY` | API key for authentication |
+| `--insecure` | - | Accept self-signed certificates |
+| `--server` | - | MCP server executable (stdio transport) |
+
+**Note:** Command line arguments override `~/.config/ironbase-tui/config.toml` settings.
 
 ### TUI with API Key Authentication
 
 ```bash
-# Set API key via environment variable
+# Via CLI argument
+ironbase-tui --url http://localhost:8080/mcp -k sk-your-api-key
+
+# Via environment variable
 export IRONBASE_API_KEY="sk-your-api-key"
 ironbase-tui
 
@@ -283,7 +396,7 @@ The TUI provides a graphical interface for managing API keys:
 # Start TUI with admin access
 export IRONBASE_API_KEY="sk-your-api-key"
 export IRONBASE_ADMIN_KEY="your-admin-key"
-ironbase-tui --http http://localhost:8080
+ironbase-tui --url http://localhost:8080/mcp
 ```
 
 Press `Shift+K` to open the API Key modal:
@@ -316,6 +429,55 @@ Press `Shift+K` to open the API Key modal:
 | Linux | `~/.config/ironbase-tui/new_key.txt` | `chmod 600` |
 | macOS | `~/Library/Application Support/ironbase-tui/new_key.txt` | `chmod 600` |
 | Windows | `%APPDATA%\ironbase-tui\new_key.txt` | Owner-only ACL |
+
+## Environment Variables
+
+All IronBase components support configuration via environment variables. CLI arguments take precedence over environment variables.
+
+### Common Environment Variables
+
+| Variable | Used By | Description |
+|----------|---------|-------------|
+| `IRONBASE_API_KEY` | TUI, Bridge | API key for authentication |
+| `IRONBASE_ADMIN_KEY` | MCP Server | Admin key for protected operations |
+| `IRONBASE_PATH` | MCP Server | Database file path |
+| `MCP_SERVER_URL` | Bridge | MCP server URL |
+| `MCP_INSECURE` | TUI, Bridge | Accept self-signed certificates |
+| `MCP_DEBUG` | Bridge | Enable debug logging |
+| `MCP_CONFIG` | MCP Server | Config file path |
+| `MCP_PORT` | MCP Server | Server port |
+| `MCP_HOST` | MCP Server | Server host |
+
+### Boolean Environment Variables
+
+Boolean environment variables accept flexible values (case-insensitive):
+
+| True Values | False Values |
+|-------------|--------------|
+| `1`, `true`, `TRUE`, `True` | `0`, `false`, `FALSE`, `False` |
+| `yes`, `YES`, `Yes` | `no`, `NO`, `No` |
+| `on`, `ON`, `On` | `off`, `OFF`, `Off`, `""` (empty) |
+
+**Examples:**
+```bash
+# All equivalent - enable insecure mode
+MCP_INSECURE=1 ironbase-tui --url https://localhost:8080/mcp
+MCP_INSECURE=true ironbase-tui --url https://localhost:8080/mcp
+MCP_INSECURE=YES ironbase-tui --url https://localhost:8080/mcp
+
+# Windows PowerShell
+$env:MCP_INSECURE = "1"
+ironbase-tui --url https://localhost:8080/mcp
+
+# Windows CMD
+set MCP_INSECURE=true
+ironbase-tui --url https://localhost:8080/mcp
+```
+
+**Invalid values produce a clear error:**
+```
+error: invalid value 'maybe' for '--insecure': Invalid boolean value: 'maybe'. Use true/false/1/0/yes/no/on/off
+```
 
 ## HTTPS/TLS Support
 

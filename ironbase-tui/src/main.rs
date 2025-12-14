@@ -17,6 +17,23 @@ mod widgets;
 use app::{App, Modal, Pane};
 use clap::Parser;
 use config::{Config, TransportMode};
+
+// ============================================================================
+// Flexible Boolean Parser for Environment Variables
+// ============================================================================
+
+/// Parse boolean from env var - accepts "1", "true", "yes", "on" (case-insensitive)
+/// Empty string is treated as false (for unset env vars)
+fn parse_bool_flexible(s: &str) -> Result<bool, String> {
+    match s.to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" | "" => Ok(false),
+        _ => Err(format!(
+            "Invalid boolean value: '{}'. Use true/false/1/0/yes/no/on/off",
+            s
+        )),
+    }
+}
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
@@ -36,12 +53,16 @@ struct Cli {
     #[arg()]
     database: Option<PathBuf>,
 
-    /// MCP server URL for HTTP transport (e.g. --http http://localhost:8080)
-    #[arg(long)]
-    http: Option<String>,
+    /// MCP server URL for HTTP transport (e.g. --url https://localhost:8080/mcp)
+    #[arg(long, visible_alias = "http")]
+    url: Option<String>,
+
+    /// API key for authentication
+    #[arg(long, short = 'k', env = "IRONBASE_API_KEY")]
+    api_key: Option<String>,
 
     /// Accept self-signed/invalid TLS certificates (for HTTPS with self-signed certs)
-    #[arg(long)]
+    #[arg(long, env = "MCP_INSECURE", value_parser = parse_bool_flexible, default_value = "false")]
     insecure: bool,
 
     /// MCP server executable path for stdio transport
@@ -57,9 +78,12 @@ async fn main() -> anyhow::Result<()> {
     let mut config = Config::load();
 
     // CLI overrides config
-    if let Some(url) = cli.http {
+    if let Some(url) = cli.url {
         config.mcp_url = url;
         config.transport = TransportMode::Http;
+    }
+    if let Some(key) = cli.api_key {
+        config.mcp_api_key = Some(key);
     }
     if cli.insecure {
         config.mcp_insecure = true;
@@ -170,6 +194,9 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
     app.update_page_size(size.height);
 
     loop {
+        // Clear expired status messages
+        app.clear_status_if_expired();
+
         terminal.draw(|f| render_ui(f, app))?;
 
         // Use poll with timeout for non-blocking check
@@ -434,6 +461,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ("Tab", "Panel".into()),
             ("j/k", "Navigate".into()),
             ("Enter", "Select".into()),
+            ("r", "Refresh".into()),
             ("f", "Filter".into()),
             ("/", "Search".into()),
             ("a", "Actions".into()),
@@ -444,6 +472,7 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
             ("Tab", "Panel".into()),
             ("j/k", "Navigate".into()),
             ("PgUp/Dn", "Page".into()),
+            ("r", "Refresh".into()),
             ("f", "Filter".into()),
             ("/", "Search".into()),
             ("a", "Actions".into()),
@@ -570,12 +599,14 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         (KeyCode::Char('/'), _) => app.open_search(),
         (KeyCode::Char('a'), _) => app.open_actions(),
         (KeyCode::Char('?'), _) => app.open_help(),
-        (KeyCode::Char('I'), KeyModifiers::SHIFT) => handle_server_info_open(app).await,
-        (KeyCode::Char('U'), KeyModifiers::SHIFT) => handle_update_open(app).await,
-        (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
-            // Refresh collections
-            if let Err(e) = app.refresh_collections_async().await {
-                app.set_error(format!("Refresh failed: {}", e));
+        (KeyCode::Char('I'), _) => handle_server_info_open(app).await,
+        (KeyCode::Char('U'), _) => handle_update_open(app).await,
+        (KeyCode::Char('R'), _) => {
+            // Refresh collections (Shift+R)
+            app.set_status("Refreshing collections...");
+            match app.refresh_collections_async().await {
+                Ok(_) => app.set_status("Collections refreshed!"),
+                Err(e) => app.set_error(format!("Refresh failed: {}", e)),
             }
         }
         (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,

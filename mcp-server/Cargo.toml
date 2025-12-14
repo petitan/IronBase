@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.34"
+version = "1.0.35"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
@@ -25,6 +25,9 @@ rustls-pemfile = "2"
 
 # Configuration
 toml = "0.7"
+
+# CLI argument parsing
+clap = { version = "4", features = ["derive", "env"] }
 
 # Logging
 tracing = "0.1"
@@ -61,5 +64,5 @@ name = "mcp-ironbase-server"
 path = "src/main.rs"
 
 [lib]
-name = "mcp_docjl"
+name = "mcp_ironbase"
 path = "src/lib.rs"

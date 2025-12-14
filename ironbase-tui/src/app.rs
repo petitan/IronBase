@@ -2223,6 +2223,7 @@ pub struct App {
 
     // Status
     pub status_message: Option<String>,
+    pub status_message_time: Option<std::time::Instant>,
     pub error_message: Option<String>,
     pub error_scroll: usize,
 }
@@ -2268,6 +2269,7 @@ impl App {
             api_key_state: crate::modals::api_key::ApiKeyState::new(),
             config,
             status_message: None,
+            status_message_time: None,
             error_message: None,
             error_scroll: 0,
         }
@@ -2990,14 +2992,25 @@ impl App {
     pub fn next_theme(&mut self) {
         self.theme_name = self.theme_name.next();
         self.theme = Theme::from_name(self.theme_name);
-        self.status_message = Some(format!("Tema: {}", self.theme_name.name()));
+        self.set_status(format!("Tema: {}", self.theme_name.name()));
     }
 
     // === Status ===
 
-    /// Set status message
+    /// Set status message with auto-clear timestamp
     pub fn set_status(&mut self, msg: impl Into<String>) {
         self.status_message = Some(msg.into());
+        self.status_message_time = Some(std::time::Instant::now());
+    }
+
+    /// Clear status message if it has been visible long enough
+    pub fn clear_status_if_expired(&mut self) {
+        if let Some(time) = self.status_message_time {
+            if time.elapsed() > std::time::Duration::from_secs(2) {
+                self.status_message = None;
+                self.status_message_time = None;
+            }
+        }
     }
 
     /// Set error message

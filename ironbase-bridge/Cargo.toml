@@ -1,6 +1,6 @@
 [package]
 name = "ironbase-bridge"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "STDIO to HTTP/HTTPS bridge for MCP IronBase Server"
 license = "MIT"
