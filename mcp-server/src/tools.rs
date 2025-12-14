@@ -279,7 +279,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "find",
                 "title": "Find Documents",
-                "description": "Find documents matching a query with optional projection, sort, limit, skip, and total count",
+                "description": "Find documents matching a query. ⚠️ ALWAYS use count_documents FIRST to check size, then use 'limit' (5-20) and 'projection' to avoid context overflow!",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -501,7 +501,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "aggregate",
                 "title": "Aggregation Pipeline",
-                "description": "Execute an aggregation pipeline",
+                "description": "Execute an aggregation pipeline. ⚠️ ALWAYS include {\"$limit\": 10-20} stage to avoid context overflow!",
                 "inputSchema": {
                     "type": "object",
                     "properties": {

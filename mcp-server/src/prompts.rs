@@ -7,6 +7,11 @@ pub fn get_prompts_list() -> Value {
     json!({
         "prompts": [
             {
+                "name": "best-practices",
+                "description": "⚠️ IMPORTANT: Read this FIRST before querying data. Guidelines for safe, efficient database operations to avoid context overflow.",
+                "arguments": []
+            },
+            {
                 "name": "discover-schema",
                 "description": "Analyze a collection's structure by examining sample documents to understand field types, nesting, and common patterns",
                 "arguments": [
@@ -114,6 +119,7 @@ pub fn get_prompts_list() -> Value {
 /// Get prompt content by name
 pub fn get_prompt_content(name: &str, arguments: &Value) -> Option<Value> {
     match name {
+        "best-practices" => Some(get_best_practices_prompt()),
         "discover-schema" => Some(get_discover_schema_prompt(arguments)),
         "query-operators" => Some(get_query_operators_prompt()),
         "aggregation-guide" => Some(get_aggregation_guide_prompt()),
@@ -127,6 +133,95 @@ pub fn get_prompt_content(name: &str, arguments: &Value) -> Option<Value> {
         "fuzzy-search" => Some(get_fuzzy_search_prompt(arguments)),
         _ => None,
     }
+}
+
+fn get_best_practices_prompt() -> Value {
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": r#"# ⚠️ IronBase Best Practices - READ FIRST
+
+## Critical: Prevent Context Overflow
+
+**NEVER fetch all documents without limits!** Large collections can have thousands of documents.
+
+### ❌ WRONG - Will overflow context:
+```json
+{"collection": "users", "query": {}}
+```
+
+### ✅ CORRECT - Always follow this workflow:
+
+## Step 1: Check Collection Size FIRST
+```json
+// count_documents tool
+{"collection": "users", "filter": {}}
+```
+
+## Step 2: Use Appropriate Limits
+| Collection Size | Recommended Limit |
+|-----------------|-------------------|
+| < 100 docs | 20-50 |
+| 100-1000 docs | 10-20 |
+| 1000+ docs | 5-10 |
+
+## Step 3: Use Projection to Reduce Data
+Only fetch fields you need:
+```json
+{
+  "collection": "users",
+  "query": {},
+  "projection": {"name": 1, "email": 1, "_id": 0},
+  "limit": 10
+}
+```
+
+## Step 4: For Large Text Fields
+If documents have large text content (articles, descriptions, full_text):
+- Use projection to EXCLUDE large fields: `{"full_text": 0, "content": 0}`
+- Or include only specific small fields: `{"title": 1, "date": 1}`
+
+## Pagination Pattern
+```json
+// Page 1
+{"collection": "users", "query": {}, "limit": 10, "skip": 0}
+// Page 2
+{"collection": "users", "query": {}, "limit": 10, "skip": 10}
+```
+
+## Safe Aggregation
+Always use $limit in pipelines:
+```json
+[
+  {"$match": {"status": "active"}},
+  {"$limit": 20},
+  {"$project": {"name": 1, "score": 1}}
+]
+```
+
+## Quick Reference
+
+| Operation | Safe Practice |
+|-----------|---------------|
+| Explore collection | `count_documents` first, then `find` with limit 5-10 |
+| Get sample data | `find` with limit 3-5 and projection |
+| Search | Use specific filters, limit 10-20 |
+| Full-text search | Use `fulltext_search` with limit, projection |
+| Aggregation | Always include `$limit` stage |
+
+## Memory Guideline
+- Aim for responses under 10KB per query
+- Large documents (>1KB each) need smaller limits
+- Text fields can be very large - always use projection
+
+**Remember: It's better to make multiple small queries than one large one!**"#
+                }
+            }
+        ]
+    })
 }
 
 fn get_discover_schema_prompt(arguments: &Value) -> Value {
