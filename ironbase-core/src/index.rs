@@ -578,6 +578,22 @@ impl BPlusTree {
         Ok(())
     }
 
+    /// Clear all entries from the index, resetting to empty state
+    ///
+    /// Resets the B+ tree to a single empty leaf node.
+    /// Used before rebuild operations to prevent duplicate entries.
+    pub fn clear(&mut self) {
+        // Reset to empty leaf node
+        self.root = Box::new(BTreeNode::Leaf(LeafNode {
+            keys: Vec::new(),
+            document_ids: Vec::new(),
+            next_leaf_offset: 0,
+        }));
+        // Reset metadata counts
+        self.metadata.num_keys = 0;
+        self.metadata.tree_height = 1;
+    }
+
     /// Delete key-document pair from index
     /// Supports multi-level B+ trees by recursively finding the leaf
     pub fn delete(&mut self, key: &IndexKey, doc_id: &DocumentId) -> Result<()> {
@@ -755,7 +771,10 @@ impl BPlusTree {
         // Sort by key - O(n log n)
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // Step 4: Rebuild index - O(n)
+        // Step 4: Clear existing tree and rebuild - O(n)
+        // FIX: Must clear before rebuild to prevent duplicate entries!
+        // Without this, build_from_sorted would ADD to existing entries.
+        self.clear();
         self.build_from_sorted(entries, false)?;
 
         Ok(())

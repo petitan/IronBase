@@ -1056,6 +1056,38 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
+        // --- FULLTEXT INDEXES: Update for each document ---
+        // FIX: Fulltext indexes were not being updated during batch updates!
+        let fulltext_index_names: Vec<String> = indexes
+            .list_fulltext_indexes()
+            .iter()
+            .map(|idx| idx.name.clone())
+            .collect();
+
+        for fts_name in fulltext_index_names {
+            if let Some(fts_index) = indexes.get_fulltext_index_mut(&fts_name) {
+                let fts_field = fts_index.field.clone();
+                for (original_doc, updated_doc) in updates {
+                    // Only update if the indexed field was changed
+                    let old_value = original_doc.get(&fts_field);
+                    let new_value = updated_doc.get(&fts_field);
+
+                    // Check if the field value actually changed
+                    if old_value != new_value {
+                        // Update the fulltext index for this document
+                        if let Some(new_val) = new_value {
+                            if let Some(text) = new_val.as_str() {
+                                fts_index.update(&updated_doc.id, text);
+                            }
+                        } else {
+                            // Field was removed, just remove from index
+                            fts_index.remove(&original_doc.id);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
