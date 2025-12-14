@@ -674,3 +674,140 @@ fn test_fulltext_search_with_projection_include() {
         "Should NOT have metadata in include mode"
     );
 }
+
+// ============================================================================
+// REGRESSION TESTS FOR BUG FIXES
+// ============================================================================
+
+/// Regression test for BUG #1: Fulltext index not updated after update_many
+///
+/// The bug was that batch_update_indexes() only updated btree indexes,
+/// not fulltext indexes. After update_many, the fulltext index still had
+/// the old content tokens, causing searches to return stale/wrong results.
+///
+/// Fix: Added fulltext index update loop in batch_update_indexes().
+#[test]
+fn test_fulltext_index_updated_after_update_many() {
+    let db = DatabaseCore::open_memory().unwrap();
+
+    // Insert documents with original content
+    db.insert_many(
+        "bug1_test",
+        vec![
+            doc! {"_id" => "doc1", "content" => "ORIGINAL TEST CONTENT A"},
+            doc! {"_id" => "doc2", "content" => "ORIGINAL TEST CONTENT B"},
+            doc! {"_id" => "doc3", "content" => "ORIGINAL TEST CONTENT C"},
+        ],
+    )
+    .unwrap();
+
+    // Create fulltext index
+    let coll = db.collection("bug1_test").unwrap();
+    coll.create_fulltext_index("content".to_string(), "english", None, None)
+        .unwrap();
+
+    // Verify original content is indexed
+    let original_results = coll
+        .fulltext_search("content", "ORIGINAL", Some(10), None, None, None)
+        .unwrap();
+    assert_eq!(
+        original_results.len(),
+        3,
+        "Should find 3 documents with 'ORIGINAL'"
+    );
+
+    // Update all documents with update_many
+    let (matched, modified) = db
+        .update_many(
+            "bug1_test",
+            &json!({}),
+            &json!({"$set": {"content": "BULK UPDATED CONTENT"}}),
+        )
+        .unwrap();
+    assert_eq!(matched, 3);
+    assert_eq!(modified, 3);
+
+    // BUG #1 TEST: Search for new content - should find 3 documents
+    let new_results = coll
+        .fulltext_search("content", "BULK", Some(10), None, None, None)
+        .unwrap();
+    assert_eq!(
+        new_results.len(),
+        3,
+        "BUG #1 regression: fulltext index not updated after update_many! Search for 'BULK' should find 3 documents."
+    );
+
+    // BUG #1 TEST: Search for old content - should find 0 documents
+    let old_results = coll
+        .fulltext_search("content", "ORIGINAL", Some(10), None, None, None)
+        .unwrap();
+    assert_eq!(
+        old_results.len(),
+        0,
+        "BUG #1 regression: old content still in fulltext index! Search for 'ORIGINAL' should find 0 documents."
+    );
+}
+
+/// Regression test for BUG #3: Duplicate documents after update_many
+///
+/// The bug was that apply_batch_updates() in B+ tree was calling
+/// build_from_sorted() without clearing the existing tree first,
+/// causing duplicate entries.
+///
+/// Fix: Added clear() call before build_from_sorted() in apply_batch_updates().
+#[test]
+fn test_no_duplicate_documents_after_update_many() {
+    let db = DatabaseCore::open_memory().unwrap();
+
+    // Insert documents
+    db.insert_many(
+        "bug3_test",
+        vec![
+            doc! {"_id" => "dup001", "content" => "ORIGINAL A"},
+            doc! {"_id" => "dup002", "content" => "ORIGINAL B"},
+            doc! {"_id" => "dup003", "content" => "ORIGINAL C"},
+        ],
+    )
+    .unwrap();
+
+    // Update all documents with update_many
+    let (matched, modified) = db
+        .update_many(
+            "bug3_test",
+            &json!({}),
+            &json!({"$set": {"content": "UPDATED"}}),
+        )
+        .unwrap();
+    assert_eq!(matched, 3);
+    assert_eq!(modified, 3);
+
+    // BUG #3 TEST: Find specific document by _id - should return exactly 1
+    let coll = db.collection("bug3_test").unwrap();
+    let results = coll.find(&json!({"_id": "dup001"})).unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "BUG #3 regression: find() returned {} documents for _id='dup001', expected 1. \
+         This indicates duplicate index entries were created by update_many.",
+        results.len()
+    );
+
+    // Verify the content was actually updated
+    assert_eq!(
+        results[0].get("content").and_then(|v| v.as_str()),
+        Some("UPDATED"),
+        "Document content should be updated"
+    );
+
+    // Double-check: count_documents should also return 1
+    let count = coll.count_documents(&json!({"_id": "dup001"})).unwrap();
+    assert_eq!(
+        count, 1,
+        "BUG #3 regression: count_documents returned {} for _id='dup001', expected 1",
+        count
+    );
+
+    // Total count should be 3
+    let total = coll.count_documents(&json!({})).unwrap();
+    assert_eq!(total, 3, "Total document count should be 3");
+}

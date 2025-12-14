@@ -2302,6 +2302,127 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    /// Regression test for BUG #3: apply_batch_updates was causing duplicate entries
+    /// because build_from_sorted was adding to the existing tree instead of replacing it.
+    /// Fix: Added clear() call before build_from_sorted in apply_batch_updates.
+    #[test]
+    fn test_apply_batch_updates_no_duplicates() {
+        let mut tree = BPlusTree::new("test_idx".to_string(), "name".to_string(), false);
+
+        // Insert 3 entries
+        tree.insert(
+            IndexKey::String("alice".to_string()),
+            DocumentId::String("doc1".to_string()),
+        )
+        .unwrap();
+        tree.insert(
+            IndexKey::String("bob".to_string()),
+            DocumentId::String("doc2".to_string()),
+        )
+        .unwrap();
+        tree.insert(
+            IndexKey::String("carol".to_string()),
+            DocumentId::String("doc3".to_string()),
+        )
+        .unwrap();
+
+        assert_eq!(tree.metadata.num_keys, 3);
+
+        // Apply batch updates (simulating update_many that doesn't change keys)
+        let updates = vec![
+            (
+                IndexKey::String("alice".to_string()),
+                DocumentId::String("doc1".to_string()),
+                IndexKey::String("alice".to_string()),
+                DocumentId::String("doc1".to_string()),
+            ),
+            (
+                IndexKey::String("bob".to_string()),
+                DocumentId::String("doc2".to_string()),
+                IndexKey::String("bob".to_string()),
+                DocumentId::String("doc2".to_string()),
+            ),
+            (
+                IndexKey::String("carol".to_string()),
+                DocumentId::String("doc3".to_string()),
+                IndexKey::String("carol".to_string()),
+                DocumentId::String("doc3".to_string()),
+            ),
+        ];
+
+        tree.apply_batch_updates(updates).unwrap();
+
+        // CRITICAL: After batch update, should still have exactly 3 entries, not 6!
+        assert_eq!(
+            tree.metadata.num_keys, 3,
+            "BUG #3 regression: apply_batch_updates created duplicates!"
+        );
+
+        // Verify each key has exactly one entry
+        let alice_results = tree.range_scan(
+            &IndexKey::String("alice".to_string()),
+            &IndexKey::String("alice".to_string()),
+            true,
+            true,
+        );
+        assert_eq!(
+            alice_results.len(),
+            1,
+            "BUG #3 regression: 'alice' has duplicates!"
+        );
+
+        let bob_results = tree.range_scan(
+            &IndexKey::String("bob".to_string()),
+            &IndexKey::String("bob".to_string()),
+            true,
+            true,
+        );
+        assert_eq!(
+            bob_results.len(),
+            1,
+            "BUG #3 regression: 'bob' has duplicates!"
+        );
+    }
+
+    /// Regression test for BUG #3: Verify clear() properly resets the tree
+    #[test]
+    fn test_clear_resets_tree() {
+        let mut tree = BPlusTree::new("test_idx".to_string(), "value".to_string(), false);
+
+        // Insert some entries
+        for i in 0..10 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+
+        assert_eq!(tree.metadata.num_keys, 10);
+        assert!(tree.metadata.tree_height >= 1);
+
+        // Clear the tree
+        tree.clear();
+
+        // Verify reset state
+        assert_eq!(
+            tree.metadata.num_keys, 0,
+            "num_keys should be 0 after clear"
+        );
+        assert_eq!(
+            tree.metadata.tree_height, 1,
+            "tree_height should be 1 after clear"
+        );
+
+        // Verify tree is empty
+        let all_entries = tree.get_all_entries();
+        assert!(
+            all_entries.is_empty(),
+            "Tree should have no entries after clear"
+        );
+
+        // Verify we can insert again
+        tree.insert(IndexKey::Int(100), DocumentId::Int(100))
+            .unwrap();
+        assert_eq!(tree.metadata.num_keys, 1);
+    }
 }
 
 #[cfg(test)]
