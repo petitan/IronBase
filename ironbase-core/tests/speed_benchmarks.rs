@@ -563,3 +563,176 @@ fn speed_benchmark_query_selectivity() {
     }
     println!();
 }
+
+#[test]
+#[ignore]
+fn speed_benchmark_fulltext_overhead() {
+    println!("\n");
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║           FULLTEXT INDEX WRITE OVERHEAD                      ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Collection WITHOUT FTS index
+    let _coll_no_fts = db.collection("no_fts").unwrap();
+
+    // Collection WITH FTS index
+    let coll_fts = db.collection("with_fts").unwrap();
+    coll_fts
+        .create_fulltext_index("content".to_string(), "english", None, None)
+        .unwrap();
+
+    let content = "The quick brown fox jumps over the lazy dog. Lorem ipsum dolor sit amet, \
+                   consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore.";
+
+    // Generate documents
+    let n = 10_000;
+    let docs_no_fts: Vec<_> = (0..n)
+        .map(|i| {
+            HashMap::from([
+                ("_id".to_string(), json!(format!("doc{}", i))),
+                ("content".to_string(), json!(content)),
+            ])
+        })
+        .collect();
+    let docs_fts = docs_no_fts.clone();
+
+    println!("  Testing with {} documents (~100 bytes content each)", n);
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════
+    // INSERT benchmarks
+    // ═══════════════════════════════════════════════════════════════
+    println!("┌──────────────────────────────────────────────────────────────┐");
+    println!("│  INSERT BENCHMARKS                                           │");
+    println!("└──────────────────────────────────────────────────────────────┘");
+
+    // Insert without FTS (batched)
+    let start = Instant::now();
+    for chunk in docs_no_fts.chunks(1000) {
+        db.insert_many("no_fts", chunk.to_vec()).unwrap();
+    }
+    let time_insert_no_fts = start.elapsed();
+
+    // Insert with FTS (batched)
+    let start = Instant::now();
+    for chunk in docs_fts.chunks(1000) {
+        db.insert_many("with_fts", chunk.to_vec()).unwrap();
+    }
+    let time_insert_fts = start.elapsed();
+
+    let slowdown = time_insert_fts.as_nanos() as f64 / time_insert_no_fts.as_nanos() as f64;
+    let overhead_per_doc =
+        (time_insert_fts.as_nanos() as f64 - time_insert_no_fts.as_nanos() as f64) / n as f64;
+
+    println!("  insert_many (batched):");
+    println!(
+        "    No FTS:   {} ({})",
+        format_duration(time_insert_no_fts),
+        format_rate(n, time_insert_no_fts)
+    );
+    println!(
+        "    With FTS: {} ({})",
+        format_duration(time_insert_fts),
+        format_rate(n, time_insert_fts)
+    );
+    println!("    Slowdown: {:.2}x", slowdown);
+    println!("    Overhead: {:.2}µs per doc", overhead_per_doc / 1000.0);
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════
+    // UPDATE benchmarks
+    // ═══════════════════════════════════════════════════════════════
+    println!("┌──────────────────────────────────────────────────────────────┐");
+    println!("│  UPDATE BENCHMARKS                                           │");
+    println!("└──────────────────────────────────────────────────────────────┘");
+
+    let new_content = "Updated content with completely different words for testing the fulltext \
+                       index update performance. This should trigger reindexing.";
+
+    // Update without FTS
+    let start = Instant::now();
+    db.update_many(
+        "no_fts",
+        &json!({}),
+        &json!({"$set": {"content": new_content}}),
+    )
+    .unwrap();
+    let time_update_no_fts = start.elapsed();
+
+    // Update with FTS
+    let start = Instant::now();
+    db.update_many(
+        "with_fts",
+        &json!({}),
+        &json!({"$set": {"content": new_content}}),
+    )
+    .unwrap();
+    let time_update_fts = start.elapsed();
+
+    let slowdown = time_update_fts.as_nanos() as f64 / time_update_no_fts.as_nanos() as f64;
+    let overhead_per_doc =
+        (time_update_fts.as_nanos() as f64 - time_update_no_fts.as_nanos() as f64) / n as f64;
+
+    println!("  update_many (all {} docs):", n);
+    println!(
+        "    No FTS:   {} ({})",
+        format_duration(time_update_no_fts),
+        format_rate(n, time_update_no_fts)
+    );
+    println!(
+        "    With FTS: {} ({})",
+        format_duration(time_update_fts),
+        format_rate(n, time_update_fts)
+    );
+    println!("    Slowdown: {:.2}x", slowdown);
+    println!("    Overhead: {:.2}µs per doc", overhead_per_doc / 1000.0);
+    println!();
+
+    // ═══════════════════════════════════════════════════════════════
+    // DELETE benchmarks
+    // ═══════════════════════════════════════════════════════════════
+    println!("┌──────────────────────────────────────────────────────────────┐");
+    println!("│  DELETE BENCHMARKS                                           │");
+    println!("└──────────────────────────────────────────────────────────────┘");
+
+    // Delete without FTS
+    let start = Instant::now();
+    db.delete_many("no_fts", &json!({})).unwrap();
+    let time_delete_no_fts = start.elapsed();
+
+    // Delete with FTS
+    let start = Instant::now();
+    db.delete_many("with_fts", &json!({})).unwrap();
+    let time_delete_fts = start.elapsed();
+
+    let slowdown = time_delete_fts.as_nanos() as f64 / time_delete_no_fts.as_nanos() as f64;
+    let overhead_per_doc =
+        (time_delete_fts.as_nanos() as f64 - time_delete_no_fts.as_nanos() as f64) / n as f64;
+
+    println!("  delete_many (all {} docs):", n);
+    println!(
+        "    No FTS:   {} ({})",
+        format_duration(time_delete_no_fts),
+        format_rate(n, time_delete_no_fts)
+    );
+    println!(
+        "    With FTS: {} ({})",
+        format_duration(time_delete_fts),
+        format_rate(n, time_delete_fts)
+    );
+    println!("    Slowdown: {:.2}x", slowdown);
+    println!("    Overhead: {:.2}µs per doc", overhead_per_doc / 1000.0);
+    println!();
+
+    println!("╔══════════════════════════════════════════════════════════════╗");
+    println!("║                        SUMMARY                               ║");
+    println!("╚══════════════════════════════════════════════════════════════╝");
+    println!("  Fulltext index adds moderate overhead to write operations.");
+    println!("  INSERT: ~1.5-3x slower (tokenization + indexing)");
+    println!("  UPDATE: ~2-4x slower (old tokens removal + new tokens add)");
+    println!("  DELETE: ~1.2-2x slower (token removal from inverted index)");
+    println!();
+}

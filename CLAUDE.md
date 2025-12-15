@@ -728,3 +728,43 @@ MCP HTTP benchmark (~64 insert/sec) bontása:
 ```
 
 **Megjegyzés:** Az MCP szerver teljesítményét a HTTP overhead dominálja, NEM az fsync!
+
+## Performance Benchmarks
+
+### Fulltext Index Write Overhead
+
+A fulltext index fenntartása extra költséggel jár írási műveleteknél. Az alábbi mérések 10,000 dokumentummal készültek, MemoryStorage-al (tiszta CPU overhead, disk I/O nélkül):
+
+| Művelet | FTS nélkül | FTS-sel | Lassulás | Overhead/doc |
+|---------|-----------|---------|----------|--------------|
+| **INSERT** | 215ms (46K ops/s) | 516ms (19K ops/s) | **2.40x** | ~30µs |
+| **UPDATE** | 309ms (32K ops/s) | 586ms (17K ops/s) | **1.90x** | ~28µs |
+| **DELETE** | 63ms (157K ops/s) | 133ms (75K ops/s) | **2.10x** | ~7µs |
+
+**Mit jelent ez a gyakorlatban:**
+- Egyedi `insert_one`: észrevehetetlen (~30µs << ~35ms hálózati latencia)
+- 1000 dokumentum batch: +30ms overhead
+- 10,000 dokumentum batch: +300ms overhead
+
+**Az overhead összetevői:**
+1. **INSERT**: Tokenizálás + stop words szűrés + TF-IDF számítás + inverted index frissítés
+2. **UPDATE**: Régi tokenek törlése + új tokenek hozzáadása (dupla munka)
+3. **DELETE**: Tokenek eltávolítása az inverted indexből
+
+**Benchmark futtatása:**
+```bash
+cargo test -p ironbase-core --release speed_benchmark_fulltext_overhead -- --nocapture --ignored
+```
+
+### General Performance (100K documents)
+
+```bash
+cargo test -p ironbase-core --release speed_benchmark_full_suite -- --nocapture --ignored
+```
+
+Tipikus eredmények (MemoryStorage):
+- **INSERT**: ~200K ops/sec (batch), ~50K ops/sec (single)
+- **FIND (indexed)**: ~500K ops/sec
+- **FIND (scan)**: ~50K ops/sec
+- **UPDATE**: ~30K ops/sec
+- **AGGREGATION**: ~100K docs/sec
