@@ -348,7 +348,67 @@ impl StorageEngine {
     /// Commit a transaction (9-step atomic operation)
     /// This is the core of ACD guarantee
     pub fn commit_transaction(&mut self, transaction: &mut Transaction) -> Result<()> {
+        use crate::transaction::Operation;
         use crate::wal::{WALEntry, WALEntryType};
+        use serde_json::Value;
+
+        /// Helper: add _collection field to all document Values in an Operation.
+        /// This centralizes the _collection injection (PHASE 5: WAL centralization).
+        /// Uses entry().or_insert_with() to avoid overwriting if caller already set it.
+        fn add_collection_to_operation(operation: &Operation) -> Operation {
+            fn inject_collection(value: &mut Value, collection: &str) {
+                if let Value::Object(ref mut map) = value {
+                    map.entry("_collection".to_string())
+                        .or_insert_with(|| Value::String(collection.to_string()));
+                }
+            }
+
+            match operation {
+                Operation::Insert {
+                    collection,
+                    doc_id,
+                    doc,
+                } => {
+                    let mut doc_clone = doc.clone();
+                    inject_collection(&mut doc_clone, collection);
+                    Operation::Insert {
+                        collection: collection.clone(),
+                        doc_id: doc_id.clone(),
+                        doc: doc_clone,
+                    }
+                }
+                Operation::Update {
+                    collection,
+                    doc_id,
+                    old_doc,
+                    new_doc,
+                } => {
+                    let mut old_clone = old_doc.clone();
+                    let mut new_clone = new_doc.clone();
+                    inject_collection(&mut old_clone, collection);
+                    inject_collection(&mut new_clone, collection);
+                    Operation::Update {
+                        collection: collection.clone(),
+                        doc_id: doc_id.clone(),
+                        old_doc: old_clone,
+                        new_doc: new_clone,
+                    }
+                }
+                Operation::Delete {
+                    collection,
+                    doc_id,
+                    old_doc,
+                } => {
+                    let mut old_clone = old_doc.clone();
+                    inject_collection(&mut old_clone, collection);
+                    Operation::Delete {
+                        collection: collection.clone(),
+                        doc_id: doc_id.clone(),
+                        old_doc: old_clone,
+                    }
+                }
+            }
+        }
 
         if !transaction.is_active() {
             return Err(MongoLiteError::TransactionCommitted);
@@ -361,8 +421,10 @@ impl StorageEngine {
         self.wal.append(&begin_entry)?;
 
         // Step 2: Write all operations to WAL (use JSON instead of bincode for compatibility)
+        // PHASE 5: Centralize _collection injection here instead of in callers
         for operation in transaction.operations() {
-            let op_json = serde_json::to_string(operation)
+            let op_with_collection = add_collection_to_operation(operation);
+            let op_json = serde_json::to_string(&op_with_collection)
                 .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
             let op_entry = WALEntry::new(
                 transaction.id,

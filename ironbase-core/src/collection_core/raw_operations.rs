@@ -1102,12 +1102,9 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // This catches duplicates early, before any storage/WAL writes
         self.check_index_constraints(&doc, None)?;
 
-        // Prepare WAL document (WITH _collection for recovery)
-        let mut wal_doc =
+        // Prepare WAL document (PHASE 5: _collection is now added by commit_transaction)
+        let wal_doc =
             serde_json::to_value(&doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
-        if let Value::Object(ref mut map) = wal_doc {
-            map.insert("_collection".to_string(), Value::String(self.name.clone()));
-        }
 
         Ok(InsertOnePrepared {
             doc_id,
@@ -1253,16 +1250,11 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             // Check against EXISTING documents in index
             self.check_index_constraints(&doc, None)?;
 
-            // Prepare WAL document (WITH _collection for recovery)
-            let mut wal_doc = doc_value.clone();
-            if let Value::Object(ref mut map) = wal_doc {
-                map.insert("_collection".to_string(), Value::String(self.name.clone()));
-            }
-
+            // PHASE 5: _collection is now added by commit_transaction
             prepared_docs.push(InsertOnePrepared {
                 doc_id: doc_id.clone(),
                 document: doc,
-                wal_doc,
+                wal_doc: doc_value, // Use doc_value directly, _collection added in commit_transaction
                 collection_name: self.name.clone(),
             });
             inserted_ids.push(doc_id);
@@ -1392,17 +1384,10 @@ mod tests {
         // Document should have _id
         assert!(prepared.document.fields.contains_key("_id"));
 
-        // WAL doc should have _collection
-        assert!(prepared.wal_doc.get("_collection").is_some());
-        assert_eq!(
-            prepared
-                .wal_doc
-                .get("_collection")
-                .unwrap()
-                .as_str()
-                .unwrap(),
-            "test"
-        );
+        // PHASE 5: _collection is NOT in wal_doc - it's added centrally in commit_transaction
+        // WAL doc should have _id and data, but NOT _collection
+        assert!(prepared.wal_doc.get("_id").is_some());
+        assert!(prepared.wal_doc.get("name").is_some());
     }
 
     #[test]
@@ -1515,9 +1500,10 @@ mod tests {
         assert_eq!(prepared.inserted_ids.len(), 3);
 
         // All should have auto-generated IDs
+        // PHASE 5: _collection is NOT in wal_doc - it's added centrally in commit_transaction
         for p in &prepared.prepared_docs {
             assert!(matches!(p.doc_id, DocumentId::Int(_)));
-            assert!(p.wal_doc.get("_collection").is_some());
+            assert!(p.wal_doc.get("_id").is_some());
         }
     }
 
@@ -1595,18 +1581,18 @@ mod tests {
     }
 
     #[test]
-    fn test_insert_one_prepare_wal_doc_has_collection() {
+    fn test_insert_one_prepare_wal_doc_structure() {
         let db = create_test_db();
         let coll = db.collection("users").unwrap();
 
         let fields = HashMap::from([("name".to_string(), json!("Test"))]);
         let prepared = coll.insert_one_prepare(fields).unwrap();
 
-        // Verify WAL doc structure
+        // Verify WAL doc structure (PHASE 5: _collection is now added by commit_transaction)
         let wal_doc = &prepared.wal_doc;
         assert_eq!(wal_doc.get("name").unwrap(), &json!("Test"));
-        assert_eq!(wal_doc.get("_collection").unwrap(), &json!("users"));
         assert!(wal_doc.get("_id").is_some());
+        // NOTE: _collection is NOT in wal_doc here - it's added centrally in commit_transaction
 
         // Storage doc should NOT have _collection
         assert!(!prepared.document.fields.contains_key("_collection"));
