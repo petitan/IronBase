@@ -766,6 +766,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Distinct values for a field
     /// FIX #19: Now supports nested fields via get_nested_value (e.g., "address.city")
     pub fn distinct(&self, field: &str, query_json: &Value) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
         use crate::value_utils::canonical_json_string;
 
         // Handle _id query optimization
@@ -1502,6 +1503,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         algorithm: crate::index::FuzzyAlgorithm,
         threshold: f64,
     ) -> Result<String> {
+        self.check_not_closed()?;
         let index_name = format!("{}_{}_fuzzy", self.name, field);
 
         // Step 1: Create the fuzzy index in IndexManager
@@ -1570,6 +1572,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         threshold: Option<f64>,
         algorithm: Option<crate::index::FuzzyAlgorithm>,
     ) -> Result<Vec<(Value, f64)>> {
+        self.check_not_closed()?;
         let indexes = self.indexes.read();
 
         // Find fuzzy index for this field
@@ -1629,6 +1632,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         min_word_length: Option<usize>,
         accent_folding: Option<bool>,
     ) -> Result<String> {
+        self.check_not_closed()?;
         use crate::fulltext::FtsLanguage;
 
         let index_name = format!("{}_{}_fts", self.name, field);
@@ -1720,6 +1724,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         min_score: Option<f64>,
         projection: Option<std::collections::HashMap<String, i32>>,
     ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+        self.check_not_closed()?;
         let indexes = self.indexes.read();
 
         // Find fulltext index for this field
