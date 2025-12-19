@@ -49,3 +49,10 @@ mongolite-core/*.mlite
 mcp-server/cert.pem
 mcp-server/key.pem
 mcp-server/config.toml
+
+# .NET build outputs
+**/bin/
+**/obj/
+*.dll
+*.pdb
+*.exe
