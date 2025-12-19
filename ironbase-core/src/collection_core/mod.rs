@@ -493,6 +493,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// FIX #18: Now checks BOTH:
     /// 1. Duplicates within the batch (via BatchConstraintValidator)
     /// 2. Conflicts with EXISTING documents in the index
+    #[allow(dead_code)] // Will be removed in Phase 6 of WAL refactor
     pub(crate) fn validate_batch_constraints(
         &self,
         documents: &[HashMap<String, Value>],

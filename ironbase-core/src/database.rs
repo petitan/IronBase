@@ -417,37 +417,27 @@ impl DatabaseCore<StorageEngine> {
                 // Safe mode: Auto-commit every operation
                 let collection = self.collection(collection_name)?;
 
-                // 1. Begin auto-transaction
+                // 1. PREPARE phase: validate, generate ID, build WAL doc
+                // No storage writes happen here - just preparation
+                let prepared = collection.insert_one_prepare(document)?;
+
+                // 2. Begin auto-transaction and add operation
+                // prepared.wal_doc already contains _id and _collection
                 let mut auto_tx = self.begin_auto_transaction();
-
-                // 2. Execute insert
-                let doc_id = collection.insert_one_raw(document.clone())?;
-
-                // 3. Add operation to transaction
-                // IMPORTANT: WAL must contain the FULL document with _id and _collection
-                // so that recovery can rebuild the catalog correctly
-                let mut doc_with_metadata = document.clone();
-                doc_with_metadata.insert(
-                    "_id".to_string(),
-                    serde_json::to_value(&doc_id)
-                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?,
-                );
-                doc_with_metadata.insert(
-                    "_collection".to_string(),
-                    Value::String(collection_name.to_string()),
-                );
-                let doc_value = serde_json::to_value(&doc_with_metadata)
-                    .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
                 auto_tx.add_operation(Operation::Insert {
                     collection: collection_name.to_string(),
-                    doc_id: doc_id.clone(),
-                    doc: doc_value,
+                    doc_id: prepared.doc_id.clone(),
+                    doc: prepared.wal_doc.clone(),
                 })?;
-                // The insert has already been applied; mark to avoid double-apply
+
+                // 3. Mark as applied (storage write follows WAL commit)
                 auto_tx.mark_operations_applied();
 
                 // 4. Auto-commit (WAL write + fsync)
                 self.commit_auto_transaction(auto_tx)?;
+
+                // 5. PERSIST phase: write to storage after WAL is committed
+                let doc_id = collection.insert_one_persist(prepared)?;
 
                 Ok(doc_id)
             }
@@ -459,30 +449,25 @@ impl DatabaseCore<StorageEngine> {
                 // Batch mode: Add to batch, flush when full
                 let collection = self.collection(collection_name)?;
 
-                // 1. Execute insert
-                let doc_id = collection.insert_one_raw(document.clone())?;
+                // 1. PREPARE phase: validate, generate ID, build WAL doc
+                let prepared = collection.insert_one_prepare(document)?;
 
-                // 2. Add to batch buffer
-                // IMPORTANT: WAL must contain the FULL document with _id and _collection
-                let mut doc_with_metadata = document.clone();
-                doc_with_metadata.insert(
-                    "_id".to_string(),
-                    serde_json::to_value(&doc_id)
-                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?,
-                );
-                doc_with_metadata.insert(
-                    "_collection".to_string(),
-                    Value::String(collection_name.to_string()),
-                );
-                let doc_value = serde_json::to_value(&doc_with_metadata)
-                    .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+                // 2. Extract WAL data before persist consumes prepared
+                let wal_doc = prepared.wal_doc.clone();
+                let doc_id_for_batch = prepared.doc_id.clone();
+
+                // 3. PERSIST phase: write to storage immediately
+                // (Batch mode writes storage first, WAL later)
+                let doc_id = collection.insert_one_persist(prepared)?;
+
+                // 4. Add to batch buffer (wal_doc has _id and _collection)
                 let should_flush = self.add_to_batch(Operation::Insert {
                     collection: collection_name.to_string(),
-                    doc_id: doc_id.clone(),
-                    doc: doc_value,
+                    doc_id: doc_id_for_batch,
+                    doc: wal_doc,
                 })?;
 
-                // 3. Flush if batch is full
+                // 5. Flush if batch is full
                 if should_flush {
                     self.flush_batch()?;
                 }
@@ -750,81 +735,33 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Safe => {
                 let collection = self.collection(collection_name)?;
 
-                // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
-                // This ensures atomic failure - either all documents insert or none.
-                collection.validate_batch_constraints(&documents)?;
+                // 1. PREPARE phase: validate all documents, generate IDs, build WAL docs
+                // This does all validation and constraint checking atomically
+                let prepared = collection.insert_many_prepare(documents)?;
 
-                // === PHASE 1: Prepare documents (add _id only, NOT _collection) ===
-                // _collection is WAL-only metadata, NOT stored in documents.
-                let mut prepared_docs: Vec<(DocumentId, HashMap<String, Value>)> =
-                    Vec::with_capacity(documents.len());
-
-                for mut document in documents {
-                    // Generate doc_id (use existing _id or generate new ObjectId)
-                    let doc_id = if let Some(existing_id) = document.get("_id") {
-                        serde_json::from_value(existing_id.clone()).map_err(|e| {
-                            crate::error::MongoLiteError::Serialization(format!(
-                                "Invalid _id format: {}",
-                                e
-                            ))
-                        })?
-                    } else {
-                        // Generate new ObjectId (UUID-based, storage-independent)
-                        let new_id = DocumentId::new_object_id();
-                        document.insert(
-                            "_id".to_string(),
-                            serde_json::to_value(&new_id).map_err(|e| {
-                                crate::error::MongoLiteError::Serialization(e.to_string())
-                            })?,
-                        );
-                        new_id
-                    };
-
-                    // NOTE: Do NOT add _collection here - it's WAL-only metadata
-                    prepared_docs.push((doc_id, document));
+                if prepared.prepared_docs.is_empty() {
+                    return Ok(Vec::new());
                 }
 
-                // 🔒 FIX #6: Pre-validate ALL schemas on prepared documents
-                // Schema validation happens AFTER _id is added, on the exact document
-                // that will be stored (without _collection, which is WAL-only).
-                for (_, doc) in &prepared_docs {
-                    let doc_value = serde_json::to_value(doc)
-                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
-                    collection.validate_value_against_schema(&doc_value)?;
-                }
-
-                // === PHASE 2: Storage writes FIRST ===
-                // Storage must complete before WAL commit for crash safety.
-                let mut inserted_ids = Vec::with_capacity(prepared_docs.len());
-                for (doc_id, document) in &prepared_docs {
-                    collection.insert_one_raw(document.clone())?;
-                    inserted_ids.push(doc_id.clone());
-                }
-
-                // === PHASE 3: WAL write (with _collection metadata) ===
-                // WAL entry needs _collection for recovery to know which collection.
+                // 2. Begin auto-transaction and add all operations
+                // Each prepared_doc.wal_doc already contains _id and _collection
                 let mut auto_tx = self.begin_auto_transaction();
-                for (doc_id, document) in prepared_docs {
-                    // Create WAL doc with _collection metadata
-                    let mut wal_doc = document;
-                    wal_doc.insert(
-                        "_collection".to_string(),
-                        Value::String(collection_name.to_string()),
-                    );
-                    let doc_value = serde_json::to_value(&wal_doc)
-                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
-
+                for prep in &prepared.prepared_docs {
                     auto_tx.add_operation(Operation::Insert {
                         collection: collection_name.to_string(),
-                        doc_id,
-                        doc: doc_value,
+                        doc_id: prep.doc_id.clone(),
+                        doc: prep.wal_doc.clone(),
                     })?;
                 }
 
-                // === PHASE 4: WAL commit ===
-                // Storage is already done, so mark_operations_applied is correct.
+                // 3. Mark as applied (storage write follows WAL commit)
                 auto_tx.mark_operations_applied();
+
+                // 4. Auto-commit (WAL write + fsync)
                 self.commit_auto_transaction(auto_tx)?;
+
+                // 5. PERSIST phase: write all documents to storage after WAL is committed
+                let inserted_ids = collection.insert_many_persist(prepared)?;
 
                 Ok(inserted_ids)
             }
@@ -832,72 +769,30 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Batch { .. } => {
                 let collection = self.collection(collection_name)?;
 
-                // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
-                collection.validate_batch_constraints(&documents)?;
+                // 1. PREPARE phase: validate all documents, generate IDs, build WAL docs
+                let prepared = collection.insert_many_prepare(documents)?;
 
-                // === PHASE 1: Prepare documents (add _id only, NOT _collection) ===
-                // _collection is WAL-only metadata, NOT stored in documents.
-                let mut prepared_docs: Vec<(DocumentId, HashMap<String, Value>)> =
-                    Vec::with_capacity(documents.len());
-
-                for mut document in documents {
-                    // Generate doc_id (use existing _id or generate new ObjectId)
-                    let doc_id = if let Some(existing_id) = document.get("_id") {
-                        serde_json::from_value(existing_id.clone()).map_err(|e| {
-                            crate::error::MongoLiteError::Serialization(format!(
-                                "Invalid _id format: {}",
-                                e
-                            ))
-                        })?
-                    } else {
-                        // Generate new ObjectId (UUID-based, storage-independent)
-                        let new_id = DocumentId::new_object_id();
-                        document.insert(
-                            "_id".to_string(),
-                            serde_json::to_value(&new_id).map_err(|e| {
-                                crate::error::MongoLiteError::Serialization(e.to_string())
-                            })?,
-                        );
-                        new_id
-                    };
-
-                    // NOTE: Do NOT add _collection here - it's WAL-only metadata
-                    prepared_docs.push((doc_id, document));
+                if prepared.prepared_docs.is_empty() {
+                    return Ok(Vec::new());
                 }
 
-                // 🔒 FIX #6: Pre-validate ALL schemas on prepared documents
-                // Schema validation happens AFTER _id is added, on the exact document
-                // that will be stored (without _collection, which is WAL-only).
-                for (_, doc) in &prepared_docs {
-                    let doc_value = serde_json::to_value(doc)
-                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
-                    collection.validate_value_against_schema(&doc_value)?;
-                }
+                // 2. Collect WAL data before persist consumes prepared
+                let wal_entries: Vec<_> = prepared
+                    .prepared_docs
+                    .iter()
+                    .map(|p| (p.doc_id.clone(), p.wal_doc.clone()))
+                    .collect();
 
-                // === PHASE 2: Storage writes FIRST ===
-                // Storage must complete before WAL batch entries for crash safety.
-                let mut inserted_ids = Vec::with_capacity(prepared_docs.len());
-                for (doc_id, document) in &prepared_docs {
-                    collection.insert_one_raw(document.clone())?;
-                    inserted_ids.push(doc_id.clone());
-                }
+                // 3. PERSIST phase: write all documents to storage
+                // (Batch mode writes storage first, WAL later)
+                let inserted_ids = collection.insert_many_persist(prepared)?;
 
-                // === PHASE 3: Add to WAL batch (with _collection metadata) ===
-                // WAL entries need _collection for recovery to know which collection.
-                for (doc_id, document) in prepared_docs {
-                    // Create WAL doc with _collection metadata
-                    let mut wal_doc = document;
-                    wal_doc.insert(
-                        "_collection".to_string(),
-                        Value::String(collection_name.to_string()),
-                    );
-                    let doc_value = serde_json::to_value(&wal_doc)
-                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
-
+                // 4. Add to WAL batch (wal_doc has _id and _collection)
+                for (doc_id, wal_doc) in wal_entries {
                     let should_flush = self.add_to_batch(Operation::Insert {
                         collection: collection_name.to_string(),
                         doc_id,
-                        doc: doc_value,
+                        doc: wal_doc,
                     })?;
 
                     if should_flush {
@@ -911,70 +806,25 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Unsafe {
                 auto_checkpoint_ops,
             } => {
+                // Unsafe mode: Fast path, no WAL
                 let collection = self.collection(collection_name)?;
 
-                // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
-                collection.validate_batch_constraints(&documents)?;
+                // insert_many_raw handles all validation and storage writes
+                let result = collection.insert_many_raw(documents)?;
 
-                // === PHASE 1: Prepare documents (add _id only, NOT _collection) ===
-                // Unsafe mode has no WAL, so _collection is not needed at all.
-                let mut prepared_docs: Vec<(DocumentId, HashMap<String, Value>)> =
-                    Vec::with_capacity(documents.len());
-
-                for mut document in documents {
-                    // Generate doc_id (use existing _id or generate new ObjectId)
-                    let doc_id = if let Some(existing_id) = document.get("_id") {
-                        serde_json::from_value(existing_id.clone()).map_err(|e| {
-                            crate::error::MongoLiteError::Serialization(format!(
-                                "Invalid _id format: {}",
-                                e
-                            ))
-                        })?
-                    } else {
-                        // Generate new ObjectId (UUID-based, storage-independent)
-                        let new_id = DocumentId::new_object_id();
-                        document.insert(
-                            "_id".to_string(),
-                            serde_json::to_value(&new_id).map_err(|e| {
-                                crate::error::MongoLiteError::Serialization(e.to_string())
-                            })?,
-                        );
-                        new_id
-                    };
-
-                    // NOTE: Do NOT add _collection - it's WAL-only metadata (no WAL in Unsafe mode)
-                    prepared_docs.push((doc_id, document));
-                }
-
-                // 🔒 FIX #6: Pre-validate ALL schemas on prepared documents
-                // Schema validation happens AFTER _id is added, on the exact document
-                // that will be stored (without _collection, which is WAL-only).
-                for (_, doc) in &prepared_docs {
-                    let doc_value = serde_json::to_value(doc)
-                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
-                    collection.validate_value_against_schema(&doc_value)?;
-                }
-
-                // === PHASE 2: Storage writes ===
-                let mut inserted_ids = Vec::with_capacity(prepared_docs.len());
-
-                for (doc_id, document) in prepared_docs {
-                    collection.insert_one_raw(document)?;
-                    inserted_ids.push(doc_id);
-                }
-
+                // Auto checkpoint if configured
                 if let Some(threshold) = auto_checkpoint_ops {
                     let count = self
                         .unsafe_op_counter
-                        .fetch_add(inserted_ids.len() as u64, Ordering::Relaxed)
-                        + inserted_ids.len() as u64;
+                        .fetch_add(result.inserted_count as u64, Ordering::Relaxed)
+                        + result.inserted_count as u64;
                     if count >= threshold as u64 {
                         self.unsafe_op_counter.store(0, Ordering::Relaxed);
                         self.checkpoint()?;
                     }
                 }
 
-                Ok(inserted_ids)
+                Ok(result.inserted_ids)
             }
         }
     }
