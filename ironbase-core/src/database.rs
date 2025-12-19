@@ -520,41 +520,35 @@ impl DatabaseCore<StorageEngine> {
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
 
-                // 1. Find the document BEFORE update (for WAL old_doc)
-                let old_doc = collection.find_one(query)?;
-                if old_doc.is_none() {
+                // Phase 6: Use prepare/persist pattern
+                // PREPARE: Find doc, apply update, write to storage (atomic under lock)
+                let prepared = collection.update_one_prepare(query, update)?;
+
+                if prepared.matched == 0 {
                     return Ok((0, 0)); // No match, nothing to update
                 }
-                let old_doc = old_doc.unwrap();
 
-                let doc_id = extract_doc_id(&old_doc)?;
+                // If modified, add to WAL
+                if prepared.modified > 0 {
+                    let mut auto_tx = self.begin_auto_transaction();
 
-                // 2. Begin auto-transaction
-                let mut auto_tx = self.begin_auto_transaction();
-
-                // 3. Execute update
-                let (matched, modified) = collection.update_one_raw(query, update)?;
-
-                // 4. If modified, get new state and add to WAL
-                if modified > 0 {
-                    // Find the updated document
-                    let new_doc = collection
-                        .find_one(&serde_json::json!({"_id": &doc_id}))?
-                        .unwrap_or(old_doc.clone());
+                    // Extract doc_id - prepared.doc_id is always Some when matched > 0
+                    let doc_id = prepared.doc_id.clone().unwrap();
 
                     auto_tx.add_operation(Operation::Update {
                         collection: collection_name.to_string(),
-                        doc_id: doc_id.clone(),
-                        old_doc,
-                        new_doc,
+                        doc_id,
+                        old_doc: prepared.old_doc.clone().unwrap_or(Value::Null),
+                        new_doc: prepared.new_doc.clone().unwrap_or(Value::Null),
                     })?;
                     auto_tx.mark_operations_applied();
 
-                    // 5. Auto-commit (WAL write + fsync)
+                    // Auto-commit (WAL write + fsync)
                     self.commit_auto_transaction(auto_tx)?;
                 }
 
-                Ok((matched, modified))
+                // PERSIST: Cache invalidation only (storage already written in prepare)
+                collection.update_one_persist(prepared)
             }
 
             DurabilityMode::Batch { .. } => {
@@ -632,36 +626,32 @@ impl DatabaseCore<StorageEngine> {
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
 
-                // 1. Find the document BEFORE delete (for WAL old_doc)
-                let old_doc = collection.find_one(query)?;
-                if old_doc.is_none() {
+                // Phase 6: Use prepare/persist pattern
+                // PREPARE: Find doc, write tombstone (atomic under lock)
+                let prepared = collection.delete_one_prepare(query)?;
+
+                if prepared.deleted == 0 {
                     return Ok(0); // No match, nothing to delete
                 }
-                let old_doc = old_doc.unwrap();
 
-                // Extract doc_id
-                let doc_id = extract_doc_id(&old_doc)?;
-
-                // 2. Begin auto-transaction
+                // If deleted, add to WAL
                 let mut auto_tx = self.begin_auto_transaction();
 
-                // 3. Execute delete
-                let deleted = collection.delete_one_raw(query)?;
+                // Extract doc_id - prepared.doc_id is always Some when deleted > 0
+                let doc_id = prepared.doc_id.clone().unwrap();
 
-                // 4. If deleted, add to WAL
-                if deleted > 0 {
-                    auto_tx.add_operation(Operation::Delete {
-                        collection: collection_name.to_string(),
-                        doc_id,
-                        old_doc,
-                    })?;
-                    auto_tx.mark_operations_applied();
+                auto_tx.add_operation(Operation::Delete {
+                    collection: collection_name.to_string(),
+                    doc_id,
+                    old_doc: prepared.old_doc.clone().unwrap_or(Value::Null),
+                })?;
+                auto_tx.mark_operations_applied();
 
-                    // 5. Auto-commit (WAL write + fsync)
-                    self.commit_auto_transaction(auto_tx)?;
-                }
+                // Auto-commit (WAL write + fsync)
+                self.commit_auto_transaction(auto_tx)?;
 
-                Ok(deleted)
+                // PERSIST: Cache invalidation only (storage already written in prepare)
+                collection.delete_one_persist(prepared)
             }
 
             DurabilityMode::Batch { .. } => {

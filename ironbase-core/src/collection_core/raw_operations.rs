@@ -99,6 +99,56 @@ pub struct InsertManyPrepared {
     pub(crate) collection_name: String,
 }
 
+/// Prepared data for update_one operation.
+/// Contains all info needed for WAL logging.
+///
+/// WAL REFACTOR Phase 6: Consistent prepare/persist pattern for updates.
+///
+/// IMPORTANT: Unlike insert, update requires ATOMIC read-modify-write.
+/// The prepare phase performs ALL I/O (including storage write) under lock
+/// to guarantee correct old_doc/new_doc values for WAL.
+///
+/// - PREPARE phase: Find doc, apply update, write to storage (ALL under write lock)
+/// - PERSIST phase: Cache invalidation only (after WAL commit)
+#[derive(Debug)]
+pub struct UpdateOnePrepared {
+    /// The document ID that was updated (if any)
+    pub doc_id: Option<DocumentId>,
+    /// The document BEFORE update (for WAL recovery/undo)
+    pub old_doc: Option<Value>,
+    /// The document AFTER update (for WAL recovery/redo)
+    pub new_doc: Option<Value>,
+    /// Number of documents matched (0 or 1)
+    pub matched: u64,
+    /// Number of documents modified (0 or 1)
+    pub modified: u64,
+    /// Collection name for context
+    pub(crate) collection_name: String,
+}
+
+/// Prepared data for delete_one operation.
+/// Contains all info needed for WAL logging.
+///
+/// WAL REFACTOR Phase 6: Consistent prepare/persist pattern for deletes.
+///
+/// IMPORTANT: Like update, delete requires atomic find-and-delete.
+/// The prepare phase performs ALL I/O (including tombstone write) under lock
+/// to guarantee correct old_doc value for WAL.
+///
+/// - PREPARE phase: Find doc, write tombstone, update indexes (ALL under write lock)
+/// - PERSIST phase: Cache invalidation only (after WAL commit)
+#[derive(Debug)]
+pub struct DeleteOnePrepared {
+    /// The document ID that was deleted (if any)
+    pub doc_id: Option<DocumentId>,
+    /// The document that was deleted (for WAL recovery/undo)
+    pub old_doc: Option<Value>,
+    /// Number of documents deleted (0 or 1)
+    pub deleted: u64,
+    /// Collection name for context
+    pub(crate) collection_name: String,
+}
+
 /// Helper: Check if document is a tombstone
 #[inline]
 fn is_tombstone(doc: &Value) -> bool {
@@ -227,6 +277,52 @@ pub(crate) trait RawOperations: sealed::Sealed {
     ///
     /// BUG #1 FIX: Only call this after WAL is committed!
     fn delete_many_persist(&self, prepared: DeleteManyPrepared) -> Result<u64>;
+
+    // ========================================================================
+    // UPDATE_ONE/DELETE_ONE PREPARE/PERSIST METHODS (PHASE 6 - CONSISTENCY)
+    // ========================================================================
+
+    /// PREPARE phase for update_one: find doc, apply update, write to storage.
+    ///
+    /// PHASE 6: Consistent prepare/persist pattern for single updates.
+    ///
+    /// IMPORTANT: Unlike insert, update requires ATOMIC read-modify-write.
+    /// This method performs ALL I/O (including storage write) under write lock
+    /// to guarantee correct old_doc/new_doc values for WAL.
+    ///
+    /// Usage:
+    /// 1. Call update_one_prepare() - finds doc, applies update, writes to storage
+    /// 2. Write to WAL using prepared.old_doc/new_doc
+    /// 3. Commit WAL (fsync)
+    /// 4. Call update_one_persist() - cache invalidation only
+    fn update_one_prepare(&self, query: &Value, update: &Value) -> Result<UpdateOnePrepared>;
+
+    /// PERSIST phase for update_one: cache invalidation only.
+    ///
+    /// PHASE 6: Storage write already happened in prepare phase (atomic requirement).
+    /// This method only invalidates the query cache.
+    fn update_one_persist(&self, prepared: UpdateOnePrepared) -> Result<(u64, u64)>;
+
+    /// PREPARE phase for delete_one: find doc, write tombstone, update indexes.
+    ///
+    /// PHASE 6: Consistent prepare/persist pattern for single deletes.
+    ///
+    /// IMPORTANT: Like update, delete requires atomic find-and-delete.
+    /// This method performs ALL I/O (including tombstone write) under write lock
+    /// to guarantee correct old_doc value for WAL.
+    ///
+    /// Usage:
+    /// 1. Call delete_one_prepare() - finds doc, writes tombstone, updates indexes
+    /// 2. Write to WAL using prepared.old_doc
+    /// 3. Commit WAL (fsync)
+    /// 4. Call delete_one_persist() - cache invalidation only
+    fn delete_one_prepare(&self, query: &Value) -> Result<DeleteOnePrepared>;
+
+    /// PERSIST phase for delete_one: cache invalidation only.
+    ///
+    /// PHASE 6: Storage write already happened in prepare phase (atomic requirement).
+    /// This method only invalidates the query cache.
+    fn delete_one_persist(&self, prepared: DeleteOnePrepared) -> Result<u64>;
 
     // ========================================================================
     // INSERT PREPARE/PERSIST METHODS (WAL REFACTOR)
@@ -1321,6 +1417,209 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         Ok(prepared.inserted_ids)
     }
+
+    // ========================================================================
+    // UPDATE_ONE PREPARE/PERSIST IMPLEMENTATION (PHASE 6)
+    // ========================================================================
+
+    /// PREPARE phase for update_one: find doc, apply update, write to storage.
+    ///
+    /// PHASE 6: All I/O happens here under write lock for atomicity.
+    /// The persist phase only does cache invalidation.
+    fn update_one_prepare(
+        &self,
+        query_json: &Value,
+        update_json: &Value,
+    ) -> Result<UpdateOnePrepared> {
+        self.check_not_closed()?;
+        let parsed_query = Query::from_json(query_json)?;
+
+        // 🔒 ATOMIC: Acquire write lock for entire read-modify-write cycle
+        let mut storage = self.storage.write();
+
+        // Clone catalog to avoid borrow issues
+        let catalog = match storage.get_collection_meta(&self.name) {
+            Some(m) => m.document_catalog.clone(),
+            None => {
+                return Ok(UpdateOnePrepared {
+                    doc_id: None,
+                    old_doc: None,
+                    new_doc: None,
+                    matched: 0,
+                    modified: 0,
+                    collection_name: self.name.clone(),
+                });
+            }
+        };
+
+        // Read documents under write lock
+        let docs_by_id: HashMap<DocumentId, Value> =
+            match try_direct_id_lookup(&mut *storage, &catalog, query_json) {
+                Some(map) => map,
+                None => inline_scan_with_catalog(&mut *storage, &catalog)?,
+            };
+
+        // Find first matching document
+        for (_, doc) in docs_by_id {
+            let doc_json_str = serde_json::to_string(&doc)?;
+            let mut document = Document::from_json(&doc_json_str)?;
+
+            if parsed_query.matches(&document) {
+                // Found match - save original for WAL
+                let old_doc_value = doc.clone();
+                let original_document = document.clone();
+
+                // Apply update operators
+                let was_modified =
+                    super::update_operators::apply_update_operators(&mut document, update_json)?;
+
+                if was_modified {
+                    // Check unique constraints
+                    self.check_index_constraints(&document, Some(&document.id))?;
+
+                    // Update indexes (under storage lock)
+                    self.remove_from_indexes(&original_document)?;
+                    self.add_to_indexes(&document)?;
+
+                    // Write tombstone for old document
+                    let mut tombstone = old_doc_value.clone();
+                    if let Value::Object(ref mut map) = tombstone {
+                        map.insert("_tombstone".to_string(), Value::Bool(true));
+                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    }
+                    let tombstone_json = serde_json::to_string(&tombstone)?;
+                    storage.write_data(tombstone_json.as_bytes())?;
+
+                    // Validate and write updated document
+                    self.validate_document(&document)?;
+                    let updated_json = document.to_json()?;
+                    storage.write_document_raw(
+                        &self.name,
+                        &document.id,
+                        updated_json.as_bytes(),
+                    )?;
+
+                    // Convert new doc to Value for WAL
+                    let new_doc_value = serde_json::to_value(&document)
+                        .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+
+                    return Ok(UpdateOnePrepared {
+                        doc_id: Some(document.id),
+                        old_doc: Some(old_doc_value),
+                        new_doc: Some(new_doc_value),
+                        matched: 1,
+                        modified: 1,
+                        collection_name: self.name.clone(),
+                    });
+                } else {
+                    // Matched but not modified
+                    return Ok(UpdateOnePrepared {
+                        doc_id: Some(document.id),
+                        old_doc: Some(old_doc_value.clone()),
+                        new_doc: Some(old_doc_value), // Same as old
+                        matched: 1,
+                        modified: 0,
+                        collection_name: self.name.clone(),
+                    });
+                }
+            }
+        }
+
+        // No match found
+        Ok(UpdateOnePrepared {
+            doc_id: None,
+            old_doc: None,
+            new_doc: None,
+            matched: 0,
+            modified: 0,
+            collection_name: self.name.clone(),
+        })
+    }
+
+    /// PERSIST phase for update_one: cache invalidation only.
+    ///
+    /// PHASE 6: Storage write already happened in prepare phase.
+    fn update_one_persist(&self, prepared: UpdateOnePrepared) -> Result<(u64, u64)> {
+        if prepared.modified > 0 {
+            self.query_cache
+                .invalidate_collection(&prepared.collection_name);
+        }
+        Ok((prepared.matched, prepared.modified))
+    }
+
+    // ========================================================================
+    // DELETE_ONE PREPARE/PERSIST IMPLEMENTATION (PHASE 6)
+    // ========================================================================
+
+    /// PREPARE phase for delete_one: find doc, write tombstone, update indexes.
+    ///
+    /// PHASE 6: All I/O happens here under write lock for atomicity.
+    /// The persist phase only does cache invalidation.
+    fn delete_one_prepare(&self, query_json: &Value) -> Result<DeleteOnePrepared> {
+        self.check_not_closed()?;
+        let parsed_query = Query::from_json(query_json)?;
+
+        // Read documents (optimization for _id queries)
+        let docs_by_id = match self.try_id_query_optimization(query_json)? {
+            Some(docs) => docs,
+            None => self.scan_documents_via_catalog()?,
+        };
+
+        // 🔒 ATOMIC: Acquire write lock for delete operation
+        let mut storage = self.storage.write();
+
+        for (_, doc) in docs_by_id {
+            let doc_json_str = serde_json::to_string(&doc)?;
+            let document = Document::from_json(&doc_json_str)?;
+
+            if parsed_query.matches(&document) {
+                // Save old doc for WAL
+                let old_doc_value = doc.clone();
+                let doc_id = document.id.clone();
+
+                // Remove from indexes (drop storage lock temporarily to avoid deadlock)
+                drop(storage);
+                self.remove_from_indexes(&document)?;
+                storage = self.storage.write();
+
+                // Write tombstone
+                let mut tombstone = old_doc_value.clone();
+                if let Value::Object(ref mut map) = tombstone {
+                    map.insert("_tombstone".to_string(), Value::Bool(true));
+                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                }
+                let tombstone_json = serde_json::to_string(&tombstone)?;
+                storage.write_document_raw(&self.name, &doc_id, tombstone_json.as_bytes())?;
+                storage.adjust_live_count(&self.name, -1);
+
+                return Ok(DeleteOnePrepared {
+                    doc_id: Some(doc_id),
+                    old_doc: Some(old_doc_value),
+                    deleted: 1,
+                    collection_name: self.name.clone(),
+                });
+            }
+        }
+
+        // No match found
+        Ok(DeleteOnePrepared {
+            doc_id: None,
+            old_doc: None,
+            deleted: 0,
+            collection_name: self.name.clone(),
+        })
+    }
+
+    /// PERSIST phase for delete_one: cache invalidation only.
+    ///
+    /// PHASE 6: Storage write already happened in prepare phase.
+    fn delete_one_persist(&self, prepared: DeleteOnePrepared) -> Result<u64> {
+        if prepared.deleted > 0 {
+            self.query_cache
+                .invalidate_collection(&prepared.collection_name);
+        }
+        Ok(prepared.deleted)
+    }
 }
 
 /// Helper: Scan documents using a pre-cloned catalog and pre-held storage guard
@@ -1888,5 +2187,201 @@ mod tests {
         // So between 10-13 successes expected, rest are errors
         assert!(total_success >= 5, "At least some inserts should succeed");
         assert!(total_success + total_errors > 0, "All threads completed");
+    }
+
+    // ========================================================================
+    // UPDATE_ONE PREPARE/PERSIST TESTS (PHASE 6)
+    // ========================================================================
+
+    #[test]
+    fn test_update_one_prepare_no_match() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert a document
+        coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Alice"))]))
+            .unwrap();
+
+        // Try to update non-existent document
+        let prepared = coll
+            .update_one_prepare(&json!({"name": "Bob"}), &json!({"$set": {"age": 30}}))
+            .unwrap();
+
+        assert_eq!(prepared.matched, 0);
+        assert_eq!(prepared.modified, 0);
+        assert!(prepared.doc_id.is_none());
+        assert!(prepared.old_doc.is_none());
+        assert!(prepared.new_doc.is_none());
+    }
+
+    #[test]
+    fn test_update_one_prepare_matched_modified() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert a document
+        coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Alice"))]))
+            .unwrap();
+
+        // Update the document
+        let prepared = coll
+            .update_one_prepare(&json!({"name": "Alice"}), &json!({"$set": {"age": 25}}))
+            .unwrap();
+
+        assert_eq!(prepared.matched, 1);
+        assert_eq!(prepared.modified, 1);
+        assert!(prepared.doc_id.is_some());
+        assert!(prepared.old_doc.is_some());
+        assert!(prepared.new_doc.is_some());
+
+        // Check old_doc doesn't have age
+        let old_doc = prepared.old_doc.as_ref().unwrap();
+        assert!(old_doc.get("age").is_none());
+
+        // Check new_doc has age
+        let new_doc = prepared.new_doc.as_ref().unwrap();
+        assert_eq!(new_doc.get("age"), Some(&json!(25)));
+    }
+
+    #[test]
+    fn test_update_one_prepare_same_value_still_modified() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert a document with age
+        coll.insert_one_raw(HashMap::from([
+            ("name".to_string(), json!("Alice")),
+            ("age".to_string(), json!(25)),
+        ]))
+        .unwrap();
+
+        // Update with same value - IronBase reports as modified
+        // (MongoDB behavior: modified=1 if write occurred, regardless of value change)
+        let prepared = coll
+            .update_one_prepare(&json!({"name": "Alice"}), &json!({"$set": {"age": 25}}))
+            .unwrap();
+
+        assert_eq!(prepared.matched, 1);
+        assert_eq!(prepared.modified, 1); // Modified because $set was applied
+        assert!(prepared.doc_id.is_some());
+        assert!(prepared.old_doc.is_some());
+        assert!(prepared.new_doc.is_some());
+    }
+
+    #[test]
+    fn test_update_one_persist_cache_invalidation() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert and query to cache
+        coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Alice"))]))
+            .unwrap();
+        let _ = coll.find(&json!({})).unwrap(); // Populate cache
+
+        // Update via prepare/persist
+        let prepared = coll
+            .update_one_prepare(&json!({"name": "Alice"}), &json!({"$set": {"age": 25}}))
+            .unwrap();
+        let (matched, modified) = coll.update_one_persist(prepared).unwrap();
+
+        assert_eq!(matched, 1);
+        assert_eq!(modified, 1);
+
+        // Query should return updated data (cache was invalidated)
+        let docs = coll.find(&json!({})).unwrap();
+        assert_eq!(docs[0].get("age"), Some(&json!(25)));
+    }
+
+    // ========================================================================
+    // DELETE_ONE PREPARE/PERSIST TESTS (PHASE 6)
+    // ========================================================================
+
+    #[test]
+    fn test_delete_one_prepare_no_match() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert a document
+        coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Alice"))]))
+            .unwrap();
+
+        // Try to delete non-existent document
+        let prepared = coll.delete_one_prepare(&json!({"name": "Bob"})).unwrap();
+
+        assert_eq!(prepared.deleted, 0);
+        assert!(prepared.doc_id.is_none());
+        assert!(prepared.old_doc.is_none());
+    }
+
+    #[test]
+    fn test_delete_one_prepare_match() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert a document
+        coll.insert_one_raw(HashMap::from([
+            ("name".to_string(), json!("Alice")),
+            ("age".to_string(), json!(25)),
+        ]))
+        .unwrap();
+
+        // Delete the document
+        let prepared = coll.delete_one_prepare(&json!({"name": "Alice"})).unwrap();
+
+        assert_eq!(prepared.deleted, 1);
+        assert!(prepared.doc_id.is_some());
+        assert!(prepared.old_doc.is_some());
+
+        // Check old_doc contains the deleted document data
+        let old_doc = prepared.old_doc.as_ref().unwrap();
+        assert_eq!(old_doc.get("name"), Some(&json!("Alice")));
+        assert_eq!(old_doc.get("age"), Some(&json!(25)));
+    }
+
+    #[test]
+    fn test_delete_one_persist_cache_invalidation() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert and query to cache
+        coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Alice"))]))
+            .unwrap();
+        let _ = coll.find(&json!({})).unwrap(); // Populate cache
+
+        // Delete via prepare/persist
+        let prepared = coll.delete_one_prepare(&json!({"name": "Alice"})).unwrap();
+        let deleted = coll.delete_one_persist(prepared).unwrap();
+
+        assert_eq!(deleted, 1);
+
+        // Query should return empty (cache was invalidated, document deleted)
+        let docs = coll.find(&json!({})).unwrap();
+        assert!(docs.is_empty());
+    }
+
+    #[test]
+    fn test_delete_one_prepare_removes_from_index() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Create index
+        coll.create_index("name".to_string(), false).unwrap();
+
+        // Insert documents
+        coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Alice"))]))
+            .unwrap();
+        coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Bob"))]))
+            .unwrap();
+
+        // Delete one document
+        let prepared = coll.delete_one_prepare(&json!({"name": "Alice"})).unwrap();
+        let _ = coll.delete_one_persist(prepared).unwrap();
+
+        // Only Bob should be findable via index
+        let docs = coll.find(&json!({"name": "Bob"})).unwrap();
+        assert_eq!(docs.len(), 1);
+
+        let docs = coll.find(&json!({"name": "Alice"})).unwrap();
+        assert!(docs.is_empty());
     }
 }
