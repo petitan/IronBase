@@ -923,20 +923,20 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// BUG #1 FIX: Only call this after WAL is committed!
     /// This method:
-    /// - Writes tombstones and updated documents to storage FIRST
-    /// - Updates indexes (batch operation) AFTER storage success
+    /// - Updates indexes (batch operation) FIRST
+    /// - Writes tombstones and updated documents to storage
     /// - Invalidates query cache
     ///
-    /// PHASE 4 FIX: Storage writes before index updates prevents orphan index entries.
+    /// NOTE: For batch operations, index-first is safer for partial storage failure.
+    /// Phantom index entries are gracefully handled (fetch fails, skip).
     fn update_many_persist(&self, prepared: UpdateManyPrepared) -> Result<(u64, u64)> {
-        // PHASE 4: BATCH STORAGE WRITE FIRST
-        self.batch_write_updates(prepared.storage_writes)?;
-
-        // PHASE 4: BATCH INDEX UPDATE AFTER storage success
-        // Constraint check was done in prepare phase, so this should not fail
+        // BATCH INDEX UPDATE FIRST (safer for partial storage failure)
         if !prepared.index_updates.is_empty() {
             self.batch_update_indexes(&prepared.index_updates)?;
         }
+
+        // BATCH STORAGE WRITE
+        self.batch_write_updates(prepared.storage_writes)?;
 
         // Invalidate query cache if any document was modified
         if prepared.modified > 0 {
@@ -1002,26 +1002,27 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// BUG #1 FIX: Only call this after WAL is committed!
     /// This method:
-    /// - Writes tombstones to storage FIRST
-    /// - Removes from all indexes AFTER storage success
+    /// - Removes from all indexes FIRST
+    /// - Writes tombstones to storage
     /// - Invalidates query cache
     ///
-    /// PHASE 4 FIX: Storage writes before index updates.
-    /// If tombstone write fails, index entries remain (docs still queryable).
+    /// NOTE: For batch operations, index-first is safer for partial storage failure.
+    /// If tombstone write fails mid-batch, removed index entries mean those docs
+    /// won't appear in queries (acceptable - they were meant to be deleted).
     /// Recovery rebuilds indexes from storage, ensuring consistency.
     fn delete_many_persist(&self, prepared: DeleteManyPrepared) -> Result<u64> {
-        // PHASE 4: Write tombstones to storage FIRST
+        // Remove from indexes FIRST (safer for partial storage failure)
+        for document in &prepared.index_removals {
+            self.remove_from_indexes(document)?;
+        }
+
+        // Write tombstones to storage
         if !prepared.tombstone_writes.is_empty() {
             let mut storage = self.storage.write();
             for (doc_id, tombstone_json) in &prepared.tombstone_writes {
                 storage.write_document_raw(&self.name, doc_id, tombstone_json.as_bytes())?;
             }
             storage.adjust_live_count(&self.name, -(prepared.deleted as i64));
-        }
-
-        // PHASE 4: Remove from indexes AFTER successful storage writes
-        for document in &prepared.index_removals {
-            self.remove_from_indexes(document)?;
         }
 
         // Invalidate query cache if any document was deleted
@@ -1278,19 +1279,31 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// WAL REFACTOR: Only call this after WAL is committed!
     /// This method:
-    /// - Writes all documents to storage FIRST
-    /// - Updates indexes in batch AFTER all storage writes succeed
+    /// - Updates indexes in batch FIRST (atomic at index level)
+    /// - Writes all documents to storage
     /// - Invalidates query cache
     ///
-    /// PHASE 4 FIX: Storage writes before index updates prevents orphan index entries.
-    /// If a storage write fails, no documents are indexed.
-    /// Recovery rebuilds indexes from storage, ensuring consistency.
+    /// NOTE: For batch operations, index-first is safer than storage-first because:
+    /// - If storage write fails mid-batch, phantom index entries are gracefully handled
+    ///   (query finds entry, fetch fails, skips it)
+    /// - If we did storage-first and failed mid-batch, successfully written docs
+    ///   would be MISSING from indexes until restart (worse for query correctness)
+    /// - Recovery rebuilds indexes from storage in both cases
     fn insert_many_persist(&self, prepared: InsertManyPrepared) -> Result<Vec<DocumentId>> {
         if prepared.prepared_docs.is_empty() {
             return Ok(Vec::new());
         }
 
-        // PHASE 4: Write ALL documents to storage FIRST
+        // Update indexes in batch FIRST (atomic operation, all-or-nothing)
+        // This is safer for partial storage failure - phantom entries are handled gracefully
+        let docs_for_index: Vec<Document> = prepared
+            .prepared_docs
+            .iter()
+            .map(|p| p.document.clone())
+            .collect();
+        self.batch_add_to_indexes(&docs_for_index)?;
+
+        // Write all documents to storage
         {
             let mut storage = self.storage.write();
             let mut live_delta = 0i64;
@@ -1308,16 +1321,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             if live_delta != 0 {
                 storage.adjust_live_count(&prepared.collection_name, live_delta);
             }
-        } // Release storage lock before index update
-
-        // PHASE 4: Update indexes AFTER all storage writes succeed
-        // Constraint check was done in prepare phase, so this should not fail
-        let docs_for_index: Vec<Document> = prepared
-            .prepared_docs
-            .iter()
-            .map(|p| p.document.clone())
-            .collect();
-        self.batch_add_to_indexes(&docs_for_index)?;
+        }
 
         // Invalidate query cache (collection has changed)
         self.query_cache
