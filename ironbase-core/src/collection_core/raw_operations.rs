@@ -72,7 +72,6 @@ pub struct DeleteManyPrepared {
 /// - PREPARE phase: Validate document, generate _id, prepare WAL entry (no storage writes)
 /// - PERSIST phase: Write to storage and update indexes (after WAL commit)
 #[derive(Debug)]
-#[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
 pub struct InsertOnePrepared {
     /// The document ID (auto-generated or provided)
     pub doc_id: DocumentId,
@@ -91,7 +90,6 @@ pub struct InsertOnePrepared {
 /// - PREPARE phase: Validate all documents, check constraints (no storage writes)
 /// - PERSIST phase: Write all to storage and update indexes (after WAL commit)
 #[derive(Debug)]
-#[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
 pub struct InsertManyPrepared {
     /// Individual prepared inserts
     pub prepared_docs: Vec<InsertOnePrepared>,
@@ -241,13 +239,11 @@ pub(crate) trait RawOperations: sealed::Sealed {
     /// 2. Write to WAL using prepared.wal_doc
     /// 3. Commit WAL (fsync)
     /// 4. Call insert_one_persist() - writes to storage (safe now, WAL is committed)
-    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
     fn insert_one_prepare(&self, fields: HashMap<String, Value>) -> Result<InsertOnePrepared>;
 
     /// PERSIST phase for insert_one: write to storage AFTER WAL commit.
     ///
     /// WAL REFACTOR: Only call this after WAL is committed!
-    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
     fn insert_one_persist(&self, prepared: InsertOnePrepared) -> Result<DocumentId>;
 
     /// PREPARE phase for insert_many: validate all documents and generate IDs, NO storage writes.
@@ -257,7 +253,6 @@ pub(crate) trait RawOperations: sealed::Sealed {
     /// 2. Write to WAL using prepared.prepared_docs[].wal_doc
     /// 3. Commit WAL (fsync)
     /// 4. Call insert_many_persist() - writes all to storage (safe now, WAL is committed)
-    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
     fn insert_many_prepare(
         &self,
         documents: Vec<HashMap<String, Value>>,
@@ -266,7 +261,6 @@ pub(crate) trait RawOperations: sealed::Sealed {
     /// PERSIST phase for insert_many: write all documents to storage AFTER WAL commit.
     ///
     /// WAL REFACTOR: Only call this after WAL is committed!
-    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
     fn insert_many_persist(&self, prepared: InsertManyPrepared) -> Result<Vec<DocumentId>>;
 }
 
@@ -929,17 +923,20 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// BUG #1 FIX: Only call this after WAL is committed!
     /// This method:
-    /// - Updates indexes (batch operation)
-    /// - Writes tombstones and updated documents to storage
+    /// - Writes tombstones and updated documents to storage FIRST
+    /// - Updates indexes (batch operation) AFTER storage success
     /// - Invalidates query cache
+    ///
+    /// PHASE 4 FIX: Storage writes before index updates prevents orphan index entries.
     fn update_many_persist(&self, prepared: UpdateManyPrepared) -> Result<(u64, u64)> {
-        // BATCH INDEX UPDATE: Single lock acquisition for all index operations
+        // PHASE 4: BATCH STORAGE WRITE FIRST
+        self.batch_write_updates(prepared.storage_writes)?;
+
+        // PHASE 4: BATCH INDEX UPDATE AFTER storage success
+        // Constraint check was done in prepare phase, so this should not fail
         if !prepared.index_updates.is_empty() {
             self.batch_update_indexes(&prepared.index_updates)?;
         }
-
-        // BATCH STORAGE WRITE: Single lock acquisition for all storage operations
-        self.batch_write_updates(prepared.storage_writes)?;
 
         // Invalidate query cache if any document was modified
         if prepared.modified > 0 {
@@ -1005,22 +1002,26 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// BUG #1 FIX: Only call this after WAL is committed!
     /// This method:
-    /// - Removes from all indexes
-    /// - Writes tombstones to storage
+    /// - Writes tombstones to storage FIRST
+    /// - Removes from all indexes AFTER storage success
     /// - Invalidates query cache
+    ///
+    /// PHASE 4 FIX: Storage writes before index updates.
+    /// If tombstone write fails, index entries remain (docs still queryable).
+    /// Recovery rebuilds indexes from storage, ensuring consistency.
     fn delete_many_persist(&self, prepared: DeleteManyPrepared) -> Result<u64> {
-        // Remove from indexes FIRST
-        for document in &prepared.index_removals {
-            self.remove_from_indexes(document)?;
-        }
-
-        // Write tombstones to storage
+        // PHASE 4: Write tombstones to storage FIRST
         if !prepared.tombstone_writes.is_empty() {
             let mut storage = self.storage.write();
             for (doc_id, tombstone_json) in &prepared.tombstone_writes {
                 storage.write_document_raw(&self.name, doc_id, tombstone_json.as_bytes())?;
             }
             storage.adjust_live_count(&self.name, -(prepared.deleted as i64));
+        }
+
+        // PHASE 4: Remove from indexes AFTER successful storage writes
+        for document in &prepared.index_removals {
+            self.remove_from_indexes(document)?;
         }
 
         // Invalidate query cache if any document was deleted
@@ -1119,22 +1120,29 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// WAL REFACTOR: Only call this after WAL is committed!
     /// This method:
-    /// - Updates indexes (adds document)
-    /// - Writes document to storage
+    /// - Writes document to storage FIRST
+    /// - Updates indexes (adds document) AFTER storage success
     /// - Invalidates query cache
+    ///
+    /// PHASE 4 FIX: Storage write before index update prevents orphan index entries.
+    /// If storage write fails, no index entry is created.
+    /// If index update fails (rare - constraints checked in prepare), recovery rebuilds.
     fn insert_one_persist(&self, prepared: InsertOnePrepared) -> Result<DocumentId> {
-        // Update indexes BEFORE writing to storage
-        self.add_to_indexes(&prepared.document)?;
+        // PHASE 4: Write to storage FIRST
+        {
+            let mut storage = self.storage.write();
+            let doc_json = prepared.document.to_json()?;
+            storage.write_document_raw(
+                &prepared.collection_name,
+                &prepared.doc_id,
+                doc_json.as_bytes(),
+            )?;
+            storage.adjust_live_count(&prepared.collection_name, 1);
+        } // Release storage lock before index update
 
-        // Write to storage
-        let mut storage = self.storage.write();
-        let doc_json = prepared.document.to_json()?;
-        storage.write_document_raw(
-            &prepared.collection_name,
-            &prepared.doc_id,
-            doc_json.as_bytes(),
-        )?;
-        storage.adjust_live_count(&prepared.collection_name, 1);
+        // PHASE 4: Update indexes AFTER successful storage write
+        // Constraint check was done in prepare phase, so this should not fail
+        self.add_to_indexes(&prepared.document)?;
 
         // Invalidate query cache (collection has changed)
         self.query_cache
@@ -1270,39 +1278,46 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// WAL REFACTOR: Only call this after WAL is committed!
     /// This method:
-    /// - Updates indexes in batch (adds all documents)
-    /// - Writes all documents to storage
+    /// - Writes all documents to storage FIRST
+    /// - Updates indexes in batch AFTER all storage writes succeed
     /// - Invalidates query cache
+    ///
+    /// PHASE 4 FIX: Storage writes before index updates prevents orphan index entries.
+    /// If a storage write fails, no documents are indexed.
+    /// Recovery rebuilds indexes from storage, ensuring consistency.
     fn insert_many_persist(&self, prepared: InsertManyPrepared) -> Result<Vec<DocumentId>> {
         if prepared.prepared_docs.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Update indexes in batch BEFORE writing to storage
+        // PHASE 4: Write ALL documents to storage FIRST
+        {
+            let mut storage = self.storage.write();
+            let mut live_delta = 0i64;
+
+            for prep in &prepared.prepared_docs {
+                let doc_json = prep.document.to_json()?;
+                storage.write_document_raw(
+                    &prepared.collection_name,
+                    &prep.doc_id,
+                    doc_json.as_bytes(),
+                )?;
+                live_delta += 1;
+            }
+
+            if live_delta != 0 {
+                storage.adjust_live_count(&prepared.collection_name, live_delta);
+            }
+        } // Release storage lock before index update
+
+        // PHASE 4: Update indexes AFTER all storage writes succeed
+        // Constraint check was done in prepare phase, so this should not fail
         let docs_for_index: Vec<Document> = prepared
             .prepared_docs
             .iter()
             .map(|p| p.document.clone())
             .collect();
         self.batch_add_to_indexes(&docs_for_index)?;
-
-        // Write all documents to storage
-        let mut storage = self.storage.write();
-        let mut live_delta = 0i64;
-
-        for prep in &prepared.prepared_docs {
-            let doc_json = prep.document.to_json()?;
-            storage.write_document_raw(
-                &prepared.collection_name,
-                &prep.doc_id,
-                doc_json.as_bytes(),
-            )?;
-            live_delta += 1;
-        }
-
-        if live_delta != 0 {
-            storage.adjust_live_count(&prepared.collection_name, live_delta);
-        }
 
         // Invalidate query cache (collection has changed)
         self.query_cache
