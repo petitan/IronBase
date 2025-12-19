@@ -70,7 +70,21 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: native-${{ matrix.os }}
-          path: IronBase.NET/src/IronBase/runtimes/
+          path: native-artifact
+
+      - name: Copy native library to runtime folder
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            mkdir -p IronBase.NET/runtimes/linux-x64/native
+            cp native-artifact/libironbase_ffi.so IronBase.NET/runtimes/linux-x64/native/
+          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+            mkdir -p IronBase.NET/runtimes/win-x64/native
+            cp native-artifact/ironbase_ffi.dll IronBase.NET/runtimes/win-x64/native/
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            mkdir -p IronBase.NET/runtimes/osx-x64/native
+            cp native-artifact/libironbase_ffi.dylib IronBase.NET/runtimes/osx-x64/native/
+          fi
 
       - name: Build .NET project
         run: dotnet build IronBase.NET/IronBase.NET.sln --configuration Release
