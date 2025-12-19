@@ -1,7 +1,10 @@
 // ironbase-core/src/find_options.rs
 // Find query options: projection, sort, limit, skip
 
-use crate::value_utils::get_nested_value;
+use crate::error::{MongoLiteError, Result};
+use crate::value_utils::{
+    compare_values as compare_values_core, delete_nested_value, get_nested_value, set_nested_value,
+};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -50,9 +53,13 @@ impl FindOptions {
 
 /// Apply projection to a document
 /// Supports dot notation for nested fields (e.g., "address.city")
-pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value {
+///
+/// # Errors
+/// Returns `InvalidQuery` if projection mixes inclusion (1) and exclusion (0) fields.
+/// Exception: `_id: 0` is allowed in include mode (MongoDB compatible).
+pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Result<Value> {
     if projection.is_empty() {
-        return doc.clone();
+        return Ok(doc.clone());
     }
 
     // Detect mode
@@ -61,10 +68,17 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value
         .iter()
         .any(|(field, &action)| action == 0 && field != "_id");
 
-    let include_mode = has_inclusions && !has_non_id_exclusions;
+    // Validate: Cannot mix inclusion and exclusion (except _id: 0 in include mode)
+    if has_inclusions && has_non_id_exclusions {
+        return Err(MongoLiteError::InvalidQuery(
+            "Cannot mix inclusion and exclusion in projection (except _id: 0)".to_string(),
+        ));
+    }
+
+    let include_mode = has_inclusions;
 
     if let Value::Object(obj) = doc {
-        let mut result = serde_json::Map::new();
+        let mut result = Value::Object(serde_json::Map::new());
 
         if include_mode {
             // Include specified fields
@@ -72,7 +86,9 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value
                 if action == 1 {
                     // Use get_nested_value to support dot notation (e.g., "address.city")
                     if let Some(value) = get_nested_value(doc, field) {
-                        result.insert(field.clone(), value.clone());
+                        // Use set_nested_value to build proper nested structure
+                        // e.g., "address.city" → {"address": {"city": value}}
+                        set_nested_value(&mut result, field, value.clone());
                     }
                 }
             }
@@ -80,31 +96,47 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Value
             // Include _id unless explicitly excluded
             if projection.get("_id") != Some(&0) {
                 if let Some(id) = obj.get("_id") {
-                    result.insert("_id".to_string(), id.clone());
+                    set_nested_value(&mut result, "_id", id.clone());
                 }
             }
         } else {
-            // Exclude mode: copy all except excluded
-            // Note: For exclude mode with dot notation, we only exclude top-level fields
-            // (dot notation exclusion is complex and rarely used in practice)
-            for (key, value) in obj {
-                if projection.get(key) != Some(&0) {
-                    result.insert(key.clone(), value.clone());
+            // Exclude mode: copy entire document, then delete excluded fields
+            // BUG #3 FIX: Now supports dot notation for nested field exclusion
+            // e.g., {"address.city": 0} will properly exclude only the city field
+            result = doc.clone();
+
+            // Delete each excluded field (supports dot notation)
+            for (field, &action) in projection {
+                if action == 0 {
+                    delete_nested_value(&mut result, field);
                 }
             }
         }
 
-        Value::Object(result)
+        Ok(result)
     } else {
-        doc.clone()
+        Ok(doc.clone())
     }
 }
 
 /// Apply sort to documents
 /// Supports dot notation for nested fields (e.g., "address.city")
-pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) {
+///
+/// # Errors
+/// Returns `InvalidQuery` if sort direction is not 1 (ascending) or -1 (descending).
+pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) -> Result<()> {
     if sort.is_empty() {
-        return;
+        return Ok(());
+    }
+
+    // Validate sort directions (MongoDB only accepts 1 or -1)
+    for (field, direction) in sort {
+        if *direction != 1 && *direction != -1 {
+            return Err(MongoLiteError::InvalidQuery(format!(
+                "Invalid sort direction {} for field '{}'. Must be 1 (ascending) or -1 (descending).",
+                direction, field
+            )));
+        }
     }
 
     docs.sort_by(|a, b| {
@@ -121,9 +153,12 @@ pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) {
         }
         std::cmp::Ordering::Equal
     });
+
+    Ok(())
 }
 
 /// Compare two JSON values for sorting
+/// BUG #2 FIX: Now uses compare_values_core which handles large integers correctly
 fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
     use std::cmp::Ordering;
 
@@ -132,18 +167,14 @@ fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
         (None, Some(_)) => Ordering::Less, // null < any value
         (Some(_), None) => Ordering::Greater,
 
-        (Some(Value::Number(n1)), Some(Value::Number(n2))) => {
-            let f1 = n1.as_f64().unwrap_or(0.0);
-            let f2 = n2.as_f64().unwrap_or(0.0);
-            f1.partial_cmp(&f2).unwrap_or(Ordering::Equal)
+        // BUG #2 FIX: Use the core compare_values which doesn't lose precision
+        // for large integers (> 2^53)
+        (Some(a_val), Some(b_val)) => {
+            compare_values_core(a_val, b_val).unwrap_or_else(|| {
+                // Type priority fallback for incompatible types
+                type_priority(a_val).cmp(&type_priority(b_val))
+            })
         }
-
-        (Some(Value::String(s1)), Some(Value::String(s2))) => s1.cmp(s2),
-
-        (Some(Value::Bool(b1)), Some(Value::Bool(b2))) => b1.cmp(b2),
-
-        // Type priority: null < number < string < bool < object < array
-        (Some(a_val), Some(b_val)) => type_priority(a_val).cmp(&type_priority(b_val)),
     }
 }
 
@@ -196,7 +227,7 @@ mod tests {
         let doc = json!({"name": "Alice", "age": 30, "city": "NYC", "_id": 1});
         let projection = HashMap::from([("name".to_string(), 1), ("age".to_string(), 1)]);
 
-        let result = apply_projection(&doc, &projection);
+        let result = apply_projection(&doc, &projection).unwrap();
         assert!(result.get("name").is_some());
         assert!(result.get("age").is_some());
         assert!(result.get("_id").is_some()); // Included by default
@@ -211,7 +242,7 @@ mod tests {
             ("_id".to_string(), 0), // Explicit exclude
         ]);
 
-        let result = apply_projection(&doc, &projection);
+        let result = apply_projection(&doc, &projection).unwrap();
         assert!(result.get("name").is_some());
         assert!(result.get("_id").is_none()); // Excluded
     }
@@ -221,11 +252,101 @@ mod tests {
         let doc = json!({"name": "Alice", "age": 30, "city": "NYC", "_id": 1});
         let projection = HashMap::from([("city".to_string(), 0)]);
 
-        let result = apply_projection(&doc, &projection);
+        let result = apply_projection(&doc, &projection).unwrap();
         assert!(result.get("name").is_some());
         assert!(result.get("age").is_some());
         assert!(result.get("_id").is_some());
         assert!(result.get("city").is_none()); // Excluded
+    }
+
+    #[test]
+    fn test_projection_exclude_dot_notation() {
+        // BUG #3 regression test: exclude mode with dot notation
+        let doc = json!({
+            "_id": 1,
+            "user": {
+                "password": "secret123",
+                "email": "alice@example.com",
+                "name": "Alice"
+            },
+            "data": "public info"
+        });
+
+        // Exclude sensitive field: user.password
+        let projection = HashMap::from([("user.password".to_string(), 0)]);
+
+        let result = apply_projection(&doc, &projection).unwrap();
+
+        // _id and data should remain
+        assert_eq!(result.get("_id"), Some(&json!(1)));
+        assert_eq!(result.get("data"), Some(&json!("public info")));
+
+        // user should exist but without password
+        let user = result.get("user").unwrap();
+        assert_eq!(user.get("email"), Some(&json!("alice@example.com")));
+        assert_eq!(user.get("name"), Some(&json!("Alice")));
+        assert!(
+            user.get("password").is_none(),
+            "user.password should be excluded"
+        );
+    }
+
+    #[test]
+    fn test_projection_exclude_deeply_nested() {
+        // BUG #3: Test deeply nested exclusion
+        let doc = json!({
+            "_id": 1,
+            "settings": {
+                "security": {
+                    "api_key": "secret-key",
+                    "rate_limit": 100
+                },
+                "display": {
+                    "theme": "dark"
+                }
+            }
+        });
+
+        // Exclude settings.security.api_key
+        let projection = HashMap::from([("settings.security.api_key".to_string(), 0)]);
+
+        let result = apply_projection(&doc, &projection).unwrap();
+
+        // api_key should be excluded, rate_limit should remain
+        let security = result.get("settings").unwrap().get("security").unwrap();
+        assert!(
+            security.get("api_key").is_none(),
+            "api_key should be excluded"
+        );
+        assert_eq!(security.get("rate_limit"), Some(&json!(100)));
+
+        // display should be unchanged
+        assert_eq!(
+            result.get("settings").unwrap().get("display"),
+            Some(&json!({"theme": "dark"}))
+        );
+    }
+
+    #[test]
+    fn test_projection_exclude_multiple_dot_notation() {
+        // BUG #3: Multiple nested exclusions
+        let doc = json!({
+            "_id": 1,
+            "user": {"password": "secret", "token": "abc123", "name": "Alice"}
+        });
+
+        // Exclude both password and token
+        let projection = HashMap::from([
+            ("user.password".to_string(), 0),
+            ("user.token".to_string(), 0),
+        ]);
+
+        let result = apply_projection(&doc, &projection).unwrap();
+
+        let user = result.get("user").unwrap();
+        assert!(user.get("password").is_none());
+        assert!(user.get("token").is_none());
+        assert_eq!(user.get("name"), Some(&json!("Alice")));
     }
 
     #[test]
@@ -234,7 +355,7 @@ mod tests {
 
         let sort = vec![("age".to_string(), 1)]; // Ascending
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         assert_eq!(docs[0].get("age").unwrap(), 25);
         assert_eq!(docs[1].get("age").unwrap(), 30);
@@ -247,7 +368,7 @@ mod tests {
 
         let sort = vec![("age".to_string(), -1)]; // Descending
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         assert_eq!(docs[0].get("age").unwrap(), 35);
         assert_eq!(docs[1].get("age").unwrap(), 30);
@@ -267,7 +388,7 @@ mod tests {
             ("name".to_string(), -1), // Name descending
         ];
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         assert_eq!(docs[0].get("name").unwrap(), "Alice"); // age=25
         assert_eq!(docs[1].get("name").unwrap(), "Carol"); // age=30, name=C
@@ -284,7 +405,7 @@ mod tests {
 
         let sort = vec![("name".to_string(), 1)];
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         assert_eq!(docs[0].get("name").unwrap(), "Alice");
         assert_eq!(docs[1].get("name").unwrap(), "Bob");
@@ -392,12 +513,16 @@ mod tests {
         // Include nested field with dot notation
         let projection = HashMap::from([("address.city".to_string(), 1), ("name".to_string(), 1)]);
 
-        let result = apply_projection(&doc, &projection);
+        let result = apply_projection(&doc, &projection).unwrap();
 
         assert!(result.get("_id").is_some()); // _id included by default
         assert!(result.get("name").is_some());
-        assert_eq!(result.get("address.city"), Some(&json!("NYC")));
-        assert!(result.get("address").is_none()); // Full object not included
+        // MongoDB-compatible: returns nested structure, not flat key
+        assert!(result.get("address").is_some());
+        assert_eq!(result["address"]["city"], json!("NYC"));
+        // Only the projected field is included, not other nested fields
+        assert!(result["address"].get("street").is_none());
+        assert!(result["address"].get("zip").is_none());
     }
 
     #[test]
@@ -415,8 +540,23 @@ mod tests {
 
         let projection = HashMap::from([("data.level1.level2.value".to_string(), 1)]);
 
+        let result = apply_projection(&doc, &projection).unwrap();
+        // MongoDB-compatible: returns nested structure
+        assert_eq!(result["data"]["level1"]["level2"]["value"], json!(42));
+    }
+
+    #[test]
+    fn test_projection_mixed_mode_error() {
+        let doc = json!({"name": "Alice", "age": 30, "city": "NYC"});
+        // Mixed: include name (1) and exclude age (0) - MongoDB rejects this
+        let projection = HashMap::from([("name".to_string(), 1), ("age".to_string(), 0)]);
+
         let result = apply_projection(&doc, &projection);
-        assert_eq!(result.get("data.level1.level2.value"), Some(&json!(42)));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot mix inclusion and exclusion"));
     }
 
     #[test]
@@ -429,7 +569,7 @@ mod tests {
 
         let sort = vec![("address.zip".to_string(), 1)]; // Ascending by nested field
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         assert_eq!(docs[0].get("name").unwrap(), "Alice");
         assert_eq!(docs[1].get("name").unwrap(), "Bob");
@@ -446,7 +586,7 @@ mod tests {
 
         let sort = vec![("stats.score".to_string(), -1)]; // Descending by nested field
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         assert_eq!(docs[0].get("name").unwrap(), "Bob");
         assert_eq!(docs[1].get("name").unwrap(), "Alice");
@@ -467,7 +607,7 @@ mod tests {
             ("stats.score".to_string(), -1),
         ];
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         // LA comes first (alphabetically), then NYC
         assert_eq!(docs[0].get("name").unwrap(), "Bob"); // LA
@@ -485,11 +625,42 @@ mod tests {
 
         let sort = vec![("address.zip".to_string(), 1)]; // Ascending
 
-        apply_sort(&mut docs, &sort);
+        apply_sort(&mut docs, &sort).unwrap();
 
         // Missing field (null) should come first
         assert_eq!(docs[0].get("name").unwrap(), "Bob");
         assert_eq!(docs[1].get("name").unwrap(), "Alice");
         assert_eq!(docs[2].get("name").unwrap(), "Charlie");
+    }
+
+    #[test]
+    fn test_sort_invalid_direction_zero() {
+        let mut docs = vec![json!({"age": 30}), json!({"age": 25})];
+        let sort = vec![("age".to_string(), 0)]; // Invalid: 0
+
+        let result = apply_sort(&mut docs, &sort);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid sort direction"));
+    }
+
+    #[test]
+    fn test_sort_invalid_direction_two() {
+        let mut docs = vec![json!({"age": 30}), json!({"age": 25})];
+        let sort = vec![("age".to_string(), 2)]; // Invalid: 2
+
+        let result = apply_sort(&mut docs, &sort);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sort_invalid_direction_negative_two() {
+        let mut docs = vec![json!({"age": 30}), json!({"age": 25})];
+        let sort = vec![("age".to_string(), -2)]; // Invalid: -2
+
+        let result = apply_sort(&mut docs, &sort);
+        assert!(result.is_err());
     }
 }

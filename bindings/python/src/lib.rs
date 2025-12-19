@@ -277,7 +277,10 @@ impl Collection {
 
     /// Get current JSON schema
     fn get_schema<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        let schema = self.core.get_schema();
+        let schema = self
+            .core
+            .get_schema()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
         match schema {
             Some(v) => json_value_to_python(py, &v),
             None => Ok(py.None()),
@@ -653,7 +656,17 @@ impl Collection {
         Ok(py_list)
     }
 
-    /// Create a cursor for streaming
+    /// Create a lazy cursor for streaming large result sets
+    ///
+    /// Unlike find(), this does NOT load all documents into memory.
+    /// Documents are fetched in batches as you iterate.
+    ///
+    /// # Example
+    /// ```python
+    /// cursor = collection.find_cursor({"status": "active"}, batch_size=100)
+    /// for doc in cursor:
+    ///     process(doc)  # Documents loaded batch by batch
+    /// ```
     #[pyo3(signature = (query=None, batch_size=100))]
     fn find_cursor(
         &self,
@@ -666,15 +679,17 @@ impl Collection {
             None => serde_json::json!({}),
         };
 
-        let results = self
-            .core
-            .find(&query_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
-
+        // Don't load documents yet - lazy loading on iteration
         Ok(Cursor {
-            documents: results,
+            db: Arc::clone(&self.db),
+            collection_name: self.name.clone(),
+            query: query_json,
             position: 0,
             batch_size,
+            exhausted: false,
+            // Local buffer for current batch
+            current_batch: Vec::new(),
+            batch_position: 0,
         })
     }
 
@@ -683,109 +698,186 @@ impl Collection {
     }
 }
 
-/// Cursor for iterating through query results
+/// Lazy cursor for iterating through query results
+///
+/// Documents are loaded in batches as you iterate, not all at once.
+/// This allows processing millions of documents without memory exhaustion.
 #[pyclass]
 pub struct Cursor {
-    documents: Vec<Value>,
-    position: usize,
+    db: Arc<DatabaseCore<StorageEngine>>,
+    collection_name: String,
+    query: Value,
+    position: usize, // Global position (skip offset for DB query)
     batch_size: usize,
+    exhausted: bool,
+    // Local buffer for current batch
+    current_batch: Vec<Value>,
+    batch_position: usize, // Position within current_batch
+}
+
+impl Cursor {
+    /// Fetch the next batch from database
+    fn fetch_next_batch(&mut self) -> PyResult<()> {
+        if self.exhausted {
+            return Ok(());
+        }
+
+        let collection = self
+            .db
+            .collection(&self.collection_name)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        let options = ironbase_core::FindOptions::new()
+            .with_skip(self.position)
+            .with_limit(self.batch_size);
+
+        let results = collection
+            .find_with_options(&self.query, options)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        // If we got fewer results than batch_size, we've exhausted the data
+        if results.len() < self.batch_size {
+            self.exhausted = true;
+        }
+
+        self.position += results.len();
+        self.current_batch = results;
+        self.batch_position = 0;
+
+        Ok(())
+    }
 }
 
 #[pymethods]
 impl Cursor {
-    /// Get the next document
+    /// Get the next document (lazy loading)
     fn next<'py>(&mut self, py: Python<'py>) -> PyResult<PyObject> {
-        if self.position >= self.documents.len() {
-            return Ok(py.None());
+        // If current batch is exhausted, fetch next batch
+        if self.batch_position >= self.current_batch.len() {
+            if self.exhausted {
+                return Ok(py.None());
+            }
+            self.fetch_next_batch()?;
+            if self.current_batch.is_empty() {
+                return Ok(py.None());
+            }
         }
 
-        let doc = &self.documents[self.position];
-        self.position += 1;
+        let doc = &self.current_batch[self.batch_position];
+        self.batch_position += 1;
 
         let py_dict = json_to_python_dict(py, doc)?;
         Ok(py_dict.into_any().unbind())
     }
 
-    /// Get the next batch
+    /// Get the next batch of documents
     fn next_batch<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        self.next_chunk(py, self.batch_size)
+        if self.exhausted && self.batch_position >= self.current_batch.len() {
+            return Ok(PyList::empty(py));
+        }
+
+        // Fetch a fresh batch from DB
+        self.fetch_next_batch()?;
+
+        // Convert entire batch to Python list
+        let py_list = PyList::empty(py);
+        for doc in &self.current_batch {
+            let py_dict = json_to_python_dict(py, doc)?;
+            py_list.append(py_dict)?;
+        }
+        self.batch_position = self.current_batch.len(); // Mark as consumed
+
+        Ok(py_list)
     }
 
-    /// Get next chunk
+    /// Get next chunk of N documents
     fn next_chunk<'py>(
         &mut self,
         py: Python<'py>,
         chunk_size: usize,
     ) -> PyResult<Bound<'py, PyList>> {
-        if self.position >= self.documents.len() {
-            return Ok(PyList::empty(py));
-        }
-
-        let end = (self.position + chunk_size).min(self.documents.len());
-
         let py_list = PyList::empty(py);
-        for doc in &self.documents[self.position..end] {
+        let mut count = 0;
+
+        while count < chunk_size {
+            // Refill buffer if needed
+            if self.batch_position >= self.current_batch.len() {
+                if self.exhausted {
+                    break;
+                }
+                self.fetch_next_batch()?;
+                if self.current_batch.is_empty() {
+                    break;
+                }
+            }
+
+            let doc = &self.current_batch[self.batch_position];
+            self.batch_position += 1;
+            count += 1;
+
             let py_dict = json_to_python_dict(py, doc)?;
             py_list.append(py_dict)?;
         }
-        self.position = end;
+
         Ok(py_list)
     }
 
-    /// Get remaining count
-    fn remaining(&self) -> usize {
-        self.documents.len().saturating_sub(self.position)
-    }
-
-    /// Get total count
-    fn total(&self) -> usize {
-        self.documents.len()
-    }
-
-    /// Get current position
+    /// Get current position (total documents read so far)
     fn position(&self) -> usize {
-        self.position
+        // position tracks where we are in the DB, batch_position is local
+        self.position - self.current_batch.len() + self.batch_position
     }
 
-    /// Check if exhausted
+    /// Check if cursor is exhausted
     fn is_finished(&self) -> bool {
-        self.position >= self.documents.len()
+        self.exhausted && self.batch_position >= self.current_batch.len()
     }
 
-    /// Reset cursor
+    /// Reset cursor to beginning
     fn rewind(&mut self) {
         self.position = 0;
+        self.batch_position = 0;
+        self.current_batch.clear();
+        self.exhausted = false;
     }
 
     /// Skip N documents
     fn skip(&mut self, n: usize) {
-        self.position = (self.position + n).min(self.documents.len());
+        // Advance position - next fetch will skip these
+        self.position += n;
+        self.current_batch.clear();
+        self.batch_position = 0;
     }
 
-    /// Take N documents
+    /// Take up to N documents
     fn take<'py>(&mut self, py: Python<'py>, n: usize) -> PyResult<Bound<'py, PyList>> {
-        let py_list = PyList::empty(py);
-        for _ in 0..n {
-            if self.position >= self.documents.len() {
-                break;
-            }
-            let doc = &self.documents[self.position];
-            self.position += 1;
-            let py_dict = json_to_python_dict(py, doc)?;
-            py_list.append(py_dict)?;
-        }
-        Ok(py_list)
+        self.next_chunk(py, n)
     }
 
-    /// Collect all remaining
+    /// Collect all remaining documents (use with caution on large datasets!)
     fn collect_all<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let py_list = PyList::empty(py);
-        while self.position < self.documents.len() {
-            let doc = &self.documents[self.position];
-            self.position += 1;
-            let py_dict = json_to_python_dict(py, doc)?;
-            py_list.append(py_dict)?;
+
+        loop {
+            // Refill buffer if needed
+            if self.batch_position >= self.current_batch.len() {
+                if self.exhausted {
+                    break;
+                }
+                self.fetch_next_batch()?;
+                if self.current_batch.is_empty() {
+                    break;
+                }
+            }
+
+            while self.batch_position < self.current_batch.len() {
+                let doc = &self.current_batch[self.batch_position];
+                self.batch_position += 1;
+                let py_dict = json_to_python_dict(py, doc)?;
+                py_list.append(py_dict)?;
+            }
         }
+
         Ok(py_list)
     }
 
@@ -794,14 +886,21 @@ impl Cursor {
         slf
     }
 
-    /// Get next for Python iteration
+    /// Get next for Python iteration (lazy loading)
     fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<PyObject>> {
-        if self.position >= self.documents.len() {
-            return Ok(None);
+        // Refill buffer if needed
+        if self.batch_position >= self.current_batch.len() {
+            if self.exhausted {
+                return Ok(None);
+            }
+            self.fetch_next_batch()?;
+            if self.current_batch.is_empty() {
+                return Ok(None);
+            }
         }
 
-        let doc = &self.documents[self.position];
-        self.position += 1;
+        let doc = &self.current_batch[self.batch_position];
+        self.batch_position += 1;
 
         let py_dict = json_to_python_dict(py, doc)?;
         Ok(Some(py_dict.into_any().unbind()))
@@ -809,10 +908,10 @@ impl Cursor {
 
     fn __repr__(&self) -> String {
         format!(
-            "Cursor(position={}, total={}, remaining={})",
-            self.position,
-            self.documents.len(),
-            self.remaining()
+            "Cursor(position={}, batch_size={}, exhausted={})",
+            self.position(),
+            self.batch_size,
+            self.is_finished()
         )
     }
 }

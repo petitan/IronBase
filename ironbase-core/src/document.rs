@@ -17,7 +17,7 @@ pub struct Document {
 /// Document ID types
 /// IMPORTANT: Untagged so it appears as simple value in documents: {"_id": 2}
 /// Type preservation is handled separately in metadata catalog via custom serialization.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(untagged)]
 pub enum DocumentId {
     Int(i64),

@@ -550,7 +550,7 @@ impl IronBaseAdapter {
     pub fn get_schema(&self, collection: &str) -> Result<Option<Value>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
-        Ok(coll.get_schema())
+        Ok(coll.get_schema()?)
     }
 
     // ============================================================

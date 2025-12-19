@@ -133,6 +133,17 @@ impl Query {
                 if key.starts_with('$') {
                     // Top-level or field-level operator
                     if !key.starts_with("$**") {
+                        // SPECIAL CASE: $options is a modifier for $regex, not a standalone operator
+                        if key == "$options" {
+                            if obj.contains_key("$regex") {
+                                // Valid - $options is allowed alongside $regex
+                                continue;
+                            }
+                            return Err(crate::MongoLiteError::InvalidQuery(
+                                "$options can only be used with $regex".into(),
+                            ));
+                        }
+
                         // Not a wildcard - validate it's a known operator
                         if !operators::OPERATOR_REGISTRY.contains_key(key.as_str()) {
                             return Err(crate::MongoLiteError::InvalidQuery(format!(

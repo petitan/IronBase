@@ -48,6 +48,9 @@ pub enum MongoLiteError {
     #[error("Database '{0}' is locked by another process")]
     DatabaseLocked(String),
 
+    #[error("Database is closed")]
+    DatabaseClosed,
+
     #[error("Operation not allowed: {0}")]
     OperationNotAllowed(String),
 

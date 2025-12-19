@@ -137,7 +137,7 @@ pub extern "C" fn ironbase_get_collection_schema(
 
     // Get schema
     match collection.get_schema() {
-        Some(schema) => {
+        Ok(Some(schema)) => {
             // Convert schema to JSON string
             match serde_json::to_string(&schema) {
                 Ok(json_str) => match std::ffi::CString::new(json_str) {
@@ -153,6 +153,10 @@ pub extern "C" fn ironbase_get_collection_schema(
                 }
             }
         }
-        None => std::ptr::null_mut(), // No schema set - return NULL (not an error)
+        Ok(None) => std::ptr::null_mut(), // No schema set - return NULL (not an error)
+        Err(e) => {
+            set_last_error(&format!("Failed to get schema: {}", e));
+            std::ptr::null_mut()
+        }
     }
 }

@@ -278,7 +278,7 @@ fn save_schema(path: &Path, db_path: &Path, collection: Option<&str>, all: bool)
                 .collection(&coll_name)
                 .with_context(|| format!("Failed to get collection: {}", coll_name))?;
 
-            if let Some(schema) = coll.get_schema() {
+            if let Ok(Some(schema)) = coll.get_schema() {
                 let file_path = dir_path.join(format!("{}.schema.json", coll_name));
                 let json = serde_json::to_string_pretty(&schema)
                     .with_context(|| "Failed to serialize schema")?;
@@ -308,6 +308,7 @@ fn save_schema(path: &Path, db_path: &Path, collection: Option<&str>, all: bool)
 
         let schema = coll
             .get_schema()
+            .with_context(|| format!("Failed to get schema for '{}'", coll_name))?
             .ok_or_else(|| anyhow::anyhow!("Collection '{}' has no schema", coll_name))?;
 
         let json =

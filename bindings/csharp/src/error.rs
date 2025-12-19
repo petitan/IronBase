@@ -91,6 +91,7 @@ impl From<&MongoLiteError> for IronBaseErrorCode {
             MongoLiteError::WALCorruption => IronBaseErrorCode::WalCorruption,
             MongoLiteError::DatabaseLocked(_) => IronBaseErrorCode::DatabaseLocked,
             MongoLiteError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
+            MongoLiteError::DatabaseClosed => IronBaseErrorCode::OperationNotAllowed,
             MongoLiteError::Unknown(_) => IronBaseErrorCode::Unknown,
         }
     }

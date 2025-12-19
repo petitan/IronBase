@@ -377,6 +377,134 @@ fn test_schema_validation_blocks_invalid_update() {
 }
 
 #[test]
+fn test_insert_many_schema_atomicity() {
+    // BUG #6 FIX: insert_many must be atomic with schema validation
+    // If ANY document fails schema validation, NO documents should be inserted
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("atomic_schema.mlite");
+    let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+    let collection = db.collection("atomic_test").unwrap();
+
+    // Set schema that requires "name" field
+    collection
+        .set_schema(Some(json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string"}
+            }
+        })))
+        .unwrap();
+
+    // Try to insert batch where 2nd document is invalid (missing "name")
+    let docs = vec![
+        HashMap::from([("name".to_string(), json!("First"))]), // Valid
+        HashMap::from([("invalid".to_string(), json!("no name"))]), // Invalid - missing "name"
+        HashMap::from([("name".to_string(), json!("Third"))]), // Valid
+    ];
+
+    let result = db.insert_many("atomic_test", docs);
+
+    // Should fail because doc 2 is invalid
+    assert!(
+        result.is_err(),
+        "insert_many should fail when any doc fails schema"
+    );
+
+    // CRITICAL: NO documents should have been inserted (atomicity)
+    let count = collection.count_documents(&json!({})).unwrap();
+    assert_eq!(
+        count, 0,
+        "BUG #6: Atomicity violated! {} docs inserted despite batch failure. Expected 0.",
+        count
+    );
+}
+
+#[test]
+fn test_aggregation_large_integer_precision() {
+    // BUG #15 FIX: $min/$max must preserve integer precision for values > 2^53
+    // f64 can only precisely represent integers up to 2^53 (9007199254740992)
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+    use std::collections::HashMap;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Values around the f64 precision limit
+    let large_int_1: i64 = 9007199254740993; // 2^53 + 1 (cannot be exactly represented in f64)
+    let large_int_2: i64 = 9007199254740994; // 2^53 + 2
+    let large_int_3: i64 = 9007199254740995; // 2^53 + 3
+
+    db.insert_one(
+        "precision_test",
+        HashMap::from([("val".to_string(), json!(large_int_1))]),
+    )
+    .unwrap();
+    db.insert_one(
+        "precision_test",
+        HashMap::from([("val".to_string(), json!(large_int_2))]),
+    )
+    .unwrap();
+    db.insert_one(
+        "precision_test",
+        HashMap::from([("val".to_string(), json!(large_int_3))]),
+    )
+    .unwrap();
+
+    let coll = db.collection("precision_test").unwrap();
+
+    // Test $max - should return 9007199254740995, NOT 9007199254740992 (f64 truncation)
+    let result = coll
+        .aggregate(&json!([
+            {"$group": {"_id": null, "max_val": {"$max": "$val"}}}
+        ]))
+        .unwrap();
+
+    assert_eq!(result.len(), 1);
+    let max_val = result[0].get("max_val").unwrap();
+    assert_eq!(
+        max_val.as_i64(),
+        Some(large_int_3),
+        "BUG #15: $max precision loss! Expected {}, got {:?}",
+        large_int_3,
+        max_val
+    );
+
+    // Test $min - should return 9007199254740993
+    let result = coll
+        .aggregate(&json!([
+            {"$group": {"_id": null, "min_val": {"$min": "$val"}}}
+        ]))
+        .unwrap();
+
+    let min_val = result[0].get("min_val").unwrap();
+    assert_eq!(
+        min_val.as_i64(),
+        Some(large_int_1),
+        "BUG #15: $min precision loss! Expected {}, got {:?}",
+        large_int_1,
+        min_val
+    );
+
+    // Test $sum - should preserve integer type for integer-only sums
+    let result = coll
+        .aggregate(&json!([
+            {"$group": {"_id": null, "sum_val": {"$sum": "$val"}}}
+        ]))
+        .unwrap();
+
+    let sum_val = result[0].get("sum_val").unwrap();
+    // Sum of the three values (may overflow, but should still be i64)
+    let expected_sum = large_int_1
+        .saturating_add(large_int_2)
+        .saturating_add(large_int_3);
+    assert_eq!(
+        sum_val.as_i64(),
+        Some(expected_sum),
+        "BUG #15: $sum should return i64 for integer-only fields"
+    );
+}
+
+#[test]
 fn test_nested_field_queries_via_collection_core() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("nested_query.mlite");

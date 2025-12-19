@@ -546,7 +546,11 @@ impl OperatorMatcher for AllOperator {
 /// { field: { $elemMatch: { query1, query2, ... } } }
 /// ```
 ///
-/// # Complexity: CC = 6
+/// Supports both object arrays and scalar arrays:
+/// - Object arrays: `{items: {$elemMatch: {type: "fruit", qty: {$gte: 5}}}}`
+/// - Scalar arrays: `{scores: {$elemMatch: {$gt: 80, $lt: 85}}}`
+///
+/// # Complexity: CC = 8
 pub struct ElemMatchOperator;
 
 impl OperatorMatcher for ElemMatchOperator {
@@ -565,9 +569,8 @@ impl OperatorMatcher for ElemMatchOperator {
             Some(Value::Array(arr)) => {
                 // At least one element in the array must match all conditions in filter_value
                 for elem in arr {
-                    // Create a temporary document from the array element
                     if let Value::Object(obj) = elem {
-                        // Check if this element matches all conditions
+                        // OBJECT ELEMENT: Check fields within the object
                         let mut matches_all = true;
 
                         if let Value::Object(conditions) = filter_value {
@@ -600,6 +603,35 @@ impl OperatorMatcher for ElemMatchOperator {
 
                         if matches_all {
                             return Ok(true);
+                        }
+                    } else {
+                        // SCALAR ELEMENT: Apply operators directly to the element value
+                        // E.g., {scores: {$elemMatch: {$gt: 80, $lt: 85}}} with [75, 82, 90]
+                        if let Value::Object(conditions) = filter_value {
+                            let mut matches_all = true;
+
+                            for (op_name, op_value) in conditions {
+                                if op_name.starts_with('$') {
+                                    // Operator condition: apply directly to scalar
+                                    if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str())
+                                    {
+                                        if !operator.matches(Some(elem), op_value, None)? {
+                                            matches_all = false;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    // Non-operator key on scalar - this doesn't make sense
+                                    // (e.g., {$elemMatch: {field: value}} on [1, 2, 3])
+                                    // Skip this element as it can't match field-based conditions
+                                    matches_all = false;
+                                    break;
+                                }
+                            }
+
+                            if matches_all {
+                                return Ok(true);
+                            }
                         }
                     }
                 }
@@ -936,13 +968,45 @@ impl OperatorMatcher for TypeOperator {
                 };
 
                 let matches = match type_name {
-                    "double" | "number" => val.is_number(),
+                    "double" => {
+                        // Double should match floating-point numbers only (not integers)
+                        // serde_json stores integers as PosInt/NegInt, floats as Float
+                        // is_i64()/is_u64() returns false for Float-stored numbers
+                        if let Value::Number(n) = val {
+                            !n.is_i64() && !n.is_u64()
+                        } else {
+                            false
+                        }
+                    }
+                    "number" => val.is_number(), // Alias - matches all numeric types
                     "string" => val.is_string(),
                     "object" => val.is_object(),
                     "array" => val.is_array(),
                     "bool" | "boolean" => val.is_boolean(),
                     "null" => val.is_null(),
-                    "int" | "long" => val.is_i64() || val.is_u64(),
+                    "int" => {
+                        // int32: must be integer AND fit in i32 range
+                        if let Value::Number(n) = val {
+                            if let Some(i) = n.as_i64() {
+                                i >= i32::MIN as i64 && i <= i32::MAX as i64
+                            } else if let Some(u) = n.as_u64() {
+                                u <= i32::MAX as u64
+                            } else {
+                                false // Float-stored number
+                            }
+                        } else {
+                            false
+                        }
+                    }
+                    "long" => {
+                        // int64: must be integer (stored as PosInt/NegInt, not Float)
+                        if let Value::Number(n) = val {
+                            n.is_i64()
+                                || (n.is_u64() && n.as_u64().is_some_and(|u| u <= i64::MAX as u64))
+                        } else {
+                            false
+                        }
+                    }
                     _ => {
                         return Err(MongoLiteError::InvalidQuery(format!(
                             "Unknown type name: {}",
@@ -1922,6 +1986,117 @@ mod tests {
         assert!(op.matches(Some(&json!(42)), &json!("long"), None).unwrap());
     }
 
+    #[test]
+    fn test_type_double_vs_int_distinction() {
+        // BUG #3 regression test: $type must distinguish between int and double
+        // serde_json stores 42 as PosInt/NegInt, 42.0 as Float
+        let op = TypeOperator;
+
+        // Integer stored as int (json!(42))
+        let int_val = json!(42);
+        // Float stored as float (json!(42.5) - has fractional part)
+        let float_val = json!(42.5);
+        // Float stored as float (json!(42.0) - no fractional part but stored as Float)
+        let float_whole = serde_json::Number::from_f64(42.0).unwrap();
+        let float_whole_val = Value::Number(float_whole);
+
+        // $type: "double" should match floats, NOT integers
+        assert!(
+            !op.matches(Some(&int_val), &json!("double"), None).unwrap(),
+            "Integer 42 should NOT match $type: 'double'"
+        );
+        assert!(
+            op.matches(Some(&float_val), &json!("double"), None)
+                .unwrap(),
+            "Float 42.5 should match $type: 'double'"
+        );
+        assert!(
+            op.matches(Some(&float_whole_val), &json!("double"), None)
+                .unwrap(),
+            "Float 42.0 should match $type: 'double'"
+        );
+
+        // $type: "int" should match integers, NOT floats
+        assert!(
+            op.matches(Some(&int_val), &json!("int"), None).unwrap(),
+            "Integer 42 should match $type: 'int'"
+        );
+        assert!(
+            !op.matches(Some(&float_val), &json!("int"), None).unwrap(),
+            "Float 42.5 should NOT match $type: 'int'"
+        );
+        assert!(
+            !op.matches(Some(&float_whole_val), &json!("int"), None)
+                .unwrap(),
+            "Float 42.0 should NOT match $type: 'int'"
+        );
+
+        // $type: "number" should match ALL numbers
+        assert!(
+            op.matches(Some(&int_val), &json!("number"), None).unwrap(),
+            "Integer 42 should match $type: 'number'"
+        );
+        assert!(
+            op.matches(Some(&float_val), &json!("number"), None)
+                .unwrap(),
+            "Float 42.5 should match $type: 'number'"
+        );
+    }
+
+    #[test]
+    fn test_type_bson_double_vs_int32_distinction() {
+        // BUG #3 regression test: BSON type numbers must also distinguish
+        let op = TypeOperator;
+
+        let int_val = json!(42);
+        let float_val = json!(42.5);
+
+        // BSON type 1 = double: should NOT match integers
+        assert!(
+            !op.matches(Some(&int_val), &json!(1), None).unwrap(),
+            "Integer 42 should NOT match BSON type 1 (double)"
+        );
+        assert!(
+            op.matches(Some(&float_val), &json!(1), None).unwrap(),
+            "Float 42.5 should match BSON type 1 (double)"
+        );
+
+        // BSON type 16 = int32: should NOT match floats
+        assert!(
+            op.matches(Some(&int_val), &json!(16), None).unwrap(),
+            "Integer 42 should match BSON type 16 (int32)"
+        );
+        assert!(
+            !op.matches(Some(&float_val), &json!(16), None).unwrap(),
+            "Float 42.5 should NOT match BSON type 16 (int32)"
+        );
+    }
+
+    #[test]
+    fn test_type_int32_range() {
+        // int32 has range -2147483648 to 2147483647
+        let op = TypeOperator;
+
+        // Within i32 range
+        assert!(op
+            .matches(Some(&json!(2147483647)), &json!("int"), None)
+            .unwrap());
+        assert!(op
+            .matches(Some(&json!(-2147483648_i64)), &json!("int"), None)
+            .unwrap());
+
+        // Outside i32 range - should NOT match "int" but should match "long"
+        let large_int = json!(2147483648_i64);
+        assert!(
+            !op.matches(Some(&large_int), &json!("int"), None).unwrap(),
+            "2147483648 exceeds i32 max, should NOT match 'int'"
+        );
+        assert!(
+            op.matches(Some(&large_int), &json!("long"), None).unwrap(),
+            "2147483648 should match 'long'"
+        );
+    }
+
     // ========== Logical operator tests ==========
 
     #[test]
@@ -2139,8 +2314,54 @@ mod tests {
     fn test_elemmatch_non_object_elements() {
         let op = ElemMatchOperator;
         let doc_value = json!([1, 2, 3]); // Array of non-objects
-        let filter_value = json!({"name": "Alice"});
+        let filter_value = json!({"name": "Alice"}); // Field-based query doesn't work on scalars
         assert!(!op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_scalar_array_with_operators() {
+        // MongoDB: {scores: {$elemMatch: {$gt: 80, $lt: 85}}} matches [75, 82, 90]
+        // because 82 satisfies BOTH conditions
+        let op = ElemMatchOperator;
+        let doc_value = json!([75, 82, 90]);
+        let filter_value = json!({"$gt": 80, "$lt": 85});
+        assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_scalar_array_no_match() {
+        // No element in [75, 90, 95] satisfies BOTH $gt:80 AND $lt:85
+        let op = ElemMatchOperator;
+        let doc_value = json!([75, 90, 95]);
+        let filter_value = json!({"$gt": 80, "$lt": 85});
+        assert!(!op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_scalar_array_single_condition() {
+        // {$elemMatch: {$gte: 5}} on [3, 5, 7] - 5 and 7 both match
+        let op = ElemMatchOperator;
+        let doc_value = json!([3, 5, 7]);
+        let filter_value = json!({"$gte": 5});
+        assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_scalar_string_array() {
+        // String array with $regex
+        let op = ElemMatchOperator;
+        let doc_value = json!(["apple", "banana", "cherry"]);
+        let filter_value = json!({"$regex": "^b"});
+        assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
+    #[test]
+    fn test_elemmatch_scalar_array_in_operator() {
+        // {$elemMatch: {$in: [2, 4, 6]}} on [1, 3, 4] - 4 is in the list
+        let op = ElemMatchOperator;
+        let doc_value = json!([1, 3, 4]);
+        let filter_value = json!({"$in": [2, 4, 6]});
+        assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
     }
 
     // ========== matches_filter_value tests ==========

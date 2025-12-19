@@ -196,6 +196,39 @@ fn test_find_streaming_with_batch_size() {
     assert_eq!(batch.len(), 5);
 }
 
+#[test]
+fn test_find_cursor_many_tombstones() {
+    // Test that FindCursor handles many consecutive tombstones without stack overflow
+    // This tests the fix for the recursion bug in FindCursor::next()
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    // Insert 1000 documents
+    for i in 0..1000 {
+        let doc = HashMap::from([("value".to_string(), json!(i))]);
+        db.insert_one(&coll_name, doc).unwrap();
+    }
+
+    // Delete 900 of them (leaving 100)
+    // This creates many tombstones
+    db.delete_many(&coll_name, &json!({"value": {"$lt": 900}}))
+        .unwrap();
+
+    // Create a streaming cursor - this should work without stack overflow
+    let mut cursor = collection.find_streaming(&json!({})).unwrap();
+
+    // Iterate through remaining documents
+    let mut count = 0;
+    while let Some(_doc) = cursor.next().unwrap() {
+        count += 1;
+    }
+
+    assert_eq!(
+        count, 100,
+        "Should have 100 remaining documents after deletion"
+    );
+}
+
 // ========== COUNT TESTS ==========
 
 #[test]
@@ -603,6 +636,129 @@ fn test_distinct_missing_field() {
     assert!(distinct.is_empty());
 }
 
+#[test]
+fn test_distinct_object_key_order_canonical() {
+    // Test that objects with different key orders are treated as equal
+    // This tests the fix for the distinct() canonicalization bug
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    // Insert documents with identical address objects but different key order
+    // Using serde_json's indexmap, key order is preserved during parsing
+    let doc1 = HashMap::from([
+        ("name".to_string(), json!("Alice")),
+        (
+            "address".to_string(),
+            json!({"city": "NYC", "zip": "10001"}),
+        ),
+    ]);
+    let doc2 = HashMap::from([
+        ("name".to_string(), json!("Bob")),
+        (
+            "address".to_string(),
+            json!({"zip": "10001", "city": "NYC"}),
+        ), // Same content, different order
+    ]);
+    db.insert_one(&coll_name, doc1).unwrap();
+    db.insert_one(&coll_name, doc2).unwrap();
+
+    // Should return 1 distinct address (both are semantically identical)
+    let distinct = collection.distinct("address", &json!({})).unwrap();
+    assert_eq!(
+        distinct.len(),
+        1,
+        "Expected 1 distinct address, got {}. Bug: objects with different key order treated as different.",
+        distinct.len()
+    );
+}
+
+#[test]
+fn test_distinct_array_field_with_dot_notation() {
+    // BUG FIX: distinct() should handle arrays with dot notation (MongoDB-style)
+    // This tests the fix for implicit array traversal in distinct()
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    // Insert documents with array fields
+    let doc1 = HashMap::from([(
+        "items".to_string(),
+        json!([{"name": "apple"}, {"name": "banana"}]),
+    )]);
+    let doc2 = HashMap::from([(
+        "items".to_string(),
+        json!([{"name": "banana"}, {"name": "cherry"}]),
+    )]);
+    db.insert_one(&coll_name, doc1).unwrap();
+    db.insert_one(&coll_name, doc2).unwrap();
+
+    // distinct("items.name") should return all unique names from the nested arrays
+    let distinct = collection.distinct("items.name", &json!({})).unwrap();
+
+    // Should find: "apple", "banana", "cherry" (3 distinct values)
+    assert_eq!(
+        distinct.len(),
+        3,
+        "Expected 3 distinct values (apple, banana, cherry), got {:?}",
+        distinct
+    );
+
+    // Verify all expected values are present
+    let values: Vec<String> = distinct
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert!(values.contains(&"apple".to_string()), "Missing 'apple'");
+    assert!(values.contains(&"banana".to_string()), "Missing 'banana'");
+    assert!(values.contains(&"cherry".to_string()), "Missing 'cherry'");
+}
+
+#[test]
+fn test_distinct_nested_array_with_query() {
+    // Test distinct with array fields combined with a query filter
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    let doc1 = HashMap::from([
+        ("category".to_string(), json!("fruit")),
+        (
+            "items".to_string(),
+            json!([{"name": "apple"}, {"name": "banana"}]),
+        ),
+    ]);
+    let doc2 = HashMap::from([
+        ("category".to_string(), json!("vegetable")),
+        (
+            "items".to_string(),
+            json!([{"name": "carrot"}, {"name": "potato"}]),
+        ),
+    ]);
+    db.insert_one(&coll_name, doc1).unwrap();
+    db.insert_one(&coll_name, doc2).unwrap();
+
+    // Get distinct item names only from "fruit" category
+    let distinct = collection
+        .distinct("items.name", &json!({"category": "fruit"}))
+        .unwrap();
+
+    assert_eq!(
+        distinct.len(),
+        2,
+        "Expected 2 distinct values from fruit category, got {:?}",
+        distinct
+    );
+
+    let values: Vec<String> = distinct
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert!(values.contains(&"apple".to_string()));
+    assert!(values.contains(&"banana".to_string()));
+    assert!(
+        !values.contains(&"carrot".to_string()),
+        "Should not include vegetable items"
+    );
+}
+
 // ========== INDEX TESTS ==========
 
 #[test]
@@ -860,6 +1016,66 @@ fn test_schema_clear() {
     // Now any document should be valid
     let doc = HashMap::from([("any_field".to_string(), json!("any value"))]);
     db.insert_one(&coll_name, doc).unwrap();
+}
+
+#[test]
+fn test_schema_sharing_between_handles() {
+    // BUG FIX: Schema changes should be visible across all CollectionCore handles
+    // This tests the fix for schema not being shared between instances
+    let (db, coll_name) = create_test_db("test");
+
+    // Get first handle
+    let coll1 = db.collection(&coll_name).unwrap();
+
+    // Get second handle for the SAME collection
+    let _coll2 = db.collection(&coll_name).unwrap();
+
+    // Set schema on first handle
+    coll1
+        .set_schema(Some(json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string"}
+            }
+        })))
+        .unwrap();
+
+    // Second handle should now also have the schema
+    // Inserting a document without "name" should fail
+    let invalid_doc = HashMap::from([("age".to_string(), json!(25))]);
+    let result = db.insert_one(&coll_name, invalid_doc);
+
+    assert!(
+        result.is_err(),
+        "Schema from coll1.set_schema() should be visible to coll2 (and db.insert_one). \
+         Document without required 'name' field should be rejected."
+    );
+
+    // Valid document should work
+    let valid_doc = HashMap::from([("name".to_string(), json!("Alice"))]);
+    db.insert_one(&coll_name, valid_doc).unwrap();
+}
+
+#[test]
+fn test_schema_sharing_after_reopen() {
+    // Test that schema changes persist and are shared after getting a new handle
+    let (db, coll_name) = create_test_db("test");
+
+    // Set schema
+    let coll = db.collection(&coll_name).unwrap();
+    coll.set_schema(Some(json!({
+        "type": "object",
+        "required": ["email"]
+    })))
+    .unwrap();
+
+    // Get a NEW handle - should see the schema
+    let coll_new = db.collection(&coll_name).unwrap();
+
+    // This should verify schema is enforced through the new handle
+    let schema = coll_new.get_schema().unwrap();
+    assert!(schema.is_some(), "New handle should have the schema");
 }
 
 // ========== FIND WITH OPTIONS TESTS ==========

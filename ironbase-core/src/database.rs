@@ -4,10 +4,10 @@
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::collection_core::{CollectionCore, RawOperations};
+use crate::collection_core::{schema::CompiledSchema, CollectionCore, RawOperations};
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use crate::error::{MongoLiteError, Result};
@@ -58,6 +58,7 @@ fn extract_doc_id(doc: &Value) -> Result<DocumentId> {
 /// Generic over Storage backend:
 /// - `DatabaseCore<StorageEngine>` - Production file-based storage (default)
 /// - `DatabaseCore<MemoryStorage>` - Fast in-memory storage for testing
+#[allow(clippy::type_complexity)]
 pub struct DatabaseCore<S: Storage + RawStorage> {
     storage: Arc<RwLock<S>>,
     db_path: String,
@@ -77,11 +78,19 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Each collection shares its IndexManager across all CollectionCore instances
     index_managers: Arc<RwLock<HashMap<String, Arc<RwLock<IndexManager>>>>>,
 
+    // Shared SchemaManagers per collection (fixes stale schema problem)
+    // Each collection shares its CompiledSchema across all CollectionCore instances
+    schema_managers: Arc<RwLock<HashMap<String, Arc<RwLock<Option<CompiledSchema>>>>>>,
+
     // Transaction-level exclusive write lock for Read Committed isolation
     // Only one write transaction can be active at a time (SQLite-style)
     // None = no active write transaction
     // Some(tx_id) = this transaction holds the exclusive write lock
     write_transaction_lock: Arc<RwLock<Option<TransactionId>>>,
+
+    // Flag to prevent operations after close() is called
+    // Arc-wrapped so CollectionCore can share the same flag
+    is_closed: Arc<AtomicBool>,
 }
 
 // ============================================================================
@@ -154,7 +163,9 @@ impl DatabaseCore<StorageEngine> {
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(RwLock::new(None)),
+            is_closed: Arc::new(AtomicBool::new(false)),
         };
 
         // Apply recovered index changes to collections
@@ -397,6 +408,7 @@ impl DatabaseCore<StorageEngine> {
         collection_name: &str,
         document: HashMap<String, Value>,
     ) -> Result<DocumentId> {
+        self.check_not_closed()?;
         match self.durability_mode {
             DurabilityMode::Safe => {
                 // Wait for any active write transaction to complete (blocking with timeout)
@@ -514,6 +526,7 @@ impl DatabaseCore<StorageEngine> {
         query: &Value,
         update: &Value,
     ) -> Result<(u64, u64)> {
+        self.check_not_closed()?;
         match self.durability_mode {
             DurabilityMode::Safe => {
                 // Wait for active write transaction to complete (Read Committed isolation)
@@ -625,6 +638,7 @@ impl DatabaseCore<StorageEngine> {
     ///
     /// Returns deleted_count
     pub fn delete_one(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        self.check_not_closed()?;
         match self.durability_mode {
             DurabilityMode::Safe => {
                 // Wait for active write transaction to complete (Read Committed isolation)
@@ -740,38 +754,74 @@ impl DatabaseCore<StorageEngine> {
                 // This ensures atomic failure - either all documents insert or none.
                 collection.validate_batch_constraints(&documents)?;
 
+                // 🔒 FIX #6: Pre-validate ALL schemas BEFORE any insert
+                // Schema validation must happen before WAL/storage to ensure atomicity.
+                for doc in &documents {
+                    let doc_value = serde_json::to_value(doc)
+                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+                    collection.validate_value_against_schema(&doc_value)?;
+                }
+
+                // === PHASE 1: Prepare documents and build WAL (NO storage writes!) ===
+                // This is the WRITE-AHEAD approach: WAL first, storage second.
+                // If we crash after WAL commit but before storage writes, recovery replays the WAL.
                 let mut auto_tx = self.begin_auto_transaction();
-                let mut inserted_ids = Vec::with_capacity(documents.len());
+                let mut prepared_docs: Vec<(DocumentId, HashMap<String, Value>)> =
+                    Vec::with_capacity(documents.len());
 
-                for document in documents {
-                    let doc_id = collection.insert_one_raw(document.clone())?;
+                for mut document in documents {
+                    // Generate doc_id (use existing _id or generate new ObjectId)
+                    let doc_id = if let Some(existing_id) = document.get("_id") {
+                        serde_json::from_value(existing_id.clone()).map_err(|e| {
+                            crate::error::MongoLiteError::Serialization(format!(
+                                "Invalid _id format: {}",
+                                e
+                            ))
+                        })?
+                    } else {
+                        // Generate new ObjectId (UUID-based, storage-independent)
+                        let new_id = DocumentId::new_object_id();
+                        document.insert(
+                            "_id".to_string(),
+                            serde_json::to_value(&new_id).map_err(|e| {
+                                crate::error::MongoLiteError::Serialization(e.to_string())
+                            })?,
+                        );
+                        new_id
+                    };
 
-                    // Add full document to WAL
-                    let mut doc_with_metadata = document.clone();
-                    doc_with_metadata.insert(
-                        "_id".to_string(),
-                        serde_json::to_value(&doc_id).map_err(|e| {
-                            crate::error::MongoLiteError::Serialization(e.to_string())
-                        })?,
-                    );
-                    doc_with_metadata.insert(
+                    // Add metadata for WAL
+                    document.insert(
                         "_collection".to_string(),
                         Value::String(collection_name.to_string()),
                     );
-                    let doc_value = serde_json::to_value(&doc_with_metadata)
+
+                    let doc_value = serde_json::to_value(&document)
                         .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
 
+                    // Add to WAL (no storage write yet!)
                     auto_tx.add_operation(Operation::Insert {
                         collection: collection_name.to_string(),
                         doc_id: doc_id.clone(),
                         doc: doc_value,
                     })?;
 
-                    inserted_ids.push(doc_id);
+                    prepared_docs.push((doc_id, document));
                 }
 
+                // === PHASE 2: WAL commit (ATOMIC POINT!) ===
+                // After this succeeds, the operation is durable even if we crash.
                 auto_tx.mark_operations_applied();
-                self.commit_auto_transaction(auto_tx)?;
+                self.commit_auto_transaction(auto_tx)?; // WAL fsync happens here
+
+                // === PHASE 3: Storage writes (WAL is already safe) ===
+                // If this fails, WAL recovery will replay the operations on restart.
+                let mut inserted_ids = Vec::with_capacity(prepared_docs.len());
+                for (doc_id, document) in prepared_docs {
+                    // insert_one_raw will use the _id from the document
+                    collection.insert_one_raw(document)?;
+                    inserted_ids.push(doc_id);
+                }
 
                 Ok(inserted_ids)
             }
@@ -782,25 +832,49 @@ impl DatabaseCore<StorageEngine> {
                 // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
                 collection.validate_batch_constraints(&documents)?;
 
-                let mut inserted_ids = Vec::with_capacity(documents.len());
+                // 🔒 FIX #6: Pre-validate ALL schemas BEFORE any insert
+                for doc in &documents {
+                    let doc_value = serde_json::to_value(doc)
+                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+                    collection.validate_value_against_schema(&doc_value)?;
+                }
 
-                for document in documents {
-                    let doc_id = collection.insert_one_raw(document.clone())?;
+                // === PHASE 1: Prepare documents and add to WAL batch (NO storage writes!) ===
+                // This is the WRITE-AHEAD approach for batch mode.
+                let mut prepared_docs: Vec<(DocumentId, HashMap<String, Value>)> =
+                    Vec::with_capacity(documents.len());
 
-                    let mut doc_with_metadata = document.clone();
-                    doc_with_metadata.insert(
-                        "_id".to_string(),
-                        serde_json::to_value(&doc_id).map_err(|e| {
-                            crate::error::MongoLiteError::Serialization(e.to_string())
-                        })?,
-                    );
-                    doc_with_metadata.insert(
+                for mut document in documents {
+                    // Generate doc_id (use existing _id or generate new ObjectId)
+                    let doc_id = if let Some(existing_id) = document.get("_id") {
+                        serde_json::from_value(existing_id.clone()).map_err(|e| {
+                            crate::error::MongoLiteError::Serialization(format!(
+                                "Invalid _id format: {}",
+                                e
+                            ))
+                        })?
+                    } else {
+                        // Generate new ObjectId (UUID-based, storage-independent)
+                        let new_id = DocumentId::new_object_id();
+                        document.insert(
+                            "_id".to_string(),
+                            serde_json::to_value(&new_id).map_err(|e| {
+                                crate::error::MongoLiteError::Serialization(e.to_string())
+                            })?,
+                        );
+                        new_id
+                    };
+
+                    // Add metadata for WAL
+                    document.insert(
                         "_collection".to_string(),
                         Value::String(collection_name.to_string()),
                     );
-                    let doc_value = serde_json::to_value(&doc_with_metadata)
+
+                    let doc_value = serde_json::to_value(&document)
                         .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
 
+                    // Add to WAL batch (no storage write yet!)
                     let should_flush = self.add_to_batch(Operation::Insert {
                         collection: collection_name.to_string(),
                         doc_id: doc_id.clone(),
@@ -811,6 +885,14 @@ impl DatabaseCore<StorageEngine> {
                         self.flush_batch()?;
                     }
 
+                    prepared_docs.push((doc_id, document));
+                }
+
+                // === PHASE 2: Storage writes (WAL batch contains all operations) ===
+                let mut inserted_ids = Vec::with_capacity(prepared_docs.len());
+                for (doc_id, document) in prepared_docs {
+                    // insert_one_raw will use the _id from the document
+                    collection.insert_one_raw(document)?;
                     inserted_ids.push(doc_id);
                 }
 
@@ -824,6 +906,13 @@ impl DatabaseCore<StorageEngine> {
 
                 // 🔒 FIX #17: Pre-validate batch for duplicates BEFORE any insert
                 collection.validate_batch_constraints(&documents)?;
+
+                // 🔒 FIX #6: Pre-validate ALL schemas BEFORE any insert
+                for doc in &documents {
+                    let doc_value = serde_json::to_value(doc)
+                        .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+                    collection.validate_value_against_schema(&doc_value)?;
+                }
 
                 let mut inserted_ids = Vec::with_capacity(documents.len());
 
@@ -868,39 +957,32 @@ impl DatabaseCore<StorageEngine> {
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
 
-                // 1. Find all matching documents BEFORE update
-                let old_docs = collection.find(query)?;
-                if old_docs.is_empty() {
-                    return Ok((0, 0));
-                }
+                // BUG #1 FIX: Use prepare/persist pattern for correct WAL ordering
+                // PHASE 1: PREPARE - compute updates in memory (NO storage writes!)
+                let prepared = collection.update_many_prepare(query, update)?;
 
-                // 2. Begin auto-transaction
-                let mut auto_tx = self.begin_auto_transaction();
+                // Save counts before moving prepared into persist
+                let matched = prepared.matched;
+                let modified = prepared.modified;
 
-                // 3. Execute update_many
-                let (matched, modified) = collection.update_many_raw(query, update)?;
-
-                // 4. For each modified document, add WAL entry
                 if modified > 0 {
-                    for old_doc in old_docs.iter() {
-                        let Some(doc_id) = DocumentId::try_from_value(old_doc) else {
-                            continue; // Skip docs without valid _id
-                        };
-
-                        // Find the updated document
-                        if let Ok(Some(new_doc)) =
-                            collection.find_one(&serde_json::json!({"_id": &doc_id}))
-                        {
-                            auto_tx.add_operation(Operation::Update {
-                                collection: collection_name.to_string(),
-                                doc_id,
-                                old_doc: old_doc.clone(),
-                                new_doc,
-                            })?;
-                        }
+                    // PHASE 2: BUILD WAL from prepared results
+                    let mut auto_tx = self.begin_auto_transaction();
+                    for (doc_id, old_doc, new_doc) in &prepared.wal_entries {
+                        auto_tx.add_operation(Operation::Update {
+                            collection: collection_name.to_string(),
+                            doc_id: doc_id.clone(),
+                            old_doc: old_doc.clone(),
+                            new_doc: new_doc.clone(),
+                        })?;
                     }
+
+                    // PHASE 3: COMMIT WAL (fsync!) ← ATOMIC POINT
                     auto_tx.mark_operations_applied();
                     self.commit_auto_transaction(auto_tx)?;
+
+                    // PHASE 4: PERSIST to storage (WAL is safe now)
+                    collection.update_many_persist(prepared)?;
                 }
 
                 Ok((matched, modified))
@@ -909,42 +991,32 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Batch { .. } => {
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
-                let old_docs = collection.find(query)?;
-                if old_docs.is_empty() {
-                    return Ok((0, 0));
-                }
 
-                let (matched, modified) = collection.update_many_raw(query, update)?;
+                // BUG #1 FIX: Use prepare/persist pattern for correct WAL ordering
+                // PHASE 1: PREPARE - compute updates in memory (NO storage writes!)
+                let prepared = collection.update_many_prepare(query, update)?;
+
+                // Save counts before moving prepared into persist
+                let matched = prepared.matched;
+                let modified = prepared.modified;
 
                 if modified > 0 {
-                    for old_doc in old_docs.iter() {
-                        let doc_id = match old_doc.get("_id") {
-                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                            Some(Value::String(s)) => {
-                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                                    DocumentId::ObjectId(s.clone())
-                                } else {
-                                    DocumentId::String(s.clone())
-                                }
-                            }
-                            _ => continue,
-                        };
+                    // PHASE 2: BUILD batch WAL from prepared results
+                    for (doc_id, old_doc, new_doc) in &prepared.wal_entries {
+                        let should_flush = self.add_to_batch(Operation::Update {
+                            collection: collection_name.to_string(),
+                            doc_id: doc_id.clone(),
+                            old_doc: old_doc.clone(),
+                            new_doc: new_doc.clone(),
+                        })?;
 
-                        if let Ok(Some(new_doc)) =
-                            collection.find_one(&serde_json::json!({"_id": &doc_id}))
-                        {
-                            let should_flush = self.add_to_batch(Operation::Update {
-                                collection: collection_name.to_string(),
-                                doc_id,
-                                old_doc: old_doc.clone(),
-                                new_doc,
-                            })?;
-
-                            if should_flush {
-                                self.flush_batch()?;
-                            }
+                        if should_flush {
+                            self.flush_batch()?;
                         }
                     }
+
+                    // PHASE 3: PERSIST to storage (batch WAL handles durability)
+                    collection.update_many_persist(prepared)?;
                 }
 
                 Ok((matched, modified))
@@ -988,41 +1060,30 @@ impl DatabaseCore<StorageEngine> {
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
 
-                // 1. Find all matching documents BEFORE delete
-                let old_docs = collection.find(query)?;
-                if old_docs.is_empty() {
-                    return Ok(0);
-                }
+                // BUG #1 FIX: Use prepare/persist pattern for correct WAL ordering
+                // PHASE 1: PREPARE - identify deletions in memory (NO storage writes!)
+                let prepared = collection.delete_many_prepare(query)?;
 
-                // 2. Begin auto-transaction
-                let mut auto_tx = self.begin_auto_transaction();
+                // Save count before moving prepared into persist
+                let deleted = prepared.deleted;
 
-                // 3. Execute delete_many
-                let deleted = collection.delete_many_raw(query)?;
-
-                // 4. For each deleted document, add WAL entry
                 if deleted > 0 {
-                    for old_doc in old_docs {
-                        let doc_id = match old_doc.get("_id") {
-                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                            Some(Value::String(s)) => {
-                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                                    DocumentId::ObjectId(s.clone())
-                                } else {
-                                    DocumentId::String(s.clone())
-                                }
-                            }
-                            _ => continue,
-                        };
-
+                    // PHASE 2: BUILD WAL from prepared results
+                    let mut auto_tx = self.begin_auto_transaction();
+                    for (doc_id, old_doc) in &prepared.wal_entries {
                         auto_tx.add_operation(Operation::Delete {
                             collection: collection_name.to_string(),
-                            doc_id,
-                            old_doc,
+                            doc_id: doc_id.clone(),
+                            old_doc: old_doc.clone(),
                         })?;
                     }
+
+                    // PHASE 3: COMMIT WAL (fsync!) ← ATOMIC POINT
                     auto_tx.mark_operations_applied();
                     self.commit_auto_transaction(auto_tx)?;
+
+                    // PHASE 4: PERSIST tombstones to storage (WAL is safe now)
+                    collection.delete_many_persist(prepared)?;
                 }
 
                 Ok(deleted)
@@ -1031,37 +1092,30 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Batch { .. } => {
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
-                let old_docs = collection.find(query)?;
-                if old_docs.is_empty() {
-                    return Ok(0);
-                }
 
-                let deleted = collection.delete_many_raw(query)?;
+                // BUG #1 FIX: Use prepare/persist pattern for correct WAL ordering
+                // PHASE 1: PREPARE - identify deletions in memory (NO storage writes!)
+                let prepared = collection.delete_many_prepare(query)?;
+
+                // Save count before moving prepared into persist
+                let deleted = prepared.deleted;
 
                 if deleted > 0 {
-                    for old_doc in old_docs {
-                        let doc_id = match old_doc.get("_id") {
-                            Some(Value::Number(n)) => DocumentId::Int(n.as_i64().unwrap_or(0)),
-                            Some(Value::String(s)) => {
-                                if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
-                                    DocumentId::ObjectId(s.clone())
-                                } else {
-                                    DocumentId::String(s.clone())
-                                }
-                            }
-                            _ => continue,
-                        };
-
+                    // PHASE 2: BUILD batch WAL from prepared results
+                    for (doc_id, old_doc) in &prepared.wal_entries {
                         let should_flush = self.add_to_batch(Operation::Delete {
                             collection: collection_name.to_string(),
-                            doc_id,
-                            old_doc,
+                            doc_id: doc_id.clone(),
+                            old_doc: old_doc.clone(),
                         })?;
 
                         if should_flush {
                             self.flush_batch()?;
                         }
                     }
+
+                    // PHASE 3: PERSIST tombstones to storage (batch WAL handles durability)
+                    collection.delete_many_persist(prepared)?;
                 }
 
                 Ok(deleted)
@@ -1141,6 +1195,9 @@ impl DatabaseCore<StorageEngine> {
     /// # Ok::<(), ironbase_core::MongoLiteError>(())
     /// ```
     pub fn close(&self) -> Result<()> {
+        // Mark as closed FIRST to prevent new operations
+        self.is_closed.store(true, Ordering::SeqCst);
+
         // Flush all pending changes to disk
         self.flush()?;
 
@@ -1203,7 +1260,9 @@ impl DatabaseCore<MemoryStorage> {
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
+            schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(RwLock::new(None)),
+            is_closed: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -1218,6 +1277,7 @@ impl DatabaseCore<MemoryStorage> {
         collection_name: &str,
         document: HashMap<String, Value>,
     ) -> Result<DocumentId> {
+        self.check_not_closed()?;
         let collection = self.collection(collection_name)?;
         collection.insert_one_raw(document)
     }
@@ -1231,6 +1291,7 @@ impl DatabaseCore<MemoryStorage> {
         query: &Value,
         update: &Value,
     ) -> Result<(u64, u64)> {
+        self.check_not_closed()?;
         // Use get_collection - no implicit creation for update operations
         let collection = self.get_collection(collection_name)?;
         collection.update_one_raw(query, update)
@@ -1240,6 +1301,7 @@ impl DatabaseCore<MemoryStorage> {
     ///
     /// Returns deleted_count
     pub fn delete_one(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        self.check_not_closed()?;
         // Use get_collection - no implicit creation for delete operations
         let collection = self.get_collection(collection_name)?;
         collection.delete_one_raw(query)
@@ -1253,6 +1315,7 @@ impl DatabaseCore<MemoryStorage> {
         collection_name: &str,
         documents: Vec<HashMap<String, Value>>,
     ) -> Result<Vec<DocumentId>> {
+        self.check_not_closed()?;
         let collection = self.collection(collection_name)?;
         let result = collection.insert_many_raw(documents)?;
         Ok(result.inserted_ids)
@@ -1267,6 +1330,7 @@ impl DatabaseCore<MemoryStorage> {
         query: &Value,
         update: &Value,
     ) -> Result<(u64, u64)> {
+        self.check_not_closed()?;
         // Use get_collection - no implicit creation for update operations
         let collection = self.get_collection(collection_name)?;
         collection.update_many_raw(query, update)
@@ -1276,6 +1340,7 @@ impl DatabaseCore<MemoryStorage> {
     ///
     /// Returns deleted_count
     pub fn delete_many(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        self.check_not_closed()?;
         // Use get_collection - no implicit creation for delete operations
         let collection = self.get_collection(collection_name)?;
         collection.delete_many_raw(query)
@@ -1287,6 +1352,16 @@ impl DatabaseCore<MemoryStorage> {
 // ============================================================================
 
 impl<S: Storage + RawStorage> DatabaseCore<S> {
+    // ========== Database Closed Check ==========
+
+    /// Check if database is closed, return error if so
+    fn check_not_closed(&self) -> Result<()> {
+        if self.is_closed.load(Ordering::SeqCst) {
+            return Err(MongoLiteError::DatabaseClosed);
+        }
+        Ok(())
+    }
+
     // ========== Transaction Write Lock (Read Committed Isolation) ==========
 
     /// Acquire exclusive write lock for a transaction
@@ -1450,6 +1525,48 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Initialize the IndexManager for this collection
         let index_manager = self.initialize_index_manager(name)?;
         let shared = Arc::new(RwLock::new(index_manager));
+        managers.insert(name.to_string(), Arc::clone(&shared));
+        Ok(shared)
+    }
+
+    /// Get or create a shared schema manager for a collection
+    ///
+    /// Similar to `get_or_create_index_manager`, this ensures all CollectionCore
+    /// instances share the same schema Arc, so schema changes propagate correctly.
+    fn get_or_create_schema_manager(
+        &self,
+        name: &str,
+    ) -> Result<Arc<RwLock<Option<CompiledSchema>>>> {
+        // Fast path: read lock to check if already exists
+        {
+            let managers = self.schema_managers.read();
+            if let Some(manager) = managers.get(name) {
+                return Ok(Arc::clone(manager));
+            }
+        }
+
+        // Slow path: create with write lock (double-checked)
+        let mut managers = self.schema_managers.write();
+        if let Some(manager) = managers.get(name) {
+            return Ok(Arc::clone(manager));
+        }
+
+        // Load schema from storage metadata
+        let compiled_schema = {
+            let storage = self.storage.read();
+            match storage.get_collection_meta(name) {
+                Some(meta) => {
+                    if let Some(raw_schema) = &meta.schema {
+                        Some(CompiledSchema::from_value(raw_schema)?)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+
+        let shared = Arc::new(RwLock::new(compiled_schema));
         managers.insert(name.to_string(), Arc::clone(&shared));
         Ok(shared)
     }
@@ -1735,15 +1852,19 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
     /// Get collection (creates if doesn't exist)
     ///
-    /// Uses shared IndexManager to fix stale index problem.
+    /// Uses shared IndexManager and Schema to fix stale index/schema problems.
     /// Note: This method IMPLICITLY creates the collection if it doesn't exist.
     /// For read-only access without creation, use `get_collection()` instead.
     pub fn collection(&self, name: &str) -> Result<CollectionCore<S>> {
+        self.check_not_closed()?;
         let shared_indexes = self.get_or_create_index_manager(name)?;
+        let shared_schema = self.get_or_create_schema_manager(name)?;
         CollectionCore::with_shared_indexes(
             name.to_string(),
             Arc::clone(&self.storage),
             shared_indexes,
+            shared_schema,
+            Arc::clone(&self.is_closed),
         )
     }
 
@@ -1754,6 +1875,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     ///
     /// Optimized for READ operations - uses READ locks only on the hot path.
     pub fn get_collection(&self, name: &str) -> Result<CollectionCore<S>> {
+        self.check_not_closed()?;
         // Fast path: check if index manager is cached
         let shared_indexes = {
             let managers = self.index_managers.read();
@@ -1770,22 +1892,27 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     // This can happen after database reopen - need to create manager
                     drop(storage);
                     drop(managers);
-                    return self.get_or_create_index_manager(name).and_then(|idx| {
-                        CollectionCore::with_shared_indexes_readonly(
-                            name.to_string(),
-                            Arc::clone(&self.storage),
-                            idx,
-                        )
-                    });
+                    let shared_indexes = self.get_or_create_index_manager(name)?;
+                    let shared_schema = self.get_or_create_schema_manager(name)?;
+                    return CollectionCore::with_shared_indexes_readonly(
+                        name.to_string(),
+                        Arc::clone(&self.storage),
+                        shared_indexes,
+                        shared_schema,
+                        Arc::clone(&self.is_closed),
+                    );
                 }
             }
         };
 
         // Use readonly path - no write locks
+        let shared_schema = self.get_or_create_schema_manager(name)?;
         CollectionCore::with_shared_indexes_readonly(
             name.to_string(),
             Arc::clone(&self.storage),
             shared_indexes,
+            shared_schema,
+            Arc::clone(&self.is_closed),
         )
     }
 
@@ -2792,5 +2919,57 @@ mod tests {
         let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
         let result = db.delete_one("nonexistent", &json!({}));
         assert!(matches!(result, Err(MongoLiteError::CollectionNotFound(_))));
+    }
+
+    #[test]
+    fn test_operations_after_close_fail() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Insert some data before close
+        let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one("users", doc).unwrap();
+
+        // Close the database
+        db.close().unwrap();
+
+        // All operations after close should fail with DatabaseClosed error
+        let result = db.insert_one("users", HashMap::new());
+        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+
+        let result = db.update_one("users", &json!({}), &json!({"$set": {"x": 1}}));
+        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+
+        let result = db.delete_one("users", &json!({}));
+        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+
+        let result = db.collection("users");
+        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+    }
+
+    #[test]
+    fn test_operations_after_close_fail_memory() {
+        use crate::storage::MemoryStorage;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+        // Insert some data
+        let doc = HashMap::from([("name".to_string(), json!("Alice"))]);
+        db.insert_one("users", doc).unwrap();
+
+        // Mark as closed (MemoryStorage doesn't have close() method, so we test via the flag)
+        db.is_closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // All operations should fail
+        let result = db.insert_one("users", HashMap::new());
+        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+
+        let result = db.update_one("users", &json!({}), &json!({"$set": {"x": 1}}));
+        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+
+        let result = db.delete_one("users", &json!({}));
+        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
     }
 }

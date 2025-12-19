@@ -1,6 +1,7 @@
 // ironbase-core/src/collection_core/mod.rs
 // Pure Rust collection logic - NO PyO3 dependencies
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -20,7 +21,7 @@ use crate::{log_debug, log_trace, log_warn};
 mod constraints;
 mod index_persistence;
 mod raw_operations;
-mod schema;
+pub(crate) mod schema;
 mod update_operators;
 
 pub(crate) use self::constraints::BatchConstraintValidator;
@@ -136,13 +137,13 @@ impl QueryExecutionContext {
     }
 
     /// Apply projection to documents (returns owned docs)
-    fn apply_projection_to_docs(&self, docs: Vec<Value>) -> Vec<Value> {
+    fn apply_projection_to_docs(&self, docs: Vec<Value>) -> crate::error::Result<Vec<Value>> {
         match &self.projection {
             Some(proj) => docs
                 .into_iter()
                 .map(|doc| crate::find_options::apply_projection(&doc, proj))
                 .collect(),
-            None => docs,
+            None => Ok(docs),
         }
     }
 }
@@ -162,13 +163,15 @@ pub struct CollectionCore<S: Storage + RawStorage> {
     /// Query result cache with LRU eviction (capacity: 1000 queries)
     pub query_cache: Arc<QueryCache>,
     schema: Arc<RwLock<Option<CompiledSchema>>>,
+    /// Reference to database closed flag - prevents writes after db.close()
+    is_closed: Arc<AtomicBool>,
 }
 
 impl<S: Storage + RawStorage> CollectionCore<S> {
     // ========== CONSTRUCTOR ==========
 
     /// Create new collection (or get existing)
-    pub fn new(name: String, storage: Arc<RwLock<S>>) -> Result<Self> {
+    pub fn new(name: String, storage: Arc<RwLock<S>>, is_closed: Arc<AtomicBool>) -> Result<Self> {
         // Create collection if it doesn't exist
         {
             let mut storage_guard = storage.write();
@@ -357,17 +360,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             indexes: Arc::new(RwLock::new(index_manager)),
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
             schema: Arc::new(RwLock::new(compiled_schema)),
+            is_closed,
         })
     }
 
-    /// Create a collection with a shared IndexManager
+    /// Create a collection with shared IndexManager and Schema
     ///
-    /// This constructor is used by DatabaseCore to share IndexManagers across
-    /// multiple CollectionCore instances, fixing the "stale index" problem.
+    /// This constructor is used by DatabaseCore to share IndexManagers and Schemas
+    /// across multiple CollectionCore instances, fixing both "stale index" and
+    /// "stale schema" problems.
     pub(crate) fn with_shared_indexes(
         name: String,
         storage: Arc<RwLock<S>>,
         indexes: Arc<RwLock<IndexManager>>,
+        schema: Arc<RwLock<Option<CompiledSchema>>>,
+        is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
         // Ensure collection exists
         {
@@ -377,26 +384,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // Load schema from metadata
-        let schema_definition = {
-            let storage_guard = storage.read();
-            storage_guard
-                .get_collection_meta(&name)
-                .and_then(|meta| meta.schema.clone())
-        };
-
-        let compiled_schema = if let Some(raw_schema) = schema_definition {
-            Some(Self::compile_schema(&raw_schema)?)
-        } else {
-            None
-        };
-
         Ok(CollectionCore {
             name,
             storage,
             indexes, // Shared!
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
-            schema: Arc::new(RwLock::new(compiled_schema)),
+            schema, // Shared!
+            is_closed,
         })
     }
 
@@ -410,37 +404,40 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         name: String,
         storage: Arc<RwLock<S>>,
         indexes: Arc<RwLock<IndexManager>>,
+        schema: Arc<RwLock<Option<CompiledSchema>>>,
+        is_closed: Arc<AtomicBool>,
     ) -> Result<Self> {
-        // READ lock only - no collection creation
-        let schema_definition = {
+        // Verify collection exists (READ lock only)
+        {
             let storage_guard = storage.read();
-            storage_guard
-                .get_collection_meta(&name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?
-                .schema
-                .clone()
-        };
-
-        let compiled_schema = if let Some(raw_schema) = schema_definition {
-            Some(Self::compile_schema(&raw_schema)?)
-        } else {
-            None
-        };
+            if storage_guard.get_collection_meta(&name).is_none() {
+                return Err(MongoLiteError::CollectionNotFound(name.clone()));
+            }
+        }
 
         Ok(CollectionCore {
             name,
             storage,
-            indexes,
+            indexes, // Shared!
             query_cache: Arc::new(QueryCache::new(QUERY_CACHE_CAPACITY)),
-            schema: Arc::new(RwLock::new(compiled_schema)),
+            schema, // Shared!
+            is_closed,
         })
+    }
+
+    /// Check if database is closed - prevents writes after db.close()
+    pub(crate) fn check_not_closed(&self) -> Result<()> {
+        if self.is_closed.load(Ordering::SeqCst) {
+            return Err(MongoLiteError::DatabaseClosed);
+        }
+        Ok(())
     }
 
     fn compile_schema(schema: &Value) -> Result<CompiledSchema> {
         CompiledSchema::from_value(schema)
     }
 
-    fn validate_value_against_schema(&self, value: &Value) -> Result<()> {
+    pub(crate) fn validate_value_against_schema(&self, value: &Value) -> Result<()> {
         let guard = self.schema.read();
         if let Some(schema) = guard.as_ref() {
             schema.validate(value)?;
@@ -456,6 +453,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Set or clear the JSON schema for this collection.
     pub fn set_schema(&self, schema: Option<Value>) -> Result<()> {
+        self.check_not_closed()?;
         let compiled = if let Some(ref raw) = schema {
             Some(Self::compile_schema(raw)?)
         } else {
@@ -477,11 +475,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Get the JSON schema for this collection (if any)
-    pub fn get_schema(&self) -> Option<Value> {
+    pub fn get_schema(&self) -> Result<Option<Value>> {
+        self.check_not_closed()?;
         let storage = self.storage.read();
-        storage
+        Ok(storage
             .get_collection_meta(&self.name)
-            .and_then(|meta| meta.schema.clone())
+            .and_then(|meta| meta.schema.clone()))
     }
 
     // ========== BATCH VALIDATION ==========
@@ -544,6 +543,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Find documents matching query
     pub fn find(&self, query_json: &Value) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
         log_debug!("find() called with query: {:?}", query_json);
 
         // 🚀 OPTIMIZED: find({}) special case - return all docs directly
@@ -572,6 +572,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         query_json: &Value,
         options: crate::find_options::FindOptions,
     ) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
         // Phase 1: Build execution context (all setup logic centralized)
         let ctx = QueryExecutionContext::from_options(&options);
 
@@ -598,7 +599,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // 4a. Apply sort if needed (index didn't sort for us)
         if ctx.needs_memory_sort(index_sorted) {
             if let Some(ref sort_spec) = ctx.sort_spec {
-                crate::find_options::apply_sort(&mut docs, sort_spec);
+                crate::find_options::apply_sort(&mut docs, sort_spec)?;
             }
         }
 
@@ -606,7 +607,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let docs = ctx.apply_post_sort_pagination(docs);
 
         // 4c. Apply projection
-        let docs = ctx.apply_projection_to_docs(docs);
+        let docs = ctx.apply_projection_to_docs(docs)?;
 
         Ok(docs)
     }
@@ -633,6 +634,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// }
     /// ```
     pub fn find_streaming(&self, query_json: &Value) -> Result<FindCursor<'_, S>> {
+        self.check_not_closed()?;
         let (doc_ids, _) =
             self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
         Ok(FindCursor::new(self, doc_ids))
@@ -643,6 +645,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Uses QueryPlanner for index optimization when available.
     /// For `_id` queries, uses direct O(1) catalog lookup.
     pub fn find_one(&self, query_json: &Value) -> Result<Option<Value>> {
+        self.check_not_closed()?;
         // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
         // This is faster than going through QueryPlanner for the most common case
         if let Some(query_obj) = query_json.as_object() {
@@ -682,6 +685,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// Uses QueryPlanner for index optimization when available.
     pub fn count_documents(&self, query_json: &Value) -> Result<u64> {
+        self.check_not_closed()?;
         // Fast path: empty query = count all
         if Self::query_matches_all(query_json) {
             let storage = self.storage.read();
@@ -762,13 +766,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Distinct values for a field
     /// FIX #19: Now supports nested fields via get_nested_value (e.g., "address.city")
     pub fn distinct(&self, field: &str, query_json: &Value) -> Result<Vec<Value>> {
-        use crate::value_utils::get_nested_value;
+        use crate::value_utils::canonical_json_string;
 
+        // Handle _id query optimization
         if let Some(doc_id) = Self::extract_id_query(query_json) {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                if let Some(value) = get_nested_value(&doc, field) {
-                    return Ok(vec![value.clone()]);
-                }
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
+                // Use Document::get_all for MongoDB-style array traversal
+                let values: Vec<Value> = document.get_all(field).into_iter().cloned().collect();
+                return Ok(values);
             }
             return Ok(Vec::new());
         }
@@ -796,18 +803,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 continue;
             }
 
+            // Create Document from Value for proper array handling
+            let doc_json_str = serde_json::to_string(&doc)?;
+            let document = Document::from_json(&doc_json_str)?;
+
             let matches = if let Some(query) = &parsed_query {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
                 query.matches(&document)
             } else {
                 true
             };
 
             if matches {
-                if let Some(field_value) = get_nested_value(&doc, field) {
-                    let value_key =
-                        serde_json::to_string(field_value).unwrap_or_else(|_| "null".to_string());
+                // Use Document::get_all() for MongoDB-style implicit array traversal
+                // This properly handles dot notation with arrays like "items.name"
+                for field_value in document.get_all(field) {
+                    // Use canonical_json_string for deterministic object key ordering
+                    let value_key = canonical_json_string(field_value);
 
                     if seen_values.insert(value_key) {
                         distinct_values.push(field_value.clone());
@@ -1204,6 +1215,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// ])).unwrap();
     /// ```
     pub fn aggregate(&self, pipeline_json: &Value) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
         use crate::aggregation::Pipeline;
 
         // Parse pipeline
@@ -1352,6 +1364,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Create a B+ tree index on a field
     pub fn create_index(&self, field: String, unique: bool) -> Result<String> {
+        self.check_not_closed()?;
         let index_name = format!("{}_{}", self.name, field);
 
         let mut indexes = self.indexes.write();
@@ -1431,6 +1444,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Drop an index
     pub fn drop_index(&self, index_name: &str) -> Result<()> {
+        self.check_not_closed()?;
         let mut indexes = self.indexes.write();
         indexes.drop_index(index_name)?;
 
@@ -1727,7 +1741,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         for result in search_results {
             if let Some(doc) = self.read_document_by_id(&result.doc_id)? {
                 let projected_doc = if let Some(ref proj) = projection {
-                    crate::find_options::apply_projection(&doc, proj)
+                    crate::find_options::apply_projection(&doc, proj)?
                 } else {
                     doc
                 };
@@ -2143,32 +2157,61 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // 🚀 FAST PATH: Empty query - skip directly from catalog without disk I/O
         // This is critical for pagination performance on large collections
+        // NOTE: Only use fast path if there are no tombstones (live_count == catalog.len())
+        // Otherwise tombstones would be incorrectly counted in skip/limit calculations
         if parsed_query.is_match_all() {
-            let effective_limit = limit.unwrap_or(usize::MAX);
-            let doc_ids: Vec<DocumentId> = catalog
-                .keys()
-                .skip(skip)
-                .take(if effective_limit == 0 {
-                    usize::MAX
-                } else {
-                    effective_limit
-                })
-                .cloned()
-                .collect();
+            let live_count = storage.get_live_count(&self.name).unwrap_or(0);
+            let catalog_len = catalog.len() as u64;
+
+            if live_count == catalog_len {
+                // No tombstones - safe to use fast path
+                let effective_limit = limit.unwrap_or(usize::MAX);
+
+                // Sort keys for deterministic pagination across process restarts
+                // HashMap iteration order is non-deterministic due to ASLR hash seeds
+                let mut sorted_keys: Vec<DocumentId> = catalog.keys().cloned().collect();
+                sorted_keys.sort();
+
+                let doc_ids: Vec<DocumentId> = sorted_keys
+                    .into_iter()
+                    .skip(skip)
+                    .take(if effective_limit == 0 {
+                        usize::MAX
+                    } else {
+                        effective_limit
+                    })
+                    .collect();
+                log_debug!(
+                    "scan_documents_with_early_termination: FAST PATH (empty query, no tombstones) - skip={}, limit={:?}, returning {} docs",
+                    skip,
+                    limit,
+                    doc_ids.len()
+                );
+                return Ok(doc_ids);
+            }
+            // Tombstones exist - fall through to slow path which filters them
             log_debug!(
-                "scan_documents_with_early_termination: FAST PATH (empty query) - skip={}, limit={:?}, returning {} docs",
-                skip,
-                limit,
-                doc_ids.len()
+                "scan_documents_with_early_termination: tombstones detected (live={}, catalog={}), using slow path",
+                live_count,
+                catalog_len
             );
-            return Ok(doc_ids);
         }
 
         let mut doc_ids = Vec::new();
         let mut skipped = 0usize;
 
-        // Iterate over catalog with early termination (for filtered queries)
-        for (doc_id, offset) in &catalog {
+        // BUG #1 FIX: Sort keys for deterministic pagination
+        // HashMap iteration order is non-deterministic due to ASLR hash seeds
+        // This ensures consistent results even when tombstones are present
+        let mut sorted_keys: Vec<DocumentId> = catalog.keys().cloned().collect();
+        sorted_keys.sort();
+
+        // Iterate over sorted keys with early termination (for filtered queries)
+        for doc_id in &sorted_keys {
+            let offset = match catalog.get(doc_id) {
+                Some(o) => *o,
+                None => continue, // Shouldn't happen, but be safe
+            };
             // Check if we've collected enough documents
             // MongoDB compatibility: limit(0) means "no limit"
             if let Some(limit_count) = limit {
@@ -2183,7 +2226,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             // Read document from storage
-            let doc_bytes = match storage.read_data(*offset) {
+            let doc_bytes = match storage.read_data(offset) {
                 Ok(bytes) => bytes,
                 Err(_) => continue, // Skip corrupted entries
             };
@@ -2460,17 +2503,20 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
     }
 
     /// Fetch the next document, or None if exhausted
+    /// Uses iterative loop instead of recursion to avoid stack overflow with many tombstones
     pub fn next(&mut self) -> Result<Option<Value>> {
-        if self.position >= self.doc_ids.len() {
-            return Ok(None);
-        }
+        loop {
+            if self.position >= self.doc_ids.len() {
+                return Ok(None);
+            }
 
-        let doc_id = &self.doc_ids[self.position];
-        self.position += 1;
+            let doc_id = &self.doc_ids[self.position];
+            self.position += 1;
 
-        match self.collection.read_document_by_id(doc_id)? {
-            Some(doc) => Ok(Some(doc)),
-            None => self.next(), // Skip tombstones, get next
+            match self.collection.read_document_by_id(doc_id)? {
+                Some(doc) => return Ok(Some(doc)),
+                None => continue, // Skip tombstones, continue to next
+            }
         }
     }
 

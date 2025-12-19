@@ -4,7 +4,10 @@
 use crate::document::Document;
 use crate::error::{MongoLiteError, Result};
 use crate::query::Query;
-use crate::value_utils::{canonical_json_string, get_nested_value, set_nested_value};
+use crate::value_utils::{
+    canonical_json_string, compare_values as compare_values_core, get_nested_value,
+    set_nested_value,
+};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -33,30 +36,145 @@ fn parse_field_reference(value: &Value, op_name: &str) -> Result<String> {
     }
 }
 
-/// Compute min or max over documents using a comparison function
+/// Compute min or max over documents with integer-first comparison
+///
+/// BUG #15 FIX: Preserves integer precision for values > 2^53.
+/// Uses integer comparison when possible, only falls back to f64 for floats.
 ///
 /// Used by $min and $max accumulators
-fn compute_extremum<F>(docs: &[Value], field: &str, compare: F) -> Result<Value>
-where
-    F: Fn(f64, f64) -> f64,
-{
-    let mut result: Option<f64> = None;
+fn compute_extremum(docs: &[Value], field: &str, is_min: bool) -> Result<Value> {
+    let mut result_i64: Option<i64> = None;
+    let mut result_u64: Option<u64> = None;
+    let mut result_f64: Option<f64> = None;
 
     for doc in docs {
         if let Some(value) = get_nested_value(doc, field) {
-            let num = if let Some(n) = value.as_f64() {
-                n
-            } else if let Some(n) = value.as_i64() {
-                n as f64
-            } else {
-                continue;
-            };
-
-            result = Some(result.map_or(num, |r| compare(r, num)));
+            if let Some(n) = value.as_i64() {
+                // Integer value - compare in integer domain
+                result_i64 = Some(match result_i64 {
+                    Some(current) => {
+                        if is_min {
+                            current.min(n)
+                        } else {
+                            current.max(n)
+                        }
+                    }
+                    None => n,
+                });
+            } else if let Some(n) = value.as_u64() {
+                // Large positive integer (> i64::MAX)
+                result_u64 = Some(match result_u64 {
+                    Some(current) => {
+                        if is_min {
+                            current.min(n)
+                        } else {
+                            current.max(n)
+                        }
+                    }
+                    None => n,
+                });
+            } else if let Some(n) = value.as_f64() {
+                // Float value
+                result_f64 = Some(match result_f64 {
+                    Some(current) => {
+                        if is_min {
+                            current.min(n)
+                        } else {
+                            current.max(n)
+                        }
+                    }
+                    None => n,
+                });
+            }
         }
     }
 
-    Ok(result.map(Value::from).unwrap_or(Value::Null))
+    // Combine results: compare across types only when necessary
+    // Priority: return in original type when possible
+    match (result_i64, result_u64, result_f64) {
+        // Single type results - return in original type
+        (Some(i), None, None) => Ok(Value::from(i)),
+        (None, Some(u), None) => Ok(Value::from(u)),
+        (None, None, Some(f)) => Ok(Value::from(f)),
+
+        // Mixed i64 and u64 - compare as u64 if i64 is non-negative
+        (Some(i), Some(u), None) => {
+            if i >= 0 {
+                let i_as_u = i as u64;
+                if is_min {
+                    if i_as_u <= u {
+                        Ok(Value::from(i))
+                    } else {
+                        Ok(Value::from(u))
+                    }
+                } else if i_as_u >= u {
+                    Ok(Value::from(i))
+                } else {
+                    Ok(Value::from(u))
+                }
+            } else {
+                // i64 is negative, it's always less than any u64
+                if is_min {
+                    Ok(Value::from(i))
+                } else {
+                    Ok(Value::from(u))
+                }
+            }
+        }
+
+        // Mixed with float - convert to f64 for comparison (precision loss possible here)
+        (Some(i), None, Some(f)) => {
+            let i_as_f = i as f64;
+            if is_min {
+                if i_as_f <= f {
+                    Ok(Value::from(i))
+                } else {
+                    Ok(Value::from(f))
+                }
+            } else if i_as_f >= f {
+                Ok(Value::from(i))
+            } else {
+                Ok(Value::from(f))
+            }
+        }
+        (None, Some(u), Some(f)) => {
+            let u_as_f = u as f64;
+            if is_min {
+                if u_as_f <= f {
+                    Ok(Value::from(u))
+                } else {
+                    Ok(Value::from(f))
+                }
+            } else if u_as_f >= f {
+                Ok(Value::from(u))
+            } else {
+                Ok(Value::from(f))
+            }
+        }
+
+        // All three types present - full comparison
+        (Some(i), Some(u), Some(f)) => {
+            // Convert all to f64 for comparison (edge case, rare)
+            let i_as_f = i as f64;
+            let u_as_f = u as f64;
+            let extremum = if is_min {
+                i_as_f.min(u_as_f).min(f)
+            } else {
+                i_as_f.max(u_as_f).max(f)
+            };
+            // Return in original type that matches the extremum
+            if (i_as_f - extremum).abs() < f64::EPSILON {
+                Ok(Value::from(i))
+            } else if (u_as_f - extremum).abs() < f64::EPSILON {
+                Ok(Value::from(u))
+            } else {
+                Ok(Value::from(f))
+            }
+        }
+
+        // No values found
+        (None, None, None) => Ok(Value::Null),
+    }
 }
 
 /// Aggregation pipeline
@@ -1018,9 +1136,9 @@ impl Accumulator {
                 }
             }
 
-            Accumulator::Min(field) => compute_extremum(docs, field, f64::min),
+            Accumulator::Min(field) => compute_extremum(docs, field, true),
 
-            Accumulator::Max(field) => compute_extremum(docs, field, f64::max),
+            Accumulator::Max(field) => compute_extremum(docs, field, false),
 
             Accumulator::First(field) => docs
                 .first()
@@ -1133,23 +1251,10 @@ fn compare_values(a: Option<&Value>, b: Option<&Value>) -> std::cmp::Ordering {
         (None, None) => std::cmp::Ordering::Equal,
         (None, Some(_)) => std::cmp::Ordering::Less,
         (Some(_), None) => std::cmp::Ordering::Greater,
-        (Some(a), Some(b)) => {
-            // String comparison
-            if let (Some(s1), Some(s2)) = (a.as_str(), b.as_str()) {
-                return s1.cmp(s2);
-            }
-
-            // Number comparison
-            if let (Some(n1), Some(n2)) = (a.as_f64(), b.as_f64()) {
-                return n1.partial_cmp(&n2).unwrap_or(std::cmp::Ordering::Equal);
-            }
-
-            // Boolean comparison
-            if let (Some(b1), Some(b2)) = (a.as_bool(), b.as_bool()) {
-                return b1.cmp(&b2);
-            }
-
-            std::cmp::Ordering::Equal
+        // BUG #2 FIX: Use the core compare_values which doesn't lose precision
+        // for large integers (>2^53)
+        (Some(a_val), Some(b_val)) => {
+            compare_values_core(a_val, b_val).unwrap_or(std::cmp::Ordering::Equal)
         }
     }
 }

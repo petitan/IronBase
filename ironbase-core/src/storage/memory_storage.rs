@@ -304,6 +304,7 @@ impl RawStorage for MemoryStorage {
         // Update catalog in metadata
         if let Some(meta) = self.metadata.get_mut(collection) {
             meta.document_catalog.insert(doc_id.clone(), offset);
+            meta.document_count += 1;
         }
 
         // Update next_offset for consistency
@@ -704,5 +705,30 @@ mod tests {
         // Check catalog was updated
         let meta = storage.get_collection_meta("test").unwrap();
         assert_eq!(meta.document_catalog.get(&doc_id), Some(&offset));
+    }
+
+    #[test]
+    fn test_raw_storage_document_count_update() {
+        let mut storage = MemoryStorage::new();
+        storage.create_collection("test").unwrap();
+
+        // Initial count should be 0
+        let meta = storage.get_collection_meta("test").unwrap();
+        assert_eq!(meta.document_count, 0);
+
+        // Write documents via raw API
+        storage
+            .write_document_raw("test", &DocumentId::Int(1), b"{\"_id\":1}")
+            .unwrap();
+        storage
+            .write_document_raw("test", &DocumentId::Int(2), b"{\"_id\":2}")
+            .unwrap();
+        storage
+            .write_document_raw("test", &DocumentId::Int(3), b"{\"_id\":3}")
+            .unwrap();
+
+        // document_count should be updated
+        let meta = storage.get_collection_meta("test").unwrap();
+        assert_eq!(meta.document_count, 3);
     }
 }

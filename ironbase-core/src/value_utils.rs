@@ -64,8 +64,20 @@ pub fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
 pub fn set_nested_value(doc: &mut Value, path: &str, value: Value) {
     // Fast path: no dots means simple field assignment
     if !path.contains('.') {
-        if let Value::Object(ref mut map) = doc {
-            map.insert(path.to_string(), value);
+        match doc {
+            Value::Object(ref mut map) => {
+                map.insert(path.to_string(), value);
+            }
+            Value::Array(ref mut arr) => {
+                // Handle array index for simple path
+                if let Ok(index) = path.parse::<usize>() {
+                    if index < arr.len() {
+                        arr[index] = value;
+                    }
+                    // else: index out of bounds, ignore
+                }
+            }
+            _ => {}
         }
         return;
     }
@@ -76,22 +88,129 @@ pub fn set_nested_value(doc: &mut Value, path: &str, value: Value) {
     for (i, part) in parts.iter().enumerate() {
         if i == parts.len() - 1 {
             // Last part - set the value
-            if let Value::Object(ref mut map) = current {
-                map.insert(part.to_string(), value);
+            match current {
+                Value::Object(ref mut map) => {
+                    map.insert(part.to_string(), value);
+                }
+                Value::Array(ref mut arr) => {
+                    if let Ok(index) = part.parse::<usize>() {
+                        if index < arr.len() {
+                            arr[index] = value;
+                        }
+                        // else: index out of bounds, ignore
+                    }
+                }
+                _ => {}
             }
             return;
         }
 
-        // Navigate deeper, creating intermediate objects if needed
-        if let Value::Object(ref mut map) = current {
-            if !map.contains_key(*part) {
-                map.insert(part.to_string(), Value::Object(serde_json::Map::new()));
+        // Determine if next path component is an array index
+        let next_is_array_index = parts
+            .get(i + 1)
+            .map(|p| p.parse::<usize>().is_ok())
+            .unwrap_or(false);
+
+        // Navigate deeper, creating intermediate structures if needed
+        match current {
+            Value::Object(ref mut map) => {
+                if !map.contains_key(*part) {
+                    // Create intermediate structure based on next path component
+                    if next_is_array_index {
+                        map.insert(part.to_string(), Value::Array(Vec::new()));
+                    } else {
+                        map.insert(part.to_string(), Value::Object(serde_json::Map::new()));
+                    }
+                }
+                current = map.get_mut(*part).unwrap();
             }
-            current = map.get_mut(*part).unwrap();
-        } else {
-            // Cannot navigate into non-object
-            return;
+            Value::Array(ref mut arr) => {
+                if let Ok(index) = part.parse::<usize>() {
+                    // Extend array if needed
+                    while arr.len() <= index {
+                        if next_is_array_index {
+                            arr.push(Value::Array(Vec::new()));
+                        } else {
+                            arr.push(Value::Object(serde_json::Map::new()));
+                        }
+                    }
+                    current = &mut arr[index];
+                } else {
+                    // Invalid: array but non-numeric key
+                    return;
+                }
+            }
+            _ => return,
         }
+    }
+}
+
+/// Delete a value at a nested path with dot notation support
+///
+/// Returns `true` if the value was deleted, `false` if path doesn't exist.
+/// Supports array indexing: "items.0.name" will delete the name field from items[0].
+///
+/// # Examples
+///
+/// ```ignore
+/// use serde_json::json;
+/// use ironbase_core::value_utils::delete_nested_value;
+///
+/// let mut doc = json!({"address": {"city": "NYC", "zip": "10001"}});
+/// delete_nested_value(&mut doc, "address.city");
+/// assert_eq!(doc, json!({"address": {"zip": "10001"}}));
+/// ```
+pub fn delete_nested_value(doc: &mut Value, path: &str) -> bool {
+    // Fast path: no dots means simple field deletion
+    if !path.contains('.') {
+        if let Value::Object(ref mut map) = doc {
+            return map.remove(path).is_some();
+        }
+        return false;
+    }
+
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = doc;
+
+    // Navigate to the parent of the field to delete
+    for part in &parts[..parts.len() - 1] {
+        match current {
+            Value::Object(ref mut map) => {
+                if let Some(v) = map.get_mut(*part) {
+                    current = v;
+                } else {
+                    return false; // Path doesn't exist
+                }
+            }
+            Value::Array(ref mut arr) => {
+                if let Ok(index) = part.parse::<usize>() {
+                    if let Some(v) = arr.get_mut(index) {
+                        current = v;
+                    } else {
+                        return false; // Index out of bounds
+                    }
+                } else {
+                    return false; // Invalid array index
+                }
+            }
+            _ => return false, // Cannot navigate into non-container
+        }
+    }
+
+    // Delete the final key/index
+    let last_key = parts.last().unwrap();
+    match current {
+        Value::Object(ref mut map) => map.remove(*last_key).is_some(),
+        Value::Array(ref mut arr) => {
+            if let Ok(index) = last_key.parse::<usize>() {
+                if index < arr.len() {
+                    arr.remove(index);
+                    return true;
+                }
+            }
+            false
+        }
+        _ => false,
     }
 }
 
@@ -120,6 +239,38 @@ pub fn set_nested_value(doc: &mut Value, path: &str, value: Value) {
 pub fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Number(n1), Value::Number(n2)) => {
+            // BUG #2 FIX: Try integer comparison first to avoid f64 precision loss
+            // f64 only has 53 bits of mantissa, so integers > 2^53 lose precision
+            // serde_json stores integers as i64/u64 internally, not f64
+
+            // Case 1: Both are i64 (most common for IDs and counters)
+            if let (Some(i1), Some(i2)) = (n1.as_i64(), n2.as_i64()) {
+                return Some(i1.cmp(&i2));
+            }
+
+            // Case 2: Both are u64 (large positive integers)
+            if let (Some(u1), Some(u2)) = (n1.as_u64(), n2.as_u64()) {
+                return Some(u1.cmp(&u2));
+            }
+
+            // Case 3: Mixed i64/u64 - compare carefully
+            if let (Some(i), Some(u)) = (n1.as_i64(), n2.as_u64()) {
+                // Negative i64 is always less than any u64
+                if i < 0 {
+                    return Some(Ordering::Less);
+                }
+                // Non-negative i64 can be safely cast to u64
+                return Some((i as u64).cmp(&u));
+            }
+            if let (Some(u), Some(i)) = (n1.as_u64(), n2.as_i64()) {
+                if i < 0 {
+                    return Some(Ordering::Greater);
+                }
+                return Some(u.cmp(&(i as u64)));
+            }
+
+            // Case 4: Fall back to f64 only for actual floating-point numbers
+            // (or if the above integer checks all failed)
             let f1 = n1.as_f64()?;
             let f2 = n2.as_f64()?;
             f1.partial_cmp(&f2)
@@ -372,6 +523,191 @@ mod tests {
         let mut doc = json!({"a": {}});
         set_nested_value(&mut doc, "a.b.c.d", json!(42));
         assert_eq!(doc["a"]["b"]["c"]["d"], 42);
+    }
+
+    // ========== BUG #1 regression tests: set_nested_value array handling ==========
+
+    #[test]
+    fn test_set_nested_value_array_index_path() {
+        // BUG #1 regression test: "items.0.name" should work with existing array
+        let mut doc = json!({
+            "items": [
+                {"name": "old_name"},
+                {"name": "item2"}
+            ]
+        });
+        set_nested_value(&mut doc, "items.0.name", json!("new_name"));
+        assert_eq!(
+            doc["items"][0]["name"], "new_name",
+            "Should update items[0].name to new_name"
+        );
+        assert_eq!(
+            doc["items"][1]["name"], "item2",
+            "items[1] should be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_set_nested_value_array_navigation() {
+        // Navigate through existing array
+        let mut doc = json!({
+            "orders": [
+                {"id": 1, "status": "pending"},
+                {"id": 2, "status": "shipped"}
+            ]
+        });
+        set_nested_value(&mut doc, "orders.1.status", json!("delivered"));
+        assert_eq!(doc["orders"][1]["status"], "delivered");
+    }
+
+    #[test]
+    fn test_set_nested_value_create_array_element() {
+        // Extend array if index is beyond current length
+        let mut doc = json!({
+            "data": []
+        });
+        set_nested_value(&mut doc, "data.0.value", json!(100));
+        assert_eq!(
+            doc["data"][0]["value"], 100,
+            "Should create data[0] and set value"
+        );
+    }
+
+    #[test]
+    fn test_set_nested_value_nested_arrays() {
+        // Handle nested arrays: matrix.0.1 = first row, second column
+        let mut doc = json!({
+            "matrix": [
+                [1, 2, 3],
+                [4, 5, 6]
+            ]
+        });
+        set_nested_value(&mut doc, "matrix.0.1", json!(99));
+        assert_eq!(doc["matrix"][0][1], 99);
+    }
+
+    #[test]
+    fn test_set_nested_value_create_array_path() {
+        // When creating a path where next component is a number, create array
+        let mut doc = json!({});
+        set_nested_value(&mut doc, "items.0.name", json!("first"));
+        assert!(
+            doc["items"].is_array(),
+            "items should be an array, not object"
+        );
+        assert_eq!(doc["items"][0]["name"], "first");
+    }
+
+    #[test]
+    fn test_set_nested_value_simple_array_index() {
+        // Simple path that's just an index into existing array
+        let mut doc = json!([10, 20, 30]);
+        set_nested_value(&mut doc, "1", json!(99));
+        assert_eq!(doc[1], 99);
+    }
+
+    #[test]
+    fn test_set_nested_value_projection_use_case() {
+        // This is the actual use case: projection include mode with array paths
+        // Original doc has items array, we want to project items.0.name
+        let original = json!({
+            "_id": 1,
+            "items": [
+                {"name": "item1", "price": 100},
+                {"name": "item2", "price": 200}
+            ]
+        });
+
+        // Simulate projection: create new doc and set fields from original
+        let mut projected = json!({});
+        set_nested_value(&mut projected, "_id", original["_id"].clone());
+        set_nested_value(
+            &mut projected,
+            "items.0.name",
+            original["items"][0]["name"].clone(),
+        );
+
+        assert_eq!(projected["_id"], 1);
+        assert_eq!(projected["items"][0]["name"], "item1");
+    }
+
+    // ========== delete_nested_value tests (BUG #3 regression tests) ==========
+
+    #[test]
+    fn test_delete_nested_value_simple() {
+        let mut doc = json!({"name": "Alice", "age": 30});
+        assert!(delete_nested_value(&mut doc, "age"));
+        assert_eq!(doc, json!({"name": "Alice"}));
+    }
+
+    #[test]
+    fn test_delete_nested_value_nested() {
+        let mut doc = json!({"address": {"city": "NYC", "zip": "10001"}});
+        assert!(delete_nested_value(&mut doc, "address.city"));
+        assert_eq!(doc, json!({"address": {"zip": "10001"}}));
+    }
+
+    #[test]
+    fn test_delete_nested_value_deeply_nested() {
+        let mut doc = json!({"a": {"b": {"c": {"d": 42, "e": 100}}}});
+        assert!(delete_nested_value(&mut doc, "a.b.c.d"));
+        assert_eq!(doc, json!({"a": {"b": {"c": {"e": 100}}}}));
+    }
+
+    #[test]
+    fn test_delete_nested_value_array_index() {
+        let mut doc = json!({
+            "items": [
+                {"name": "item1", "price": 100},
+                {"name": "item2", "price": 200}
+            ]
+        });
+        assert!(delete_nested_value(&mut doc, "items.0.price"));
+        assert_eq!(
+            doc["items"][0],
+            json!({"name": "item1"}),
+            "Should delete only price from items[0]"
+        );
+        assert_eq!(
+            doc["items"][1],
+            json!({"name": "item2", "price": 200}),
+            "items[1] should be unchanged"
+        );
+    }
+
+    #[test]
+    fn test_delete_nested_value_nonexistent_path() {
+        let mut doc = json!({"name": "Alice"});
+        assert!(!delete_nested_value(&mut doc, "address.city"));
+        assert_eq!(doc, json!({"name": "Alice"})); // Unchanged
+    }
+
+    #[test]
+    fn test_delete_nested_value_entire_nested_object() {
+        let mut doc = json!({"address": {"city": "NYC"}, "name": "Alice"});
+        assert!(delete_nested_value(&mut doc, "address"));
+        assert_eq!(doc, json!({"name": "Alice"}));
+    }
+
+    #[test]
+    fn test_delete_nested_value_projection_exclude_use_case() {
+        // BUG #3: This is the actual bug - projection exclude with dot notation
+        let mut doc = json!({
+            "_id": 1,
+            "user": {"password": "secret", "email": "test@example.com"},
+            "data": "public"
+        });
+
+        // Exclude sensitive field: user.password
+        assert!(delete_nested_value(&mut doc, "user.password"));
+        assert_eq!(
+            doc,
+            json!({
+                "_id": 1,
+                "user": {"email": "test@example.com"},
+                "data": "public"
+            })
+        );
     }
 
     // ========== canonical_json_string tests ==========

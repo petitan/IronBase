@@ -59,6 +59,9 @@ impl OperationReplay {
                 let doc_json = serde_json::to_string(doc)
                     .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                 storage.write_document_raw(collection, &doc_id, doc_json.as_bytes())?;
+
+                // Update live document count for correct count_documents({}) after recovery
+                storage.adjust_live_count(collection, 1);
             }
 
             Operation::Update {
@@ -91,6 +94,9 @@ impl OperationReplay {
                 let tombstone_json = serde_json::to_string(&tombstone)
                     .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
                 storage.write_document_raw(collection, doc_id, tombstone_json.as_bytes())?;
+
+                // Update live document count for correct count_documents({}) after recovery
+                storage.adjust_live_count(collection, -1);
             }
         }
 
