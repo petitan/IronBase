@@ -1449,38 +1449,38 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut indexes = self.indexes.write();
         indexes.drop_index(index_name)?;
 
-        drop(indexes); // Release lock
-
-        // Remove from persisted metadata (B+ tree, fuzzy, and fulltext indexes)
-        {
-            let mut storage = self.storage.write();
-            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
-                // Remove from B+ tree indexes
-                meta.indexes.retain(|idx| idx.name != index_name);
-                // Remove from fuzzy indexes
-                meta.fuzzy_indexes.retain(|idx| idx.name != index_name);
-                // Remove from fulltext indexes
-                meta.fulltext_indexes.retain(|idx| idx.name != index_name);
-                storage.flush()?;
-            }
+        // FIX: Hold index lock while updating metadata to prevent race condition
+        // where another thread sees inconsistent state (index gone but metadata present)
+        let mut storage = self.storage.write();
+        if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+            // Remove from B+ tree indexes
+            meta.indexes.retain(|idx| idx.name != index_name);
+            // Remove from fuzzy indexes
+            meta.fuzzy_indexes.retain(|idx| idx.name != index_name);
+            // Remove from fulltext indexes
+            meta.fulltext_indexes.retain(|idx| idx.name != index_name);
+            storage.flush()?;
         }
+        // Both locks released here atomically
 
         Ok(())
     }
 
     /// List all indexes
-    pub fn list_indexes(&self) -> Vec<String> {
+    pub fn list_indexes(&self) -> Result<Vec<String>> {
+        self.check_not_closed()?;
         let indexes = self.indexes.read();
-        indexes.list_indexes()
+        Ok(indexes.list_indexes())
     }
 
     /// List all indexes with their prefix field (for QueryPlanner)
     ///
     /// Returns tuples of (index_name, first_field) - compound indexes only
     /// return their FIRST field, as they can only be used for prefix queries.
-    pub fn list_indexes_with_prefix_field(&self) -> Vec<(String, String)> {
+    pub fn list_indexes_with_prefix_field(&self) -> Result<Vec<(String, String)>> {
+        self.check_not_closed()?;
         let indexes = self.indexes.read();
-        indexes.list_indexes_with_prefix_field()
+        Ok(indexes.list_indexes_with_prefix_field())
     }
 
     /// Create a fuzzy text index on a field
@@ -1758,14 +1758,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// List all fulltext indexes for this collection
-    pub fn list_fulltext_indexes(&self) -> Vec<crate::fulltext::FulltextIndexMetadata> {
+    pub fn list_fulltext_indexes(&self) -> Result<Vec<crate::fulltext::FulltextIndexMetadata>> {
+        self.check_not_closed()?;
         let indexes = self.indexes.read();
-        indexes
+        Ok(indexes
             .list_fulltext_indexes()
             .into_iter()
             .filter(|idx| idx.name.starts_with(&format!("{}_", self.name)))
             .map(|idx| idx.metadata())
-            .collect()
+            .collect())
     }
 
     // ========== TRANSACTION OPERATIONS ==========

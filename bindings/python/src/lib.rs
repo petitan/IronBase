@@ -585,7 +585,9 @@ impl Collection {
 
     /// List all indexes
     fn list_indexes(&self) -> PyResult<Vec<String>> {
-        Ok(self.core.list_indexes())
+        self.core
+            .list_indexes()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
     /// Explain query

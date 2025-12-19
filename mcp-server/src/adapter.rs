@@ -414,7 +414,7 @@ impl IronBaseAdapter {
     pub fn list_indexes(&self, collection: &str) -> Result<Vec<String>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
-        let indexes = coll.list_indexes();
+        let indexes = coll.list_indexes()?;
         Ok(indexes)
     }
 

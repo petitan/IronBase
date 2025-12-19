@@ -769,7 +769,7 @@ fn test_create_index() {
     let index_name = collection.create_index("age".to_string(), false).unwrap();
     assert!(index_name.contains("age"));
 
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(indexes.len() >= 2); // _id index + age index
 }
 
@@ -825,7 +825,7 @@ fn test_drop_index() {
     collection.drop_index(&index_name).unwrap();
 
     // Verify index is gone - list_indexes returns Vec<String>
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(!indexes.contains(&index_name));
 }
 
@@ -835,7 +835,7 @@ fn test_list_indexes() {
     let collection = db.collection(&coll_name).unwrap();
 
     // Should have at least _id index - list_indexes returns Vec<String>
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(!indexes.is_empty());
     assert!(indexes.iter().any(|i| i.contains("_id")));
 }

@@ -65,6 +65,42 @@ pub struct DeleteManyPrepared {
     pub(crate) tombstone_writes: Vec<(DocumentId, String)>,
 }
 
+/// Prepared data for insert_one operation.
+/// Contains all info needed for WAL and storage persist.
+///
+/// WAL REFACTOR: Enables consistent prepare/persist pattern for inserts:
+/// - PREPARE phase: Validate document, generate _id, prepare WAL entry (no storage writes)
+/// - PERSIST phase: Write to storage and update indexes (after WAL commit)
+#[derive(Debug)]
+#[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
+pub struct InsertOnePrepared {
+    /// The document ID (auto-generated or provided)
+    pub doc_id: DocumentId,
+    /// The validated document ready for storage (has _id, NO _collection)
+    pub document: Document,
+    /// WAL entry: document with _id AND _collection for recovery
+    pub wal_doc: Value,
+    /// Collection name for context
+    pub(crate) collection_name: String,
+}
+
+/// Prepared data for insert_many operation.
+/// Contains all info needed for WAL and storage persist.
+///
+/// WAL REFACTOR: Enables consistent prepare/persist pattern for batch inserts:
+/// - PREPARE phase: Validate all documents, check constraints (no storage writes)
+/// - PERSIST phase: Write all to storage and update indexes (after WAL commit)
+#[derive(Debug)]
+#[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
+pub struct InsertManyPrepared {
+    /// Individual prepared inserts
+    pub prepared_docs: Vec<InsertOnePrepared>,
+    /// All inserted document IDs (for convenience)
+    pub inserted_ids: Vec<DocumentId>,
+    /// Collection name for context
+    pub(crate) collection_name: String,
+}
+
 /// Helper: Check if document is a tombstone
 #[inline]
 fn is_tombstone(doc: &Value) -> bool {
@@ -193,6 +229,45 @@ pub(crate) trait RawOperations: sealed::Sealed {
     ///
     /// BUG #1 FIX: Only call this after WAL is committed!
     fn delete_many_persist(&self, prepared: DeleteManyPrepared) -> Result<u64>;
+
+    // ========================================================================
+    // INSERT PREPARE/PERSIST METHODS (WAL REFACTOR)
+    // ========================================================================
+
+    /// PREPARE phase for insert_one: validate document and generate IDs, NO storage writes.
+    ///
+    /// WAL REFACTOR: This enables proper write-ahead logging for inserts:
+    /// 1. Call insert_one_prepare() - validates document, generates _id, prepares WAL entry
+    /// 2. Write to WAL using prepared.wal_doc
+    /// 3. Commit WAL (fsync)
+    /// 4. Call insert_one_persist() - writes to storage (safe now, WAL is committed)
+    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
+    fn insert_one_prepare(&self, fields: HashMap<String, Value>) -> Result<InsertOnePrepared>;
+
+    /// PERSIST phase for insert_one: write to storage AFTER WAL commit.
+    ///
+    /// WAL REFACTOR: Only call this after WAL is committed!
+    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
+    fn insert_one_persist(&self, prepared: InsertOnePrepared) -> Result<DocumentId>;
+
+    /// PREPARE phase for insert_many: validate all documents and generate IDs, NO storage writes.
+    ///
+    /// WAL REFACTOR: This enables proper write-ahead logging for batch inserts:
+    /// 1. Call insert_many_prepare() - validates all documents, checks constraints
+    /// 2. Write to WAL using prepared.prepared_docs[].wal_doc
+    /// 3. Commit WAL (fsync)
+    /// 4. Call insert_many_persist() - writes all to storage (safe now, WAL is committed)
+    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
+    fn insert_many_prepare(
+        &self,
+        documents: Vec<HashMap<String, Value>>,
+    ) -> Result<InsertManyPrepared>;
+
+    /// PERSIST phase for insert_many: write all documents to storage AFTER WAL commit.
+    ///
+    /// WAL REFACTOR: Only call this after WAL is committed!
+    #[allow(dead_code)] // Will be used in Phase 2 of WAL refactor
+    fn insert_many_persist(&self, prepared: InsertManyPrepared) -> Result<Vec<DocumentId>>;
 }
 
 // ============================================================================
@@ -238,8 +313,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             new_id
         };
 
-        // Add _collection field for multi-collection isolation
-        fields.insert("_collection".to_string(), Value::String(self.name.clone()));
+        // NOTE: _collection is NOT added here - it's WAL-only metadata
+        // Storage documents should NOT contain _collection
 
         // Create document
         let doc = Document::new(doc_id.clone(), fields);
@@ -329,8 +404,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 new_id
             };
 
-            // Add _collection field
-            fields.insert("_collection".to_string(), Value::String(self.name.clone()));
+            // NOTE: _collection is NOT added here - it's WAL-only metadata
+            // Storage documents should NOT contain _collection
 
             // Create document
             let doc = Document::new(doc_id.clone(), fields);
@@ -433,8 +508,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                     super::update_operators::apply_update_operators(&mut document, update_json)?;
 
                 if was_modified {
-                    // ✅ Ensure updated document has _collection before constraint check
-                    document.set("_collection".to_string(), Value::String(self.name.clone()));
+                    // NOTE: _collection is NOT added here - it's WAL-only metadata
+                    // Storage documents should NOT contain _collection
 
                     // 🔒 CHECK UNIQUE CONSTRAINTS BEFORE ANY CHANGES
                     // exclude_id = Some to allow updating same document's non-key fields
@@ -566,8 +641,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 super::update_operators::apply_update_operators(&mut document, update_json)?;
 
             if was_modified {
-                // ✅ Ensure updated document has _collection before constraint check
-                document.set("_collection".to_string(), Value::String(self.name.clone()));
+                // NOTE: _collection is NOT added here - it's WAL-only metadata
+                // Storage documents should NOT contain _collection
 
                 // 🔒 FIX #16: Check for duplicates WITHIN the current batch
                 // Uses unified BatchConstraintValidator for consistent duplicate detection.
@@ -808,7 +883,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 super::update_operators::apply_update_operators(&mut document, update_json)?;
 
             if was_modified {
-                document.set("_collection".to_string(), Value::String(self.name.clone()));
+                // NOTE: _collection is NOT added here - it's WAL-only metadata
+                // Storage documents should NOT contain _collection
 
                 // Check for duplicates WITHIN the current batch
                 let doc_value = serde_json::to_value(&document)
@@ -954,6 +1030,259 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         Ok(prepared.deleted)
     }
+
+    // ========================================================================
+    // INSERT PREPARE/PERSIST IMPLEMENTATIONS (WAL REFACTOR)
+    // ========================================================================
+
+    /// PREPARE phase for insert_one: validate document and generate IDs, NO storage writes.
+    ///
+    /// WAL REFACTOR: This method does all the work EXCEPT writing to storage:
+    /// - Validates document against schema
+    /// - Generates _id if not provided
+    /// - Prepares WAL entry (with _collection for recovery)
+    /// - Returns prepared data for WAL and persist phase
+    fn insert_one_prepare(&self, mut fields: HashMap<String, Value>) -> Result<InsertOnePrepared> {
+        self.check_not_closed()?;
+
+        // Need storage read access for metadata (ID generation)
+        let mut storage = self.storage.write();
+
+        // Get mutable reference to collection metadata
+        let meta = storage
+            .get_collection_meta_mut(&self.name)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+
+        // Check if _id already exists in fields
+        let doc_id = if let Some(existing_id) = fields.get("_id") {
+            // Use existing _id from fields
+            let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
+                .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?;
+
+            // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
+            if let DocumentId::Int(num) = parsed_id {
+                if num >= 0 {
+                    let numeric = num as u64;
+                    if numeric > meta.last_id {
+                        meta.last_id = numeric;
+                    }
+                }
+            }
+
+            parsed_id
+        } else {
+            // Auto-generate new _id
+            let new_id = DocumentId::new_auto(meta.last_id);
+            meta.last_id += 1;
+
+            // Add _id to fields for query matching
+            fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
+            new_id
+        };
+
+        // Drop storage lock before constraint checks (to avoid deadlock with indexes)
+        drop(storage);
+
+        // Create document for validation (NO _collection in storage doc)
+        let doc = Document::new(doc_id.clone(), fields.clone());
+        self.validate_document(&doc)?;
+
+        // Check index constraints BEFORE preparing for persist
+        // This catches duplicates early, before any storage/WAL writes
+        self.check_index_constraints(&doc, None)?;
+
+        // Prepare WAL document (WITH _collection for recovery)
+        let mut wal_doc =
+            serde_json::to_value(&doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+        if let Value::Object(ref mut map) = wal_doc {
+            map.insert("_collection".to_string(), Value::String(self.name.clone()));
+        }
+
+        Ok(InsertOnePrepared {
+            doc_id,
+            document: doc,
+            wal_doc,
+            collection_name: self.name.clone(),
+        })
+    }
+
+    /// PERSIST phase for insert_one: write to storage AFTER WAL commit.
+    ///
+    /// WAL REFACTOR: Only call this after WAL is committed!
+    /// This method:
+    /// - Updates indexes (adds document)
+    /// - Writes document to storage
+    /// - Invalidates query cache
+    fn insert_one_persist(&self, prepared: InsertOnePrepared) -> Result<DocumentId> {
+        // Update indexes BEFORE writing to storage
+        self.add_to_indexes(&prepared.document)?;
+
+        // Write to storage
+        let mut storage = self.storage.write();
+        let doc_json = prepared.document.to_json()?;
+        storage.write_document_raw(
+            &prepared.collection_name,
+            &prepared.doc_id,
+            doc_json.as_bytes(),
+        )?;
+        storage.adjust_live_count(&prepared.collection_name, 1);
+
+        // Invalidate query cache (collection has changed)
+        self.query_cache
+            .invalidate_collection(&prepared.collection_name);
+
+        Ok(prepared.doc_id)
+    }
+
+    /// PREPARE phase for insert_many: validate all documents and generate IDs, NO storage writes.
+    ///
+    /// WAL REFACTOR: This method does all the work EXCEPT writing to storage:
+    /// - Validates all documents against schema
+    /// - Generates _id for documents that don't have one
+    /// - Checks constraints (unique indexes, duplicates within batch)
+    /// - Prepares WAL entries (with _collection for recovery)
+    /// - Returns prepared data for WAL and persist phase
+    fn insert_many_prepare(
+        &self,
+        documents: Vec<HashMap<String, Value>>,
+    ) -> Result<InsertManyPrepared> {
+        self.check_not_closed()?;
+
+        if documents.is_empty() {
+            return Ok(InsertManyPrepared {
+                prepared_docs: Vec::new(),
+                inserted_ids: Vec::new(),
+                collection_name: self.name.clone(),
+            });
+        }
+
+        let mut storage = self.storage.write();
+        let mut prepared_docs = Vec::with_capacity(documents.len());
+        let mut inserted_ids = Vec::with_capacity(documents.len());
+
+        // Get mutable reference to collection metadata ONCE
+        let meta = storage
+            .get_collection_meta_mut(&self.name)
+            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+
+        // Get starting ID for auto-generation
+        let start_id = meta.last_id;
+        let mut auto_id_count = 0u64;
+
+        // Create batch constraint validator to detect duplicates WITHIN batch
+        let mut batch_validator = {
+            let indexes = self.indexes.read();
+            BatchConstraintValidator::new(&indexes, &self.name)
+        };
+
+        for mut fields in documents.into_iter() {
+            // Check if _id already exists in fields
+            let doc_id = if let Some(existing_id) = fields.get("_id") {
+                let parsed_id: DocumentId =
+                    serde_json::from_value(existing_id.clone()).map_err(|e| {
+                        MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                    })?;
+
+                // Ensure last_id tracks highest numeric _id from manual inserts
+                if let DocumentId::Int(num) = parsed_id {
+                    if num >= 0 {
+                        let numeric = num as u64;
+                        if numeric > meta.last_id {
+                            meta.last_id = numeric;
+                        }
+                    }
+                }
+
+                parsed_id
+            } else {
+                // Auto-generate new _id
+                let new_id = DocumentId::new_auto(start_id + auto_id_count);
+                auto_id_count += 1;
+                fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
+                new_id
+            };
+
+            // Create document (NO _collection in storage doc)
+            let doc = Document::new(doc_id.clone(), fields);
+            self.validate_document(&doc)?;
+
+            // Check for duplicates WITHIN the current batch
+            let doc_value = serde_json::to_value(&doc)
+                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            batch_validator.check_and_track(&doc_value)?;
+
+            // Check against EXISTING documents in index
+            self.check_index_constraints(&doc, None)?;
+
+            // Prepare WAL document (WITH _collection for recovery)
+            let mut wal_doc = doc_value.clone();
+            if let Value::Object(ref mut map) = wal_doc {
+                map.insert("_collection".to_string(), Value::String(self.name.clone()));
+            }
+
+            prepared_docs.push(InsertOnePrepared {
+                doc_id: doc_id.clone(),
+                document: doc,
+                wal_doc,
+                collection_name: self.name.clone(),
+            });
+            inserted_ids.push(doc_id);
+        }
+
+        // Update last_id with max of manual + auto-generated IDs
+        meta.last_id = meta.last_id.max(start_id + auto_id_count);
+
+        Ok(InsertManyPrepared {
+            prepared_docs,
+            inserted_ids,
+            collection_name: self.name.clone(),
+        })
+    }
+
+    /// PERSIST phase for insert_many: write all documents to storage AFTER WAL commit.
+    ///
+    /// WAL REFACTOR: Only call this after WAL is committed!
+    /// This method:
+    /// - Updates indexes in batch (adds all documents)
+    /// - Writes all documents to storage
+    /// - Invalidates query cache
+    fn insert_many_persist(&self, prepared: InsertManyPrepared) -> Result<Vec<DocumentId>> {
+        if prepared.prepared_docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Update indexes in batch BEFORE writing to storage
+        let docs_for_index: Vec<Document> = prepared
+            .prepared_docs
+            .iter()
+            .map(|p| p.document.clone())
+            .collect();
+        self.batch_add_to_indexes(&docs_for_index)?;
+
+        // Write all documents to storage
+        let mut storage = self.storage.write();
+        let mut live_delta = 0i64;
+
+        for prep in &prepared.prepared_docs {
+            let doc_json = prep.document.to_json()?;
+            storage.write_document_raw(
+                &prepared.collection_name,
+                &prep.doc_id,
+                doc_json.as_bytes(),
+            )?;
+            live_delta += 1;
+        }
+
+        if live_delta != 0 {
+            storage.adjust_live_count(&prepared.collection_name, live_delta);
+        }
+
+        // Invalidate query cache (collection has changed)
+        self.query_cache
+            .invalidate_collection(&prepared.collection_name);
+
+        Ok(prepared.inserted_ids)
+    }
 }
 
 /// Helper: Scan documents using a pre-cloned catalog and pre-held storage guard
@@ -983,4 +1312,317 @@ fn inline_scan_with_catalog<S: Storage + RawStorage>(
     }
 
     Ok(docs_by_id)
+}
+
+// ============================================================================
+// TESTS FOR PREPARE/PERSIST PATTERN
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::MemoryStorage;
+    use crate::DatabaseCore;
+    use serde_json::json;
+
+    /// Helper: Create a test database with a collection
+    fn create_test_db() -> DatabaseCore<MemoryStorage> {
+        DatabaseCore::<MemoryStorage>::open_memory().unwrap()
+    }
+
+    // ========== INSERT_ONE_PREPARE/PERSIST TESTS ==========
+
+    #[test]
+    fn test_insert_one_prepare_generates_id() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        let fields = HashMap::from([("name".to_string(), json!("Alice"))]);
+        let prepared = coll.insert_one_prepare(fields).unwrap();
+
+        // Should have auto-generated ID
+        assert!(matches!(prepared.doc_id, DocumentId::Int(_)));
+
+        // Document should have _id
+        assert!(prepared.document.fields.contains_key("_id"));
+
+        // WAL doc should have _collection
+        assert!(prepared.wal_doc.get("_collection").is_some());
+        assert_eq!(
+            prepared
+                .wal_doc
+                .get("_collection")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "test"
+        );
+    }
+
+    #[test]
+    fn test_insert_one_prepare_respects_custom_id() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        let fields = HashMap::from([
+            ("_id".to_string(), json!("custom_id")),
+            ("name".to_string(), json!("Bob")),
+        ]);
+        let prepared = coll.insert_one_prepare(fields).unwrap();
+
+        // Should use custom ID
+        assert!(matches!(&prepared.doc_id, DocumentId::String(s) if s == "custom_id"));
+    }
+
+    #[test]
+    fn test_insert_one_prepare_validates_schema() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Set a schema requiring "name" field
+        coll.set_schema(Some(json!({
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string"}
+            }
+        })))
+        .unwrap();
+
+        // This should fail validation (missing required field)
+        let fields = HashMap::from([("age".to_string(), json!(25))]);
+        let result = coll.insert_one_prepare(fields);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_insert_one_persist_writes_to_storage() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // PREPARE
+        let fields = HashMap::from([("name".to_string(), json!("Alice"))]);
+        let prepared = coll.insert_one_prepare(fields).unwrap();
+        let doc_id = prepared.doc_id.clone();
+
+        // PERSIST
+        let result_id = coll.insert_one_persist(prepared).unwrap();
+        assert_eq!(result_id, doc_id);
+
+        // Verify document is in storage
+        let count = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count, 1);
+
+        // Verify we can find the document
+        let found = coll.find_one(&json!({"name": "Alice"})).unwrap();
+        assert!(found.is_some());
+    }
+
+    #[test]
+    fn test_insert_one_prepare_persist_separation() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // PREPARE only - should NOT write to storage
+        let fields = HashMap::from([("name".to_string(), json!("Alice"))]);
+        let prepared = coll.insert_one_prepare(fields).unwrap();
+
+        // Count should be 0 (not yet persisted)
+        let count = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count, 0);
+
+        // Now PERSIST
+        coll.insert_one_persist(prepared).unwrap();
+
+        // Count should be 1 now
+        let count = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // ========== INSERT_MANY_PREPARE/PERSIST TESTS ==========
+
+    #[test]
+    fn test_insert_many_prepare_empty() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        let prepared = coll.insert_many_prepare(vec![]).unwrap();
+
+        assert!(prepared.prepared_docs.is_empty());
+        assert!(prepared.inserted_ids.is_empty());
+    }
+
+    #[test]
+    fn test_insert_many_prepare_generates_ids() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        let docs = vec![
+            HashMap::from([("name".to_string(), json!("Alice"))]),
+            HashMap::from([("name".to_string(), json!("Bob"))]),
+            HashMap::from([("name".to_string(), json!("Charlie"))]),
+        ];
+
+        let prepared = coll.insert_many_prepare(docs).unwrap();
+
+        assert_eq!(prepared.prepared_docs.len(), 3);
+        assert_eq!(prepared.inserted_ids.len(), 3);
+
+        // All should have auto-generated IDs
+        for p in &prepared.prepared_docs {
+            assert!(matches!(p.doc_id, DocumentId::Int(_)));
+            assert!(p.wal_doc.get("_collection").is_some());
+        }
+    }
+
+    #[test]
+    fn test_insert_many_prepare_detects_batch_duplicates() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Create unique index on "email"
+        coll.create_index("email".to_string(), true).unwrap();
+
+        // Try to insert two documents with same email in one batch
+        let docs = vec![
+            HashMap::from([
+                ("name".to_string(), json!("Alice")),
+                ("email".to_string(), json!("alice@test.com")),
+            ]),
+            HashMap::from([
+                ("name".to_string(), json!("Duplicate")),
+                ("email".to_string(), json!("alice@test.com")), // duplicate!
+            ]),
+        ];
+
+        let result = coll.insert_many_prepare(docs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_insert_many_persist_writes_all() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // PREPARE
+        let docs = vec![
+            HashMap::from([("value".to_string(), json!(1))]),
+            HashMap::from([("value".to_string(), json!(2))]),
+            HashMap::from([("value".to_string(), json!(3))]),
+        ];
+        let prepared = coll.insert_many_prepare(docs).unwrap();
+
+        // Count should be 0 before persist
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 0);
+
+        // PERSIST
+        let ids = coll.insert_many_persist(prepared).unwrap();
+        assert_eq!(ids.len(), 3);
+
+        // Count should be 3 after persist
+        assert_eq!(coll.count_documents(&json!({})).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_insert_many_prepare_checks_existing_constraints() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Create unique index on "email"
+        coll.create_index("email".to_string(), true).unwrap();
+
+        // Insert one document first (via raw to skip WAL for test simplicity)
+        let existing = HashMap::from([
+            ("name".to_string(), json!("Existing")),
+            ("email".to_string(), json!("existing@test.com")),
+        ]);
+        coll.insert_one_raw(existing).unwrap();
+
+        // Now try to prepare insert with same email
+        let docs = vec![HashMap::from([
+            ("name".to_string(), json!("New")),
+            ("email".to_string(), json!("existing@test.com")), // duplicate!
+        ])];
+
+        let result = coll.insert_many_prepare(docs);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_insert_one_prepare_wal_doc_has_collection() {
+        let db = create_test_db();
+        let coll = db.collection("users").unwrap();
+
+        let fields = HashMap::from([("name".to_string(), json!("Test"))]);
+        let prepared = coll.insert_one_prepare(fields).unwrap();
+
+        // Verify WAL doc structure
+        let wal_doc = &prepared.wal_doc;
+        assert_eq!(wal_doc.get("name").unwrap(), &json!("Test"));
+        assert_eq!(wal_doc.get("_collection").unwrap(), &json!("users"));
+        assert!(wal_doc.get("_id").is_some());
+
+        // Storage doc should NOT have _collection
+        assert!(!prepared.document.fields.contains_key("_collection"));
+    }
+
+    #[test]
+    fn test_insert_many_mixed_ids() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Mix of auto and manual IDs
+        let docs = vec![
+            HashMap::from([("name".to_string(), json!("Auto1"))]),
+            HashMap::from([
+                ("_id".to_string(), json!("manual_id")),
+                ("name".to_string(), json!("Manual")),
+            ]),
+            HashMap::from([("name".to_string(), json!("Auto2"))]),
+        ];
+
+        let prepared = coll.insert_many_prepare(docs).unwrap();
+        assert_eq!(prepared.inserted_ids.len(), 3);
+
+        // Second should be manual ID
+        assert!(matches!(&prepared.inserted_ids[1], DocumentId::String(s) if s == "manual_id"));
+
+        // First and third should be auto IDs
+        assert!(matches!(&prepared.inserted_ids[0], DocumentId::Int(_)));
+        assert!(matches!(&prepared.inserted_ids[2], DocumentId::Int(_)));
+    }
+
+    #[test]
+    fn test_insert_prepare_closed_collection_fails() {
+        use crate::storage::StorageEngine;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let counter = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let temp_dir = std::env::temp_dir();
+        let db_path = temp_dir
+            .join(format!("test_closed_prepare_{}.mlite", counter))
+            .to_string_lossy()
+            .to_string();
+
+        // Cleanup previous test files
+        let _ = std::fs::remove_file(&db_path);
+        let wal_path = format!("{}.wal", db_path.trim_end_matches(".mlite"));
+        let _ = std::fs::remove_file(&wal_path);
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("test").unwrap();
+
+        // Close the database
+        db.close().unwrap();
+
+        // Should fail because collection is closed
+        let fields = HashMap::from([("name".to_string(), json!("Test"))]);
+        let result = coll.insert_one_prepare(fields);
+        assert!(result.is_err());
+
+        // Cleanup
+        let _ = std::fs::remove_file(&db_path);
+        let _ = std::fs::remove_file(&wal_path);
+    }
 }

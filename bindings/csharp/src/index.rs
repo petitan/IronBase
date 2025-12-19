@@ -175,7 +175,13 @@ pub extern "C" fn ironbase_list_indexes(handle: CollHandle) -> *mut c_char {
         }
     };
 
-    let indexes = coll.inner.list_indexes();
+    let indexes = match coll.inner.list_indexes() {
+        Ok(idx) => idx,
+        Err(e) => {
+            set_last_error(&format!("Failed to list indexes: {}", e));
+            return ptr::null_mut();
+        }
+    };
     match serde_json::to_string(&indexes) {
         Ok(json) => string_to_c_str(&json),
         Err(e) => {

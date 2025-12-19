@@ -786,7 +786,7 @@ fn test_nested_index_with_persistence() {
         let coll = db.collection("users").unwrap();
 
         // List indexes - returns Vec<String> of index names
-        let indexes = coll.list_indexes();
+        let indexes = coll.list_indexes().unwrap();
         assert!(
             indexes.iter().any(|idx| idx.contains("profile.score")),
             "Index on profile.score should exist after reopen, got: {:?}",

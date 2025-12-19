@@ -101,8 +101,8 @@ fn test_get_prompts_list_returns_prompts() {
 fn test_prompts_list_has_expected_count() {
     let result = get_prompts_list();
     let prompts = result.get("prompts").unwrap().as_array().unwrap();
-    // Expected: 11 prompts (including rhai-scripting and fuzzy-search)
-    assert_eq!(prompts.len(), 11);
+    // Expected: 12 prompts (including rhai-scripting, fuzzy-search, and best-practices)
+    assert_eq!(prompts.len(), 12);
 }
 
 #[test]

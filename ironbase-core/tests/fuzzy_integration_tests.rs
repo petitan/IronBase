@@ -372,7 +372,7 @@ fn test_create_fuzzy_index() {
     assert_eq!(index_name, "users_name_fuzzy");
 
     // Verify index exists
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(indexes.contains(&"users_name_fuzzy".to_string()));
 }
 
@@ -439,12 +439,12 @@ fn test_drop_fuzzy_index() {
         .create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.8)
         .unwrap();
 
-    let indexes_before = collection.list_indexes();
+    let indexes_before = collection.list_indexes().unwrap();
     assert!(indexes_before.contains(&"users_name_fuzzy".to_string()));
 
     collection.drop_index("users_name_fuzzy").unwrap();
 
-    let indexes_after = collection.list_indexes();
+    let indexes_after = collection.list_indexes().unwrap();
     assert!(!indexes_after.contains(&"users_name_fuzzy".to_string()));
 }
 

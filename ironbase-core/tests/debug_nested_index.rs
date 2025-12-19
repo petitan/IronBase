@@ -19,7 +19,7 @@ fn debug_nested_index_persistence() {
         println!("Index created on profile.score");
 
         // List indexes
-        let indexes = coll.list_indexes();
+        let indexes = coll.list_indexes().unwrap();
         println!("Indexes after creation: {:?}", indexes);
 
         // Insert 10 docs (simpler)
@@ -58,7 +58,7 @@ fn debug_nested_index_persistence() {
         let coll = db.collection("users").unwrap();
 
         // List indexes after reopen
-        let indexes = coll.list_indexes();
+        let indexes = coll.list_indexes().unwrap();
         println!("Indexes after reopen: {:?}", indexes);
 
         // Try to find ALL docs first (no filter)

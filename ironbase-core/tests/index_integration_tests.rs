@@ -12,7 +12,7 @@ fn test_automatic_id_index() {
     let collection = db.collection("users").unwrap();
 
     // The _id index should be automatically created
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     println!("Indexes: {:?}", indexes);
     assert!(indexes.contains(&"users_id".to_string()));
 }
@@ -30,7 +30,7 @@ fn test_create_custom_index() {
     assert_eq!(index_name, "users_email");
 
     // Verify index exists
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(indexes.contains(&"users_email".to_string()));
     assert!(indexes.contains(&"users_id".to_string()));
 }
@@ -116,14 +116,14 @@ fn test_drop_index() {
     let index_name = collection.create_index("age".to_string(), false).unwrap();
 
     // Verify it exists
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(indexes.contains(&index_name));
 
     // Drop the index
     collection.drop_index(&index_name).unwrap();
 
     // Verify it's gone
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(!indexes.contains(&index_name));
 }
 

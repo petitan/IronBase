@@ -293,7 +293,7 @@ fn test_concurrent_index_creation() {
 
     // Verify all indexes exist
     let collection = db.collection("idx_test").unwrap();
-    let indexes = collection.list_indexes();
+    let indexes = collection.list_indexes().unwrap();
     assert!(indexes.iter().any(|i| i.contains("field_a")));
     assert!(indexes.iter().any(|i| i.contains("field_b")));
     assert!(indexes.iter().any(|i| i.contains("field_c")));
