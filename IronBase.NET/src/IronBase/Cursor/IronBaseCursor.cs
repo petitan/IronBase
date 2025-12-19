@@ -30,7 +30,7 @@ namespace IronBase
 
             unsafe
             {
-                var jsonPtr = NativeMethods.ironbase_cursor_next((CursorHandle*)_handle);
+                var jsonPtr = NativeMethods.ironbase_cursor_next((CursorState*)_handle);
                 if (jsonPtr == null)
                     return default;
 
@@ -51,7 +51,7 @@ namespace IronBase
 
             unsafe
             {
-                var jsonPtr = NativeMethods.ironbase_cursor_next_batch((CursorHandle*)_handle);
+                var jsonPtr = NativeMethods.ironbase_cursor_next_batch((CursorState*)_handle);
                 if (jsonPtr == null)
                     return new List<T>();
 
@@ -72,7 +72,7 @@ namespace IronBase
 
             unsafe
             {
-                var jsonPtr = NativeMethods.ironbase_cursor_next_chunk((CursorHandle*)_handle, chunkSize);
+                var jsonPtr = NativeMethods.ironbase_cursor_next_chunk((CursorState*)_handle, chunkSize);
                 if (jsonPtr == null)
                     return new List<T>();
 
@@ -94,7 +94,7 @@ namespace IronBase
                 ThrowIfDisposed();
                 unsafe
                 {
-                    return NativeMethods.ironbase_cursor_remaining((CursorHandle*)_handle);
+                    return NativeMethods.ironbase_cursor_remaining((CursorState*)_handle);
                 }
             }
         }
@@ -109,7 +109,7 @@ namespace IronBase
                 ThrowIfDisposed();
                 unsafe
                 {
-                    return NativeMethods.ironbase_cursor_total((CursorHandle*)_handle);
+                    return NativeMethods.ironbase_cursor_total((CursorState*)_handle);
                 }
             }
         }
@@ -124,7 +124,7 @@ namespace IronBase
                 ThrowIfDisposed();
                 unsafe
                 {
-                    return NativeMethods.ironbase_cursor_position((CursorHandle*)_handle);
+                    return NativeMethods.ironbase_cursor_position((CursorState*)_handle);
                 }
             }
         }
@@ -139,7 +139,7 @@ namespace IronBase
                 ThrowIfDisposed();
                 unsafe
                 {
-                    return NativeMethods.ironbase_cursor_is_finished((CursorHandle*)_handle) != 0;
+                    return NativeMethods.ironbase_cursor_is_finished((CursorState*)_handle) != 0;
                 }
             }
         }
@@ -152,7 +152,7 @@ namespace IronBase
             ThrowIfDisposed();
             unsafe
             {
-                NativeMethods.ironbase_cursor_rewind((CursorHandle*)_handle);
+                NativeMethods.ironbase_cursor_rewind((CursorState*)_handle);
             }
         }
 
@@ -164,7 +164,7 @@ namespace IronBase
             ThrowIfDisposed();
             unsafe
             {
-                NativeMethods.ironbase_cursor_skip((CursorHandle*)_handle, n);
+                NativeMethods.ironbase_cursor_skip((CursorState*)_handle, n);
             }
         }
 
@@ -177,7 +177,7 @@ namespace IronBase
 
             unsafe
             {
-                var jsonPtr = NativeMethods.ironbase_cursor_collect_all((CursorHandle*)_handle);
+                var jsonPtr = NativeMethods.ironbase_cursor_collect_all((CursorState*)_handle);
                 if (jsonPtr == null)
                     return new List<T>();
 
@@ -224,7 +224,7 @@ namespace IronBase
                 {
                     unsafe
                     {
-                        NativeMethods.ironbase_cursor_release((CursorHandle*)_handle);
+                        NativeMethods.ironbase_cursor_release((CursorState*)_handle);
                     }
                     _handle = IntPtr.Zero;
                 }

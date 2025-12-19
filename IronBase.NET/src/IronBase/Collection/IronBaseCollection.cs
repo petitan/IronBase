@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using IronBase.Interop;
 
@@ -102,11 +103,19 @@ namespace IronBase
                     var resultJson = NativeHelper.PtrToStringUtf8AndFree(resultPtr) ?? "{}";
                     var resultDoc = JsonSerializer.Deserialize<JsonElement>(resultJson);
 
+                    string[]? insertedIds = null;
+                    if (resultDoc.TryGetProperty("inserted_ids", out var idsElement))
+                    {
+                        insertedIds = idsElement.EnumerateArray()
+                            .Select(id => id.ToString())
+                            .ToArray();
+                    }
+
                     return new InsertManyResult
                     {
                         Acknowledged = true,
                         InsertedCount = resultDoc.TryGetProperty("inserted_count", out var count) ? count.GetInt32() : 0,
-                        InsertedIds = null // TODO: parse inserted_ids array
+                        InsertedIds = insertedIds
                     };
                 }
             }
@@ -486,6 +495,217 @@ namespace IronBase
             }
         }
 
+        #region Fuzzy Search
+
+        /// <summary>
+        /// Create a fuzzy text index for approximate string matching.
+        /// </summary>
+        /// <param name="field">Field name to index</param>
+        /// <param name="algorithm">Algorithm: "jaro_winkler" (default), "levenshtein", or "damerau_levenshtein"</param>
+        /// <param name="threshold">Similarity threshold 0.0-1.0 (default: 0.8)</param>
+        /// <returns>Index name</returns>
+        public string CreateFuzzyIndex(string field, string algorithm = "jaro_winkler", double threshold = 0.8)
+        {
+            unsafe
+            {
+                fixed (byte* fieldPtr = NativeHelper.ToUtf8(field))
+                fixed (byte* algoPtr = NativeHelper.ToUtf8(algorithm))
+                {
+                    byte* namePtr;
+                    int result = NativeMethods.ironbase_create_fuzzy_index(
+                        (CollectionHandle*)_handle,
+                        fieldPtr,
+                        algoPtr,
+                        threshold,
+                        &namePtr
+                    );
+                    NativeHelper.ThrowIfError(result);
+                    return NativeHelper.PtrToStringUtf8AndFree(namePtr) ?? $"{field}_fuzzy";
+                }
+            }
+        }
+
+        /// <summary>
+        /// Search for documents using fuzzy text matching.
+        /// </summary>
+        /// <param name="field">Field to search (must have a fuzzy index)</param>
+        /// <param name="query">Search term</param>
+        /// <param name="threshold">Override similarity threshold (null to use index default)</param>
+        /// <param name="algorithm">Override algorithm (null to use index default)</param>
+        /// <returns>List of (document, similarity score) tuples</returns>
+        public List<FuzzySearchResult<T>> FuzzySearch(string field, string query, double? threshold = null, string? algorithm = null)
+        {
+            unsafe
+            {
+                fixed (byte* fieldPtr = NativeHelper.ToUtf8(field))
+                fixed (byte* queryPtr = NativeHelper.ToUtf8(query))
+                fixed (byte* algoPtr = algorithm != null ? NativeHelper.ToUtf8(algorithm) : null)
+                {
+                    var resultPtr = NativeMethods.ironbase_fuzzy_search(
+                        (CollectionHandle*)_handle,
+                        fieldPtr,
+                        queryPtr,
+                        threshold ?? -1.0,
+                        algoPtr
+                    );
+
+                    if (resultPtr == null)
+                    {
+                        var error = NativeHelper.GetLastError();
+                        throw new IronBaseQueryException(error ?? "Fuzzy search failed");
+                    }
+
+                    var json = NativeHelper.PtrToStringUtf8AndFree(resultPtr);
+                    if (string.IsNullOrEmpty(json))
+                        return new List<FuzzySearchResult<T>>();
+
+                    var rawResults = JsonSerializer.Deserialize<List<JsonElement>>(json) ?? new List<JsonElement>();
+                    var results = new List<FuzzySearchResult<T>>();
+
+                    foreach (var item in rawResults)
+                    {
+                        var doc = item.GetProperty("doc");
+                        var score = item.GetProperty("score").GetDouble();
+                        var document = JsonSerializer.Deserialize<T>(doc.GetRawText());
+                        if (document != null)
+                        {
+                            results.Add(new FuzzySearchResult<T>(document, score));
+                        }
+                    }
+
+                    return results;
+                }
+            }
+        }
+
+        #endregion
+
+        #region Full-Text Search
+
+        /// <summary>
+        /// Create a full-text search index with TF-IDF scoring.
+        /// </summary>
+        /// <param name="field">Field name to index</param>
+        /// <param name="language">Language for stemming: "english" (default), "hungarian", "german", "none"</param>
+        /// <param name="minWordLength">Minimum word length to index (null for default: 2)</param>
+        /// <param name="accentFolding">Normalize accents (null for default: true)</param>
+        /// <returns>Index name</returns>
+        public string CreateFulltextIndex(string field, string language = "english", int? minWordLength = null, bool? accentFolding = null)
+        {
+            unsafe
+            {
+                fixed (byte* fieldPtr = NativeHelper.ToUtf8(field))
+                fixed (byte* langPtr = NativeHelper.ToUtf8(language))
+                {
+                    byte* namePtr;
+                    int result = NativeMethods.ironbase_create_fulltext_index(
+                        (CollectionHandle*)_handle,
+                        fieldPtr,
+                        langPtr,
+                        minWordLength ?? 0,
+                        accentFolding.HasValue ? (accentFolding.Value ? 1 : 0) : -1,
+                        &namePtr
+                    );
+                    NativeHelper.ThrowIfError(result);
+                    return NativeHelper.PtrToStringUtf8AndFree(namePtr) ?? $"{field}_fulltext";
+                }
+            }
+        }
+
+        /// <summary>
+        /// Search documents using full-text search with TF-IDF scoring.
+        /// </summary>
+        /// <param name="field">Field to search (must have a fulltext index)</param>
+        /// <param name="query">Search query (words separated by spaces)</param>
+        /// <param name="limit">Maximum results (null for default: 10)</param>
+        /// <param name="skip">Number of results to skip</param>
+        /// <param name="minScore">Minimum TF-IDF score filter</param>
+        /// <param name="projection">Fields to include/exclude (e.g., new Dictionary{["title"] = 1})</param>
+        /// <returns>List of (document, score, matched tokens) tuples</returns>
+        public List<FulltextSearchResult<T>> FulltextSearch(
+            string field,
+            string query,
+            int? limit = null,
+            int? skip = null,
+            double? minScore = null,
+            Dictionary<string, int>? projection = null)
+        {
+            var projectionJson = projection != null ? JsonSerializer.Serialize(projection) : null;
+
+            unsafe
+            {
+                fixed (byte* fieldPtr = NativeHelper.ToUtf8(field))
+                fixed (byte* queryPtr = NativeHelper.ToUtf8(query))
+                fixed (byte* projPtr = projectionJson != null ? NativeHelper.ToUtf8(projectionJson) : null)
+                {
+                    var resultPtr = NativeMethods.ironbase_fulltext_search(
+                        (CollectionHandle*)_handle,
+                        fieldPtr,
+                        queryPtr,
+                        limit ?? 0,
+                        skip ?? 0,
+                        minScore ?? -1.0,
+                        projPtr
+                    );
+
+                    if (resultPtr == null)
+                    {
+                        var error = NativeHelper.GetLastError();
+                        throw new IronBaseQueryException(error ?? "Fulltext search failed");
+                    }
+
+                    var json = NativeHelper.PtrToStringUtf8AndFree(resultPtr);
+                    if (string.IsNullOrEmpty(json))
+                        return new List<FulltextSearchResult<T>>();
+
+                    var rawResults = JsonSerializer.Deserialize<List<JsonElement>>(json) ?? new List<JsonElement>();
+                    var results = new List<FulltextSearchResult<T>>();
+
+                    foreach (var item in rawResults)
+                    {
+                        var doc = item.GetProperty("doc");
+                        var score = item.GetProperty("score").GetDouble();
+                        var tokens = item.GetProperty("tokens").EnumerateArray()
+                            .Select(t => t.GetString() ?? "")
+                            .ToList();
+                        var document = JsonSerializer.Deserialize<T>(doc.GetRawText());
+                        if (document != null)
+                        {
+                            results.Add(new FulltextSearchResult<T>(document, score, tokens));
+                        }
+                    }
+
+                    return results;
+                }
+            }
+        }
+
+        /// <summary>
+        /// List all fulltext indexes for this collection.
+        /// </summary>
+        /// <returns>List of fulltext index metadata</returns>
+        public List<FulltextIndexInfo> ListFulltextIndexes()
+        {
+            unsafe
+            {
+                var resultPtr = NativeMethods.ironbase_list_fulltext_indexes((CollectionHandle*)_handle);
+
+                if (resultPtr == null)
+                {
+                    var error = NativeHelper.GetLastError();
+                    throw new IronBaseException(-1, error ?? "Failed to list fulltext indexes");
+                }
+
+                var json = NativeHelper.PtrToStringUtf8AndFree(resultPtr);
+                if (string.IsNullOrEmpty(json))
+                    return new List<FulltextIndexInfo>();
+
+                return JsonSerializer.Deserialize<List<FulltextIndexInfo>>(json) ?? new List<FulltextIndexInfo>();
+            }
+        }
+
+        #endregion
+
         /// <summary>
         /// Explain query execution plan.
         /// </summary>
@@ -589,7 +809,7 @@ namespace IronBase
             {
                 fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
                 {
-                    CursorHandle* cursorPtr;
+                    CursorState* cursorPtr;
                     int result = NativeMethods.ironbase_create_cursor(
                         (CollectionHandle*)_handle,
                         filterPtr,

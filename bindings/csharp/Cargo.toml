@@ -7,7 +7,7 @@ license.workspace = true
 description = "C FFI bindings for IronBase - for C#/Unity integration"
 
 [lib]
-name = "ironbase_csharp"
+name = "ironbase_ffi"
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]

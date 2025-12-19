@@ -507,6 +507,90 @@ namespace IronBase.Interop
         internal static extern byte* ironbase_find_with_hint(CollectionHandle* handle, byte* query_json, byte* hint);
 
         /// <summary>
+        ///  Create a fuzzy text index for approximate string matching
+        ///
+        ///  # Parameters
+        ///  - `handle`: The collection handle
+        ///  - `field`: Field name to index (UTF-8 null-terminated string)
+        ///  - `algorithm`: Algorithm name ("jaro_winkler", "levenshtein", "damerau_levenshtein")
+        ///  - `threshold`: Similarity threshold (0.0-1.0)
+        ///  - `out_name`: Pointer to receive the index name (optional)
+        ///
+        ///  # Returns
+        ///  - `IronBaseErrorCode::Success` (0) on success
+        ///  - Error code on failure
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_create_fuzzy_index", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_create_fuzzy_index(CollectionHandle* handle, byte* field, byte* algorithm, double threshold, byte** out_name);
+
+        /// <summary>
+        ///  Search for documents using fuzzy text matching
+        ///
+        ///  # Parameters
+        ///  - `handle`: The collection handle
+        ///  - `field`: Field name to search
+        ///  - `query`: Search term
+        ///  - `threshold`: Similarity threshold (0.0-1.0), or negative to use index default
+        ///  - `algorithm`: Algorithm override (or null to use index default)
+        ///
+        ///  # Returns
+        ///  - JSON array of [{"doc": {...}, "score": 0.95}, ...] on success
+        ///  - NULL on failure (check ironbase_get_last_error)
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_fuzzy_search", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_fuzzy_search(CollectionHandle* handle, byte* field, byte* query, double threshold, byte* algorithm);
+
+        /// <summary>
+        ///  Create a full-text search index with TF-IDF scoring
+        ///
+        ///  # Parameters
+        ///  - `handle`: The collection handle
+        ///  - `field`: Field name to index
+        ///  - `language`: Language for stemming ("english", "hungarian", "german", "none")
+        ///  - `min_word_length`: Minimum word length (0 for default)
+        ///  - `accent_folding`: Normalize accents (1 = true, 0 = false, -1 = default)
+        ///  - `out_name`: Pointer to receive the index name (optional)
+        ///
+        ///  # Returns
+        ///  - `IronBaseErrorCode::Success` (0) on success
+        ///  - Error code on failure
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_create_fulltext_index", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_create_fulltext_index(CollectionHandle* handle, byte* field, byte* language, int min_word_length, int accent_folding, byte** out_name);
+
+        /// <summary>
+        ///  Search documents using full-text search with TF-IDF scoring
+        ///
+        ///  # Parameters
+        ///  - `handle`: The collection handle
+        ///  - `field`: Field to search
+        ///  - `query`: Search query (words separated by spaces)
+        ///  - `limit`: Maximum results (0 for default)
+        ///  - `skip`: Number of results to skip
+        ///  - `min_score`: Minimum score filter (negative for no filter)
+        ///  - `projection_json`: JSON object for projection (null for all fields)
+        ///
+        ///  # Returns
+        ///  - JSON array of [{"doc": {...}, "score": 0.95, "tokens": ["word1", "word2"]}, ...] on success
+        ///  - NULL on failure
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_fulltext_search", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_fulltext_search(CollectionHandle* handle, byte* field, byte* query, int limit, int skip, double min_score, byte* projection_json);
+
+        /// <summary>
+        ///  List all fulltext indexes for a collection
+        ///
+        ///  # Parameters
+        ///  - `handle`: The collection handle
+        ///
+        ///  # Returns
+        ///  - JSON array of index metadata on success
+        ///  - NULL on failure
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_list_fulltext_indexes", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_list_fulltext_indexes(CollectionHandle* handle);
+
+        /// <summary>
         ///  Execute an aggregation pipeline
         ///
         ///  # Parameters
@@ -692,6 +776,262 @@ namespace IronBase.Interop
         [DllImport(__DllName, EntryPoint = "ironbase_version", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
         internal static extern byte* ironbase_version();
 
+        /// <summary>
+        ///  Create a cursor for streaming through query results
+        ///
+        ///  # Parameters
+        ///  - `handle`: The collection handle
+        ///  - `query_json`: Query filter as JSON string
+        ///  - `batch_size`: Number of documents per batch
+        ///  - `out_cursor`: Pointer to receive the cursor handle
+        ///
+        ///  # Returns
+        ///  - `IronBaseErrorCode::Success` (0) on success
+        ///  - Error code on failure
+        ///
+        ///  # Example
+        ///  ```c
+        ///  CursorHandle cursor;
+        ///  ironbase_create_cursor(coll, "{}", 100, &amp;cursor);
+        ///  while (!ironbase_cursor_is_finished(cursor)) {
+        ///      char* batch = ironbase_cursor_next_batch(cursor);
+        ///      // process batch
+        ///      ironbase_free_string(batch);
+        ///  }
+        ///  ironbase_cursor_release(cursor);
+        ///  ```
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_create_cursor", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_create_cursor(CollectionHandle* handle, byte* query_json, uint batch_size, CursorState** out_cursor);
+
+        /// <summary>
+        ///  Get the next document from cursor
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///
+        ///  # Returns
+        ///  - JSON document string (caller must free with `ironbase_free_string()`)
+        ///  - Null if cursor is exhausted or on error
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_next", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_next(CursorState* cursor);
+
+        /// <summary>
+        ///  Get the next batch of documents from cursor
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///
+        ///  # Returns
+        ///  - JSON array of documents (caller must free with `ironbase_free_string()`)
+        ///  - Empty array "[]" if cursor is exhausted
+        ///  - Null on error
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_next_batch", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_next_batch(CursorState* cursor);
+
+        /// <summary>
+        ///  Get a specific chunk of documents from cursor
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///  - `chunk_size`: Number of documents to retrieve
+        ///
+        ///  # Returns
+        ///  - JSON array of documents (caller must free with `ironbase_free_string()`)
+        ///  - Empty array "[]" if cursor is exhausted
+        ///  - Null on error
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_next_chunk", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_next_chunk(CursorState* cursor, uint chunk_size);
+
+        /// <summary>
+        ///  Get remaining document count
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///
+        ///  # Returns
+        ///  - Number of remaining documents (0 if exhausted or invalid)
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_remaining", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern ulong ironbase_cursor_remaining(CursorState* cursor);
+
+        /// <summary>
+        ///  Get total document count
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///
+        ///  # Returns
+        ///  - Total number of documents in cursor (0 if invalid)
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_total", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern ulong ironbase_cursor_total(CursorState* cursor);
+
+        /// <summary>
+        ///  Get current position
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///
+        ///  # Returns
+        ///  - Current position (0 if invalid)
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_position", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern ulong ironbase_cursor_position(CursorState* cursor);
+
+        /// <summary>
+        ///  Check if cursor is exhausted
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///
+        ///  # Returns
+        ///  - 1 if exhausted, 0 if not (also returns 1 for invalid cursor)
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_is_finished", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_cursor_is_finished(CursorState* cursor);
+
+        /// <summary>
+        ///  Reset cursor to the beginning
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_rewind", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void ironbase_cursor_rewind(CursorState* cursor);
+
+        /// <summary>
+        ///  Skip the next N documents
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///  - `n`: Number of documents to skip
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_skip", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void ironbase_cursor_skip(CursorState* cursor, ulong n);
+
+        /// <summary>
+        ///  Collect all remaining documents
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle
+        ///
+        ///  # Returns
+        ///  - JSON array of all remaining documents (caller must free with `ironbase_free_string()`)
+        ///  - Empty array "[]" if cursor is exhausted
+        ///  - Null on error
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_collect_all", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_cursor_collect_all(CursorState* cursor);
+
+        /// <summary>
+        ///  Release a cursor handle
+        ///
+        ///  # Parameters
+        ///  - `cursor`: The cursor handle to release
+        ///
+        ///  # Safety
+        ///  - The handle must have been created by `ironbase_create_cursor()`
+        ///  - The handle must not be used after this call
+        ///  - It is safe to call with a null handle (no-op)
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_cursor_release", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern void ironbase_cursor_release(CursorState* cursor);
+
+        /// <summary>
+        ///  Set or clear JSON schema for a collection
+        ///
+        ///  # Parameters
+        ///  - `handle`: The database handle
+        ///  - `collection_name`: Collection name (UTF-8 null-terminated string)
+        ///  - `schema_json`: JSON schema definition (null to clear schema)
+        ///
+        ///  # Returns
+        ///  - `IronBaseErrorCode::Success` (0) on success
+        ///  - Error code on failure
+        ///
+        ///  # Example Schema
+        ///  ```json
+        ///  {
+        ///    "type": "object",
+        ///    "properties": {
+        ///      "name": {"type": "string"},
+        ///      "age": {"type": "integer", "minimum": 0}
+        ///    },
+        ///    "required": ["name"]
+        ///  }
+        ///  ```
+        ///
+        ///  # Notes
+        ///  - Documents that don't match the schema will be rejected on insert/update
+        ///  - Pass null for schema_json to disable schema validation
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_set_collection_schema", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_set_collection_schema(DatabaseHandle* handle, byte* collection_name, byte* schema_json);
+
+        /// <summary>
+        ///  Get JSON schema for a collection
+        ///
+        ///  # Parameters
+        ///  - `handle`: The database handle
+        ///  - `collection_name`: Collection name (UTF-8 null-terminated string)
+        ///
+        ///  # Returns
+        ///  - Pointer to JSON string if schema exists (caller must free with `ironbase_free_string`)
+        ///  - NULL if no schema is set
+        ///  - NULL on error (check `ironbase_get_last_error`)
+        ///
+        ///  # Example
+        ///  ```c
+        ///  char* schema = ironbase_get_collection_schema(db, "users");
+        ///  if (schema != NULL) {
+        ///      printf("Schema: %s\n", schema);
+        ///      ironbase_free_string(schema);
+        ///  }
+        ///  ```
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_get_collection_schema", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_get_collection_schema(DatabaseHandle* handle, byte* collection_name);
+
+        /// <summary>
+        ///  Set the global log level
+        ///
+        ///  # Parameters
+        ///  - `level`: Log level string (one of: "ERROR", "WARN", "INFO", "DEBUG", "TRACE")
+        ///
+        ///  # Returns
+        ///  - `IronBaseErrorCode::Success` (0) on success
+        ///  - Error code on failure
+        ///
+        ///  # Log Levels (from least to most verbose)
+        ///  - ERROR: Only critical errors
+        ///  - WARN: Warnings and errors (default)
+        ///  - INFO: Informational messages
+        ///  - DEBUG: Debug information
+        ///  - TRACE: Very verbose tracing
+        ///
+        ///  # Example
+        ///  ```c
+        ///  ironbase_set_log_level("DEBUG");  // Enable debug logging
+        ///  ironbase_set_log_level("WARN");   // Default level
+        ///  ```
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_set_log_level", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_set_log_level(byte* level);
+
+        /// <summary>
+        ///  Get the current global log level
+        ///
+        ///  # Returns
+        ///  - Log level string (caller must free with `ironbase_free_string()`)
+        ///  - Null on error
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_get_log_level", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern byte* ironbase_get_log_level();
+
 
     }
 
@@ -712,6 +1052,14 @@ namespace IronBase.Interop
     /// </summary>
     [StructLayout(LayoutKind.Sequential)]
     internal unsafe partial struct CollectionHandle
+    {
+    }
+
+    /// <summary>
+    ///  Opaque cursor handle
+    /// </summary>
+    [StructLayout(LayoutKind.Sequential)]
+    internal unsafe partial struct CursorState
     {
     }
 

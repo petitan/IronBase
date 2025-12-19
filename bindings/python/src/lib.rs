@@ -7,7 +7,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use ironbase_core::{CollectionCore, DatabaseCore, DocumentId, DurabilityMode, StorageEngine};
+use ironbase_core::{
+    index::FuzzyAlgorithm, CollectionCore, DatabaseCore, DocumentId, DurabilityMode, StorageEngine,
+};
 
 /// IronBase Database - Python wrapper
 #[pyclass]
@@ -588,6 +590,222 @@ impl Collection {
         self.core
             .list_indexes()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    // ========== FUZZY SEARCH ==========
+
+    /// Create a fuzzy text index for approximate string matching.
+    ///
+    /// Args:
+    ///     field: Field name to index
+    ///     algorithm: "jaro_winkler" (default), "levenshtein", or "damerau_levenshtein"
+    ///     threshold: Similarity threshold 0.0-1.0 (default: 0.8)
+    ///
+    /// Returns:
+    ///     Index name (e.g., "collection_field_fuzzy")
+    ///
+    /// Example:
+    ///     >>> coll.create_fuzzy_index("name", algorithm="levenshtein", threshold=0.7)
+    #[pyo3(signature = (field, algorithm="jaro_winkler", threshold=0.8))]
+    fn create_fuzzy_index(
+        &self,
+        field: String,
+        algorithm: &str,
+        threshold: f64,
+    ) -> PyResult<String> {
+        let algo = match algorithm.to_lowercase().as_str() {
+            "jaro_winkler" | "jarowinkler" => FuzzyAlgorithm::JaroWinkler,
+            "levenshtein" => FuzzyAlgorithm::Levenshtein,
+            "damerau_levenshtein" | "dameraulevenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
+            _ => {
+                return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid algorithm '{}'. Use 'jaro_winkler', 'levenshtein', or 'damerau_levenshtein'",
+                    algorithm
+                )));
+            }
+        };
+
+        self.core
+            .create_fuzzy_index(field, algo, threshold)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    /// Search for documents using fuzzy text matching.
+    ///
+    /// Args:
+    ///     field: Field to search (must have a fuzzy index)
+    ///     query: Search term
+    ///     threshold: Override similarity threshold (0.0-1.0)
+    ///     algorithm: Override algorithm ("jaro_winkler", "levenshtein", "damerau_levenshtein")
+    ///
+    /// Returns:
+    ///     List of tuples: (document, similarity_score)
+    ///
+    /// Example:
+    ///     >>> results = coll.fuzzy_search("name", "john", threshold=0.7)
+    ///     >>> for doc, score in results:
+    ///     ...     print(f"Match: {doc['name']}, Score: {score:.2f}")
+    #[pyo3(signature = (field, query, threshold=None, algorithm=None))]
+    fn fuzzy_search<'py>(
+        &self,
+        py: Python<'py>,
+        field: String,
+        query: String,
+        threshold: Option<f64>,
+        algorithm: Option<&str>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let algo = match algorithm {
+            Some(s) => match s.to_lowercase().as_str() {
+                "jaro_winkler" | "jarowinkler" => Some(FuzzyAlgorithm::JaroWinkler),
+                "levenshtein" => Some(FuzzyAlgorithm::Levenshtein),
+                "damerau_levenshtein" | "dameraulevenshtein" => {
+                    Some(FuzzyAlgorithm::DamerauLevenshtein)
+                }
+                _ => {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid algorithm '{}'. Use 'jaro_winkler', 'levenshtein', or 'damerau_levenshtein'",
+                        s
+                    )));
+                }
+            },
+            None => None,
+        };
+
+        let results = self
+            .core
+            .fuzzy_search(&field, &query, threshold, algo)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        let py_list = PyList::empty(py);
+        for (doc, score) in results {
+            let py_dict = json_to_python_dict(py, &doc)?;
+            let tuple = PyTuple::new(
+                py,
+                [py_dict.into_any(), score.into_pyobject(py)?.into_any()],
+            )?;
+            py_list.append(tuple)?;
+        }
+
+        Ok(py_list)
+    }
+
+    // ========== FULL-TEXT SEARCH ==========
+
+    /// Create a full-text search index with TF-IDF scoring.
+    ///
+    /// Args:
+    ///     field: Field name to index
+    ///     language: "english" (default), "hungarian", "german", or "none"
+    ///     min_word_length: Minimum word length to index (default: 2)
+    ///     accent_folding: Normalize accents (áéí → aei) (default: true)
+    ///
+    /// Returns:
+    ///     Index name (e.g., "collection_field_fulltext")
+    ///
+    /// Example:
+    ///     >>> coll.create_fulltext_index("content", language="hungarian")
+    #[pyo3(signature = (field, language="english", min_word_length=None, accent_folding=None))]
+    fn create_fulltext_index(
+        &self,
+        field: String,
+        language: &str,
+        min_word_length: Option<usize>,
+        accent_folding: Option<bool>,
+    ) -> PyResult<String> {
+        self.core
+            .create_fulltext_index(field, language, min_word_length, accent_folding)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+    }
+
+    /// Search documents using full-text search with TF-IDF scoring.
+    ///
+    /// Args:
+    ///     field: Field to search (must have a fulltext index)
+    ///     query: Search query (words separated by spaces)
+    ///     limit: Maximum results (default: 10)
+    ///     skip: Number of results to skip (default: 0)
+    ///     min_score: Minimum TF-IDF score filter
+    ///     projection: Fields to include/exclude (e.g., {"title": 1, "_id": 1})
+    ///
+    /// Returns:
+    ///     List of tuples: (document, score, matched_tokens)
+    ///
+    /// Example:
+    ///     >>> results = coll.fulltext_search("content", "király", limit=10)
+    ///     >>> for doc, score, tokens in results:
+    ///     ...     print(f"Score: {score:.2f}, Tokens: {tokens}")
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (field, query, limit=None, skip=None, min_score=None, projection=None))]
+    fn fulltext_search<'py>(
+        &self,
+        py: Python<'py>,
+        field: String,
+        query: String,
+        limit: Option<usize>,
+        skip: Option<usize>,
+        min_score: Option<f64>,
+        projection: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let proj_map = match projection {
+            Some(ref dict) => {
+                let mut map = HashMap::new();
+                for (key, value) in dict.iter() {
+                    let k: String = key.extract()?;
+                    let v: i32 = value.extract()?;
+                    map.insert(k, v);
+                }
+                Some(map)
+            }
+            None => None,
+        };
+
+        let results = self
+            .core
+            .fulltext_search(&field, &query, limit, skip, min_score, proj_map)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        let py_list = PyList::empty(py);
+        for (doc, score, tokens) in results {
+            let py_dict = json_to_python_dict(py, &doc)?;
+            let py_tokens = PyList::new(py, tokens.iter().map(|s| s.as_str()))?;
+            let tuple = PyTuple::new(
+                py,
+                [
+                    py_dict.into_any(),
+                    score.into_pyobject(py)?.into_any(),
+                    py_tokens.into_any(),
+                ],
+            )?;
+            py_list.append(tuple)?;
+        }
+
+        Ok(py_list)
+    }
+
+    /// List all fulltext indexes for this collection.
+    ///
+    /// Returns:
+    ///     List of dicts with index metadata (name, field, language, etc.)
+    fn list_fulltext_indexes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let indexes = self
+            .core
+            .list_fulltext_indexes()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        let py_list = PyList::empty(py);
+        for idx in indexes {
+            let dict = PyDict::new(py);
+            dict.set_item("name", &idx.name)?;
+            dict.set_item("field", &idx.field)?;
+            dict.set_item("language", format!("{:?}", idx.language))?;
+            dict.set_item("min_word_length", idx.min_word_length)?;
+            dict.set_item("accent_folding", idx.accent_folding)?;
+            dict.set_item("num_documents", idx.num_documents)?;
+            dict.set_item("num_tokens", idx.num_tokens)?;
+            py_list.append(dict)?;
+        }
+
+        Ok(py_list)
     }
 
     /// Explain query
