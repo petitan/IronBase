@@ -927,6 +927,9 @@ impl StorageEngine {
 impl Drop for StorageEngine {
     fn drop(&mut self) {
         let _ = self.flush();
+        // Explicitly unlock the lock file to ensure other processes can access the database
+        // This is more reliable than relying on File::drop() to release the flock
+        let _ = self.lock_file.unlock();
     }
 }
 
