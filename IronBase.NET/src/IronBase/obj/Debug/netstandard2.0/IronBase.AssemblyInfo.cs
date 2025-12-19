@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("IronBase - Rust-powered embedded document database with MongoDB-like API")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("0.3.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.3.0+254a4d1ca1b3efd7a60a7ef83638e6d20f13cc0e")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("0.3.0+babb3741fcdbd8f2f4ef89242feffc792917beae")]
 [assembly: System.Reflection.AssemblyProductAttribute("IronBase")]
 [assembly: System.Reflection.AssemblyTitleAttribute("IronBase")]
 [assembly: System.Reflection.AssemblyVersionAttribute("0.3.0.0")]

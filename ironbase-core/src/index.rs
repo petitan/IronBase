@@ -583,12 +583,12 @@ impl BPlusTree {
     /// Resets the B+ tree to a single empty leaf node.
     /// Used before rebuild operations to prevent duplicate entries.
     pub fn clear(&mut self) {
-        // Reset to empty leaf node
-        self.root = Box::new(BTreeNode::Leaf(LeafNode {
+        // Reset to empty leaf node (reuse existing Box allocation)
+        *self.root = BTreeNode::Leaf(LeafNode {
             keys: Vec::new(),
             document_ids: Vec::new(),
             next_leaf_offset: 0,
-        }));
+        });
         // Reset metadata counts
         self.metadata.num_keys = 0;
         self.metadata.tree_height = 1;
