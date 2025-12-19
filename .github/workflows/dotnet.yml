@@ -24,13 +24,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            lib_name: libironbase_csharp.so
+            lib_name: libironbase_ffi.so
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            lib_name: ironbase_csharp.dll
+            lib_name: ironbase_ffi.dll
           - os: macos-latest
             target: x86_64-apple-darwin
-            lib_name: libironbase_csharp.dylib
+            lib_name: libironbase_ffi.dylib
 
     steps:
       - uses: actions/checkout@v4
@@ -102,9 +102,9 @@ jobs:
           mkdir -p IronBase.NET/src/IronBase/runtimes/win-x64/native
           mkdir -p IronBase.NET/src/IronBase/runtimes/linux-x64/native
           mkdir -p IronBase.NET/src/IronBase/runtimes/osx-x64/native
-          cp native-libs/native-windows-latest/*.dll IronBase.NET/src/IronBase/runtimes/win-x64/native/ || true
-          cp native-libs/native-ubuntu-latest/*.so IronBase.NET/src/IronBase/runtimes/linux-x64/native/ || true
-          cp native-libs/native-macos-latest/*.dylib IronBase.NET/src/IronBase/runtimes/osx-x64/native/ || true
+          cp native-libs/native-windows-latest/ironbase_ffi.dll IronBase.NET/src/IronBase/runtimes/win-x64/native/ || true
+          cp native-libs/native-ubuntu-latest/libironbase_ffi.so IronBase.NET/src/IronBase/runtimes/linux-x64/native/ || true
+          cp native-libs/native-macos-latest/libironbase_ffi.dylib IronBase.NET/src/IronBase/runtimes/osx-x64/native/ || true
 
       - name: Pack NuGet
         run: dotnet pack IronBase.NET/src/IronBase/IronBase.csproj --configuration Release --output ./nupkg
