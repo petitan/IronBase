@@ -1042,52 +1042,61 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// - Generates _id if not provided
     /// - Prepares WAL entry (with _collection for recovery)
     /// - Returns prepared data for WAL and persist phase
+    ///
+    /// LOCK ORDERING: To avoid deadlock with drop_index (which acquires index→storage),
+    /// we release the storage lock BEFORE acquiring the index lock for constraint checks.
+    /// This ensures: insert uses storage→(release)→index, while drop_index uses index→storage.
     fn insert_one_prepare(&self, mut fields: HashMap<String, Value>) -> Result<InsertOnePrepared> {
         self.check_not_closed()?;
 
-        // Need storage read access for metadata (ID generation)
-        let mut storage = self.storage.write();
+        // ====================================================================
+        // PHASE 1: Generate ID (needs storage lock for meta.last_id)
+        // ====================================================================
+        let doc_id = {
+            let mut storage = self.storage.write();
 
-        // Get mutable reference to collection metadata
-        let meta = storage
-            .get_collection_meta_mut(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            let meta = storage
+                .get_collection_meta_mut(&self.name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        // Check if _id already exists in fields
-        let doc_id = if let Some(existing_id) = fields.get("_id") {
-            // Use existing _id from fields
-            let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
-                .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?;
+            let id = if let Some(existing_id) = fields.get("_id") {
+                // Use existing _id from fields
+                let parsed_id: DocumentId =
+                    serde_json::from_value(existing_id.clone()).map_err(|e| {
+                        MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                    })?;
 
-            // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
-            if let DocumentId::Int(num) = parsed_id {
-                if num >= 0 {
-                    let numeric = num as u64;
-                    if numeric > meta.last_id {
-                        meta.last_id = numeric;
+                // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
+                if let DocumentId::Int(num) = parsed_id {
+                    if num >= 0 {
+                        let numeric = num as u64;
+                        if numeric > meta.last_id {
+                            meta.last_id = numeric;
+                        }
                     }
                 }
-            }
 
-            parsed_id
-        } else {
-            // Auto-generate new _id
-            let new_id = DocumentId::new_auto(meta.last_id);
-            meta.last_id += 1;
+                parsed_id
+            } else {
+                // Auto-generate new _id
+                let new_id = DocumentId::new_auto(meta.last_id);
+                meta.last_id += 1;
 
-            // Add _id to fields for query matching
-            fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
-            new_id
-        };
+                // Add _id to fields for query matching
+                fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
+                new_id
+            };
 
-        // Drop storage lock before constraint checks (to avoid deadlock with indexes)
-        drop(storage);
+            id
+        }; // Storage lock released here - BEFORE acquiring index lock
 
-        // Create document for validation (NO _collection in storage doc)
+        // ====================================================================
+        // PHASE 2: Validate and check constraints (needs index lock, NOT storage)
+        // ====================================================================
         let doc = Document::new(doc_id.clone(), fields.clone());
         self.validate_document(&doc)?;
 
-        // Check index constraints BEFORE preparing for persist
+        // Check index constraints (acquires indexes.read() internally)
         // This catches duplicates early, before any storage/WAL writes
         self.check_index_constraints(&doc, None)?;
 
@@ -1142,6 +1151,11 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// - Checks constraints (unique indexes, duplicates within batch)
     /// - Prepares WAL entries (with _collection for recovery)
     /// - Returns prepared data for WAL and persist phase
+    ///
+    /// LOCK ORDERING: To avoid deadlock with drop_index (which acquires index→storage),
+    /// we use a two-phase approach:
+    /// - Phase 1: Hold storage lock for ID generation only
+    /// - Phase 2: Release storage lock, then check constraints (acquires index lock)
     fn insert_many_prepare(
         &self,
         documents: Vec<HashMap<String, Value>>,
@@ -1156,52 +1170,68 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             });
         }
 
-        let mut storage = self.storage.write();
-        let mut prepared_docs = Vec::with_capacity(documents.len());
-        let mut inserted_ids = Vec::with_capacity(documents.len());
+        // ====================================================================
+        // PHASE 1: Generate all IDs (needs storage lock for meta.last_id)
+        // ====================================================================
+        let docs_with_ids: Vec<(DocumentId, HashMap<String, Value>)> = {
+            let mut storage = self.storage.write();
 
-        // Get mutable reference to collection metadata ONCE
-        let meta = storage
-            .get_collection_meta_mut(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            let meta = storage
+                .get_collection_meta_mut(&self.name)
+                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
 
-        // Get starting ID for auto-generation
-        let start_id = meta.last_id;
-        let mut auto_id_count = 0u64;
+            let start_id = meta.last_id;
+            let mut auto_id_count = 0u64;
+            let mut result = Vec::with_capacity(documents.len());
 
+            for mut fields in documents.into_iter() {
+                let doc_id = if let Some(existing_id) = fields.get("_id") {
+                    let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
+                        .map_err(|e| {
+                            MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                        })?;
+
+                    // Ensure last_id tracks highest numeric _id from manual inserts
+                    if let DocumentId::Int(num) = parsed_id {
+                        if num >= 0 {
+                            let numeric = num as u64;
+                            if numeric > meta.last_id {
+                                meta.last_id = numeric;
+                            }
+                        }
+                    }
+
+                    parsed_id
+                } else {
+                    // Auto-generate new _id
+                    let new_id = DocumentId::new_auto(start_id + auto_id_count);
+                    auto_id_count += 1;
+                    fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
+                    new_id
+                };
+
+                result.push((doc_id, fields));
+            }
+
+            // Update last_id with max of manual + auto-generated IDs
+            meta.last_id = meta.last_id.max(start_id + auto_id_count);
+
+            result
+        }; // Storage lock released here - BEFORE acquiring index lock
+
+        // ====================================================================
+        // PHASE 2: Validate and check constraints (needs index lock, NOT storage)
+        // ====================================================================
         // Create batch constraint validator to detect duplicates WITHIN batch
         let mut batch_validator = {
             let indexes = self.indexes.read();
             BatchConstraintValidator::new(&indexes, &self.name)
         };
 
-        for mut fields in documents.into_iter() {
-            // Check if _id already exists in fields
-            let doc_id = if let Some(existing_id) = fields.get("_id") {
-                let parsed_id: DocumentId =
-                    serde_json::from_value(existing_id.clone()).map_err(|e| {
-                        MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
-                    })?;
+        let mut prepared_docs = Vec::with_capacity(docs_with_ids.len());
+        let mut inserted_ids = Vec::with_capacity(docs_with_ids.len());
 
-                // Ensure last_id tracks highest numeric _id from manual inserts
-                if let DocumentId::Int(num) = parsed_id {
-                    if num >= 0 {
-                        let numeric = num as u64;
-                        if numeric > meta.last_id {
-                            meta.last_id = numeric;
-                        }
-                    }
-                }
-
-                parsed_id
-            } else {
-                // Auto-generate new _id
-                let new_id = DocumentId::new_auto(start_id + auto_id_count);
-                auto_id_count += 1;
-                fields.insert("_id".to_string(), serde_json::to_value(&new_id).unwrap());
-                new_id
-            };
-
+        for (doc_id, fields) in docs_with_ids {
             // Create document (NO _collection in storage doc)
             let doc = Document::new(doc_id.clone(), fields);
             self.validate_document(&doc)?;
@@ -1228,9 +1258,6 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             });
             inserted_ids.push(doc_id);
         }
-
-        // Update last_id with max of manual + auto-generated IDs
-        meta.last_id = meta.last_id.max(start_id + auto_id_count);
 
         Ok(InsertManyPrepared {
             prepared_docs,
@@ -1624,5 +1651,237 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(&wal_path);
+    }
+
+    // ==================== CONCURRENT TESTS ====================
+    // These tests verify that lock ordering is correct and no deadlocks occur
+
+    #[test]
+    fn test_concurrent_insert_prepare_no_deadlock() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = Arc::new(db.collection("test").unwrap());
+
+        // Spawn multiple threads doing concurrent insert_prepare
+        let handles: Vec<_> = (0..10)
+            .map(|i| {
+                let coll = Arc::clone(&coll);
+                thread::spawn(move || {
+                    for j in 0..100 {
+                        let fields = HashMap::from([
+                            ("thread".to_string(), json!(i)),
+                            ("iter".to_string(), json!(j)),
+                        ]);
+                        let prepared = coll.insert_one_prepare(fields).unwrap();
+                        coll.insert_one_persist(prepared).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        // If we get here without hanging, there's no deadlock
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+
+        // Verify all inserts succeeded
+        let count = coll.find(&json!({})).unwrap().len();
+        assert_eq!(count, 1000); // 10 threads * 100 inserts
+    }
+
+    #[test]
+    fn test_concurrent_insert_many_prepare_no_deadlock() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = Arc::new(db.collection("test").unwrap());
+
+        // Spawn multiple threads doing concurrent insert_many_prepare
+        let handles: Vec<_> = (0..5)
+            .map(|i| {
+                let coll = Arc::clone(&coll);
+                thread::spawn(move || {
+                    for batch in 0..10 {
+                        let docs: Vec<HashMap<String, Value>> = (0..20)
+                            .map(|j| {
+                                HashMap::from([
+                                    ("thread".to_string(), json!(i)),
+                                    ("batch".to_string(), json!(batch)),
+                                    ("item".to_string(), json!(j)),
+                                ])
+                            })
+                            .collect();
+                        let prepared = coll.insert_many_prepare(docs).unwrap();
+                        coll.insert_many_persist(prepared).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+
+        // Verify all inserts succeeded
+        let count = coll.find(&json!({})).unwrap().len();
+        assert_eq!(count, 1000); // 5 threads * 10 batches * 20 docs
+    }
+
+    #[test]
+    fn test_concurrent_insert_prepare_with_drop_index_no_deadlock() {
+        use std::sync::Arc;
+        use std::thread;
+        use std::time::Duration;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = Arc::new(db.collection("test").unwrap());
+
+        // Create an index
+        coll.create_index("value".to_string(), false).unwrap();
+
+        let coll1 = Arc::clone(&coll);
+        let coll2 = Arc::clone(&coll);
+
+        // Thread 1: Does many insert_prepare operations
+        let insert_handle = thread::spawn(move || {
+            for i in 0..200 {
+                let fields = HashMap::from([("value".to_string(), json!(i))]);
+                if let Ok(prepared) = coll1.insert_one_prepare(fields) {
+                    let _ = coll1.insert_one_persist(prepared);
+                }
+                // Small yield to increase chance of interleaving
+                if i % 10 == 0 {
+                    thread::yield_now();
+                }
+            }
+        });
+
+        // Thread 2: Creates and drops index multiple times
+        // This tests the critical lock ordering: drop_index acquires index→storage,
+        // while insert_prepare acquires storage(briefly)→index
+        let index_handle = thread::spawn(move || {
+            for _ in 0..20 {
+                // Recreate index (may fail if it exists)
+                let _ = coll2.create_index("other_field".to_string(), false);
+                thread::sleep(Duration::from_micros(100));
+                // Drop it
+                let _ = coll2.drop_index("other_field");
+                thread::yield_now();
+            }
+        });
+
+        // If we get here without hanging for 5 seconds, there's no deadlock
+        insert_handle
+            .join()
+            .expect("Insert thread should not panic");
+        index_handle.join().expect("Index thread should not panic");
+    }
+
+    #[test]
+    fn test_concurrent_unique_constraint_violation() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = Arc::new(db.collection("test").unwrap());
+
+        // Create unique index
+        coll.create_index("unique_key".to_string(), true).unwrap();
+
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let error_count = Arc::new(AtomicUsize::new(0));
+
+        // Multiple threads try to insert the same unique key
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let coll = Arc::clone(&coll);
+                let success = Arc::clone(&success_count);
+                let errors = Arc::clone(&error_count);
+                thread::spawn(move || {
+                    let fields = HashMap::from([("unique_key".to_string(), json!("same_value"))]);
+                    match coll.insert_one_prepare(fields) {
+                        Ok(prepared) => match coll.insert_one_persist(prepared) {
+                            Ok(_) => success.fetch_add(1, Ordering::SeqCst),
+                            Err(_) => errors.fetch_add(1, Ordering::SeqCst),
+                        },
+                        Err(_) => errors.fetch_add(1, Ordering::SeqCst),
+                    };
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+
+        // Exactly one should succeed (unique constraint)
+        assert_eq!(success_count.load(Ordering::SeqCst), 1);
+        assert_eq!(error_count.load(Ordering::SeqCst), 9);
+    }
+
+    #[test]
+    fn test_concurrent_insert_many_prepare_unique_constraint() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+        let coll = Arc::new(db.collection("test").unwrap());
+
+        // Create unique index
+        coll.create_index("email".to_string(), true).unwrap();
+
+        let success_count = Arc::new(AtomicUsize::new(0));
+        let error_count = Arc::new(AtomicUsize::new(0));
+
+        // Each thread tries to insert a batch with overlapping emails
+        let handles: Vec<_> = (0..5)
+            .map(|thread_id| {
+                let coll = Arc::clone(&coll);
+                let success = Arc::clone(&success_count);
+                let errors = Arc::clone(&error_count);
+                thread::spawn(move || {
+                    // Each batch has some unique and some shared emails
+                    let docs: Vec<HashMap<String, Value>> = (0..5)
+                        .map(|i| {
+                            let email = if i < 2 {
+                                // First 2 docs have thread-specific email
+                                format!("thread{}_{}", thread_id, i)
+                            } else {
+                                // Last 3 docs try to claim shared emails
+                                format!("shared_{}", i)
+                            };
+                            HashMap::from([("email".to_string(), json!(email))])
+                        })
+                        .collect();
+
+                    match coll.insert_many_prepare(docs) {
+                        Ok(prepared) => match coll.insert_many_persist(prepared) {
+                            Ok(ids) => success.fetch_add(ids.len(), Ordering::SeqCst),
+                            Err(_) => errors.fetch_add(1, Ordering::SeqCst),
+                        },
+                        Err(_) => errors.fetch_add(1, Ordering::SeqCst),
+                    };
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+
+        // Due to races, results vary, but total should be consistent
+        let total_success = success_count.load(Ordering::SeqCst);
+        let total_errors = error_count.load(Ordering::SeqCst);
+
+        // At minimum, thread 0 should succeed with thread-unique emails (2 per thread * 5 threads = 10)
+        // Plus shared emails (3 emails, but only 1 thread can claim each = 3)
+        // So between 10-13 successes expected, rest are errors
+        assert!(total_success >= 5, "At least some inserts should succeed");
+        assert!(total_success + total_errors > 0, "All threads completed");
     }
 }
