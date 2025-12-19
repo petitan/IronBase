@@ -669,6 +669,21 @@ pub fn get_tools_list() -> Value {
                 }
             },
             {
+                "name": "index_list_fulltext",
+                "title": "List Full-Text Indexes",
+                "description": "List all full-text search indexes for a collection with their metadata (field, language, document count, token count)",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name"
+                        }
+                    },
+                    "required": ["collection"]
+                }
+            },
+            {
                 "name": "index_drop",
                 "title": "Drop Index",
                 "description": "Drop (delete) an index from a collection",
@@ -1617,6 +1632,12 @@ pub fn dispatch_tool(
                 .collect();
 
             Ok(json!({"results": documents, "count": documents.len()}))
+        }
+        "index_list_fulltext" => {
+            let collection = get_string(&params, "collection")?;
+            validate_collection_name(&collection)?;
+            let indexes = adapter.list_fulltext_indexes(&collection)?;
+            Ok(json!({"indexes": indexes, "count": indexes.len()}))
         }
         "index_drop" => {
             let collection = get_string(&params, "collection")?;

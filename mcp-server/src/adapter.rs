@@ -534,6 +534,28 @@ impl IronBaseAdapter {
         Ok(results)
     }
 
+    /// List all fulltext indexes for a collection
+    /// Uses get_collection - no implicit creation
+    pub fn list_fulltext_indexes(&self, collection: &str) -> Result<Vec<Value>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let indexes = coll.list_fulltext_indexes()?;
+        Ok(indexes
+            .into_iter()
+            .map(|idx| {
+                serde_json::json!({
+                    "name": idx.name,
+                    "field": idx.field,
+                    "language": format!("{:?}", idx.language).to_lowercase(),
+                    "min_word_length": idx.min_word_length,
+                    "accent_folding": idx.accent_folding,
+                    "num_documents": idx.num_documents,
+                    "num_tokens": idx.num_tokens
+                })
+            })
+            .collect())
+    }
+
     // ============================================================
     // Schema Management
     // ============================================================
