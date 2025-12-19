@@ -142,8 +142,8 @@ pub extern "C" fn ironbase_close(handle: DbHandle) -> i32 {
     // Take ownership and drop
     let db = unsafe { Box::from_raw(handle) };
 
-    // Flush before dropping
-    match db.inner.flush() {
+    // Close: flush + release lock (important for reopening database)
+    match db.inner.close() {
         Ok(_) => IronBaseErrorCode::Success as i32,
         Err(e) => set_error(&e) as i32,
     }
