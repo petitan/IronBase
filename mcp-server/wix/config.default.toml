@@ -1,0 +1,20 @@
+# IronBase MCP Server Configuration (Windows Default)
+# Location: C:\ProgramData\IronBase\config.toml
+
+[server]
+host = "127.0.0.1"
+port = 8080
+# Max request body size (supports: B, KB, MB, GB)
+max_body_size = "1GB"
+
+[database]
+# Path to IronBase database file
+# Default location: C:\ProgramData\IronBase\data.mlite
+path = "C:/ProgramData/IronBase/data.mlite"
+
+# Authentication disabled by default for local use
+# Enable in production with API keys
+require_auth = false
+
+[logging]
+level = "info"

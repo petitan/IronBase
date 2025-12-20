@@ -40,6 +40,20 @@
             Impersonate='no'
             Return='check'/>
 
+        <CustomAction Id='StartService'
+            FileKey='exe0'
+            ExeCommand='start'
+            Execute='deferred'
+            Impersonate='no'
+            Return='ignore'/>
+
+        <CustomAction Id='StopService'
+            FileKey='exe0'
+            ExeCommand='stop'
+            Execute='deferred'
+            Impersonate='no'
+            Return='ignore'/>
+
         <CustomAction Id='UninstallService'
             FileKey='exe0'
             ExeCommand='uninstall'
@@ -48,10 +62,16 @@
             Return='ignore'/>
 
         <InstallExecuteSequence>
+            <Custom Action='StopService' Before='UninstallService'>
+                (NOT UPGRADINGPRODUCTCODE) AND (REMOVE="ALL")
+            </Custom>
             <Custom Action='UninstallService' Before='RemoveFiles'>
                 (NOT UPGRADINGPRODUCTCODE) AND (REMOVE="ALL")
             </Custom>
             <Custom Action='InstallService' After='InstallFiles'>
+                NOT Installed
+            </Custom>
+            <Custom Action='StartService' After='InstallService'>
                 NOT Installed
             </Custom>
         </InstallExecuteSequence>
@@ -104,6 +124,12 @@
                         <RemoveFolder Id='RemoveDataFolder' On='uninstall'/>
                         <RegistryValue Root='HKLM' Key='Software\IronBase' Name='DataPath' Type='string' Value='[IronBaseDataFolder]' KeyPath='yes'/>
                     </Component>
+                    <Component Id='DefaultConfig' Guid='D5E6F7A8-B9C0-1234-CDEF-234567890ABC' Win64='yes'>
+                        <File Id='config1'
+                              Name='config.toml'
+                              Source='wix\config.default.toml'
+                              KeyPath='yes'/>
+                    </Component>
                 </Directory>
             </Directory>
         </Directory>
@@ -127,6 +153,18 @@
                     Description='Terminal UI for IronBase'
                     Target='[APPLICATIONFOLDER]ironbase-tui.exe'
                     WorkingDirectory='APPLICATIONFOLDER'/>
+                <Shortcut Id='BackupShortcut'
+                    Name='IronBase Backup'
+                    Description='Backup and restore IronBase databases'
+                    Target='[APPLICATIONFOLDER]ironbase-backup.exe'
+                    Arguments='--help'
+                    WorkingDirectory='APPLICATIONFOLDER'/>
+                <Shortcut Id='BridgeShortcut'
+                    Name='IronBase Bridge'
+                    Description='STDIO to HTTP proxy for Claude Desktop'
+                    Target='[APPLICATIONFOLDER]ironbase-bridge.exe'
+                    Arguments='--help'
+                    WorkingDirectory='APPLICATIONFOLDER'/>
                 <Shortcut Id='UninstallShortcut'
                     Name='Uninstall IronBase'
                     Description='Uninstall IronBase MCP Server'
@@ -145,6 +183,7 @@
             <ComponentRef Id='BridgeExecutable'/>
             <ComponentRef Id='ConfigExample'/>
             <ComponentRef Id='DataFolder'/>
+            <ComponentRef Id='DefaultConfig'/>
 
             <Feature Id='StartMenu' Title='Start Menu Shortcuts' Description='Add shortcuts to the Start Menu.' Level='1' AllowAdvertise='no'>
                 <ComponentRef Id='StartMenuShortcuts'/>
