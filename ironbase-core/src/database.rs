@@ -1056,6 +1056,56 @@ impl DatabaseCore<StorageEngine> {
         })
     }
 
+    /// Count documents matching a query.
+    ///
+    /// This method is provided for FFI consistency - it ensures the same CollectionCore
+    /// instance is used for both write and read operations, avoiding cache inconsistencies.
+    ///
+    /// # Arguments
+    /// * `collection_name` - Name of the collection
+    /// * `query` - Query filter as JSON value
+    ///
+    /// # Returns
+    /// Number of matching documents
+    pub fn count_documents(&self, collection_name: &str, query: &Value) -> Result<u64> {
+        self.check_not_closed()?;
+        let collection = self.get_collection(collection_name)?;
+        collection.count_documents(query)
+    }
+
+    /// Find documents matching a query.
+    ///
+    /// This method is provided for FFI consistency - it ensures the same CollectionCore
+    /// instance is used for both write and read operations, avoiding cache inconsistencies.
+    ///
+    /// # Arguments
+    /// * `collection_name` - Name of the collection
+    /// * `query` - Query filter as JSON value
+    ///
+    /// # Returns
+    /// Vector of matching documents
+    pub fn find(&self, collection_name: &str, query: &Value) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
+        let collection = self.get_collection(collection_name)?;
+        collection.find(query)
+    }
+
+    /// Find a single document matching a query.
+    ///
+    /// This method is provided for FFI consistency.
+    ///
+    /// # Arguments
+    /// * `collection_name` - Name of the collection
+    /// * `query` - Query filter as JSON value
+    ///
+    /// # Returns
+    /// The first matching document, or None
+    pub fn find_one(&self, collection_name: &str, query: &Value) -> Result<Option<Value>> {
+        self.check_not_closed()?;
+        let collection = self.get_collection(collection_name)?;
+        collection.find_one(query)
+    }
+
     /// Close the database: flush all changes and release the file lock.
     ///
     /// This method is primarily useful for language bindings (Python, C#) where

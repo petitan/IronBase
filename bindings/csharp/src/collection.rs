@@ -154,7 +154,8 @@ pub extern "C" fn ironbase_count_documents(
         }
     };
 
-    match coll.inner.count_documents(&query) {
+    // Use db.count_documents for FFI consistency (same CollectionCore as write ops)
+    match coll.db.count_documents(&coll.name, &query) {
         Ok(count) => {
             unsafe {
                 *out_count = count;

@@ -209,7 +209,8 @@ pub extern "C" fn ironbase_find(handle: CollHandle, query_json: *const c_char) -
         }
     };
 
-    match coll.inner.find(&query) {
+    // Use db.find for FFI consistency (same CollectionCore as write ops)
+    match coll.db.find(&coll.name, &query) {
         Ok(docs) => match serde_json::to_string(&docs) {
             Ok(json) => string_to_c_str(&json),
             Err(e) => {
@@ -261,7 +262,8 @@ pub extern "C" fn ironbase_find_one(handle: CollHandle, query_json: *const c_cha
         }
     };
 
-    match coll.inner.find_one(&query) {
+    // Use db.find_one for FFI consistency (same CollectionCore as write ops)
+    match coll.db.find_one(&coll.name, &query) {
         Ok(Some(doc)) => match serde_json::to_string(&doc) {
             Ok(json) => string_to_c_str(&json),
             Err(e) => {
