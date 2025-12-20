@@ -1,0 +1,148 @@
+<?xml version='1.0' encoding='windows-1252'?>
+<!--
+  IronBase MCP Server Windows Installer
+
+  Build with: cargo wix --no-build --nocapture
+
+  This WiX manifest installs:
+  - mcp-ironbase-server.exe to Program Files\IronBase
+  - Windows Service (IronBaseService) with auto-start
+  - Start Menu shortcuts
+  - ProgramData folder for config and database
+-->
+<Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
+
+    <Product
+        Id='*'
+        Name='IronBase MCP Server'
+        UpgradeCode='8F5B3A2E-1C4D-4E6F-9A8B-0C2D3E4F5A6B'
+        Manufacturer='PeTitan Kft.'
+        Language='1033'
+        Codepage='1252'
+        Version='$(var.Version)'>
+
+        <Package Id='*'
+            Keywords='Installer'
+            Description='IronBase MCP Server - High-performance embedded NoSQL database with MCP protocol support'
+            Manufacturer='PeTitan Kft.'
+            InstallerVersion='450'
+            Languages='1033'
+            Compressed='yes'
+            InstallScope='perMachine'
+            SummaryCodepage='1252'
+            Platform='x64'/>
+
+        <MajorUpgrade
+            Schedule='afterInstallInitialize'
+            DowngradeErrorMessage='A newer version of [ProductName] is already installed. Setup will now exit.'/>
+
+        <Media Id='1' Cabinet='media1.cab' EmbedCab='yes' DiskPrompt='CD-ROM #1'/>
+        <Property Id='DiskPrompt' Value='IronBase MCP Server Installation'/>
+
+        <!-- Custom Actions for service management -->
+        <CustomAction Id='InstallService'
+            FileKey='exe0'
+            ExeCommand='install'
+            Execute='deferred'
+            Impersonate='no'
+            Return='check'/>
+
+        <CustomAction Id='UninstallService'
+            FileKey='exe0'
+            ExeCommand='uninstall'
+            Execute='deferred'
+            Impersonate='no'
+            Return='ignore'/>
+
+        <InstallExecuteSequence>
+            <Custom Action='UninstallService' Before='RemoveFiles'>
+                (NOT UPGRADINGPRODUCTCODE) AND (REMOVE="ALL")
+            </Custom>
+            <Custom Action='InstallService' After='InstallFiles'>
+                NOT Installed
+            </Custom>
+        </InstallExecuteSequence>
+
+        <!-- Directory Structure -->
+        <Directory Id='TARGETDIR' Name='SourceDir'>
+            <Directory Id='ProgramFiles64Folder' Name='PFiles'>
+                <Directory Id='APPLICATIONFOLDER' Name='IronBase'>
+                    <Component Id='MainExecutable' Guid='A1B2C3D4-E5F6-7890-ABCD-EF1234567890' Win64='yes'>
+                        <File Id='exe0'
+                              Name='mcp-ironbase-server.exe'
+                              Source='target\release\mcp-ironbase-server.exe'
+                              KeyPath='yes'/>
+                    </Component>
+                    <Component Id='ConfigExample' Guid='B2C3D4E5-F6A7-8901-BCDE-F12345678901' Win64='yes'>
+                        <File Id='config0'
+                              Name='config.example.toml'
+                              Source='config.example.toml'
+                              KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+
+            <Directory Id='ProgramMenuFolder' Name='Programs'>
+                <Directory Id='ApplicationProgramsFolder' Name='IronBase'/>
+            </Directory>
+
+            <Directory Id='CommonAppDataFolder'>
+                <Directory Id='IronBaseDataFolder' Name='IronBase'>
+                    <Component Id='DataFolder' Guid='C3D4E5F6-A7B8-9012-CDEF-123456789012' Win64='yes'>
+                        <CreateFolder/>
+                        <RemoveFolder Id='RemoveDataFolder' On='uninstall'/>
+                        <RegistryValue Root='HKLM' Key='Software\IronBase' Name='DataPath' Type='string' Value='[IronBaseDataFolder]' KeyPath='yes'/>
+                    </Component>
+                </Directory>
+            </Directory>
+        </Directory>
+
+        <!-- Start Menu Shortcuts -->
+        <DirectoryRef Id='ApplicationProgramsFolder'>
+            <Component Id='StartMenuShortcuts' Guid='D4E5F6A7-B8C9-0123-DEFA-234567890123' Win64='yes'>
+                <Shortcut Id='StartMenuShortcut'
+                    Name='IronBase MCP Server'
+                    Description='Start IronBase MCP Server in HTTP mode'
+                    Target='[APPLICATIONFOLDER]mcp-ironbase-server.exe'
+                    WorkingDirectory='APPLICATIONFOLDER'/>
+                <Shortcut Id='StartMenuShortcutStdio'
+                    Name='IronBase MCP Server (stdio)'
+                    Description='Start IronBase MCP Server in stdio mode for Claude Desktop'
+                    Target='[APPLICATIONFOLDER]mcp-ironbase-server.exe'
+                    Arguments='--stdio'
+                    WorkingDirectory='APPLICATIONFOLDER'/>
+                <Shortcut Id='UninstallShortcut'
+                    Name='Uninstall IronBase'
+                    Description='Uninstall IronBase MCP Server'
+                    Target='[SystemFolder]msiexec.exe'
+                    Arguments='/x [ProductCode]'/>
+                <RemoveFolder Id='RemoveApplicationProgramsFolder' On='uninstall'/>
+                <RegistryValue Root='HKCU' Key='Software\IronBase' Name='StartMenuInstalled' Type='integer' Value='1' KeyPath='yes'/>
+            </Component>
+        </DirectoryRef>
+
+        <!-- Features -->
+        <Feature Id='MainProgram' Title='IronBase MCP Server' Description='The main executable and configuration files.' Level='1' ConfigurableDirectory='APPLICATIONFOLDER' AllowAdvertise='no' Display='expand' Absent='disallow'>
+            <ComponentRef Id='MainExecutable'/>
+            <ComponentRef Id='ConfigExample'/>
+            <ComponentRef Id='DataFolder'/>
+
+            <Feature Id='StartMenu' Title='Start Menu Shortcuts' Description='Add shortcuts to the Start Menu.' Level='1' AllowAdvertise='no'>
+                <ComponentRef Id='StartMenuShortcuts'/>
+            </Feature>
+        </Feature>
+
+        <!-- UI -->
+        <Property Id='WIXUI_INSTALLDIR' Value='APPLICATIONFOLDER'/>
+        <UIRef Id='WixUI_InstallDir'/>
+        <UIRef Id='WixUI_ErrorProgressText'/>
+
+        <!-- License -->
+        <WixVariable Id='WixUILicenseRtf' Value='wix\License.rtf'/>
+
+        <!-- Links -->
+        <Property Id='ARPHELPLINK' Value='https://github.com/petitan/IronBase'/>
+        <Property Id='ARPURLINFOABOUT' Value='https://github.com/petitan/IronBase'/>
+
+    </Product>
+</Wix>

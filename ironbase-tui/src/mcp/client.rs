@@ -549,6 +549,50 @@ impl McpClient {
         let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
         Ok(success)
     }
+
+    // === Full-text Search operations ===
+
+    /// Create a fulltext index on a field
+    pub async fn create_fulltext_index(
+        &self,
+        collection: &str,
+        field: &str,
+        language: &str,
+    ) -> McpResult<()> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "field": field,
+            "language": language
+        });
+        self.call_tool("index_create_fulltext", args).await?;
+        Ok(())
+    }
+
+    /// Execute fulltext search
+    /// Returns Vec of (document, score, matched_tokens)
+    pub async fn fulltext_search(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        limit: Option<usize>,
+    ) -> McpResult<Vec<Value>> {
+        let mut args = serde_json::json!({
+            "collection": collection,
+            "field": field,
+            "query": query
+        });
+        if let Some(l) = limit {
+            args["limit"] = serde_json::json!(l);
+        }
+        let result = self.call_tool("fulltext_search", args).await?;
+        // Result is {"results": [{"document": {...}, "score": 0.5, "matched_tokens": [...]}]}
+        let results: Vec<Value> = result
+            .get("results")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(results)
+    }
 }
 
 impl Drop for McpClient {

@@ -1086,3 +1086,128 @@ fn test_mixed_nested_and_flat_fields() {
         assert_eq!(agg.len(), 2);
     }
 }
+
+// ============================================================================
+// BUG REGRESSION TESTS (Schema Cache and WAL Abort)
+// ============================================================================
+
+/// Regression test for schema_managers cache bug
+/// BUG: drop_collection didn't clear schema_managers cache
+/// EXPECTED: After drop, recreated collection should not use old cached schema
+#[test]
+fn test_schema_cache_cleared_on_drop_collection() {
+    use ironbase_core::storage::MemoryStorage;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // 1. Create collection with strict schema (requires "name" field)
+    let coll = db.collection("schema_test").unwrap();
+    coll.set_schema(Some(json!({
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": {"type": "string"}
+        }
+    })))
+    .unwrap();
+
+    // 2. Verify schema is enforced
+    let result = db.insert_one(
+        "schema_test",
+        HashMap::from([("invalid".to_string(), json!("no name"))]),
+    );
+    assert!(
+        result.is_err(),
+        "Schema should reject document without 'name' field"
+    );
+
+    // 3. Drop collection
+    db.drop_collection("schema_test").unwrap();
+
+    // 4. Recreate collection WITHOUT schema
+    let coll2 = db.collection("schema_test").unwrap();
+    // Don't set schema - should have no validation
+
+    // 5. Insert document that would have failed with old schema
+    let result = db.insert_one(
+        "schema_test",
+        HashMap::from([("invalid".to_string(), json!("no name"))]),
+    );
+
+    assert!(
+        result.is_ok(),
+        "REGRESSION: Old schema cache was used after drop! \
+        After drop_collection, new collection should have NO schema validation. \
+        Error: {:?}",
+        result.err()
+    );
+
+    // 6. Verify document was actually inserted
+    let count = coll2.count_documents(&json!({})).unwrap();
+    assert_eq!(
+        count, 1,
+        "Document should be inserted without schema validation"
+    );
+}
+
+/// Regression test for schema_managers cache bug (with schema change)
+/// BUG: After drop, old schema was still cached
+/// EXPECTED: New schema should be used after drop and recreate
+#[test]
+fn test_schema_change_after_drop_collection() {
+    use ironbase_core::storage::MemoryStorage;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // 1. Create collection with schema requiring "field_a"
+    let coll = db.collection("schema_change").unwrap();
+    coll.set_schema(Some(json!({
+        "type": "object",
+        "required": ["field_a"],
+        "properties": {
+            "field_a": {"type": "string"}
+        }
+    })))
+    .unwrap();
+
+    // 2. Verify old schema works
+    let result = db.insert_one(
+        "schema_change",
+        HashMap::from([("field_a".to_string(), json!("valid"))]),
+    );
+    assert!(result.is_ok(), "Document with field_a should be valid");
+
+    // 3. Drop and recreate with DIFFERENT schema (requires "field_b")
+    db.drop_collection("schema_change").unwrap();
+    let coll2 = db.collection("schema_change").unwrap();
+    coll2
+        .set_schema(Some(json!({
+            "type": "object",
+            "required": ["field_b"],
+            "properties": {
+                "field_b": {"type": "number"}
+            }
+        })))
+        .unwrap();
+
+    // 4. Old schema should NOT work (field_a without field_b)
+    let result = db.insert_one(
+        "schema_change",
+        HashMap::from([("field_a".to_string(), json!("should fail"))]),
+    );
+    assert!(
+        result.is_err(),
+        "REGRESSION: Old schema still cached! Document with only field_a should fail new schema"
+    );
+
+    // 5. New schema SHOULD work (field_b)
+    let result = db.insert_one(
+        "schema_change",
+        HashMap::from([("field_b".to_string(), json!(42))]),
+    );
+    assert!(
+        result.is_ok(),
+        "Document with field_b should be valid with new schema. Error: {:?}",
+        result.err()
+    );
+}

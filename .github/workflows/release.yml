@@ -58,6 +58,37 @@ jobs:
           cd ironbase-bridge
           cargo build --release
 
+      - name: Install WiX Toolset
+        run: |
+          choco install wixtoolset -y
+          echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Get version for MSI
+        id: get_version_msi
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            VERSION="${{ inputs.tag }}"
+            VERSION=${VERSION#v}
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build MSI Installer
+        shell: cmd
+        run: |
+          cd mcp-server
+          if not exist target\wix mkdir target\wix
+          candle.exe -dVersion=${{ steps.get_version_msi.outputs.VERSION }} -arch x64 -out target\wix\main.wixobj wix\main.wxs
+          light.exe -ext WixUIExtension -out target\wix\IronBase-Setup-${{ steps.get_version_msi.outputs.VERSION }}.msi target\wix\main.wixobj
+
+      - name: Upload Windows MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironbase-msi-windows
+          path: mcp-server/target/wix/*.msi
+
       - name: Upload Windows MCP artifact
         uses: actions/upload-artifact@v4
         with:
@@ -295,6 +326,9 @@ jobs:
           cp mcp-server/scripts/install.sh release-assets/
           chmod +x release-assets/install.sh
 
+          # Windows MSI Installer
+          cp artifacts/ironbase-msi-windows/*.msi release-assets/ || echo "MSI not found, skipping"
+
           ls -la release-assets/
 
       - name: Get version from tag
@@ -327,16 +361,25 @@ jobs:
             release-assets/ironbase-bridge-windows.exe
             release-assets/ironbase-bridge-linux
             release-assets/ironbase-bridge-macos
+            release-assets/IronBase-Setup-*.msi
             release-assets/install.ps1
             release-assets/install.sh
           body: |
             ## IronBase ${{ steps.get_version.outputs.VERSION }}
 
+            ### Windows Installation Options
+
+            | Method | File | Description |
+            |--------|------|-------------|
+            | **MSI Installer** | `IronBase-Setup-${{ steps.get_version.outputs.VERSION }}.msi` | GUI wizard with Windows Service |
+            | **PowerShell** | `install.ps1` | Command-line installation |
+            | **Standalone** | `mcp-ironbase-server-windows.exe` | Portable, no installation |
+
             ### MCP Server Downloads
 
             | Platform | File | Install |
             |----------|------|---------|
-            | Windows | `mcp-ironbase-server-windows.exe` | `.\install.ps1` |
+            | Windows | `mcp-ironbase-server-windows.exe` | MSI or `.\install.ps1` |
             | Linux | `mcp-ironbase-server-linux` | `sudo ./install.sh` |
             | macOS | `mcp-ironbase-server-macos` | `sudo ./install.sh` |
 

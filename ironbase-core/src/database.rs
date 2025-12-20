@@ -1,7 +1,7 @@
 // ironbase-core/src/database.rs
 // Pure Rust database API - NO PyO3 dependencies
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -91,6 +91,11 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Flag to prevent operations after close() is called
     // Arc-wrapped so CollectionCore can share the same flag
     is_closed: Arc<AtomicBool>,
+
+    // Collection-level write locks for Safe mode atomicity
+    // Ensures prepare-WAL-persist sequence is atomic per collection
+    // Prevents race conditions in unique constraint checks
+    collection_write_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
 }
 
 // ============================================================================
@@ -166,6 +171,7 @@ impl DatabaseCore<StorageEngine> {
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(RwLock::new(None)),
             is_closed: Arc::new(AtomicBool::new(false)),
+            collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
         };
 
         // Apply recovered index changes to collections
@@ -337,6 +343,18 @@ impl DatabaseCore<StorageEngine> {
         Ok(())
     }
 
+    /// Write ABORT entry for a previously committed transaction
+    ///
+    /// This is called when the persist phase fails after WAL commit.
+    /// The ABORT entry ensures recovery will discard the committed transaction.
+    ///
+    /// # Arguments
+    /// * `tx_id` - The transaction ID that was committed but persist failed
+    pub(crate) fn abort_committed_transaction(&self, tx_id: TransactionId) -> Result<()> {
+        let mut storage = self.storage.write();
+        storage.write_abort_entry(tx_id)
+    }
+
     /// Flush batch operations to WAL
     ///
     /// Used by Batch mode when batch_buffer reaches batch_size.
@@ -414,6 +432,15 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for any active write transaction to complete (blocking with timeout)
                 self.wait_for_write_lock_release()?;
 
+                // HYBRID LOCKING: Only acquire collection lock if there are unique indexes
+                // Collections without unique indexes don't need the lock (no constraint races)
+                let write_lock = self.get_collection_write_lock(collection_name);
+                let _guard = if self.collection_has_unique_index(collection_name) {
+                    Some(write_lock.lock())
+                } else {
+                    None
+                };
+
                 // Safe mode: Auto-commit every operation
                 let collection = self.collection(collection_name)?;
 
@@ -424,6 +451,7 @@ impl DatabaseCore<StorageEngine> {
                 // 2. Begin auto-transaction and add operation
                 // prepared.wal_doc already contains _id and _collection
                 let mut auto_tx = self.begin_auto_transaction();
+                let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                 auto_tx.add_operation(Operation::Insert {
                     collection: collection_name.to_string(),
                     doc_id: prepared.doc_id.clone(),
@@ -437,9 +465,17 @@ impl DatabaseCore<StorageEngine> {
                 self.commit_auto_transaction(auto_tx)?;
 
                 // 5. PERSIST phase: write to storage after WAL is committed
-                let doc_id = collection.insert_one_persist(prepared)?;
-
-                Ok(doc_id)
+                // If persist fails, write ABORT to WAL to prevent recovery replaying this tx
+                match collection.insert_one_persist(prepared) {
+                    Ok(doc_id) => Ok(doc_id),
+                    Err(e) => {
+                        // Persist failed - write ABORT to invalidate the committed WAL entry
+                        // This ensures recovery will skip this transaction
+                        let _ = self.abort_committed_transaction(tx_id);
+                        Err(e)
+                    }
+                }
+                // _guard dropped here - lock released
             }
 
             DurabilityMode::Batch { .. } => {
@@ -723,6 +759,15 @@ impl DatabaseCore<StorageEngine> {
 
         match self.durability_mode {
             DurabilityMode::Safe => {
+                // HYBRID LOCKING: Only acquire collection lock if there are unique indexes
+                // Collections without unique indexes don't need the lock (no constraint races)
+                let write_lock = self.get_collection_write_lock(collection_name);
+                let _guard = if self.collection_has_unique_index(collection_name) {
+                    Some(write_lock.lock())
+                } else {
+                    None
+                };
+
                 let collection = self.collection(collection_name)?;
 
                 // 1. PREPARE phase: validate all documents, generate IDs, build WAL docs
@@ -736,6 +781,7 @@ impl DatabaseCore<StorageEngine> {
                 // 2. Begin auto-transaction and add all operations
                 // Each prepared_doc.wal_doc already contains _id and _collection
                 let mut auto_tx = self.begin_auto_transaction();
+                let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                 for prep in &prepared.prepared_docs {
                     auto_tx.add_operation(Operation::Insert {
                         collection: collection_name.to_string(),
@@ -751,9 +797,16 @@ impl DatabaseCore<StorageEngine> {
                 self.commit_auto_transaction(auto_tx)?;
 
                 // 5. PERSIST phase: write all documents to storage after WAL is committed
-                let inserted_ids = collection.insert_many_persist(prepared)?;
-
-                Ok(inserted_ids)
+                // If persist fails, write ABORT to WAL to prevent recovery replaying this tx
+                match collection.insert_many_persist(prepared) {
+                    Ok(inserted_ids) => Ok(inserted_ids),
+                    Err(e) => {
+                        // Persist failed - write ABORT to invalidate the committed WAL entry
+                        let _ = self.abort_committed_transaction(tx_id);
+                        Err(e)
+                    }
+                }
+                // _guard dropped here - lock released
             }
 
             DurabilityMode::Batch { .. } => {
@@ -850,6 +903,7 @@ impl DatabaseCore<StorageEngine> {
                 if modified > 0 {
                     // PHASE 2: BUILD WAL from prepared results
                     let mut auto_tx = self.begin_auto_transaction();
+                    let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                     for (doc_id, old_doc, new_doc) in &prepared.wal_entries {
                         auto_tx.add_operation(Operation::Update {
                             collection: collection_name.to_string(),
@@ -864,7 +918,11 @@ impl DatabaseCore<StorageEngine> {
                     self.commit_auto_transaction(auto_tx)?;
 
                     // PHASE 4: PERSIST to storage (WAL is safe now)
-                    collection.update_many_persist(prepared)?;
+                    // If persist fails, write ABORT to WAL to prevent recovery replaying this tx
+                    if let Err(e) = collection.update_many_persist(prepared) {
+                        let _ = self.abort_committed_transaction(tx_id);
+                        return Err(e);
+                    }
                 }
 
                 Ok((matched, modified))
@@ -952,6 +1010,7 @@ impl DatabaseCore<StorageEngine> {
                 if deleted > 0 {
                     // PHASE 2: BUILD WAL from prepared results
                     let mut auto_tx = self.begin_auto_transaction();
+                    let tx_id = auto_tx.id; // Save tx_id before commit consumes transaction
                     for (doc_id, old_doc) in &prepared.wal_entries {
                         auto_tx.add_operation(Operation::Delete {
                             collection: collection_name.to_string(),
@@ -965,7 +1024,11 @@ impl DatabaseCore<StorageEngine> {
                     self.commit_auto_transaction(auto_tx)?;
 
                     // PHASE 4: PERSIST tombstones to storage (WAL is safe now)
-                    collection.delete_many_persist(prepared)?;
+                    // If persist fails, write ABORT to WAL to prevent recovery replaying this tx
+                    if let Err(e) = collection.delete_many_persist(prepared) {
+                        let _ = self.abort_committed_transaction(tx_id);
+                        return Err(e);
+                    }
                 }
 
                 Ok(deleted)
@@ -1195,6 +1258,7 @@ impl DatabaseCore<MemoryStorage> {
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
             write_transaction_lock: Arc::new(RwLock::new(None)),
             is_closed: Arc::new(AtomicBool::new(false)),
+            collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -1461,6 +1525,45 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         Ok(shared)
     }
 
+    /// Get or create a collection-level write lock for Safe mode atomicity
+    ///
+    /// This lock ensures that the prepare-WAL-persist sequence is atomic,
+    /// preventing race conditions in unique constraint checks.
+    fn get_collection_write_lock(&self, name: &str) -> Arc<Mutex<()>> {
+        // Fast path: read lock to check if already exists
+        {
+            let locks = self.collection_write_locks.read();
+            if let Some(lock) = locks.get(name) {
+                return Arc::clone(lock);
+            }
+        }
+
+        // Slow path: create with write lock (double-checked)
+        let mut locks = self.collection_write_locks.write();
+        if let Some(lock) = locks.get(name) {
+            return Arc::clone(lock);
+        }
+
+        let lock = Arc::new(Mutex::new(()));
+        locks.insert(name.to_string(), Arc::clone(&lock));
+        lock
+    }
+
+    /// Check if a collection has any unique indexes (excluding _id which is always unique)
+    ///
+    /// Used for hybrid locking optimization:
+    /// - Collections WITH unique indexes use collection-level lock (serialize all ops)
+    /// - Collections WITHOUT unique indexes skip the lock (faster, no constraint races)
+    fn collection_has_unique_index(&self, name: &str) -> bool {
+        let managers = self.index_managers.read();
+        if let Some(manager) = managers.get(name) {
+            let idx_manager = manager.read();
+            idx_manager.has_unique_index()
+        } else {
+            false
+        }
+    }
+
     /// Get or create a shared schema manager for a collection
     ///
     /// Similar to `get_or_create_index_manager`, this ensures all CollectionCore
@@ -1617,7 +1720,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             // Rebuild _id index
             let index_key = IndexKey::from(id_value);
             if let Some(id_index) = index_manager.get_btree_index_mut(id_index_name) {
-                let _ = id_index.insert(index_key, doc_id.clone());
+                // BUG #4 FIX: Log duplicate key errors instead of silently ignoring
+                // This helps diagnose database inconsistencies after crash recovery
+                if let Err(e) = id_index.insert(index_key, doc_id.clone()) {
+                    log_warn!(
+                        "Index rebuild: duplicate _id key ignored for {}: {:?}",
+                        collection_name,
+                        e
+                    );
+                }
             }
 
             // Rebuild custom indexes
@@ -1639,7 +1750,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
                 // Include null keys for unique indexes, skip for non-unique
                 if !is_all_null || index.metadata.unique {
-                    let _ = index.insert(key, doc_id.clone());
+                    // BUG #4 FIX: Log duplicate key errors instead of silently ignoring
+                    if let Err(e) = index.insert(key, doc_id.clone()) {
+                        log_warn!(
+                            "Index rebuild: duplicate key ignored for index {} in {}: {:?}",
+                            index_meta.name,
+                            collection_name,
+                            e
+                        );
+                    }
                     rebuilt_count += 1;
                 }
             }
@@ -1896,8 +2015,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Remove shared IndexManager first
+        // Remove shared IndexManager, SchemaManager, and collection write lock
         self.index_managers.write().remove(name);
+        self.schema_managers.write().remove(name);
+        self.collection_write_locks.write().remove(name);
 
         let mut storage = self.storage.write();
         storage.drop_collection(name)
@@ -1944,8 +2065,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Force drop a protected collection (admin only)
     /// Use with caution - bypasses protection checks
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
-        // Remove shared IndexManager first
+        // Remove shared IndexManager, SchemaManager, and collection write lock
         self.index_managers.write().remove(name);
+        self.schema_managers.write().remove(name);
+        self.collection_write_locks.write().remove(name);
 
         let mut storage = self.storage.write();
         storage.drop_collection(name)

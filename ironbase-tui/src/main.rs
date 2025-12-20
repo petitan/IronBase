@@ -14,7 +14,7 @@ mod panes;
 mod theme;
 mod widgets;
 
-use app::{App, Modal, Pane};
+use app::{App, FulltextState, Modal, Pane};
 use clap::Parser;
 use config::{Config, TransportMode};
 
@@ -410,6 +410,9 @@ fn render_ui(frame: &mut Frame, app: &App) {
             Modal::ApiKey => {
                 modals::api_key::render(frame, frame.area(), &app.api_key_state, &theme);
             }
+            Modal::Fulltext => {
+                modals::fulltext::render(frame, frame.area(), &app.fulltext_state, &theme);
+            }
         }
     }
 
@@ -565,6 +568,7 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::Update) => handle_update_key(app, key),
         Some(Modal::Database) => handle_database_key_async(app, key).await,
         Some(Modal::ApiKey) => handle_api_key_key_async(app, key).await,
+        Some(Modal::Fulltext) => handle_fulltext_key_async(app, key).await,
         None => {}
     }
 }
@@ -610,6 +614,7 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
             }
         }
         (KeyCode::Char('f'), _) => app.open_filter_modal_async().await,
+        (KeyCode::Char('F'), KeyModifiers::SHIFT) => handle_fulltext_open(app).await,
 
         // Error detail modal (if error present, 'e' opens error details)
         (KeyCode::Char('e'), _) if app.error_message.is_some() => {
@@ -1224,6 +1229,95 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
             }
             _ => {}
         },
+    }
+}
+
+/// Open fulltext search modal
+async fn handle_fulltext_open(app: &mut App) {
+    // Need to have a selected collection
+    if app.collections.is_empty() {
+        app.set_error("Valassz ki egy kollekciot elobb!");
+        return;
+    }
+
+    let collection = app.current_collection_name().unwrap_or_default();
+    if collection.is_empty() {
+        app.set_error("Valassz ki egy kollekciot elobb!");
+        return;
+    }
+
+    // Get list of fulltext indexes for this collection
+    let indexed_fields = if let Some(ref db) = app.db {
+        match db.list_indexes(&collection).await {
+            Ok(indexes) => {
+                // Filter to only fulltext indexes (they contain "fulltext" in name)
+                indexes
+                    .into_iter()
+                    .filter(|idx| idx.contains("fulltext"))
+                    .map(|idx| {
+                        // Extract field name from index name (format: "fieldname_fulltext")
+                        idx.trim_end_matches("_fulltext").to_string()
+                    })
+                    .collect()
+            }
+            Err(_) => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+
+    if indexed_fields.is_empty() {
+        app.set_error("Nincs fulltext index ezen a kollekcio! Hozz letre egyet elobb.");
+        return;
+    }
+
+    app.fulltext_state = FulltextState::new(collection.to_string(), indexed_fields);
+    app.modal = Some(Modal::Fulltext);
+}
+
+/// Async fulltext key handler
+async fn handle_fulltext_key_async(app: &mut App, key: KeyCode) {
+    match key {
+        KeyCode::Esc => app.close_modal(),
+        KeyCode::Tab => app.fulltext_state.next_field(),
+        KeyCode::Up | KeyCode::Char('k') => app.fulltext_state.select_up(),
+        KeyCode::Down | KeyCode::Char('j') => app.fulltext_state.select_down(),
+        KeyCode::Left => app.fulltext_state.move_cursor_left(),
+        KeyCode::Right => app.fulltext_state.move_cursor_right(),
+        KeyCode::Backspace => app.fulltext_state.backspace(),
+        KeyCode::Delete => app.fulltext_state.delete(),
+        KeyCode::Enter => {
+            // Execute fulltext search
+            if app.fulltext_state.query.is_empty() {
+                return;
+            }
+
+            app.fulltext_state.loading = true;
+
+            if let Some(ref db) = app.db {
+                let collection = app.fulltext_state.collection.clone();
+                let field = app.fulltext_state.field.clone();
+                let query = app.fulltext_state.query.clone();
+
+                match db.fulltext_search(&collection, &field, &query, Some(50)).await {
+                    Ok(results) => {
+                        app.fulltext_state.results = results;
+                        app.fulltext_state.selected_result = 0;
+                        app.fulltext_state.error = None;
+                    }
+                    Err(e) => {
+                        app.fulltext_state.error = Some(format!("{}", e));
+                        app.fulltext_state.results.clear();
+                    }
+                }
+            }
+
+            app.fulltext_state.loading = false;
+        }
+        KeyCode::Char(c) => {
+            app.fulltext_state.insert_char(c);
+        }
+        _ => {}
     }
 }
 

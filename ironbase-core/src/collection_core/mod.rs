@@ -1034,37 +1034,105 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // --- OTHER INDEXES: Use apply_batch_updates for each ---
+        // --- OTHER INDEXES: Use extract_key for proper compound index support ---
         for index_name in &index_names {
             if index_name == &id_index_name {
                 continue;
             }
 
-            // Get the field name first
-            let field = if let Some(idx) = indexes.get_btree_index(index_name) {
-                idx.metadata.field.clone()
-            } else {
-                continue;
-            };
+            // Extract keys using index's extract_key method (handles compound indexes)
+            // Also handle cases where field is added/removed (not just changed)
+            let mut field_updates: Vec<(IndexKey, DocumentId, IndexKey, DocumentId)> = Vec::new();
+            let mut removals: Vec<(IndexKey, DocumentId)> = Vec::new();
+            let mut additions: Vec<(IndexKey, DocumentId)> = Vec::new();
 
-            // Collect updates for this index
-            let field_updates: Vec<(IndexKey, DocumentId, IndexKey, DocumentId)> = updates
-                .iter()
-                .filter_map(|(original_doc, updated_doc)| {
-                    let old_value = original_doc.get(&field)?;
-                    let new_value = updated_doc.get(&field)?;
-                    Some((
-                        IndexKey::from(old_value),
-                        original_doc.id.clone(),
-                        IndexKey::from(new_value),
-                        updated_doc.id.clone(),
-                    ))
-                })
-                .collect();
+            if let Some(idx) = indexes.get_btree_index(index_name) {
+                let is_unique = idx.metadata.unique;
 
-            if !field_updates.is_empty() {
-                if let Some(index) = indexes.get_btree_index_mut(index_name) {
+                for (original_doc, updated_doc) in updates {
+                    // Convert Document to Value for extract_key
+                    let old_doc_value =
+                        serde_json::to_value(original_doc).unwrap_or(serde_json::Value::Null);
+                    let new_doc_value =
+                        serde_json::to_value(updated_doc).unwrap_or(serde_json::Value::Null);
+                    let old_key = idx.extract_key(&old_doc_value);
+                    let new_key = idx.extract_key(&new_doc_value);
+
+                    // Skip if keys are identical
+                    if old_key == new_key {
+                        continue;
+                    }
+
+                    let old_is_null = crate::index::IndexManager::is_key_all_null(&old_key);
+                    let new_is_null = crate::index::IndexManager::is_key_all_null(&new_key);
+
+                    // Handle all cases:
+                    // 1. Both have values (update): use batch update
+                    // 2. Old has value, new is null (removed): remove from index
+                    // 3. Old is null, new has value (added): add to index
+                    // 4. Both null: skip (no change)
+
+                    match (old_is_null, new_is_null) {
+                        (false, false) => {
+                            // Both have values - update
+                            field_updates.push((
+                                old_key,
+                                original_doc.id.clone(),
+                                new_key,
+                                updated_doc.id.clone(),
+                            ));
+                        }
+                        (false, true) => {
+                            // Value removed - delete from index (if was indexed)
+                            if is_unique {
+                                // Unique indexes include null, so we need to update
+                                field_updates.push((
+                                    old_key,
+                                    original_doc.id.clone(),
+                                    new_key,
+                                    updated_doc.id.clone(),
+                                ));
+                            } else {
+                                // Non-unique: just remove old entry
+                                removals.push((old_key, original_doc.id.clone()));
+                            }
+                        }
+                        (true, false) => {
+                            // Value added - add to index
+                            if is_unique {
+                                // Unique indexes include null, so we need to update
+                                field_updates.push((
+                                    old_key,
+                                    original_doc.id.clone(),
+                                    new_key,
+                                    updated_doc.id.clone(),
+                                ));
+                            } else {
+                                // Non-unique: just add new entry
+                                additions.push((new_key, updated_doc.id.clone()));
+                            }
+                        }
+                        (true, true) => {
+                            // Both null - no action needed for non-unique
+                            // For unique indexes, both null means same value
+                        }
+                    }
+                }
+            }
+
+            // Apply updates
+            if let Some(index) = indexes.get_btree_index_mut(index_name) {
+                // Apply batch updates for changed values
+                if !field_updates.is_empty() {
                     index.apply_batch_updates(field_updates)?;
+                }
+                // Apply removals
+                for (key, doc_id) in removals {
+                    let _ = index.delete(&key, &doc_id); // Ignore errors for missing entries
+                }
+                // Apply additions
+                for (key, doc_id) in additions {
+                    index.insert(key, doc_id)?;
                 }
             }
         }
@@ -1088,13 +1156,49 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // Check if the field value actually changed
                     if old_value != new_value {
                         // Update the fulltext index for this document
+                        // First remove old entry (handles type changes too)
+                        if old_value.is_some() {
+                            fts_index.remove(&original_doc.id);
+                        }
+                        // Then add new entry if it's a string
                         if let Some(new_val) = new_value {
                             if let Some(text) = new_val.as_str() {
                                 fts_index.update(&updated_doc.id, text);
                             }
-                        } else {
-                            // Field was removed, just remove from index
-                            fts_index.remove(&original_doc.id);
+                            // If new value is not a string, entry already removed above
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- FUZZY INDEXES: Update for each document ---
+        // Get fuzzy index info before mutable borrow
+        let fuzzy_index_info: Vec<(String, String)> = indexes
+            .list_fuzzy_indexes()
+            .iter()
+            .map(|idx| (idx.metadata.name.clone(), idx.metadata.field.clone()))
+            .collect();
+
+        for (fuzzy_name, fuzzy_field) in fuzzy_index_info {
+            for (original_doc, updated_doc) in updates {
+                let old_value = original_doc.get(&fuzzy_field);
+                let new_value = updated_doc.get(&fuzzy_field);
+
+                // Only update if the indexed field was changed
+                if old_value != new_value {
+                    if let Some(fuzzy_index) = indexes.get_fuzzy_index_mut(&fuzzy_name) {
+                        // Remove old entry if it was a string
+                        if let Some(old_val) = old_value {
+                            if let Some(old_text) = old_val.as_str() {
+                                fuzzy_index.remove_value(old_text, &original_doc.id);
+                            }
+                        }
+                        // Add new entry if it's a string
+                        if let Some(new_val) = new_value {
+                            if let Some(new_text) = new_val.as_str() {
+                                fuzzy_index.insert(new_text, updated_doc.id.clone());
+                            }
                         }
                     }
                 }

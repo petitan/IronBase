@@ -411,6 +411,36 @@ impl DbWrapper {
         let success = self.client.delete_api_key(admin_key, id).await?;
         Ok(success)
     }
+
+    // === Full-text Search ===
+
+    /// Create a fulltext index on a field
+    pub async fn create_fulltext_index(
+        &self,
+        collection: &str,
+        field: &str,
+        language: &str,
+    ) -> Result<()> {
+        self.client
+            .create_fulltext_index(collection, field, language)
+            .await?;
+        Ok(())
+    }
+
+    /// Execute fulltext search
+    pub async fn fulltext_search(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        limit: Option<usize>,
+    ) -> Result<Vec<Value>> {
+        let results = self
+            .client
+            .fulltext_search(collection, field, query, limit)
+            .await?;
+        Ok(results)
+    }
 }
 
 /// Recursively collect field names and types

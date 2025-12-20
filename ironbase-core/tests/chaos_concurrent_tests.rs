@@ -712,3 +712,185 @@ fn test_single_document_high_contention() {
         update_count.load(Ordering::Relaxed)
     );
 }
+
+// =============================================================================
+// BUG #4: UNIQUE CONSTRAINT RACE CONDITION TEST
+// =============================================================================
+// This test verifies that concurrent inserts with the same unique key value
+// properly enforce the unique constraint. Only ONE thread should succeed,
+// and the database should remain consistent.
+//
+// The race condition occurs when:
+// 1. Thread A: prepare (constraint check) -> OK
+// 2. Thread B: prepare (constraint check) -> OK (race window!)
+// 3. Thread A: WAL commit -> COMMITTED
+// 4. Thread B: WAL commit -> COMMITTED
+// 5. Thread B: persist (index write) -> OK
+// 6. Thread A: persist (index write) -> FAIL (duplicate key)
+//
+// Result: A gets error but WAL is committed, B succeeds.
+// After recovery: both documents in storage, but only one in index!
+
+/// Test: Concurrent inserts with unique constraint - MUST enforce atomicity
+///
+/// Expected behavior (CORRECT):
+/// - Exactly 1 insert succeeds
+/// - Exactly N-1 inserts fail with duplicate key error
+/// - After all threads complete: exactly 1 document in storage
+/// - Index query returns exactly 1 document
+///
+/// Bug manifestation (INCORRECT):
+/// - Multiple inserts succeed (race through constraint check)
+/// - After recovery: documents in storage but missing from index
+///
+/// NOTE: This test uses StorageEngine (file-based) because the race condition
+/// only affects Safe mode with WAL (prepare/persist separation).
+/// MemoryStorage uses insert_one_raw which is atomic.
+#[test]
+fn test_concurrent_unique_constraint_race_bug4() {
+    const NUM_THREADS: usize = 10;
+    const EMAIL_VALUE: &str = "race@test.com";
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("race_test.mlite");
+
+    let db = Arc::new(DatabaseCore::open(&db_path).unwrap());
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email field
+    collection
+        .create_index("email".to_string(), true)
+        .expect("Index creation should succeed");
+
+    let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+    // All threads try to insert the SAME email value simultaneously
+    let handles: Vec<_> = (0..NUM_THREADS)
+        .map(|thread_id| {
+            let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                barrier.wait(); // All threads start at exactly the same time
+
+                let doc = HashMap::from([
+                    ("email".to_string(), json!(EMAIL_VALUE)),
+                    ("thread_id".to_string(), json!(thread_id)),
+                ]);
+
+                db.insert_one("users", doc)
+            })
+        })
+        .collect();
+
+    // Collect results
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("Thread should not panic"))
+        .collect();
+
+    let successes: Vec<_> = results.iter().filter(|r| r.is_ok()).collect();
+    let failures: Vec<_> = results.iter().filter(|r| r.is_err()).collect();
+
+    println!(
+        "Results: {} successes, {} failures",
+        successes.len(),
+        failures.len()
+    );
+
+    // CRITICAL ASSERTION #1: Exactly ONE insert should succeed
+    assert_eq!(
+        successes.len(),
+        1,
+        "BUG #4: Race condition detected! Expected exactly 1 success, got {}. \
+         Multiple threads passed the unique constraint check simultaneously.",
+        successes.len()
+    );
+
+    // CRITICAL ASSERTION #2: All other inserts should fail
+    assert_eq!(
+        failures.len(),
+        NUM_THREADS - 1,
+        "Expected {} failures, got {}",
+        NUM_THREADS - 1,
+        failures.len()
+    );
+
+    // CRITICAL ASSERTION #3: Storage should have exactly 1 document
+    let collection = db.collection("users").unwrap();
+    let all_docs = collection.find(&json!({})).unwrap();
+    assert_eq!(
+        all_docs.len(),
+        1,
+        "BUG #4: Storage inconsistency! Expected 1 document, found {}",
+        all_docs.len()
+    );
+
+    // CRITICAL ASSERTION #4: Index query should return exactly 1 document
+    let via_index = collection.find(&json!({"email": EMAIL_VALUE})).unwrap();
+    assert_eq!(
+        via_index.len(),
+        1,
+        "BUG #4: Index inconsistency! Query via unique index returned {} documents",
+        via_index.len()
+    );
+
+    // CRITICAL ASSERTION #5: count_documents should match
+    let count = collection.count_documents(&json!({})).unwrap();
+    assert_eq!(count, 1, "count_documents mismatch");
+
+    println!("BUG #4 test passed: Unique constraint properly enforced under concurrency");
+}
+
+/// Test: Multiple different unique values - should all succeed
+#[test]
+fn test_concurrent_unique_different_values() {
+    const NUM_THREADS: usize = 10;
+
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+    let collection = db.collection("users").unwrap();
+
+    // Create unique index on email field
+    collection
+        .create_index("email".to_string(), true)
+        .expect("Index creation should succeed");
+
+    let barrier = Arc::new(Barrier::new(NUM_THREADS));
+
+    // Each thread inserts a DIFFERENT email value
+    let handles: Vec<_> = (0..NUM_THREADS)
+        .map(|thread_id| {
+            let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+
+            thread::spawn(move || {
+                barrier.wait();
+
+                let doc = HashMap::from([
+                    (
+                        "email".to_string(),
+                        json!(format!("user{}@test.com", thread_id)),
+                    ),
+                    ("thread_id".to_string(), json!(thread_id)),
+                ]);
+
+                db.insert_one("users", doc)
+            })
+        })
+        .collect();
+
+    let results: Vec<_> = handles
+        .into_iter()
+        .map(|h| h.join().expect("Thread should not panic"))
+        .collect();
+
+    let successes = results.iter().filter(|r| r.is_ok()).count();
+    assert_eq!(
+        successes, NUM_THREADS,
+        "All inserts with different unique values should succeed"
+    );
+
+    let collection = db.collection("users").unwrap();
+    let count = collection.count_documents(&json!({})).unwrap();
+    assert_eq!(count, NUM_THREADS as u64);
+}

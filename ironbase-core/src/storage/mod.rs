@@ -9,7 +9,7 @@ pub mod traits; // NEW: Storage trait definitions
 
 use crate::document::{Document, DocumentId};
 use crate::error::{MongoLiteError, Result};
-use crate::transaction::Transaction;
+use crate::transaction::{Transaction, TransactionId};
 use crate::wal::WriteAheadLog;
 use fs2::FileExt;
 use memmap2::{MmapMut, MmapOptions};
@@ -562,6 +562,20 @@ impl StorageEngine {
 
         // Discard all buffered operations
         transaction.rollback()?;
+
+        Ok(())
+    }
+
+    /// Write ABORT entry for a previously committed transaction
+    ///
+    /// This is used when persist phase fails after WAL commit.
+    /// The ABORT entry tells recovery to discard the committed transaction.
+    pub fn write_abort_entry(&mut self, tx_id: TransactionId) -> Result<()> {
+        use crate::wal::{WALEntry, WALEntryType};
+
+        let abort_entry = WALEntry::new(tx_id, WALEntryType::Abort, vec![]);
+        self.wal.append(&abort_entry)?;
+        self.wal.flush()?;
 
         Ok(())
     }

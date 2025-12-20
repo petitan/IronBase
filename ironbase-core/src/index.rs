@@ -1724,6 +1724,14 @@ impl IndexManager {
         self.fulltext_indexes.values().collect()
     }
 
+    /// Check if any index in this manager has unique constraint
+    ///
+    /// Used for hybrid locking: collections with unique indexes use collection-level lock,
+    /// collections without unique indexes can use per-document locking for better concurrency.
+    pub fn has_unique_index(&self) -> bool {
+        self.btree_indexes.values().any(|idx| idx.metadata.unique)
+    }
+
     /// Add a pre-loaded FulltextIndex
     pub fn add_loaded_fulltext_index(&mut self, index: FulltextIndex) {
         let name = index.name.clone();
@@ -1941,7 +1949,7 @@ impl IndexManager {
     }
 
     /// Helper: Check if an IndexKey is all Null
-    fn is_key_all_null(key: &IndexKey) -> bool {
+    pub fn is_key_all_null(key: &IndexKey) -> bool {
         match key {
             IndexKey::Null => true,
             IndexKey::Compound(keys) => keys.iter().all(|k| matches!(k, IndexKey::Null)),

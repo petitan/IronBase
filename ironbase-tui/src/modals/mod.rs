@@ -7,6 +7,7 @@ pub mod database;
 pub mod error;
 pub mod export;
 pub mod filter;
+pub mod fulltext;
 pub mod help;
 pub mod index;
 pub mod insert;
