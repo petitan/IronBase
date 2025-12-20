@@ -1,14 +1,7 @@
 <?xml version='1.0' encoding='windows-1252'?>
 <!--
   IronBase MCP Server Windows Installer
-
-  Build with: cargo wix --no-build --nocapture
-
-  This WiX manifest installs:
-  - mcp-ironbase-server.exe to Program Files\IronBase
-  - Windows Service (IronBaseService) with auto-start
-  - Start Menu shortcuts
-  - ProgramData folder for config and database
+  Build: candle.exe main.wxs and light.exe main.wixobj
 -->
 <Wix xmlns='http://schemas.microsoft.com/wix/2006/wi'>
 
