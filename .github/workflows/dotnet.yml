@@ -89,6 +89,17 @@ jobs:
       - name: Build .NET project
         run: dotnet build IronBase.NET/IronBase.NET.sln --configuration Release
 
+      - name: Copy native library to test output (for runtime loading)
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            cp native-artifact/libironbase_ffi.so IronBase.NET/src/IronBase.Tests/bin/Release/net8.0/
+          elif [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cp native-artifact/ironbase_ffi.dll IronBase.NET/src/IronBase.Tests/bin/Release/net8.0/
+          elif [ "${{ matrix.os }}" = "macos-latest" ]; then
+            cp native-artifact/libironbase_ffi.dylib IronBase.NET/src/IronBase.Tests/bin/Release/net8.0/
+          fi
+
       - name: Run tests
         run: dotnet test IronBase.NET/IronBase.NET.sln --configuration Release --no-build --verbosity normal
 
