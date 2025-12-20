@@ -66,6 +66,24 @@
                               Source='target\release\mcp-ironbase-server.exe'
                               KeyPath='yes'/>
                     </Component>
+                    <Component Id='TuiExecutable' Guid='E5F6A7B8-C9D0-1234-EFAB-567890123456' Win64='yes'>
+                        <File Id='exe1'
+                              Name='ironbase-tui.exe'
+                              Source='target\release\ironbase-tui.exe'
+                              KeyPath='yes'/>
+                    </Component>
+                    <Component Id='BackupExecutable' Guid='F6A7B8C9-D0E1-2345-FABC-678901234567' Win64='yes'>
+                        <File Id='exe2'
+                              Name='ironbase-backup.exe'
+                              Source='target\release\ironbase-backup.exe'
+                              KeyPath='yes'/>
+                    </Component>
+                    <Component Id='BridgeExecutable' Guid='A7B8C9D0-E1F2-3456-ABCD-789012345678' Win64='yes'>
+                        <File Id='exe3'
+                              Name='ironbase-bridge.exe'
+                              Source='target\release\ironbase-bridge.exe'
+                              KeyPath='yes'/>
+                    </Component>
                     <Component Id='ConfigExample' Guid='B2C3D4E5-F6A7-8901-BCDE-F12345678901' Win64='yes'>
                         <File Id='config0'
                               Name='config.example.toml'
@@ -104,6 +122,11 @@
                     Target='[APPLICATIONFOLDER]mcp-ironbase-server.exe'
                     Arguments='--stdio'
                     WorkingDirectory='APPLICATIONFOLDER'/>
+                <Shortcut Id='TuiShortcut'
+                    Name='IronBase TUI'
+                    Description='Terminal UI for IronBase'
+                    Target='[APPLICATIONFOLDER]ironbase-tui.exe'
+                    WorkingDirectory='APPLICATIONFOLDER'/>
                 <Shortcut Id='UninstallShortcut'
                     Name='Uninstall IronBase'
                     Description='Uninstall IronBase MCP Server'
@@ -117,6 +140,9 @@
         <!-- Features -->
         <Feature Id='MainProgram' Title='IronBase MCP Server' Description='The main executable and configuration files.' Level='1' ConfigurableDirectory='APPLICATIONFOLDER' AllowAdvertise='no' Display='expand' Absent='disallow'>
             <ComponentRef Id='MainExecutable'/>
+            <ComponentRef Id='TuiExecutable'/>
+            <ComponentRef Id='BackupExecutable'/>
+            <ComponentRef Id='BridgeExecutable'/>
             <ComponentRef Id='ConfigExample'/>
             <ComponentRef Id='DataFolder'/>
 

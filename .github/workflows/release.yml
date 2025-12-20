@@ -75,6 +75,13 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
+      - name: Copy binaries for MSI
+        shell: cmd
+        run: |
+          copy ironbase-tui\target\release\ironbase-tui.exe mcp-server\target\release\
+          copy target\release\ironbase-backup.exe mcp-server\target\release\
+          copy ironbase-bridge\target\release\ironbase-bridge.exe mcp-server\target\release\
+
       - name: Build MSI Installer
         shell: cmd
         run: |
