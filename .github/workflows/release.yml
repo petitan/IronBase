@@ -84,31 +84,31 @@ jobs:
           light.exe -ext WixUIExtension -out target\wix\IronBase-Setup-${{ steps.get_version_msi.outputs.VERSION }}.msi target\wix\main.wixobj
 
       - name: Upload Windows MSI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-msi-windows
           path: mcp-server/target/wix/*.msi
 
       - name: Upload Windows MCP artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mcp-ironbase-server-windows
           path: mcp-server/target/release/mcp-ironbase-server.exe
 
       - name: Upload Windows Backup artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-backup-windows
           path: target/release/ironbase-backup.exe
 
       - name: Upload Windows TUI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-tui-windows
           path: ironbase-tui/target/release/ironbase-tui.exe
 
       - name: Upload Windows Bridge artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-bridge-windows
           path: ironbase-bridge/target/release/ironbase-bridge.exe
@@ -156,25 +156,25 @@ jobs:
           cargo build --release
 
       - name: Upload Linux MCP artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mcp-ironbase-server-linux
           path: mcp-server/target/release/mcp-ironbase-server
 
       - name: Upload Linux Backup artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-backup-linux
           path: target/release/ironbase-backup
 
       - name: Upload Linux TUI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-tui-linux
           path: ironbase-tui/target/release/ironbase-tui
 
       - name: Upload Linux Bridge artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-bridge-linux
           path: ironbase-bridge/target/release/ironbase-bridge
@@ -222,25 +222,25 @@ jobs:
           cargo build --release
 
       - name: Upload macOS MCP artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: mcp-ironbase-server-macos
           path: mcp-server/target/release/mcp-ironbase-server
 
       - name: Upload macOS Backup artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-backup-macos
           path: target/release/ironbase-backup
 
       - name: Upload macOS TUI artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-tui-macos
           path: ironbase-tui/target/release/ironbase-tui
 
       - name: Upload macOS Bridge artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ironbase-bridge-macos
           path: ironbase-bridge/target/release/ironbase-bridge
