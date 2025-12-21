@@ -129,19 +129,67 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ServerInfoState, scroll: us
     lines.push(Line::from(""));
 
     if let Some(ref stats) = state.db_stats {
-        // Collection count
-        if let Some(count) = stats.get("collection_count").and_then(|v| v.as_u64()) {
-            lines.push(Line::from(vec![
-                Span::styled("Kollekcio szam:     ", Style::default().fg(theme.accent)),
-                Span::raw(count.to_string()),
-            ]));
+        // Server info section
+        if let Some(server) = stats.get("server") {
+            if let Some(protocol) = server.get("protocol").and_then(|v| v.as_str()) {
+                let host = server.get("host").and_then(|v| v.as_str()).unwrap_or("?");
+                let port = server.get("port").and_then(|v| v.as_u64()).unwrap_or(0);
+                lines.push(Line::from(vec![
+                    Span::styled("Szerver:            ", Style::default().fg(theme.accent)),
+                    Span::raw(format!("{}://{}:{}", protocol, host, port)),
+                ]));
+            }
+            if let Some(require_key) = server.get("require_api_key").and_then(|v| v.as_bool()) {
+                lines.push(Line::from(vec![
+                    Span::styled("API kulcs:          ", Style::default().fg(theme.accent)),
+                    Span::raw(if require_key { "Kotelezo" } else { "Nem szukseges" }),
+                ]));
+            }
         }
 
-        // Collection names
+        // Database info section
+        if let Some(database) = stats.get("database") {
+            if let Some(path) = database.get("path").and_then(|v| v.as_str()) {
+                lines.push(Line::from(vec![
+                    Span::styled("Adatbazis:          ", Style::default().fg(theme.accent)),
+                    Span::raw(path),
+                ]));
+            }
+            if let Some(size) = database.get("file_size").and_then(|v| v.as_str()) {
+                lines.push(Line::from(vec![
+                    Span::styled("Fajlmeret:          ", Style::default().fg(theme.accent)),
+                    Span::raw(size),
+                ]));
+            }
+        }
+
+        // Summary section
+        if let Some(summary) = stats.get("summary") {
+            if let Some(count) = summary.get("collection_count").and_then(|v| v.as_u64()) {
+                lines.push(Line::from(vec![
+                    Span::styled("Kollekcio szam:     ", Style::default().fg(theme.accent)),
+                    Span::raw(count.to_string()),
+                ]));
+            }
+            if let Some(docs) = summary.get("total_documents").and_then(|v| v.as_u64()) {
+                lines.push(Line::from(vec![
+                    Span::styled("Osszes dokumentum:  ", Style::default().fg(theme.accent)),
+                    Span::raw(docs.to_string()),
+                ]));
+            }
+            if let Some(indexes) = summary.get("total_indexes").and_then(|v| v.as_u64()) {
+                lines.push(Line::from(vec![
+                    Span::styled("Osszes index:       ", Style::default().fg(theme.accent)),
+                    Span::raw(indexes.to_string()),
+                ]));
+            }
+        }
+
+        // Collection names (new structure: array of objects with "name" field)
         if let Some(collections) = stats.get("collections").and_then(|v| v.as_array()) {
             let names: Vec<&str> = collections
                 .iter()
-                .filter_map(|v| v.as_str())
+                .filter_map(|v| v.get("name").and_then(|n| n.as_str()))
                 .collect();
             if !names.is_empty() {
                 lines.push(Line::from(vec![
@@ -149,14 +197,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ServerInfoState, scroll: us
                     Span::raw(names.join(", ")),
                 ]));
             }
-        }
-
-        // Database path if available
-        if let Some(path) = stats.get("db_path").and_then(|v| v.as_str()) {
-            lines.push(Line::from(vec![
-                Span::styled("Adatbazis eleresi ut: ", Style::default().fg(theme.accent)),
-                Span::raw(path),
-            ]));
         }
     }
 

@@ -3179,8 +3179,11 @@ impl App {
     pub async fn fetch_db_path_async(&mut self) -> anyhow::Result<()> {
         if let Some(db) = &self.db {
             let stats = db.db_stats().await?;
-            if let Some(path_str) = stats.get("database_path").and_then(|v| v.as_str()) {
-                self.db_path = Some(std::path::PathBuf::from(path_str));
+            // New structure: database.path
+            if let Some(database) = stats.get("database") {
+                if let Some(path_str) = database.get("path").and_then(|v| v.as_str()) {
+                    self.db_path = Some(std::path::PathBuf::from(path_str));
+                }
             }
         }
         Ok(())
