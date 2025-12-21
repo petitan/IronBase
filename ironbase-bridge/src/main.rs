@@ -15,15 +15,31 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+// BUG #5 fix: Limit batch request size to prevent DoS
+const MAX_BATCH_SIZE: usize = 1000;
+
+// BUG #6 fix: Limit response body size to prevent memory exhaustion
+const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+
+// BUG #10 fix: Maximum backoff time for health check retries
+const MAX_HEALTH_BACKOFF_MS: u64 = 5000;
+
+// BUG #4 fix: Track stdout health for graceful exit
+static STDOUT_BROKEN: AtomicBool = AtomicBool::new(false);
 
 /// Parse boolean from env var - accepts "1", "true", "yes" (case-insensitive)
 fn parse_bool_flexible(s: &str) -> Result<bool, String> {
     match s.to_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" | "" => Ok(false),
-        _ => Err(format!("Invalid boolean value: '{}'. Use true/false/1/0", s)),
+        _ => Err(format!(
+            "Invalid boolean value: '{}'. Use true/false/1/0",
+            s
+        )),
     }
 }
 
@@ -36,7 +52,12 @@ fn parse_bool_flexible(s: &str) -> Result<bool, String> {
 #[command(version, about = "STDIO to HTTP/HTTPS bridge for MCP IronBase Server")]
 struct Args {
     /// Server URL
-    #[arg(short, long, env = "MCP_SERVER_URL", default_value = "http://localhost:8080/mcp")]
+    #[arg(
+        short,
+        long,
+        env = "MCP_SERVER_URL",
+        default_value = "http://localhost:8080/mcp"
+    )]
     server: String,
 
     /// API key for authentication
@@ -110,11 +131,7 @@ fn is_notification(request: &JsonRpcRequest) -> bool {
 }
 
 /// Create an error response
-fn make_error_response(
-    id: Option<serde_json::Value>,
-    code: i32,
-    message: &str,
-) -> JsonRpcResponse {
+fn make_error_response(id: Option<serde_json::Value>, code: i32, message: &str) -> JsonRpcResponse {
     JsonRpcResponse {
         jsonrpc: "2.0".to_string(),
         id,
@@ -127,27 +144,87 @@ fn make_error_response(
     }
 }
 
+/// Validate JSON-RPC version field
+/// BUG #12 fix: jsonrpc field must be exactly "2.0" if present
+fn validate_jsonrpc_version(request: &JsonRpcRequest) -> Result<()> {
+    if let Some(version) = &request.jsonrpc {
+        if version != "2.0" {
+            anyhow::bail!("Invalid JSON-RPC version '{}', expected '2.0'", version);
+        }
+    }
+    Ok(())
+}
+
 /// Parse input as single request or batch
+/// BUG #5 fix: Limit batch size to MAX_BATCH_SIZE
+/// BUG #11 fix: Reject empty batch
+/// BUG #12 fix: Validate jsonrpc version
 fn parse_input(line: &str) -> Result<JsonRpcInput> {
     let trimmed = line.trim();
     if trimmed.starts_with('[') {
-        let requests: Vec<JsonRpcRequest> = serde_json::from_str(trimmed)
-            .context("Failed to parse batch request")?;
+        let requests: Vec<JsonRpcRequest> =
+            serde_json::from_str(trimmed).context("Failed to parse batch request")?;
+
+        // BUG #11 fix: Empty batch is invalid per JSON-RPC 2.0 spec
+        if requests.is_empty() {
+            anyhow::bail!("Empty batch request is invalid");
+        }
+
+        // BUG #5 fix: Limit batch size to prevent DoS
+        if requests.len() > MAX_BATCH_SIZE {
+            anyhow::bail!(
+                "Batch size {} exceeds maximum allowed ({})",
+                requests.len(),
+                MAX_BATCH_SIZE
+            );
+        }
+
+        // BUG #12 fix: Validate jsonrpc version for each request
+        for req in &requests {
+            validate_jsonrpc_version(req)?;
+        }
+
         Ok(JsonRpcInput::Batch(requests))
     } else {
-        let request: JsonRpcRequest = serde_json::from_str(trimmed)
-            .context("Failed to parse request")?;
+        let request: JsonRpcRequest =
+            serde_json::from_str(trimmed).context("Failed to parse request")?;
+
+        // BUG #12 fix: Validate jsonrpc version
+        validate_jsonrpc_version(&request)?;
+
         Ok(JsonRpcInput::Single(request))
     }
 }
 
 /// Write JSON response to stdout with proper flushing
 /// CRITICAL: This is the ONLY function that writes to stdout
-fn write_response(json: &str) {
+/// BUG #4 fix: Detect broken pipe and signal for graceful exit
+fn write_response(json: &str) -> bool {
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
-    writeln!(handle, "{}", json).ok();
-    handle.flush().ok();
+
+    if let Err(e) = writeln!(handle, "{}", json) {
+        // Broken pipe (client disconnected) - signal exit
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            STDOUT_BROKEN.store(true, Ordering::SeqCst);
+            return false;
+        }
+        tracing::error!("Failed to write to stdout: {}", e);
+        STDOUT_BROKEN.store(true, Ordering::SeqCst);
+        return false;
+    }
+
+    if let Err(e) = handle.flush() {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            STDOUT_BROKEN.store(true, Ordering::SeqCst);
+            return false;
+        }
+        tracing::error!("Failed to flush stdout: {}", e);
+        STDOUT_BROKEN.store(true, Ordering::SeqCst);
+        return false;
+    }
+
+    true
 }
 
 /// Setup panic handler to write to stderr, not stdout
@@ -179,6 +256,7 @@ fn setup_logging(args: &Args) {
 // ============================================================================
 
 /// Build HTTP client with connection pooling
+/// BUG #8 fix: Better documentation and warnings for insecure mode
 fn build_client(args: &Args) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(2)
@@ -186,24 +264,56 @@ fn build_client(args: &Args) -> Result<reqwest::Client> {
         .timeout(Duration::from_secs(30))
         .use_rustls_tls();
 
-    // Self-signed cert support
+    // BUG #8 fix: Enhanced warning for insecure mode
+    // Self-signed cert support - USE WITH CAUTION
     if args.insecure {
-        tracing::warn!("Accepting invalid/self-signed certificates (--insecure)");
-        builder = builder
-            .danger_accept_invalid_certs(true);
+        tracing::warn!("╔════════════════════════════════════════════════════════╗");
+        tracing::warn!("║ WARNING: TLS CERTIFICATE VERIFICATION DISABLED         ║");
+        tracing::warn!("║                                                        ║");
+        tracing::warn!("║ The --insecure flag is enabled. This disables ALL      ║");
+        tracing::warn!("║ certificate validation, making the connection          ║");
+        tracing::warn!("║ vulnerable to man-in-the-middle (MITM) attacks.        ║");
+        tracing::warn!("║                                                        ║");
+        tracing::warn!("║ Only use this for:                                     ║");
+        tracing::warn!("║   - Local development with self-signed certs           ║");
+        tracing::warn!("║   - Testing environments                               ║");
+        tracing::warn!("║                                                        ║");
+        tracing::warn!("║ NEVER use --insecure in production!                    ║");
+        tracing::warn!("╚════════════════════════════════════════════════════════╝");
+        builder = builder.danger_accept_invalid_certs(true);
     }
 
     builder.build().context("Failed to build HTTP client")
 }
 
 /// Health check with retry logic
+/// BUG #7 fix: Use proper URL parsing instead of string manipulation
+/// BUG #10 fix: Cap backoff time to MAX_HEALTH_BACKOFF_MS
 async fn wait_for_server(client: &reqwest::Client, url: &str, retries: u32) -> Result<()> {
     if retries == 0 {
         tracing::debug!("Health check disabled");
         return Ok(());
     }
 
-    let health_url = url.trim_end_matches("/mcp").to_string() + "/health";
+    // BUG #7 fix: Proper URL construction
+    let health_url = match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            // Remove /mcp path if present and add /health
+            let path = parsed.path().trim_end_matches('/');
+            let new_path = if path.ends_with("/mcp") {
+                format!("{}/health", path.trim_end_matches("/mcp"))
+            } else {
+                format!("{}/health", path)
+            };
+            parsed.set_path(&new_path);
+            parsed.to_string()
+        }
+        Err(e) => {
+            tracing::warn!("Failed to parse URL '{}': {}, using fallback", url, e);
+            // Fallback to simple string replacement
+            url.trim_end_matches("/mcp").to_string() + "/health"
+        }
+    };
     tracing::debug!("Health check URL: {}", health_url);
 
     for attempt in 1..=retries {
@@ -226,7 +336,9 @@ async fn wait_for_server(client: &reqwest::Client, url: &str, retries: u32) -> R
         }
 
         if attempt < retries {
-            tokio::time::sleep(Duration::from_millis(500 * attempt as u64)).await;
+            // BUG #10 fix: Cap backoff to MAX_HEALTH_BACKOFF_MS
+            let backoff_ms = std::cmp::min(500 * attempt as u64, MAX_HEALTH_BACKOFF_MS);
+            tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         }
     }
 
@@ -238,6 +350,7 @@ async fn wait_for_server(client: &reqwest::Client, url: &str, retries: u32) -> R
 }
 
 /// Forward a single request to the server
+/// BUG #6 fix: Limit response body size to prevent memory exhaustion
 async fn forward_single(
     client: &reqwest::Client,
     args: &Args,
@@ -260,10 +373,38 @@ async fn forward_single(
         return Ok(None);
     }
 
+    // BUG #6 fix: Check Content-Length before reading body
+    if let Some(content_length) = response.content_length() {
+        if content_length as usize > MAX_RESPONSE_SIZE {
+            return Ok(Some(make_error_response(
+                request.id.clone(),
+                -32603,
+                &format!(
+                    "Response too large: {} bytes (max: {} bytes)",
+                    content_length, MAX_RESPONSE_SIZE
+                ),
+            )));
+        }
+    }
+
     // Check for errors
+    // BUG #2 fix: Handle error response body read failures properly
     if !response.status().is_success() {
         let status = response.status();
-        let text = response.text().await.unwrap_or_default();
+        let text = match response.text().await {
+            Ok(t) => {
+                // BUG #6 fix: Truncate error body if too large
+                if t.len() > MAX_RESPONSE_SIZE {
+                    format!("{}...<truncated>", &t[..1000])
+                } else {
+                    t
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read error response body: {}", e);
+                format!("<body read error: {}>", e)
+            }
+        };
         return Ok(Some(make_error_response(
             request.id.clone(),
             -32603,
@@ -272,18 +413,36 @@ async fn forward_single(
     }
 
     // Empty body = notification acknowledged
-    let text = response.text().await.context("Failed to read response body")?;
+    let text = response
+        .text()
+        .await
+        .context("Failed to read response body")?;
+
+    // BUG #6 fix: Check actual body size
+    if text.len() > MAX_RESPONSE_SIZE {
+        return Ok(Some(make_error_response(
+            request.id.clone(),
+            -32603,
+            &format!(
+                "Response body too large: {} bytes (max: {} bytes)",
+                text.len(),
+                MAX_RESPONSE_SIZE
+            ),
+        )));
+    }
+
     if text.is_empty() {
         return Ok(None);
     }
 
     // Parse response
-    let resp: JsonRpcResponse = serde_json::from_str(&text)
-        .context("Failed to parse JSON-RPC response")?;
+    let resp: JsonRpcResponse =
+        serde_json::from_str(&text).context("Failed to parse JSON-RPC response")?;
     Ok(Some(resp))
 }
 
 /// Process a batch of requests
+/// BUG #9 fix: Log notification forward errors
 async fn process_batch(
     client: &reqwest::Client,
     args: &Args,
@@ -293,8 +452,10 @@ async fn process_batch(
 
     for request in requests {
         if is_notification(&request) {
-            // Forward notification but don't collect response
-            let _ = forward_single(client, args, &request).await;
+            // BUG #9 fix: Log notification forward errors instead of ignoring
+            if let Err(e) = forward_single(client, args, &request).await {
+                tracing::warn!("Notification '{}' forward failed: {}", request.method, e);
+            }
             continue;
         }
 
@@ -318,51 +479,101 @@ async fn process_batch(
 // Signal Handling
 // ============================================================================
 
+/// BUG #1 fix: Handle signal installation errors gracefully
 #[cfg(unix)]
 async fn shutdown_signal() {
     use tokio::signal::unix::{signal, SignalKind};
-    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to setup SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to setup SIGTERM handler");
+
+    let sigint = async {
+        match signal(SignalKind::interrupt()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to setup SIGINT handler: {}", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    let sigterm = async {
+        match signal(SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to setup SIGTERM handler: {}", e);
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
     tokio::select! {
-        _ = sigint.recv() => tracing::info!("Received SIGINT"),
-        _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
+        _ = sigint => tracing::info!("Received SIGINT"),
+        _ = sigterm => tracing::info!("Received SIGTERM"),
     }
 }
 
+/// BUG #1 fix: Handle signal installation errors gracefully
 #[cfg(windows)]
 async fn shutdown_signal() {
-    tokio::signal::ctrl_c()
-        .await
-        .expect("Failed to setup Ctrl+C handler");
-    tracing::info!("Received Ctrl+C");
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => tracing::info!("Received Ctrl+C"),
+        Err(e) => {
+            tracing::error!("Failed to setup Ctrl+C handler: {}", e);
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 // ============================================================================
 // Main Loop
 // ============================================================================
 
-async fn process_line(client: &reqwest::Client, args: &Args, line: &str) {
+/// BUG #3 fix: Helper to serialize JSON with proper error handling
+fn serialize_response<T: serde::Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_string(value) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            // BUG #3 fix: Log serialization error and send error response
+            tracing::error!("Failed to serialize response: {}", e);
+            // Create a minimal fallback error response
+            Some(r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Internal error: failed to serialize response"}}"#.to_string())
+        }
+    }
+}
+
+/// BUG #3 fix: Proper JSON serialization error handling
+/// BUG #4 fix: Check STDOUT_BROKEN and propagate write errors
+/// BUG #9 fix: Log notification forward errors
+async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool {
+    // BUG #4 fix: Check if stdout is already broken
+    if STDOUT_BROKEN.load(Ordering::SeqCst) {
+        return false;
+    }
+
     let output = match parse_input(line) {
         Ok(JsonRpcInput::Single(request)) => {
-            tracing::debug!("Processing request: {} (id: {:?})", request.method, request.id);
+            tracing::debug!(
+                "Processing request: {} (id: {:?})",
+                request.method,
+                request.id
+            );
 
             if is_notification(&request) {
-                // Forward notification but don't output response
-                let _ = forward_single(client, args, &request).await;
-                return;
+                // BUG #9 fix: Log notification forward errors
+                if let Err(e) = forward_single(client, args, &request).await {
+                    tracing::warn!("Notification '{}' forward failed: {}", request.method, e);
+                }
+                return true;
             }
 
             match forward_single(client, args, &request).await {
-                Ok(Some(resp)) => serde_json::to_string(&resp).ok(),
-                Ok(None) => return, // notification response
+                Ok(Some(resp)) => serialize_response(&resp),
+                Ok(None) => return true, // notification response
                 Err(e) => {
                     tracing::error!("Request failed: {}", e);
-                    serde_json::to_string(&make_error_response(
-                        request.id,
-                        -32603,
-                        &e.to_string(),
-                    ))
-                    .ok()
+                    serialize_response(&make_error_response(request.id, -32603, &e.to_string()))
                 }
             }
         }
@@ -371,24 +582,27 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) {
 
             let responses = process_batch(client, args, requests).await;
             if responses.is_empty() {
-                return; // all were notifications
+                return true; // all were notifications
             }
-            serde_json::to_string(&responses).ok()
+            serialize_response(&responses)
         }
         Err(e) => {
             tracing::error!("Parse error: {}", e);
-            serde_json::to_string(&make_error_response(
+            serialize_response(&make_error_response(
                 None,
                 -32700,
                 &format!("Parse error: {}", e),
             ))
-            .ok()
         }
     };
 
     if let Some(json) = output {
-        write_response(&json);
+        // BUG #4 fix: Check write_response return value
+        if !write_response(&json) {
+            return false;
+        }
     }
+    true
 }
 
 #[tokio::main]
@@ -402,10 +616,7 @@ async fn main() -> Result<()> {
     // Setup logging to stderr
     setup_logging(&args);
 
-    tracing::info!(
-        "ironbase-bridge v{} starting",
-        env!("CARGO_PKG_VERSION")
-    );
+    tracing::info!("ironbase-bridge v{} starting", env!("CARGO_PKG_VERSION"));
     tracing::info!("Server: {}", args.server);
     if args.api_key.is_some() {
         tracing::info!("API key: configured");
@@ -425,13 +636,24 @@ async fn main() -> Result<()> {
     tracing::debug!("Entering main loop...");
 
     // Main loop with graceful shutdown
+    // BUG #4 fix: Exit on stdout broken
     loop {
+        // BUG #4 fix: Check stdout before each iteration
+        if STDOUT_BROKEN.load(Ordering::SeqCst) {
+            tracing::info!("stdout broken, exiting...");
+            break;
+        }
+
         tokio::select! {
             // Read next line from stdin
             line_result = lines.next_line() => {
                 match line_result {
                     Ok(Some(line)) if !line.trim().is_empty() => {
-                        process_line(&client, &args, &line).await;
+                        // BUG #4 fix: Check process_line return value
+                        if !process_line(&client, &args, &line).await {
+                            tracing::info!("stdout broken during processing, exiting...");
+                            break;
+                        }
                     }
                     Ok(Some(_)) => continue, // empty line
                     Ok(None) => {
