@@ -518,10 +518,11 @@ fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 
     // Add error/status message if present
     if let Some(ref err) = app.error_message {
-        // Truncate long errors for status bar display
+        // Truncate long errors for status bar display (UTF-8 safe)
         let max_err_len = 50;
-        let truncated = if err.len() > max_err_len {
-            format!("{}...", &err[..max_err_len])
+        let truncated = if err.chars().count() > max_err_len {
+            let chars: String = err.chars().take(max_err_len).collect();
+            format!("{}...", chars)
         } else {
             err.clone()
         };

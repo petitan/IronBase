@@ -39,18 +39,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Get selected document
-    let doc = app.get_selected_document();
-
-    if doc.is_none() {
+    // Get selected document - BUG FIX: use if-let instead of is_none + unwrap
+    let Some(doc) = app.get_selected_document() else {
         let empty_msg = Paragraph::new("Valassz dokumentumot")
             .style(Style::default().fg(theme.muted))
             .alignment(Alignment::Center);
         frame.render_widget(empty_msg, inner);
         return;
-    }
-
-    let doc = doc.unwrap();
+    };
 
     // Get search query for highlighting (if any)
     let highlight_query = if !app.search.doc_matches.is_empty() {
@@ -266,20 +262,19 @@ fn syntax_highlight_line(line: &str, theme: &Theme) -> Line<'static> {
             }
             _ if !in_string && (c.is_ascii_digit() || c == '-') => {
                 current.push(c);
-                // Consume full number
-                while chars
-                    .peek()
-                    .map(|&nc| {
-                        nc.is_ascii_digit()
-                            || nc == '.'
-                            || nc == 'e'
-                            || nc == 'E'
-                            || nc == '+'
-                            || nc == '-'
-                    })
-                    .unwrap_or(false)
-                {
-                    current.push(chars.next().unwrap());
+                // Consume full number - BUG FIX: Use while-let instead of peek + unwrap
+                while let Some(&nc) = chars.peek() {
+                    if nc.is_ascii_digit()
+                        || nc == '.'
+                        || nc == 'e'
+                        || nc == 'E'
+                        || nc == '+'
+                        || nc == '-'
+                    {
+                        current.push(chars.next().unwrap_or(nc)); // Safe: peek returned Some
+                    } else {
+                        break;
+                    }
                 }
                 spans.push(Span::styled(
                     current.clone(),

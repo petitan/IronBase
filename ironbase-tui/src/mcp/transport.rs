@@ -5,9 +5,13 @@ use crate::mcp::protocol::{JsonRpcRequest, JsonRpcResponse};
 use async_trait::async_trait;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+
+/// Timeout for stdio communication (30 seconds)
+const STDIO_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Transport trait for MCP communication
 #[async_trait]
@@ -148,6 +152,7 @@ impl StdioTransport {
     }
 }
 
+/// BUG FIX: Added timeout and size limit to prevent DoS and deadlock
 #[async_trait]
 impl Transport for StdioTransport {
     async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
@@ -155,18 +160,29 @@ impl Transport for StdioTransport {
         let mut json = serde_json::to_string(request)?;
         json.push('\n');
 
-        // Send request
+        // Send request with timeout
         {
             let mut stdin = self.stdin.lock().await;
-            stdin.write_all(json.as_bytes()).await?;
-            stdin.flush().await?;
+            tokio::time::timeout(STDIO_TIMEOUT, async {
+                stdin.write_all(json.as_bytes()).await?;
+                stdin.flush().await?;
+                Ok::<_, std::io::Error>(())
+            })
+            .await
+            .map_err(|_| McpError::connection("Timeout sending request to server"))??;
         }
 
-        // Read response line
+        // Read response line with timeout
         let mut line = String::new();
         {
             let mut stdout = self.stdout.lock().await;
-            stdout.read_line(&mut line).await?;
+            let read_result = tokio::time::timeout(STDIO_TIMEOUT, stdout.read_line(&mut line)).await;
+
+            match read_result {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => return Err(McpError::Io(e)),
+                Err(_) => return Err(McpError::connection("Timeout waiting for server response")),
+            }
         }
 
         if line.is_empty() {

@@ -415,10 +415,13 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &The
     frame.render_widget(status, area);
 }
 
+/// BUG FIX: Use char count instead of byte length for UTF-8 safety
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    let char_count = s.chars().count();
+    if char_count <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len - 3])
+        let truncated: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", truncated)
     }
 }

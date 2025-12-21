@@ -180,6 +180,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
     frame.render_widget(list, inner);
 }
 
+/// BUG FIX: Use char count instead of byte length for UTF-8 safety
 fn format_doc_preview(doc: &serde_json::Value, max_len: usize) -> String {
     // Try to get a meaningful preview
     let preview = if let Some(obj) = doc.as_object() {
@@ -191,8 +192,10 @@ fn format_doc_preview(doc: &serde_json::Value, max_len: usize) -> String {
             .map(|(k, v)| {
                 let val_str = match v {
                     serde_json::Value::String(s) => {
-                        if s.len() > 30 {
-                            format!("\"{}...\"", &s[..30])
+                        // UTF-8 safe truncation
+                        if s.chars().count() > 30 {
+                            let truncated: String = s.chars().take(30).collect();
+                            format!("\"{}...\"", truncated)
                         } else {
                             format!("\"{}\"", s)
                         }
@@ -207,8 +210,10 @@ fn format_doc_preview(doc: &serde_json::Value, max_len: usize) -> String {
         doc.to_string()
     };
 
-    if preview.len() > max_len {
-        format!("{}...", &preview[..max_len])
+    // UTF-8 safe truncation
+    if preview.chars().count() > max_len {
+        let truncated: String = preview.chars().take(max_len).collect();
+        format!("{}...", truncated)
     } else {
         preview
     }
