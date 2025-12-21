@@ -3262,6 +3262,19 @@ impl App {
                 }
             }
             // When active_filter is set, total_docs is preserved from execute_filter_async
+
+            // BUG FIX: Validate selected_document after refresh
+            // If document count decreased, selected_document might be out of bounds
+            if self.total_docs == 0 {
+                self.selected_document = 0;
+                self.doc_scroll_offset = 0;
+            } else if self.selected_document >= self.total_docs {
+                self.selected_document = self.total_docs.saturating_sub(1);
+                // Also adjust scroll offset if needed
+                if self.doc_scroll_offset > self.selected_document {
+                    self.doc_scroll_offset = self.selected_document;
+                }
+            }
         }
         Ok(())
     }
