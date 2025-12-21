@@ -150,8 +150,9 @@
                     WorkingDirectory='APPLICATIONFOLDER'/>
                 <Shortcut Id='TuiShortcut'
                     Name='IronBase TUI'
-                    Description='Terminal UI for IronBase'
+                    Description='Terminal UI for IronBase (connects to local server)'
                     Target='[APPLICATIONFOLDER]ironbase-tui.exe'
+                    Arguments='--http http://127.0.0.1:8080'
                     WorkingDirectory='APPLICATIONFOLDER'/>
                 <Shortcut Id='BackupShortcut'
                     Name='IronBase Backup'
