@@ -150,10 +150,73 @@ impl IronBaseAdapter {
     pub fn stats(&self) -> Value {
         let db = self.db.read();
         let db_path = self.db_path.read();
+        let path_str = db_path.display().to_string();
+
+        // Get file size
+        let file_size = std::fs::metadata(&*db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        // Format human-readable file size
+        let file_size_human = if file_size >= 1_073_741_824 {
+            format!("{:.2} GB", file_size as f64 / 1_073_741_824.0)
+        } else if file_size >= 1_048_576 {
+            format!("{:.2} MB", file_size as f64 / 1_048_576.0)
+        } else if file_size >= 1024 {
+            format!("{:.2} KB", file_size as f64 / 1024.0)
+        } else {
+            format!("{} B", file_size)
+        };
+
+        // Get collection details with document counts and indexes
+        let collections: Vec<Value> = db
+            .list_collections()
+            .into_iter()
+            .filter(|name| !name.starts_with("_system.")) // Hide system collections
+            .map(|name| {
+                let doc_count = db.collection(&name)
+                    .ok()
+                    .map(|c| c.count_documents(&serde_json::json!({})).unwrap_or(0))
+                    .unwrap_or(0);
+
+                let indexes = db.collection(&name)
+                    .ok()
+                    .and_then(|c| c.list_indexes().ok())
+                    .unwrap_or_default();
+
+                serde_json::json!({
+                    "name": name,
+                    "document_count": doc_count,
+                    "index_count": indexes.len(),
+                    "indexes": indexes,
+                })
+            })
+            .collect();
+
+        // Calculate totals
+        let total_documents: u64 = collections
+            .iter()
+            .filter_map(|c| c.get("document_count").and_then(|v| v.as_u64()))
+            .sum();
+
+        let total_indexes: usize = collections
+            .iter()
+            .filter_map(|c| c.get("index_count").and_then(|v| v.as_u64()))
+            .map(|v| v as usize)
+            .sum();
+
         serde_json::json!({
-            "database_path": db_path.display().to_string(),
-            "collections": db.list_collections(),
-            "collection_count": db.list_collections().len(),
+            "database": {
+                "path": path_str,
+                "file_size_bytes": file_size,
+                "file_size": file_size_human,
+            },
+            "collections": collections,
+            "summary": {
+                "collection_count": collections.len(),
+                "total_documents": total_documents,
+                "total_indexes": total_indexes,
+            }
         })
     }
 

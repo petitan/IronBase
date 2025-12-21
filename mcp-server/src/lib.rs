@@ -25,3 +25,16 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Library name
 pub const NAME: &str = "mcp-ironbase-server";
+
+/// Server runtime information for db_stats
+#[derive(Debug, Clone, Default)]
+pub struct ServerInfo {
+    /// Protocol: "http" or "https"
+    pub protocol: String,
+    /// Server host
+    pub host: String,
+    /// Server port
+    pub port: u16,
+    /// Whether API key authentication is required
+    pub require_api_key: bool,
+}

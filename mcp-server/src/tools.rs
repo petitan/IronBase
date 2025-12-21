@@ -1312,11 +1312,15 @@ pub fn get_tools_list() -> Value {
 ///
 /// The `api_key_cache` parameter is optional and used to invalidate the cache
 /// when API keys are created, revoked, or deleted.
+///
+/// The `server_info` parameter is optional and used to include server runtime
+/// information in db_stats output.
 pub fn dispatch_tool(
     name: &str,
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
     api_key_cache: Option<&crate::ApiKeyCache>,
+    server_info: Option<&crate::ServerInfo>,
 ) -> Result<Value> {
     match name {
         // Database Management
@@ -1335,7 +1339,30 @@ pub fn dispatch_tool(
                 "message": if create { "Database created" } else { "Database opened" }
             }))
         }
-        "db_stats" => Ok(adapter.stats()),
+        "db_stats" => {
+            let mut stats = adapter.stats();
+            // Add server info if available
+            if let Some(info) = server_info {
+                if let Some(obj) = stats.as_object_mut() {
+                    obj.insert("server".to_string(), json!({
+                        "version": crate::VERSION,
+                        "protocol": info.protocol,
+                        "host": info.host,
+                        "port": info.port,
+                        "require_api_key": info.require_api_key,
+                    }));
+                }
+            } else {
+                // Stdio mode - no server info
+                if let Some(obj) = stats.as_object_mut() {
+                    obj.insert("server".to_string(), json!({
+                        "version": crate::VERSION,
+                        "mode": "stdio",
+                    }));
+                }
+            }
+            Ok(stats)
+        }
         "db_compact" => adapter.compact(),
         "db_checkpoint" => {
             adapter.checkpoint()?;

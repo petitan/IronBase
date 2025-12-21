@@ -346,6 +346,12 @@ async fn run_http_server_internal(
         initialized: std::sync::atomic::AtomicBool::new(false),
         api_key_cache,
         require_api_key: config.require_api_key,
+        server_info: crate::ServerInfo {
+            protocol: if config.tls_enabled { "https".to_string() } else { "http".to_string() },
+            host: config.host.clone(),
+            port: config.port,
+            require_api_key: config.require_api_key,
+        },
     });
 
     // HTTP request handler
@@ -378,6 +384,7 @@ async fn run_http_server_internal(
             api_key.as_deref(),
             &state.api_key_cache,
             state.require_api_key,
+            &state.server_info,
         ) {
             Some(response) => {
                 // RAW response logging
@@ -554,6 +561,8 @@ struct HttpAppState {
     api_key_cache: ApiKeyCache,
     /// Whether API key is required for tool calls
     require_api_key: bool,
+    /// Server runtime info for db_stats
+    server_info: crate::ServerInfo,
 }
 
 // MCP Request/Response types (duplicated from main.rs for lib independence)
@@ -636,6 +645,7 @@ fn handle_request(
     api_key: Option<&str>,
     api_key_cache: &ApiKeyCache,
     require_api_key: bool,
+    server_info: &crate::ServerInfo,
 ) -> Option<McpResponse> {
     use crate::{dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list};
     use std::sync::atomic::Ordering;
@@ -736,7 +746,7 @@ fn handle_request(
 
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
-            match dispatch_tool(&params.name, arguments, adapter, Some(api_key_cache)) {
+            match dispatch_tool(&params.name, arguments, adapter, Some(api_key_cache), Some(server_info)) {
                 Ok(result) => {
                     let response = serde_json::json!({
                         "content": [{
