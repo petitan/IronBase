@@ -1,37 +1,39 @@
 # IronBase TUI
 
-Terminal User Interface az IronBase NoSQL adatbázishoz.
+Terminal User Interface for IronBase NoSQL database.
 
-## Telepítés
+> [Magyar verzió / Hungarian version](docs/README_HU.md)
+
+## Installation
 
 ```bash
 # Release build
 cargo build --release -p ironbase-tui
 
-# A bináris itt lesz:
+# Binary location:
 ./target/release/ironbase-tui
 ```
 
-## Használat
+## Usage
 
 ```bash
-# Alapértelmezett (localhost:8080)
+# Default (localhost:8080)
 ironbase-tui
 
-# Távoli szerver
+# Remote server
 ironbase-tui --url https://192.168.0.136:8080/mcp
 
-# Self-signed tanúsítvány elfogadása
+# Accept self-signed certificate
 ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
 
-# API key-el
+# With API key
 ironbase-tui --url https://192.168.0.136:8080/mcp -k sk-xxx --insecure
 
-# API key környezeti változóból
+# API key from environment variable
 IRONBASE_API_KEY=sk-xxx ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
 ```
 
-## CLI Opciók
+## CLI Options
 
 ```
 ironbase-tui [OPTIONS] [DATABASE]
@@ -48,55 +50,59 @@ Options:
   -V, --version            Print version
 ```
 
-## Billentyűparancsok
+## Keyboard Shortcuts
 
-### Navigáció
-| Billentyű | Művelet |
-|-----------|---------|
-| `Tab` | Következő panel |
-| `Shift+Tab` | Előző panel |
-| `j` / `↓` | Le |
-| `k` / `↑` | Fel |
-| `PgUp` / `PgDn` | Lapozás |
-| `g` / `Home` | Lista elejére |
-| `G` / `End` | Lista végére |
-| `Enter` | Kiválaszt |
-| `Esc` | Vissza / Bezár |
+### Navigation
 
-### Funkciók
-| Billentyű | Művelet |
-|-----------|---------|
-| `/` | Keresés |
-| `a` | Akciók menü |
-| `?` | Súgó |
-| `r` | Adatok frissítése |
-| `R` (Shift+R) | Kollekció lista frissítés |
-| `t` | Téma váltás |
-| `q` | Kilépés |
+| Key | Action |
+|-----|--------|
+| `Tab` | Next panel |
+| `Shift+Tab` | Previous panel |
+| `j` / `↓` | Down |
+| `k` / `↑` | Up |
+| `PgUp` / `PgDn` | Page up/down |
+| `g` / `Home` | Go to top |
+| `G` / `End` | Go to bottom |
+| `Enter` | Select |
+| `Esc` | Back / Close |
 
-### Detail panel
-| Billentyű | Művelet |
-|-----------|---------|
-| `e` | Dokumentum szerkesztése |
-| `d` | Dokumentum törlése |
-| `f` | Vizuális szűrő |
-| `i` | Dokumentum beszúrása |
-| `x` | Index kezelés |
-| `y` | Másolás vágólapra |
+### Functions
 
-### Globális
-| Billentyű | Művelet |
-|-----------|---------|
-| `Shift+I` | Szerver információk |
-| `Shift+U` | Frissítés ellenőrzés |
-| `Shift+K` | API Key kezelés |
-| `Shift+D` | Adatbázis váltás |
+| Key | Action |
+|-----|--------|
+| `/` | Search |
+| `a` | Actions menu |
+| `?` | Help |
+| `r` | Refresh data |
+| `R` (Shift+R) | Refresh collection list |
+| `t` | Toggle theme |
+| `q` | Quit |
 
-## HTTPS beállítás mkcert-tel
+### Detail Panel
 
-A `mkcert` eszközzel létrehozott tanúsítványok megbízhatóak lesznek a helyi gépen, nem kell `--insecure` flag.
+| Key | Action |
+|-----|--------|
+| `e` | Edit document |
+| `d` | Delete document |
+| `f` | Visual filter |
+| `i` | Insert document |
+| `x` | Index management |
+| `y` | Copy to clipboard |
 
-### mkcert telepítés
+### Global
+
+| Key | Action |
+|-----|--------|
+| `Shift+I` | Server info |
+| `Shift+U` | Check for updates |
+| `Shift+K` | API Key management |
+| `Shift+D` | Switch database |
+
+## HTTPS Setup with mkcert
+
+Certificates created with `mkcert` are trusted on the local machine, no `--insecure` flag needed.
+
+### Install mkcert
 
 ```bash
 # Linux (Debian/Ubuntu)
@@ -115,23 +121,23 @@ choco install mkcert
 scoop install mkcert
 ```
 
-### CA telepítés és tanúsítvány generálás
+### Install CA and Generate Certificate
 
 ```bash
-# Root CA telepítése a rendszer trust store-ba (egyszer kell)
+# Install root CA to system trust store (once)
 mkcert -install
 
-# Tanúsítvány generálás az MCP szerverhez
+# Generate certificate for MCP server
 cd /path/to/mcp-server
 mkcert -key-file key.pem -cert-file cert.pem localhost 127.0.0.1 ::1 192.168.0.136
 
-# Több hostname/IP is megadható:
+# Multiple hostnames/IPs:
 mkcert -key-file key.pem -cert-file cert.pem \
     localhost 127.0.0.1 ::1 \
     192.168.0.136 myserver.local
 ```
 
-### MCP szerver config.toml
+### MCP Server config.toml
 
 ```toml
 [tls]
@@ -140,53 +146,53 @@ cert_file = "./cert.pem"
 key_file = "./key.pem"
 ```
 
-### Használat mkcert tanúsítvánnyal
+### Usage with mkcert Certificate
 
 ```bash
-# Nem kell --insecure, mert a CA megbízható
+# No --insecure needed when CA is trusted
 ironbase-tui --url https://localhost:8080/mcp
 
-# Távoli gép esetén (ha a CA telepítve van ott is)
+# Remote machine (if CA is installed there too)
 ironbase-tui --url https://192.168.0.136:8080/mcp
 ```
 
-### WSL2 / Cross-machine használat
+### WSL2 / Cross-machine Usage
 
-Ha a szerver WSL2-ben fut és Windows-ról csatlakozol:
+If the server runs in WSL2 and you connect from Windows:
 
 ```bash
-# WSL2-ben generáld a cert-et a Windows IP-vel is
+# In WSL2, generate cert with Windows IP too
 mkcert -key-file key.pem -cert-file cert.pem localhost 127.0.0.1 172.19.152.126
 
-# Windows-on telepítsd a mkcert CA-t
-# (másold át a ~/.local/share/mkcert/rootCA.pem fájlt és importáld)
+# On Windows, install the mkcert CA
+# (copy ~/.local/share/mkcert/rootCA.pem and import it)
 ```
 
-Ha nem akarod a CA-t telepíteni, használd az `--insecure` flaget:
+If you don't want to install the CA, use the `--insecure` flag:
 
 ```bash
 ironbase-tui --url https://192.168.0.136:8080/mcp --insecure
 ```
 
-## Konfiguráció
+## Configuration
 
-A konfiguráció helye: `~/.config/ironbase-tui/config.toml` (Linux/macOS) vagy `%APPDATA%\ironbase-tui\config.toml` (Windows)
+Config location: `~/.config/ironbase-tui/config.toml` (Linux/macOS) or `%APPDATA%\ironbase-tui\config.toml` (Windows)
 
 ```toml
-# Alapértelmezett MCP szerver URL
+# Default MCP server URL
 mcp_url = "http://localhost:8080/mcp"
 
-# API key (opcionális)
+# API key (optional)
 mcp_api_key = "sk-your-key"
 
-# Self-signed tanúsítvány elfogadása
+# Accept self-signed certificates
 mcp_insecure = false
 
-# Téma: "dark", "light", "nord", "dracula"
+# Theme: "dark", "light", "nord", "dracula"
 theme = "dark"
 ```
 
-## Architektúra
+## Architecture
 
 ```
 ironbase-tui/
@@ -210,14 +216,14 @@ ironbase-tui/
 └── Cargo.toml
 ```
 
-## Követelmények
+## Requirements
 
-- Futó MCP szerver (`mcp-ironbase-server`)
-- Terminal UTF-8 támogatással
-- Minimum 80x24 karakteres terminál
+- Running MCP server (`mcp-ironbase-server`)
+- Terminal with UTF-8 support
+- Minimum 80x24 character terminal
 
-## Kapcsolódó projektek
+## Related Projects
 
 - [ironbase-core](../ironbase-core/) - Rust core library
 - [mcp-server](../mcp-server/) - MCP protocol server
-- [ironbase-bridge](../ironbase-bridge/) - STDIO-HTTP bridge Claude Desktop-hoz
+- [ironbase-bridge](../ironbase-bridge/) - STDIO-HTTP bridge for Claude Desktop

@@ -83,7 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Windows configuration file line ending issues
 
-## [0.3.0] - 2025-01-XX
+## [0.3.0] - 2025-11-26
 
 ### Added
 - **C# Bindings**: Complete .NET bindings with MongoDB-like API
@@ -120,7 +120,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Modularized `collection_core` module structure
 - Improved documentation with dot notation examples
 
-## [0.2.0] - 2024-12-XX
+## [0.2.0] - 2025-11-10
 
 ### Added
 - **Query Operators**: Complete MongoDB-compatible query system
@@ -150,7 +150,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Strategy pattern for query operators (83% complexity reduction)
 - Improved storage engine with compaction support
 
-## [0.1.0] - 2024-11-XX
+## [0.1.0] - 2025-11-01
 
 ### Added
 - Initial release
@@ -161,8 +161,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - WAL (Write-Ahead Log) for crash recovery
 - MIT License
 
-[Unreleased]: https://github.com/petitan/IronBase/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/petitan/IronBase/compare/v1.0.55...HEAD
 [1.0.5]: https://github.com/petitan/IronBase/compare/v0.3.0...v1.0.5
 [0.3.0]: https://github.com/petitan/IronBase/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/petitan/IronBase/compare/v0.1.0...v0.2.0
+[0.2.0]: https://github.com/petitan/IronBase/releases/tag/v0.2.0
 [0.1.0]: https://github.com/petitan/IronBase/releases/tag/v0.1.0

@@ -10,6 +10,19 @@ Written in Rust with Python and C# bindings. Single-file, zero-configuration, se
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust CI](https://github.com/petitan/IronBase/actions/workflows/rust.yml/badge.svg)](https://github.com/petitan/IronBase/actions/workflows/rust.yml)
 
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [MCP Server](#quick-install-mcp-server)
+- [MCP Bridge](#mcp-bridge-for-claudechatgpt-desktop)
+- [Backup CLI](#backup-cli-usage)
+- [TUI](#tui-usage)
+- [API Key Authentication](#api-key-authentication)
+- [Environment Variables](#environment-variables)
+- [HTTPS/TLS Support](#httpstls-support)
+- [Manual Installation](#manual-installation)
+
 ## Features
 
 | Category | Features |
@@ -76,27 +89,49 @@ db.close()
 ```csharp
 using IronBase;
 
+// Open database
+using var db = new IronBaseClient("myapp.mlite");
+var users = db.GetCollection("users");
+
+// Insert
+users.InsertOne(new { name = "Alice", age = 30, city = "NYC" });
+
+// Query
+var adults = users.Find(new { age = new { _gte = 18 } });
+var nyc = users.Find(new { city = "NYC" });
+
+// Update
+users.UpdateOne(
+    new { name = "Alice" },
+    new { _set = new { age = 31 } }
+);
+
+// Aggregation
+var stats = users.Aggregate(new[] {
+    new { _match = new { age = new { _gte = 18 } } },
+    new { _group = new { _id = "$city", count = new { _sum = 1 } } }
+});
 ```
 
-## Quick Install MCP Server (release v1.0.17)
+## Quick Install MCP Server (release v1.0.55)
 
-Note: these commands pin downloads to the v1.0.17 release assets so documentation always matches the release.
+Note: these commands pin downloads to the v1.0.55 release assets so documentation always matches the release.
 
 ### Windows (PowerShell)
 ```powershell
 # Download installer and run (as Administrator)
-Invoke-WebRequest -Uri https://github.com/petitan/IronBase/releases/download/v1.0.17/install.ps1 -OutFile install.ps1
+Invoke-WebRequest -Uri https://github.com/petitan/IronBase/releases/download/v1.0.55/install.ps1 -OutFile install.ps1
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
 ```
 
 ### Linux/macOS
 ```bash
-# Download and run installer (pins to v1.0.17)
-curl -sSL https://github.com/petitan/IronBase/releases/download/v1.0.17/install.sh | sudo bash
+# Download and run installer (pins to v1.0.55)
+curl -sSL https://github.com/petitan/IronBase/releases/download/v1.0.55/install.sh | sudo bash
 ```
 
-## MCP Server Downloads (v1.0.17)
+## MCP Server Downloads (v1.0.55)
 
 | Platform | File |
 |----------|------|
@@ -104,7 +139,7 @@ curl -sSL https://github.com/petitan/IronBase/releases/download/v1.0.17/install.
 | Linux | `mcp-ironbase-server-linux` |
 | macOS | `mcp-ironbase-server-macos` |
 
-Full release assets list and checksums available on the release page: https://github.com/petitan/IronBase/releases/tag/v1.0.17
+Full release assets list and checksums available on the release page: https://github.com/petitan/IronBase/releases/tag/v1.0.55
 
 ## MCP Server Usage
 
@@ -496,4 +531,4 @@ key_file = "/path/to/key.pem"
 3. Start the service: `sc start IronBaseService` (Windows) or `systemctl start ironbase` (Linux)
 
 
-**Full Changelog**: https://github.com/petitan/IronBase/compare/v1.0.16...v1.0.17
+**Full Changelog**: https://github.com/petitan/IronBase/compare/v1.0.54...v1.0.55

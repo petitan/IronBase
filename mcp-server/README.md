@@ -10,22 +10,22 @@ Download the latest release for your platform:
 
 ```bash
 # Linux
-curl -L https://github.com/peti12345/MongoLite/releases/latest/download/mcp-ironbase-server-linux-x64.tar.gz | tar xz
+curl -L https://github.com/petitan/IronBase/releases/latest/download/mcp-ironbase-server-linux-x64.tar.gz | tar xz
 chmod +x mcp-ironbase-server
 sudo mv mcp-ironbase-server /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/peti12345/MongoLite/releases/latest/download/mcp-ironbase-server-macos-x64.tar.gz | tar xz
+curl -L https://github.com/petitan/IronBase/releases/latest/download/mcp-ironbase-server-macos-x64.tar.gz | tar xz
 chmod +x mcp-ironbase-server
 sudo mv mcp-ironbase-server /usr/local/bin/
 
 # macOS (Apple Silicon)
-curl -L https://github.com/peti12345/MongoLite/releases/latest/download/mcp-ironbase-server-macos-arm64.tar.gz | tar xz
+curl -L https://github.com/petitan/IronBase/releases/latest/download/mcp-ironbase-server-macos-arm64.tar.gz | tar xz
 chmod +x mcp-ironbase-server
 sudo mv mcp-ironbase-server /usr/local/bin/
 
 # Windows (PowerShell)
-Invoke-WebRequest -Uri https://github.com/peti12345/MongoLite/releases/latest/download/mcp-ironbase-server-windows-x64.zip -OutFile mcp-server.zip
+Invoke-WebRequest -Uri https://github.com/petitan/IronBase/releases/latest/download/mcp-ironbase-server-windows-x64.zip -OutFile mcp-server.zip
 Expand-Archive mcp-server.zip -DestinationPath .
 # Add to PATH or move to desired location
 ```
@@ -33,7 +33,7 @@ Expand-Archive mcp-server.zip -DestinationPath .
 ### Build from Source
 
 ```bash
-git clone https://github.com/peti12345/MongoLite.git
+git clone https://github.com/petitan/IronBase.git
 cd MongoLite/mcp-server
 cargo build --release
 # Binary: ./target/release/mcp-ironbase-server
