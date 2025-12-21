@@ -3220,8 +3220,8 @@ impl App {
     }
 
     async fn refresh_documents_inner(&mut self) -> anyhow::Result<()> {
-        let (coll_name, needs_details) = match self.collections.get(self.selected_collection) {
-            Some(coll) => (coll.name.clone(), !coll.is_loaded()),
+        let coll_name = match self.collections.get(self.selected_collection) {
+            Some(coll) => coll.name.clone(),
             None => return Ok(()),
         };
 
@@ -3241,8 +3241,13 @@ impl App {
                 .await?;
             self.documents = docs;
 
-            // Lazy load: only fetch details if not already loaded (skip if filtering)
-            if needs_details && self.active_filter.is_none() {
+            // BUG FIX: Always refresh total_docs, not just when needs_details
+            if let Some(filter) = &self.active_filter {
+                // When filter is active, count matching documents
+                let count = db.count_with_query(&coll_name, filter).await.unwrap_or(0);
+                self.total_docs = count;
+            } else {
+                // No filter - get total collection count
                 let (doc_count, index_names) = db.load_collection_details(&coll_name).await?;
                 self.total_docs = doc_count;
 
@@ -3254,14 +3259,7 @@ impl App {
 
                 // Update index_state for UI display
                 self.index_state.indexes = index_names;
-            } else if self.active_filter.is_none() {
-                // Use cached count ONLY when not filtering
-                // (filtered total_docs is set by execute_filter_async)
-                if let Some(coll) = self.collections.get(self.selected_collection) {
-                    self.total_docs = coll.doc_count.unwrap_or(0);
-                }
             }
-            // When active_filter is set, total_docs is preserved from execute_filter_async
 
             // BUG FIX: Validate selected_document after refresh
             // If document count decreased, selected_document might be out of bounds
