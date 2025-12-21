@@ -114,39 +114,38 @@ fn load_rustls_config(
         return Err(format!("No valid certificates found in '{}'", cert_path).into());
     }
 
-    // Read private key file - try PKCS8 first
-    let key_file = std::fs::File::open(key_path)
-        .map_err(|e| format!("Failed to open key file '{}': {}", key_path, e))?;
-    let mut key_reader = BufReader::new(key_file);
+    // BUG #8 fix: Read key file once into memory, then try different formats
+    // This avoids reopening the file and potential handle leaks on Windows
+    let key_contents = std::fs::read(key_path)
+        .map_err(|e| format!("Failed to read key file '{}': {}", key_path, e))?;
 
-    let pkcs8_keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+    // Try PKCS8 format first
+    let pkcs8_keys: Vec<_> = rustls_pemfile::pkcs8_private_keys(&mut key_contents.as_slice())
         .filter_map(|r| r.ok())
         .collect();
 
     let key_der: Vec<u8> = if !pkcs8_keys.is_empty() {
-        pkcs8_keys
-            .into_iter()
-            .next()
-            .unwrap()
-            .secret_pkcs8_der()
-            .to_vec()
+        // BUG #14 fix: Use if-let instead of unwrap (can't fail since we checked is_empty)
+        if let Some(key) = pkcs8_keys.into_iter().next() {
+            key.secret_pkcs8_der().to_vec()
+        } else {
+            return Err(format!("No valid PKCS8 keys in '{}'", key_path).into());
+        }
     } else {
-        // Try RSA key format
-        let key_file = std::fs::File::open(key_path)?;
-        let mut key_reader = BufReader::new(key_file);
-        let rsa_keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut key_reader)
+        // Try RSA key format (reuse the same bytes in memory)
+        let rsa_keys: Vec<_> = rustls_pemfile::rsa_private_keys(&mut key_contents.as_slice())
             .filter_map(|r| r.ok())
             .collect();
 
         if rsa_keys.is_empty() {
             return Err(format!("No valid private keys found in '{}'", key_path).into());
         }
-        rsa_keys
-            .into_iter()
-            .next()
-            .unwrap()
-            .secret_pkcs1_der()
-            .to_vec()
+        // BUG #14 fix: Use if-let instead of unwrap
+        if let Some(key) = rsa_keys.into_iter().next() {
+            key.secret_pkcs1_der().to_vec()
+        } else {
+            return Err(format!("No valid RSA keys in '{}'", key_path).into());
+        }
     };
 
     // Build rustls config

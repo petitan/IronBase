@@ -140,6 +140,31 @@ fn validate_collection_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// BUG #12 fix: Validate script name (same rules as collection name)
+fn validate_script_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        return Err(McpError::InvalidParams(
+            "Script name cannot be empty".into(),
+        ));
+    }
+    if name.len() > MAX_COLLECTION_NAME_LEN {
+        return Err(McpError::InvalidParams(format!(
+            "Script name too long (max {} chars)",
+            MAX_COLLECTION_NAME_LEN
+        )));
+    }
+    // Check for invalid characters (allow alphanumeric, underscore, dot, hyphen)
+    if !name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+    {
+        return Err(McpError::InvalidParams(
+            "Script name can only contain alphanumeric characters, underscores, dots, and hyphens".into()
+        ));
+    }
+    Ok(())
+}
+
 /// Get the list of all available tools for MCP tools/list
 pub fn get_tools_list() -> Value {
     json!({
@@ -1601,7 +1626,7 @@ pub fn dispatch_tool(
             let min_score = params.get("min_score").and_then(|v| v.as_f64());
 
             // Parse projection: {"field": 1} or {"field": 0}
-            // Accepts integers and floats (1.0 → 1), rejects strings and other types
+            // BUG #10 fix: Validate BEFORE casting to prevent silent truncation
             let projection: Option<std::collections::HashMap<String, i32>> =
                 if let Some(proj_value) = params.get("projection") {
                     if proj_value.is_null() {
@@ -1609,22 +1634,34 @@ pub fn dispatch_tool(
                     } else if let Some(obj) = proj_value.as_object() {
                         let mut map = std::collections::HashMap::new();
                         for (k, v) in obj {
+                            // BUG #10 fix: Check exact values BEFORE casting
                             let int_val = if let Some(i) = v.as_i64() {
+                                // Validate integer is exactly 0 or 1 before casting
+                                if i != 0 && i != 1 {
+                                    return Err(McpError::InvalidParams(format!(
+                                        "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                        k, i
+                                    )));
+                                }
                                 i as i32
                             } else if let Some(f) = v.as_f64() {
-                                f as i32 // 1.0 → 1, 0.0 → 0
+                                // Validate float is exactly 0.0 or 1.0 (no truncation)
+                                if f == 0.0 {
+                                    0
+                                } else if f == 1.0 {
+                                    1
+                                } else {
+                                    return Err(McpError::InvalidParams(format!(
+                                        "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                        k, f
+                                    )));
+                                }
                             } else {
                                 return Err(McpError::InvalidParams(format!(
                                     "Invalid projection value for '{}': expected 0 or 1, got {:?}",
                                     k, v
                                 )));
                             };
-                            if int_val != 0 && int_val != 1 {
-                                return Err(McpError::InvalidParams(format!(
-                                    "Invalid projection value for '{}': expected 0 or 1, got {}",
-                                    k, int_val
-                                )));
-                            }
                             map.insert(k.clone(), int_val);
                         }
                         Some(map)
@@ -1704,6 +1741,7 @@ pub fn dispatch_tool(
         // Script Management
         "script_save" => {
             let name = get_string(&params, "name")?;
+            validate_script_name(&name)?; // BUG #12 fix: Validate script name
             let code = get_string(&params, "code")?;
             let description = params.get("description").and_then(|v| v.as_str());
             let tags: Option<Vec<String>> = params.get("tags").and_then(|v| {

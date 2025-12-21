@@ -82,12 +82,19 @@ impl ApiKeyCache {
     }
 
     /// Internal refresh implementation
+    /// BUG #6 fix: Log warnings instead of silently ignoring initialization errors
     fn do_refresh(&self, adapter: &Arc<IronBaseAdapter>) {
         // Ensure the _system.api_keys collection exists
-        let _ = adapter.create_system_collection("_system.api_keys");
+        if let Err(e) = adapter.create_system_collection("_system.api_keys") {
+            // Collection might already exist - log at debug level
+            tracing::debug!("API key collection init: {}", e);
+        }
 
         // Create index on 'key' field for fast lookup
-        let _ = adapter.create_index("_system.api_keys", "key", true);
+        if let Err(e) = adapter.create_index("_system.api_keys", "key", true) {
+            // Index might already exist - log at debug level
+            tracing::debug!("API key index init: {}", e);
+        }
 
         // Load all enabled keys
         let options = FindOptions::default();
@@ -213,7 +220,9 @@ pub fn create_api_key(
     };
 
     // Insert into database as JSON Value
-    let doc = serde_json::to_value(&api_key).unwrap();
+    // BUG #4 fix: Handle serialization error instead of panic
+    let doc = serde_json::to_value(&api_key)
+        .map_err(|e| format!("Failed to serialize API key: {}", e))?;
 
     adapter
         .insert_one("_system.api_keys", doc)

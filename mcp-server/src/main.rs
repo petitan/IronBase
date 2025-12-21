@@ -167,6 +167,8 @@ async fn main() {
 /// - Windows: %LOCALAPPDATA%\IronBase\data\ironbase_data.mlite
 /// - Linux: /var/lib/ironbase/ironbase_data.mlite
 /// - macOS: /usr/local/var/ironbase/ironbase_data.mlite
+///
+/// BUG #13 fix: Log warnings when directory creation fails instead of silent ignore
 fn get_default_db_path() -> String {
     #[cfg(target_os = "windows")]
     {
@@ -175,7 +177,9 @@ fn get_default_db_path() -> String {
             path.push("IronBase");
             path.push("data");
             // Create directory if it doesn't exist
-            let _ = std::fs::create_dir_all(&path);
+            if let Err(e) = std::fs::create_dir_all(&path) {
+                eprintln!("Warning: Failed to create data directory {:?}: {}", path, e);
+            }
             path.push("ironbase_data.mlite");
             return path.to_string_lossy().to_string();
         }
@@ -185,7 +189,9 @@ fn get_default_db_path() -> String {
     {
         let path = PathBuf::from("/usr/local/var/ironbase/ironbase_data.mlite");
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("Warning: Failed to create data directory {:?}: {}", parent, e);
+            }
         }
         return path.to_string_lossy().to_string();
     }
@@ -194,7 +200,9 @@ fn get_default_db_path() -> String {
     {
         let path = PathBuf::from("/var/lib/ironbase/ironbase_data.mlite");
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("Warning: Failed to create data directory {:?}: {}", parent, e);
+            }
         }
         return path.to_string_lossy().to_string();
     }
@@ -260,11 +268,10 @@ fn run_stdio_server(cli: &Cli) {
             Err(e) => {
                 let error_response =
                     create_error_response(-32700, &format!("Parse error: {}", e), None);
-                let _ = writeln!(
-                    stdout,
-                    "{}",
-                    serde_json::to_string(&error_response).unwrap()
-                );
+                // BUG #14 fix: Handle JSON serialization errors gracefully
+                let response_str = serde_json::to_string(&error_response)
+                    .unwrap_or_else(|_| r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"}}"#.to_string());
+                let _ = writeln!(stdout, "{}", response_str);
                 let _ = stdout.flush();
                 continue;
             }
@@ -272,8 +279,14 @@ fn run_stdio_server(cli: &Cli) {
 
         // Handle request with lifecycle enforcement
         if let Some(response) = handle_request(&request, &adapter, &mut initialized) {
+            // BUG #14 fix: Handle JSON serialization errors gracefully
+            let response_str = serde_json::to_string(&response)
+                .unwrap_or_else(|e| {
+                    eprintln!("Response serialization error: {}", e);
+                    r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal error"}}"#.to_string()
+                });
             // Write response only for requests, not notifications
-            if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(&response).unwrap()) {
+            if let Err(e) = writeln!(stdout, "{}", response_str) {
                 eprintln!("Write error: {}", e);
             }
             let _ = stdout.flush();
@@ -308,21 +321,27 @@ fn handle_request(
         "initialize" => {
             *initialized = true;
             eprintln!("Server initialized");
-            Some(create_success_response(
-                serde_json::to_value(InitializeResult {
-                    protocol_version: "2025-06-18".to_string(),
-                    capabilities: Capabilities {
-                        tools: serde_json::json!({"listChanged": false}),
-                        prompts: serde_json::json!({"listChanged": false}),
-                    },
-                    server_info: ServerInfo {
-                        name: "ironbase-mcp".to_string(),
-                        version: VERSION.to_string(),
-                    },
+            // BUG #14 fix: Handle serialization error gracefully
+            let init_result = serde_json::to_value(InitializeResult {
+                protocol_version: "2025-06-18".to_string(),
+                capabilities: Capabilities {
+                    tools: serde_json::json!({"listChanged": false}),
+                    prompts: serde_json::json!({"listChanged": false}),
+                },
+                server_info: ServerInfo {
+                    name: "ironbase-mcp".to_string(),
+                    version: VERSION.to_string(),
+                },
+            })
+            .unwrap_or_else(|e| {
+                eprintln!("Initialize result serialization error: {}", e);
+                serde_json::json!({
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "serverInfo": {"name": "ironbase-mcp", "version": VERSION}
                 })
-                .unwrap(),
-                request.id.clone(),
-            ))
+            });
+            Some(create_success_response(init_result, request.id.clone()))
         }
 
         "initialized" | "notifications/initialized" => {

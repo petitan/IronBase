@@ -227,11 +227,15 @@ impl IronBaseAdapter {
 
     /// Switch to a different database file
     /// Returns the new database path on success
+    /// BUG #3 fix: Acquire write lock BEFORE existence check to prevent TOCTOU race
     pub fn switch_database(&self, new_path: &str, create_if_missing: bool) -> Result<String> {
         use crate::error::McpError;
         let path = std::path::Path::new(new_path);
 
-        // Validate path
+        // BUG #3 fix: Acquire write lock FIRST to make existence check + open atomic
+        let mut db_guard = self.db.write();
+
+        // Validate path (now atomic with the lock held)
         if !create_if_missing && !path.exists() {
             return Err(McpError::InvalidParams(format!(
                 "Database file does not exist: {}",
@@ -255,15 +259,13 @@ impl IronBaseAdapter {
             }
         }
 
-        // Open new database (creates if needed)
+        // Open new database (creates if needed) - still under write lock
         let new_db = DatabaseCore::open(path)
             .map_err(|e| McpError::Internal(format!("Failed to open database: {}", e)))?;
 
-        // Swap the database (write lock)
-        {
-            let mut db_guard = self.db.write();
-            *db_guard = new_db;
-        }
+        // Swap the database (already holding write lock)
+        *db_guard = new_db;
+        drop(db_guard); // Explicitly release db lock before acquiring path lock
 
         // Update path
         {
@@ -656,6 +658,7 @@ impl IronBaseAdapter {
     }
 
     /// Set collection flags (only sets flags that are Some)
+    /// BUG #9 fix: Use write lock for flag modification (was read lock - race condition)
     pub fn set_collection_flags(
         &self,
         collection: &str,
@@ -663,7 +666,7 @@ impl IronBaseAdapter {
         protected: Option<bool>,
         hidden: Option<bool>,
     ) -> Result<()> {
-        let db = self.db.read();
+        let db = self.db.write();
         // Get existing flags first
         let mut flags = db.get_collection_flags(collection).unwrap_or_default();
 
@@ -701,15 +704,17 @@ impl IronBaseAdapter {
     }
 
     /// Commit a transaction
+    /// BUG #1 fix: Use write lock for transaction commit (was read lock - race condition)
     pub fn commit_transaction(&self, tx_id: u64) -> Result<()> {
-        let db = self.db.read();
+        let db = self.db.write();
         db.commit_transaction(tx_id)?;
         Ok(())
     }
 
     /// Rollback a transaction
+    /// BUG #1 fix: Use write lock for transaction rollback (was read lock - race condition)
     pub fn rollback_transaction(&self, tx_id: u64) -> Result<()> {
-        let db = self.db.read();
+        let db = self.db.write();
         db.rollback_transaction(tx_id)?;
         Ok(())
     }

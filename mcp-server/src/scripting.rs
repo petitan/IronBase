@@ -134,10 +134,11 @@ impl ScriptManager {
                 .insert_one(SCRIPT_VERSIONS_COLLECTION, version_doc)?;
 
             // Update existing script with incremented version
+            // BUG #5 fix: Use optimistic locking - include version in filter to detect concurrent updates
             let new_ver = existing_script.version + 1;
-            self.adapter.update_one(
+            let update_result = self.adapter.update_one(
                 SCRIPTS_COLLECTION,
-                json!({"_id": name}),
+                json!({"_id": name, "version": existing_script.version}), // Version check for optimistic locking
                 json!({
                     "$set": {
                         "code": code,
@@ -149,6 +150,14 @@ impl ScriptManager {
                     }
                 }),
             )?;
+
+            // BUG #5 fix: Check if update matched - if not, concurrent modification occurred
+            if update_result.matched_count == 0 {
+                return Err(McpError::ScriptError(format!(
+                    "Script '{}' was modified by another request. Please retry.",
+                    name
+                )));
+            }
             new_ver
         } else {
             // Insert new script with version 1
@@ -388,7 +397,28 @@ impl ScriptManager {
     }
 
     /// Delete a script by name (also deletes version history)
+    /// BUG #7 fix: Check for dependent scripts before deletion
     pub fn delete(&self, name: &str) -> Result<bool> {
+        // BUG #7 fix: Check if any scripts depend on this one
+        let dependents = self.adapter.find(
+            SCRIPTS_COLLECTION,
+            json!({"dependencies": name}),
+            AdapterFindOptions::default(),
+        )?;
+
+        if !dependents.documents.is_empty() {
+            let dependent_names: Vec<String> = dependents
+                .documents
+                .iter()
+                .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect();
+            return Err(McpError::ScriptError(format!(
+                "Cannot delete '{}': scripts depend on it: {}",
+                name,
+                dependent_names.join(", ")
+            )));
+        }
+
         // Delete version history first
         self.adapter
             .delete_many(SCRIPT_VERSIONS_COLLECTION, json!({"script_name": name}))?;
@@ -799,10 +829,13 @@ impl RhaiEngine {
         let mut engine = Engine::new();
 
         // Security: Disable dangerous operations with configurable limit
-        // Note: 0 means no limit (DANGEROUS for untrusted scripts!)
-        if options.max_operations > 0 {
-            engine.set_max_operations(options.max_operations);
-        }
+        // BUG #2 fix: Always apply operation limit - use default if 0 to prevent DoS
+        let max_ops = if options.max_operations > 0 {
+            options.max_operations
+        } else {
+            DEFAULT_MAX_OPERATIONS // Use default instead of unlimited (DoS protection)
+        };
+        engine.set_max_operations(max_ops);
 
         // Create logs collector (Arc<Mutex> for thread safety)
         let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
