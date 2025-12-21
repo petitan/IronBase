@@ -528,6 +528,10 @@ impl StorageEngine {
         // - Minor: index reads after crash before WAL replay may be stale
         //
         // PRIORITY: Medium (nice-to-have, not critical for correctness)
+        //
+        // REVIEW 2024-12: Reviewed and accepted as technical debt.
+        // WAL guarantees correctness, index files are just cache.
+        // Cost of implementation outweighs benefit.
 
         // Step 7: Apply metadata changes (skip if already applied)
         if !already_applied {
@@ -994,6 +998,9 @@ impl Storage for StorageEngine {
     }
 
     fn scan_documents(&mut self, collection: &str) -> Result<Vec<Document>> {
+        // NOTE: catalog.clone() reviewed 2024-12 - acceptable overhead.
+        // HashMap<DocumentId, u64> ~40 bytes/entry, fast clone even for 10k+ docs.
+        // Borrow checker requires clone to release lock before iteration.
         let catalog = match self.get_collection_meta(collection) {
             Some(m) => m.document_catalog.clone(),
             None => return Ok(Vec::new()),

@@ -1267,9 +1267,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Explain query execution plan without executing
     pub fn explain(&self, query_json: &Value) -> Result<Value> {
         let indexes = self.indexes.read();
-        let available_indexes = indexes.list_indexes();
+        let index_fields = indexes.list_indexes_with_compound_info();
 
-        let plan = QueryPlanner::explain_query(query_json, &available_indexes);
+        let plan = QueryPlanner::explain_query_with_fields(query_json, &index_fields);
         Ok(plan)
     }
 

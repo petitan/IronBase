@@ -35,6 +35,13 @@ pub struct QueryPlanner;
 impl QueryPlanner {
     /// Analyze a query and determine if an index can be used
     /// Returns (field_name, QueryPlan) if an index opportunity is found
+    ///
+    /// DEPRECATED: Use analyze_query_with_fields() for compound index support
+    #[deprecated(
+        since = "0.3.0",
+        note = "use analyze_query_with_fields for compound index support"
+    )]
+    #[allow(dead_code)]
     pub fn analyze_query(
         query_json: &Value,
         available_indexes: &[String],
@@ -81,6 +88,9 @@ impl QueryPlanner {
     }
 
     /// Analyze query for range operators ($gt, $gte, $lt, $lte)
+    ///
+    /// DEPRECATED: Used by deprecated analyze_query()
+    #[allow(dead_code)]
     fn analyze_range_query(
         query_json: &Value,
         available_indexes: &[String],
@@ -147,6 +157,7 @@ impl QueryPlanner {
     /// (prefix) field of a compound index.
     ///
     /// Use find_index_for_field_v2 with index_fields parameter instead.
+    #[allow(dead_code)]
     fn find_index_for_field(field: &str, available_indexes: &[String]) -> Option<String> {
         // Look for index ending with _{field}
         available_indexes
@@ -282,9 +293,18 @@ impl QueryPlanner {
     }
 
     /// Create a query plan description for explain output
+    ///
+    /// DEPRECATED: Use explain_query_with_fields() for compound index support
+    #[deprecated(
+        since = "0.3.0",
+        note = "use explain_query_with_fields for compound index support"
+    )]
+    #[allow(deprecated)]
+    #[allow(dead_code)]
     pub fn explain_query(query_json: &Value, available_indexes: &[String]) -> Value {
         use serde_json::json;
 
+        #[allow(deprecated)]
         if let Some((field, plan)) = Self::analyze_query(query_json, available_indexes) {
             // Index-based plan
             match plan {
@@ -339,9 +359,76 @@ impl QueryPlanner {
             })
         }
     }
+
+    /// Create a query plan description for explain output (v2 - compound index aware)
+    ///
+    /// Uses the new compound-index-aware query analysis for accurate explain output.
+    pub fn explain_query_with_fields(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+    ) -> Value {
+        use serde_json::json;
+
+        if let Some((field, plan)) = Self::analyze_query_with_fields(query_json, index_fields) {
+            // Index-based plan
+            match plan {
+                QueryPlan::IndexScan {
+                    ref index_name,
+                    ref key,
+                    is_compound,
+                    ..
+                } => {
+                    json!({
+                        "queryPlan": if is_compound { "CompoundIndexScan" } else { "IndexScan" },
+                        "indexUsed": index_name,
+                        "field": field,
+                        "stage": "FETCH_WITH_INDEX",
+                        "indexType": if is_compound { "compound_prefix" } else { "equality" },
+                        "searchKey": format!("{:?}", key),
+                        "estimatedCost": "O(log n)",
+                    })
+                }
+                QueryPlan::IndexRangeScan {
+                    ref index_name,
+                    ref start,
+                    ref end,
+                    inclusive_start,
+                    inclusive_end,
+                    ..
+                } => {
+                    json!({
+                        "queryPlan": "IndexRangeScan",
+                        "indexUsed": index_name,
+                        "field": field,
+                        "stage": "FETCH_WITH_INDEX",
+                        "indexType": "range",
+                        "range": {
+                            "start": format!("{:?}", start),
+                            "end": format!("{:?}", end),
+                            "inclusiveStart": inclusive_start,
+                            "inclusiveEnd": inclusive_end,
+                        },
+                        "estimatedCost": "O(log n + k)",
+                    })
+                }
+            }
+        } else {
+            // No index available
+            let available: Vec<&str> = index_fields.iter().map(|i| i.index_name.as_str()).collect();
+            json!({
+                "queryPlan": "CollectionScan",
+                "indexUsed": null,
+                "stage": "FULL_SCAN",
+                "reason": "No suitable index found for query",
+                "estimatedCost": "O(n)",
+                "availableIndexes": available,
+            })
+        }
+    }
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use serde_json::json;
