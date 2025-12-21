@@ -77,29 +77,25 @@ impl QueryCache {
     /// Automatically evicts LRU entry if cache is full and maintains
     /// the reverse index for collection-level invalidation.
     pub fn insert(&self, collection: &str, query_hash: QueryHash, doc_ids: Vec<DocumentId>) {
+        // BUG #3 fix: Acquire both locks upfront to avoid TOCTOU race condition
+        // Lock ordering: always cache first, then collection_index (prevents deadlock)
         let mut cache = self.cache.write();
+        let mut coll_index = self.collection_index.write();
 
         // Handle LRU eviction: if at capacity and inserting new key, clean up reverse index
         if cache.len() >= self.capacity && !cache.contains(&query_hash) {
             if let Some((evicted_hash, _)) = cache.peek_lru() {
                 let evicted_hash = *evicted_hash;
-                // Remove from all collection indexes (we don't track which collection it belonged to)
-                // This is O(collections * entries_per_collection) but happens rarely
-                drop(cache); // Release cache lock before acquiring collection_index lock
-                let mut coll_index = self.collection_index.write();
+                // Remove from all collection indexes atomically
                 for hashes in coll_index.values_mut() {
                     hashes.remove(&evicted_hash);
                 }
-                drop(coll_index);
-                cache = self.cache.write(); // Re-acquire cache lock
             }
         }
 
         cache.put(query_hash, doc_ids);
-        drop(cache);
 
         // Update reverse index
-        let mut coll_index = self.collection_index.write();
         coll_index
             .entry(collection.to_string())
             .or_default()
@@ -112,14 +108,13 @@ impl QueryCache {
     /// Only invalidates queries belonging to the specified collection,
     /// leaving other collections' cached queries intact.
     pub fn invalidate_collection(&self, collection: &str) {
-        // Get query hashes for this collection
+        // BUG #3 fix: Use same lock ordering as insert() to prevent deadlock
+        // Lock ordering: always cache first, then collection_index
+        let mut cache = self.cache.write();
         let mut coll_index = self.collection_index.write();
-        let hashes_to_remove = coll_index.remove(collection);
-        drop(coll_index);
 
-        // Remove from LRU cache
-        if let Some(hashes) = hashes_to_remove {
-            let mut cache = self.cache.write();
+        // Get and remove query hashes for this collection
+        if let Some(hashes) = coll_index.remove(collection) {
             for hash in hashes {
                 cache.pop(&hash);
             }

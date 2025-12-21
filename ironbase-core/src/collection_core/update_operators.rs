@@ -91,11 +91,18 @@ fn apply_inc(document: &mut Document, fields: &Value) -> Result<bool> {
 
         // Try int first to preserve integer types
         if let (Some(curr_int), Some(inc_int)) = (current.as_i64(), inc_value.as_i64()) {
-            document.set_nested(field, Value::from(curr_int + inc_int));
+            // Use saturating_add to prevent overflow (BUG #2 fix)
+            document.set_nested(field, Value::from(curr_int.saturating_add(inc_int)));
             modified = true;
         } else if let (Some(curr_num), Some(inc_num)) = (current.as_f64(), inc_value.as_f64()) {
             document.set_nested(field, Value::from(curr_num + inc_num));
             modified = true;
+        } else if !inc_value.is_number() {
+            // BUG #4 fix: Return error for non-numeric increment value
+            return Err(MongoLiteError::InvalidQuery(format!(
+                "$inc value must be numeric, got: {}",
+                inc_value
+            )));
         }
     }
     Ok(modified)
@@ -269,10 +276,11 @@ fn parse_push_modifiers(value: &Value) -> (Vec<Value>, Option<usize>, Option<i64
             vec![value.clone()]
         };
 
+        // BUG #5 fix: Validate position is non-negative before converting to usize
         let position = modifiers
             .get("$position")
             .and_then(|v| v.as_i64())
-            .map(|p| p as usize);
+            .and_then(|p| if p >= 0 { Some(p as usize) } else { None });
 
         let slice = modifiers.get("$slice").and_then(|v| v.as_i64());
 
@@ -367,7 +375,7 @@ pub fn value_matches_condition(value: &Value, condition: &Value) -> bool {
                             true
                         }
                     }
-                    _ => true, // Unknown operator, treat as match
+                    _ => false, // Unknown operator: treat as no match (safe default)
                 };
 
                 if !matches {
@@ -383,9 +391,15 @@ pub fn value_matches_condition(value: &Value, condition: &Value) -> bool {
 }
 
 /// Compare two JSON values for ordering
+/// BUG #6 fix: Use integer comparison when both values are integers to preserve precision
 fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
         (Value::Number(n1), Value::Number(n2)) => {
+            // Try integer comparison first to preserve precision for large integers
+            if let (Some(i1), Some(i2)) = (n1.as_i64(), n2.as_i64()) {
+                return Some(i1.cmp(&i2));
+            }
+            // Fall back to float comparison
             let f1 = n1.as_f64()?;
             let f2 = n2.as_f64()?;
             f1.partial_cmp(&f2)

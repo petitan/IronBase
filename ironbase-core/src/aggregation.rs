@@ -1140,21 +1140,16 @@ impl Accumulator {
 
             Accumulator::Max(field) => compute_extremum(docs, field, false),
 
-            Accumulator::First(field) => docs
+            // BUG #7 fix: Return null instead of error when field is missing (MongoDB behavior)
+            Accumulator::First(field) => Ok(docs
                 .first()
-                // Use get_nested_value to support dot notation
                 .and_then(|doc| get_nested_value(doc, field).cloned())
-                .ok_or_else(|| {
-                    MongoLiteError::AggregationError("No documents in group".to_string())
-                }),
+                .unwrap_or(Value::Null)),
 
-            Accumulator::Last(field) => docs
+            Accumulator::Last(field) => Ok(docs
                 .last()
-                // Use get_nested_value to support dot notation
                 .and_then(|doc| get_nested_value(doc, field).cloned())
-                .ok_or_else(|| {
-                    MongoLiteError::AggregationError("No documents in group".to_string())
-                }),
+                .unwrap_or(Value::Null)),
 
             Accumulator::Push(field) => {
                 // Collect all values from the field into an array
