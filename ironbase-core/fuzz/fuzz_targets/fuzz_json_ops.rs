@@ -2,11 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use ironbase_core::DatabaseCore;
 use ironbase_core::storage::MemoryStorage;
-use ironbase_core::storage::Storage;
-use ironbase_core::CollectionCore;
-use parking_lot::RwLock;
-use std::sync::Arc;
 use std::collections::HashMap;
 use serde_json::json;
 
@@ -29,15 +26,8 @@ fuzz_target!(|ops: Vec<FuzzOp>| {
         return;
     }
 
-    let storage = Arc::new(RwLock::new(MemoryStorage::new()));
-
-    {
-        let mut s = storage.write();
-        let _ = s.create_collection("fuzz_ops");
-    }
-
-    let collection = match CollectionCore::new("fuzz_ops".to_string(), Arc::clone(&storage)) {
-        Ok(c) => c,
+    let db = match DatabaseCore::<MemoryStorage>::open_memory() {
+        Ok(db) => db,
         Err(_) => return,
     };
 
@@ -50,8 +40,14 @@ fuzz_target!(|ops: Vec<FuzzOp>| {
             ("name".to_string(), json!(format!("doc_{}", i))),
             ("tags".to_string(), json!(["a", "b", "c"])),
         ]);
-        let _ = collection.insert_one(doc);
+        let _ = db.insert_one("fuzz_ops", doc);
     }
+
+    // Get collection for query operations
+    let collection = match db.collection("fuzz_ops") {
+        Ok(c) => c,
+        Err(_) => return,
+    };
 
     // Apply fuzzed operations
     for op in ops {
@@ -73,37 +69,37 @@ fuzz_target!(|ops: Vec<FuzzOp>| {
             // $set
             0 => {
                 let update = json!({"$set": {&field: op.int_value}});
-                let _ = collection.update_one(&query, &update);
+                let _ = db.update_one("fuzz_ops", &query, &update);
             }
             // $inc
             1 => {
                 let update = json!({"$inc": {&field: op.int_value}});
-                let _ = collection.update_one(&query, &update);
+                let _ = db.update_one("fuzz_ops", &query, &update);
             }
             // $unset
             2 => {
                 let update = json!({"$unset": {&field: ""}});
-                let _ = collection.update_one(&query, &update);
+                let _ = db.update_one("fuzz_ops", &query, &update);
             }
             // $push
             3 => {
                 let update = json!({"$push": {"tags": op.string_value}});
-                let _ = collection.update_one(&query, &update);
+                let _ = db.update_one("fuzz_ops", &query, &update);
             }
             // $pull
             4 => {
                 let update = json!({"$pull": {"tags": op.string_value}});
-                let _ = collection.update_one(&query, &update);
+                let _ = db.update_one("fuzz_ops", &query, &update);
             }
             // $addToSet
             5 => {
                 let update = json!({"$addToSet": {"tags": op.string_value}});
-                let _ = collection.update_one(&query, &update);
+                let _ = db.update_one("fuzz_ops", &query, &update);
             }
             // $pop
             6 => {
                 let update = json!({"$pop": {"tags": if op.int_value > 0 { 1 } else { -1 }}});
-                let _ = collection.update_one(&query, &update);
+                let _ = db.update_one("fuzz_ops", &query, &update);
             }
             // Query operators
             7 => {
@@ -140,7 +136,7 @@ fuzz_target!(|ops: Vec<FuzzOp>| {
             // Delete
             13 => {
                 let q = json!({&field: op.int_value});
-                let _ = collection.delete_one(&q);
+                let _ = db.delete_one("fuzz_ops", &q);
             }
             // Insert with fuzzed data
             14 => {
@@ -149,7 +145,7 @@ fuzz_target!(|ops: Vec<FuzzOp>| {
                     ("fuzz_str".to_string(), json!(op.string_value)),
                     ("fuzz_float".to_string(), json!(op.float_value)),
                 ]);
-                let _ = collection.insert_one(doc);
+                let _ = db.insert_one("fuzz_ops", doc);
             }
             _ => {}
         }

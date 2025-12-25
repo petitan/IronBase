@@ -52,3 +52,24 @@ path = "fuzz_targets/fuzz_json_ops.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_aggregation"
+path = "fuzz_targets/fuzz_aggregation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_storage_format"
+path = "fuzz_targets/fuzz_storage_format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fulltext"
+path = "fuzz_targets/fuzz_fulltext.rs"
+test = false
+doc = false
+bench = false

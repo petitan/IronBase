@@ -2,11 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use ironbase_core::document::Document;
+use ironbase_core::DatabaseCore;
 use ironbase_core::storage::MemoryStorage;
-use ironbase_core::storage::Storage;
-use ironbase_core::CollectionCore;
-use parking_lot::RwLock;
-use std::sync::Arc;
 use std::collections::HashMap;
 
 // Fuzz target: Document parsing and insertion
@@ -22,24 +19,20 @@ fuzz_target!(|data: &[u8]| {
 
         // Test document insertion with arbitrary JSON
         if doc_value.is_object() {
-            let storage = Arc::new(RwLock::new(MemoryStorage::new()));
+            let db = match DatabaseCore::<MemoryStorage>::open_memory() {
+                Ok(db) => db,
+                Err(_) => return,
+            };
 
-            {
-                let mut s = storage.write();
-                let _ = s.create_collection("fuzz_doc");
-            }
+            // Convert to HashMap for insertion
+            if let Some(obj) = doc_value.as_object() {
+                let doc: HashMap<String, serde_json::Value> = obj
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
 
-            if let Ok(collection) = CollectionCore::new("fuzz_doc".to_string(), Arc::clone(&storage)) {
-                // Convert to HashMap for insertion
-                if let Some(obj) = doc_value.as_object() {
-                    let doc: HashMap<String, serde_json::Value> = obj
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-
-                    // Insert should not panic
-                    let _ = collection.insert_one(doc);
-                }
+                // Insert should not panic
+                let _ = db.insert_one("fuzz_doc", doc);
             }
         }
     }
