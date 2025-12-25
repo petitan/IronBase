@@ -606,6 +606,61 @@ Listeners integrate with ACL - each interface type (localhost/internal/external)
 - `mcp-server/src/listener.rs` - Listener configuration and management
 - `mcp-server/src/tools.rs:2538-2690` - Listener tool handlers
 
+### System Collections (`_system.*`)
+
+Protected collections for internal server configuration.
+
+**Available System Collections:**
+| Collection | Purpose | Read Access | Write Access |
+|------------|---------|-------------|--------------|
+| `_system.scripts` | Rhai script storage | localhost, internal, external | localhost only |
+| `_system.script_versions` | Script version history | localhost, internal, external | localhost only |
+| `_system.api_keys` | API key storage | localhost only | localhost only |
+| `_system.acl` | ACL rules | localhost only | localhost only |
+| `_system.listeners` | Listener configuration | localhost only | localhost only |
+
+**Protection Features:**
+- Hidden from `collection_list` output (filtered by `_system.` prefix)
+- Protected from `collection_drop` (requires `admin_drop_protected`)
+- Write operations restricted to localhost interface
+- `_system.scripts` readable from internal/external for script execution
+
+**Admin Tools for System Collections:**
+```bash
+# List ALL collections including system
+{"name": "admin_list_all_collections"}
+
+# Create new system collection
+{"name": "admin_create_system_collection", "arguments": {
+  "admin_key": "your-admin-key",
+  "name": "_system.custom"
+}}
+
+# Drop protected collection (DANGEROUS)
+{"name": "admin_drop_protected", "arguments": {
+  "admin_key": "your-admin-key",
+  "collection": "_system.old_data"
+}}
+
+# Set collection flags
+{"name": "admin_set_collection_flags", "arguments": {
+  "admin_key": "your-admin-key",
+  "collection": "users",
+  "hidden": true,
+  "protected": true
+}}
+```
+
+**Collection Flags:**
+| Flag | Effect |
+|------|--------|
+| `hidden` | Excluded from `collection_list` |
+| `protected` | Cannot be dropped with `collection_drop` |
+
+**Key Files:**
+- `mcp-server/src/adapter.rs:56-75` - System collection constants
+- `mcp-server/src/acl.rs:334-370` - System collection ACL rules
+
 ## Testing Strategy
 
 - **Test first** approach always
