@@ -2,10 +2,7 @@
 //!
 //! Provides HTTP server functionality that can be started with custom shutdown signals.
 
-use crate::acl::{
-    get_collection_from_args, get_required_permission, get_system_collection_for_tool,
-    requires_localhost, AclManager, CallerContext, InterfaceType,
-};
+use crate::acl::{AclManager, CallerContext};
 use crate::{shutdown, ApiKeyCache, IronBaseAdapter, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -345,7 +342,7 @@ async fn run_http_server_internal(
     }
 
     // Create ACL manager
-    let acl_manager = Arc::new(AclManager::new(adapter.clone()));
+    let acl_manager = AclManager::new(adapter.clone());
 
     // Initialize listener configuration in database
     {
@@ -356,22 +353,30 @@ async fn run_http_server_internal(
         }
     }
 
-    let app_state = Arc::new(HttpAppState {
-        adapter: adapter.clone(),
-        initialized: std::sync::atomic::AtomicBool::new(false),
-        api_key_cache,
-        require_api_key: config.require_api_key,
-        server_info: crate::ServerInfo {
-            protocol: if config.tls_enabled {
-                "https".to_string()
-            } else {
-                "http".to_string()
-            },
-            host: config.host.clone(),
-            port: config.port,
-            require_api_key: config.require_api_key,
+    // Create server info
+    let server_info = crate::ServerInfo {
+        protocol: if config.tls_enabled {
+            "https".to_string()
+        } else {
+            "http".to_string()
         },
+        host: config.host.clone(),
+        port: config.port,
+        require_api_key: config.require_api_key,
+    };
+
+    // Create central service layer
+    let service = Arc::new(crate::IronBaseService::new(
+        adapter.clone(),
         acl_manager,
+        api_key_cache,
+        server_info,
+        config.require_api_key,
+    ));
+
+    let app_state = Arc::new(HttpAppState {
+        service,
+        initialized: std::sync::atomic::AtomicBool::new(false),
     });
 
     // HTTP request handler
@@ -400,13 +405,9 @@ async fn run_http_server_internal(
 
         match handle_request(
             &request,
-            &state.adapter,
+            &state.service,
             &state.initialized,
             api_key.as_deref(),
-            &state.api_key_cache,
-            state.require_api_key,
-            &state.server_info,
-            &state.acl_manager,
             Some(remote_addr),
         ) {
             Some(response) => {
@@ -580,18 +581,11 @@ async fn run_http_server_internal(
 }
 
 struct HttpAppState {
-    adapter: Arc<IronBaseAdapter>,
+    /// Central service layer for tool execution
+    service: Arc<crate::IronBaseService>,
     /// MCP lifecycle state: track if initialize has been called
     /// Per spec: "The initialization phase MUST be the first interaction"
     initialized: std::sync::atomic::AtomicBool,
-    /// API key cache for validation
-    api_key_cache: ApiKeyCache,
-    /// Whether API key is required for tool calls
-    require_api_key: bool,
-    /// Server runtime info for db_stats
-    server_info: crate::ServerInfo,
-    /// ACL manager for collection-level permissions
-    acl_manager: Arc<AclManager>,
 }
 
 // MCP Request/Response types (duplicated from main.rs for lib independence)
@@ -667,19 +661,20 @@ struct ServerInfo {
     version: String,
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Handle MCP request using the service layer
+///
+/// This function handles MCP protocol routing and delegates tool execution
+/// to the IronBaseService for authentication, authorization, and dispatch.
 fn handle_request(
     request: &McpRequest,
-    adapter: &Arc<IronBaseAdapter>,
+    service: &crate::IronBaseService,
     initialized: &std::sync::atomic::AtomicBool,
     api_key: Option<&str>,
-    api_key_cache: &ApiKeyCache,
-    require_api_key: bool,
-    server_info: &crate::ServerInfo,
-    acl_manager: &AclManager,
     remote_addr: Option<std::net::SocketAddr>,
 ) -> Option<McpResponse> {
-    use crate::{dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list};
+    use crate::{
+        get_prompt_content, get_prompts_list, get_tools_list, ServiceContext, ToolRequest,
+    };
     use std::sync::atomic::Ordering;
 
     let is_notification = request.id.is_none() || matches!(&request.id, Some(v) if v.is_null());
@@ -696,38 +691,6 @@ fn handle_request(
             "Server not initialized. Call 'initialize' first.",
             request.id.clone(),
         ));
-    }
-
-    // API key validation for tools/call (except admin operations which use admin_key)
-    if require_api_key && request.method == "tools/call" {
-        // Check if this is an admin operation (these use admin_key, not api_key)
-        let is_admin_op = request
-            .params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .map(|name| name.starts_with("admin_"))
-            .unwrap_or(false);
-
-        if !is_admin_op {
-            match api_key {
-                None => {
-                    return Some(create_error_response(
-                        -32001, // Authentication required
-                        "API key required. Provide via 'Authorization: Bearer <key>' header or 'api_key' parameter.",
-                        request.id.clone(),
-                    ));
-                }
-                Some(key) => {
-                    if !api_key_cache.validate(key, adapter) {
-                        return Some(create_error_response(
-                            -32001, // Invalid authentication
-                            "Invalid API key.",
-                            request.id.clone(),
-                        ));
-                    }
-                }
-            }
-        }
     }
 
     match request.method.as_str() {
@@ -778,50 +741,16 @@ fn handle_request(
 
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
-            // ACL check before dispatch
+            // Create service context
             let caller = CallerContext::new(remote_addr, api_key.map(|s| s.to_string()));
+            let ctx = ServiceContext::new(caller, initialized.load(Ordering::SeqCst));
 
-            // Check localhost requirement for system tools (acl_*, listener_*)
-            if requires_localhost(&params.name) && caller.interface != InterfaceType::Localhost {
-                let response = serde_json::json!({
-                    "content": [{
-                        "type": "text",
-                        "text": format!("'{}' can only be called from localhost (current: {})", params.name, caller.interface)
-                    }],
-                    "isError": true
-                });
-                return Some(create_success_response(response, request.id.clone()));
-            }
+            // Create tool request
+            let tool_request = ToolRequest::new(&params.name, arguments);
 
-            // Determine which collection to check:
-            // 1. From tool arguments (for regular collection operations)
-            // 2. From tool name (for system tools like acl_*, listener_*)
-            let collection_to_check = get_collection_from_args(&arguments)
-                .or_else(|| get_system_collection_for_tool(&params.name).map(String::from));
-
-            // Check ACL if tool operates on a collection
-            if let Some(collection) = collection_to_check {
-                let required = get_required_permission(&params.name);
-                if let Err(e) = acl_manager.check(&collection, &caller, required) {
-                    let response = serde_json::json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!("Access denied: {}", e)
-                        }],
-                        "isError": true
-                    });
-                    return Some(create_success_response(response, request.id.clone()));
-                }
-            }
-
-            match dispatch_tool(
-                &params.name,
-                arguments,
-                adapter,
-                Some(api_key_cache),
-                Some(server_info),
-            ) {
-                Ok(result) => {
+            // Execute via service layer (handles auth, ACL, dispatch)
+            match service.execute_tool(&ctx, &tool_request) {
+                crate::ToolResult::Success(result) => {
                     let response = serde_json::json!({
                         "content": [{
                             "type": "text",
@@ -830,11 +759,26 @@ fn handle_request(
                     });
                     Some(create_success_response(response, request.id.clone()))
                 }
-                Err(e) => {
+                crate::ToolResult::Error { code, message } => {
                     let response = serde_json::json!({
                         "content": [{
                             "type": "text",
-                            "text": format!("Error: {}", e)
+                            "text": format!("Error: {}", message)
+                        }],
+                        "isError": true
+                    });
+                    // Use code for JSON-RPC error if it's a standard error
+                    if code == -32602 || code == -32601 {
+                        Some(create_error_response(code, &message, request.id.clone()))
+                    } else {
+                        Some(create_success_response(response, request.id.clone()))
+                    }
+                }
+                crate::ToolResult::AccessDenied(msg) => {
+                    let response = serde_json::json!({
+                        "content": [{
+                            "type": "text",
+                            "text": msg
                         }],
                         "isError": true
                     });

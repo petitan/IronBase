@@ -1839,55 +1839,53 @@ pub fn dispatch_tool(
 
             // Parse projection: {"field": 1} or {"field": 0}
             // BUG #10 fix: Validate BEFORE casting to prevent silent truncation
-            let projection: Option<std::collections::HashMap<String, i32>> = if let Some(
-                proj_value,
-            ) =
-                params.get("projection")
-            {
-                if proj_value.is_null() {
-                    None
-                } else if let Some(obj) = proj_value.as_object() {
-                    let mut map = std::collections::HashMap::new();
-                    for (k, v) in obj {
-                        // BUG #10 fix: Check exact values BEFORE casting
-                        let int_val = if let Some(i) = v.as_i64() {
-                            // Validate integer is exactly 0 or 1 before casting
-                            if i != 0 && i != 1 {
-                                return Err(McpError::InvalidParams(format!(
+            let projection: Option<std::collections::HashMap<String, i32>> =
+                if let Some(proj_value) = params.get("projection") {
+                    if proj_value.is_null() {
+                        None
+                    } else if let Some(obj) = proj_value.as_object() {
+                        let mut map = std::collections::HashMap::new();
+                        for (k, v) in obj {
+                            // BUG #10 fix: Check exact values BEFORE casting
+                            let int_val = if let Some(i) = v.as_i64() {
+                                // Validate integer is exactly 0 or 1 before casting
+                                if i != 0 && i != 1 {
+                                    return Err(McpError::InvalidParams(format!(
                                     "Invalid projection value for '{}': expected 0 or 1, got {}",
                                     k, i
                                 )));
-                            }
-                            i as i32
-                        } else if let Some(f) = v.as_f64() {
-                            // Validate float is exactly 0.0 or 1.0 (no truncation)
-                            if f == 0.0 {
-                                0
-                            } else if f == 1.0 {
-                                1
-                            } else {
-                                return Err(McpError::InvalidParams(format!(
+                                }
+                                i as i32
+                            } else if let Some(f) = v.as_f64() {
+                                // Validate float is exactly 0.0 or 1.0 (no truncation)
+                                if f == 0.0 {
+                                    0
+                                } else if f == 1.0 {
+                                    1
+                                } else {
+                                    return Err(McpError::InvalidParams(format!(
                                     "Invalid projection value for '{}': expected 0 or 1, got {}",
                                     k, f
                                 )));
-                            }
-                        } else {
-                            return Err(McpError::InvalidParams(format!(
-                                "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                                k, v
-                            )));
-                        };
-                        map.insert(k.clone(), int_val);
+                                }
+                            } else {
+                                return Err(McpError::InvalidParams(format!(
+                                    "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                                    k, v
+                                )));
+                            };
+                            map.insert(k.clone(), int_val);
+                        }
+                        Some(map)
+                    } else {
+                        return Err(McpError::InvalidParams(
+                            "projection must be an object like {\"field\": 1} or {\"field\": 0}"
+                                .into(),
+                        ));
                     }
-                    Some(map)
                 } else {
-                    return Err(McpError::InvalidParams(
-                        "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
-                    ));
-                }
-            } else {
-                None
-            };
+                    None
+                };
 
             let options = FulltextSearchOptions {
                 limit,
