@@ -275,6 +275,7 @@ cd mcp-server && cargo build --release
 - `script_save`, `script_list`, `script_get`, `script_delete`, `script_run` - Rhai scripting
 - `admin_apikey_create`, `admin_apikey_list`, `admin_apikey_revoke`, `admin_apikey_delete` - API key management
 - `acl_list`, `acl_get`, `acl_set`, `acl_delete`, `acl_cleanup` - Access Control List management
+- `listener_list`, `listener_get`, `listener_add`, `listener_delete`, `listener_enable`, `listener_disable` - Multi-interface configuration
 
 ### Testing HTTP Mode
 ```bash
@@ -541,6 +542,69 @@ coll.clear_schema()?;
 
 **Key Files:**
 - `ironbase-core/src/collection_core/schema.rs` - Schema validation logic
+
+### Listeners (Multi-Interface Support)
+
+Configure multiple HTTP/HTTPS endpoints for the MCP server.
+
+**Use Cases:**
+- Separate internal (HTTP) and external (HTTPS) interfaces
+- Multiple ports with different TLS configurations
+- Interface-specific ACL rules
+
+**Listener Tools:**
+```bash
+# List all listeners
+{"name": "listener_list"}
+
+# Get specific listener
+{"name": "listener_get", "arguments": {"id": "internal"}}
+
+# Add HTTP listener
+{"name": "listener_add", "arguments": {
+  "id": "internal",
+  "bind": "192.168.1.100:8080",
+  "tls": false,
+  "description": "Internal API endpoint"
+}}
+
+# Add HTTPS listener
+{"name": "listener_add", "arguments": {
+  "id": "external",
+  "bind": "0.0.0.0:443",
+  "tls": true,
+  "cert_path": "/etc/ssl/certs/server.crt",
+  "key_path": "/etc/ssl/private/server.key",
+  "description": "Public HTTPS endpoint"
+}}
+
+# Enable/disable listener
+{"name": "listener_enable", "arguments": {"id": "external"}}
+{"name": "listener_disable", "arguments": {"id": "internal"}}
+
+# Delete listener
+{"name": "listener_delete", "arguments": {"id": "old-listener"}}
+```
+
+**ListenerConfig Fields:**
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `id` | string | Yes | Unique identifier |
+| `bind` | string | Yes | Address:port (e.g., "0.0.0.0:8080") |
+| `tls` | bool | No | Enable HTTPS (default: false) |
+| `cert_path` | string | If tls=true | Path to TLS certificate |
+| `key_path` | string | If tls=true | Path to TLS private key |
+| `enabled` | bool | No | Active status (default: true) |
+| `description` | string | No | Human-readable description |
+
+**Storage:** `_system.listeners` collection (localhost-only write access)
+
+**ACL Integration:**
+Listeners integrate with ACL - each interface type (localhost/internal/external) can have different permissions per collection.
+
+**Key Files:**
+- `mcp-server/src/listener.rs` - Listener configuration and management
+- `mcp-server/src/tools.rs:2538-2690` - Listener tool handlers
 
 ## Testing Strategy
 
