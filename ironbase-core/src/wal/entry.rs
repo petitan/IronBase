@@ -1,7 +1,7 @@
 // wal/entry.rs
 // WAL entry types and serialization
 
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::transaction::TransactionId;
 
 /// Entry type in the WAL
@@ -31,7 +31,7 @@ impl WALEntryType {
             0x04 => Ok(WALEntryType::Abort),
             0x05 => Ok(WALEntryType::IndexChange),
             0x06 => Ok(WALEntryType::MetadataSnapshot),
-            _ => Err(MongoLiteError::WALCorruption),
+            _ => Err(IronBaseError::WALCorruption),
         }
     }
 }
@@ -98,7 +98,7 @@ impl WALEntry {
     pub fn deserialize(data: &[u8]) -> Result<Self> {
         if data.len() < WAL_HEADER_SIZE + 4 {
             // Minimum: header + checksum
-            return Err(MongoLiteError::WALCorruption);
+            return Err(IronBaseError::WALCorruption);
         }
 
         let mut offset = 0;
@@ -117,12 +117,12 @@ impl WALEntry {
 
         // SECURITY: Prevent OOM from malformed WAL with huge data_len
         if data_len > MAX_WAL_ENTRY_SIZE {
-            return Err(MongoLiteError::WALCorruption);
+            return Err(IronBaseError::WALCorruption);
         }
 
         // Data
         if data.len() < offset + data_len + 4 {
-            return Err(MongoLiteError::WALCorruption);
+            return Err(IronBaseError::WALCorruption);
         }
         let entry_data = data[offset..offset + data_len].to_vec();
         offset += data_len;
@@ -139,7 +139,7 @@ impl WALEntry {
 
         // Verify checksum
         if entry.compute_checksum() != checksum {
-            return Err(MongoLiteError::WALCorruption);
+            return Err(IronBaseError::WALCorruption);
         }
 
         Ok(entry)
@@ -212,7 +212,7 @@ mod tests {
 
         assert!(matches!(
             WALEntry::deserialize(&serialized),
-            Err(MongoLiteError::WALCorruption)
+            Err(IronBaseError::WALCorruption)
         ));
     }
 

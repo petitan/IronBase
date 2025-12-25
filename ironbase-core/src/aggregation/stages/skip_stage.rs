@@ -2,7 +2,7 @@
 // $skip stage implementation
 
 use crate::aggregation::types::SkipStage;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 impl SkipStage {
@@ -10,7 +10,7 @@ impl SkipStage {
         if let Some(n) = spec.as_u64() {
             Ok(SkipStage { skip: n as usize })
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "$skip must be a positive number".to_string(),
             ))
         }

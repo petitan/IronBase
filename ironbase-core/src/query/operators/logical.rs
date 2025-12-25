@@ -2,7 +2,7 @@
 // Logical operators: $and, $or, $nor, $not
 
 use crate::document::Document;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 use super::filter::{matches_filter, matches_filter_value};
@@ -31,7 +31,7 @@ impl OperatorMatcher for AndOperator {
         document: Option<&Document>,
     ) -> Result<bool> {
         let doc = document.ok_or_else(|| {
-            MongoLiteError::InvalidQuery("$and operator requires document context".to_string())
+            IronBaseError::InvalidQuery("$and operator requires document context".to_string())
         })?;
 
         if let Value::Array(conditions) = filter_value {
@@ -43,7 +43,7 @@ impl OperatorMatcher for AndOperator {
             }
             Ok(true)
         } else {
-            Err(MongoLiteError::InvalidQuery(
+            Err(IronBaseError::InvalidQuery(
                 "$and operator requires an array".to_string(),
             ))
         }
@@ -73,7 +73,7 @@ impl OperatorMatcher for OrOperator {
         document: Option<&Document>,
     ) -> Result<bool> {
         let doc = document.ok_or_else(|| {
-            MongoLiteError::InvalidQuery("$or operator requires document context".to_string())
+            IronBaseError::InvalidQuery("$or operator requires document context".to_string())
         })?;
 
         if let Value::Array(conditions) = filter_value {
@@ -85,7 +85,7 @@ impl OperatorMatcher for OrOperator {
             }
             Ok(false)
         } else {
-            Err(MongoLiteError::InvalidQuery(
+            Err(IronBaseError::InvalidQuery(
                 "$or operator requires an array".to_string(),
             ))
         }
@@ -117,7 +117,7 @@ impl OperatorMatcher for NorOperator {
         document: Option<&Document>,
     ) -> Result<bool> {
         let doc = document.ok_or_else(|| {
-            MongoLiteError::InvalidQuery("$nor operator requires document context".to_string())
+            IronBaseError::InvalidQuery("$nor operator requires document context".to_string())
         })?;
 
         if let Value::Array(conditions) = filter_value {
@@ -129,7 +129,7 @@ impl OperatorMatcher for NorOperator {
             }
             Ok(true)
         } else {
-            Err(MongoLiteError::InvalidQuery(
+            Err(IronBaseError::InvalidQuery(
                 "$nor operator requires an array".to_string(),
             ))
         }
@@ -168,7 +168,7 @@ impl OperatorMatcher for NotOperator {
             let result = matches_filter_value(doc_value, filter_value, document)?;
             Ok(!result)
         } else {
-            Err(MongoLiteError::InvalidQuery(
+            Err(IronBaseError::InvalidQuery(
                 "$not operator requires document context".to_string(),
             ))
         }

@@ -1,7 +1,7 @@
 // ironbase-core/src/find_options.rs
 // Find query options: projection, sort, limit, skip
 
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::{
     compare_values as compare_values_core, delete_nested_value, get_nested_value, set_nested_value,
 };
@@ -70,7 +70,7 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Resul
 
     // Validate: Cannot mix inclusion and exclusion (except _id: 0 in include mode)
     if has_inclusions && has_non_id_exclusions {
-        return Err(MongoLiteError::InvalidQuery(
+        return Err(IronBaseError::InvalidQuery(
             "Cannot mix inclusion and exclusion in projection (except _id: 0)".to_string(),
         ));
     }
@@ -132,7 +132,7 @@ pub fn apply_sort(docs: &mut [Value], sort: &[(String, i32)]) -> Result<()> {
     // Validate sort directions (MongoDB only accepts 1 or -1)
     for (field, direction) in sort {
         if *direction != 1 && *direction != -1 {
-            return Err(MongoLiteError::InvalidQuery(format!(
+            return Err(IronBaseError::InvalidQuery(format!(
                 "Invalid sort direction {} for field '{}'. Must be 1 (ascending) or -1 (descending).",
                 direction, field
             )));

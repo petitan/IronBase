@@ -2,7 +2,7 @@
 // Expression operator: $expr
 
 use crate::document::Document;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::compare_values;
 use serde_json::Value;
 
@@ -45,12 +45,12 @@ fn resolve_expr_value<'a>(value: &'a Value, document: &'a Document) -> Option<&'
 /// Evaluate an aggregation expression against a document
 fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
     let expr_obj = expr.as_object().ok_or_else(|| {
-        MongoLiteError::InvalidQuery("$expr expression must be an object".to_string())
+        IronBaseError::InvalidQuery("$expr expression must be an object".to_string())
     })?;
 
     // Expression should have exactly one operator
     if expr_obj.len() != 1 {
-        return Err(MongoLiteError::InvalidQuery(
+        return Err(IronBaseError::InvalidQuery(
             "$expr expression must have exactly one operator".to_string(),
         ));
     }
@@ -73,7 +73,7 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
         // Logical operators for nested expressions
         "$and" => {
             let arr = args.as_array().ok_or_else(|| {
-                MongoLiteError::InvalidQuery("$and in $expr requires an array".to_string())
+                IronBaseError::InvalidQuery("$and in $expr requires an array".to_string())
             })?;
             for sub_expr in arr {
                 if !evaluate_expr(sub_expr, document)? {
@@ -84,7 +84,7 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
         }
         "$or" => {
             let arr = args.as_array().ok_or_else(|| {
-                MongoLiteError::InvalidQuery("$or in $expr requires an array".to_string())
+                IronBaseError::InvalidQuery("$or in $expr requires an array".to_string())
             })?;
             for sub_expr in arr {
                 if evaluate_expr(sub_expr, document)? {
@@ -95,17 +95,17 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
         }
         "$not" => {
             let arr = args.as_array().ok_or_else(|| {
-                MongoLiteError::InvalidQuery("$not in $expr requires an array".to_string())
+                IronBaseError::InvalidQuery("$not in $expr requires an array".to_string())
             })?;
             if arr.len() != 1 {
-                return Err(MongoLiteError::InvalidQuery(
+                return Err(IronBaseError::InvalidQuery(
                     "$not in $expr requires exactly one element".to_string(),
                 ));
             }
             Ok(!evaluate_expr(&arr[0], document)?)
         }
 
-        _ => Err(MongoLiteError::InvalidQuery(format!(
+        _ => Err(IronBaseError::InvalidQuery(format!(
             "Unsupported operator in $expr: {}",
             op
         ))),
@@ -118,11 +118,11 @@ where
     F: Fn(std::cmp::Ordering) -> bool,
 {
     let arr = args.as_array().ok_or_else(|| {
-        MongoLiteError::InvalidQuery("Comparison in $expr requires an array".to_string())
+        IronBaseError::InvalidQuery("Comparison in $expr requires an array".to_string())
     })?;
 
     if arr.len() != 2 {
-        return Err(MongoLiteError::InvalidQuery(
+        return Err(IronBaseError::InvalidQuery(
             "Comparison in $expr requires exactly 2 arguments".to_string(),
         ));
     }
@@ -156,7 +156,7 @@ impl OperatorMatcher for ExprOperator {
         document: Option<&Document>,
     ) -> Result<bool> {
         let doc = document.ok_or_else(|| {
-            MongoLiteError::InvalidQuery("$expr operator requires document context".to_string())
+            IronBaseError::InvalidQuery("$expr operator requires document context".to_string())
         })?;
 
         evaluate_expr(filter_value, doc)

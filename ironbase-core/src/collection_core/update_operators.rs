@@ -2,7 +2,7 @@
 // MongoDB-style update operators implementation
 
 use crate::document::Document;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 use std::cmp::Ordering;
 
@@ -49,7 +49,7 @@ pub fn apply_update_operators(document: &mut Document, update_json: &Value) -> R
                 was_modified |= apply_pop(document, fields)?;
             }
             _ => {
-                return Err(MongoLiteError::InvalidQuery(format!(
+                return Err(IronBaseError::InvalidQuery(format!(
                     "Unsupported update operator: {}",
                     op
                 )));
@@ -99,7 +99,7 @@ fn apply_inc(document: &mut Document, fields: &Value) -> Result<bool> {
             modified = true;
         } else if !inc_value.is_number() {
             // BUG #4 fix: Return error for non-numeric increment value
-            return Err(MongoLiteError::InvalidQuery(format!(
+            return Err(IronBaseError::InvalidQuery(format!(
                 "$inc value must be numeric, got: {}",
                 inc_value
             )));
@@ -178,7 +178,7 @@ fn apply_pull(document: &mut Document, fields: &Value) -> Result<bool> {
                 modified = true;
             }
         } else if document.get(field).is_some() {
-            return Err(MongoLiteError::InvalidQuery(format!(
+            return Err(IronBaseError::InvalidQuery(format!(
                 "$pull: field '{}' is not an array",
                 field
             )));
@@ -240,7 +240,7 @@ fn apply_pop(document: &mut Document, fields: &Value) -> Result<bool> {
                     modified = true;
                 }
                 _ => {
-                    return Err(MongoLiteError::InvalidQuery(format!(
+                    return Err(IronBaseError::InvalidQuery(format!(
                         "$pop: value must be -1 or 1, got {:?}",
                         direction
                     )));
@@ -249,7 +249,7 @@ fn apply_pop(document: &mut Document, fields: &Value) -> Result<bool> {
 
             document.set_nested(field, Value::Array(new_array));
         } else if document.get(field).is_some() {
-            return Err(MongoLiteError::InvalidQuery(format!(
+            return Err(IronBaseError::InvalidQuery(format!(
                 "$pop: field '{}' is not an array",
                 field
             )));
@@ -309,7 +309,7 @@ fn parse_each_modifier(value: &Value) -> Vec<Value> {
 fn get_array_field(document: &Document, field: &str, op_name: &str) -> Result<Vec<Value>> {
     match document.get(field) {
         Some(Value::Array(arr)) => Ok(arr.clone()),
-        Some(_) => Err(MongoLiteError::InvalidQuery(format!(
+        Some(_) => Err(IronBaseError::InvalidQuery(format!(
             "{}: field '{}' is not an array",
             op_name, field
         ))),

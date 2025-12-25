@@ -402,7 +402,7 @@ mod integration_tests {
 
     #[test]
     fn test_file_lock_prevents_double_open() {
-        use crate::error::MongoLiteError;
+        use crate::error::IronBaseError;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.mlite");
@@ -414,7 +414,7 @@ mod integration_tests {
         let result = DatabaseCore::open(&db_path);
 
         match result {
-            Err(MongoLiteError::DatabaseLocked(path)) => {
+            Err(IronBaseError::DatabaseLocked(path)) => {
                 assert!(path.contains("test.mlite"));
             }
             Ok(_) => panic!("Expected DatabaseLocked error, got Ok"),

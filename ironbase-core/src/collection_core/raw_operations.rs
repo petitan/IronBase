@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::document::{Document, DocumentId};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::query::Query;
 use crate::storage::{RawStorage, Storage};
 
@@ -374,13 +374,13 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // Get mutable reference to collection metadata
         let meta = storage
             .get_collection_meta_mut(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
         // Check if _id already exists in fields
         let doc_id = if let Some(existing_id) = fields.get("_id") {
             // Use existing _id from fields
             let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
-                .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id format: {}", e)))?;
+                .map_err(|e| IronBaseError::Serialization(format!("Invalid _id format: {}", e)))?;
 
             // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
             if let DocumentId::Int(num) = parsed_id {
@@ -449,7 +449,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // Get mutable reference to collection metadata ONCE
         let meta = storage
             .get_collection_meta_mut(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
         // Get starting ID for auto-generation (don't pre-reserve)
         let start_id = meta.last_id;
@@ -472,7 +472,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 // Use existing _id from fields - MongoDB compatible behavior
                 let parsed_id: DocumentId =
                     serde_json::from_value(existing_id.clone()).map_err(|e| {
-                        MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                        IronBaseError::Serialization(format!("Invalid _id format: {}", e))
                     })?;
 
                 // Ensure last_id tracks highest numeric _id from manual inserts
@@ -503,7 +503,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             // 🔒 FIX #17: Check for duplicates WITHIN the current batch
             let doc_value = serde_json::to_value(&doc)
-                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
             batch_validator.check_and_track(&doc_value)?;
 
             // 🔒 FIX #18: Check against EXISTING documents in index BEFORE any writes
@@ -737,7 +737,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 // 🔒 FIX #16: Check for duplicates WITHIN the current batch
                 // Uses unified BatchConstraintValidator for consistent duplicate detection.
                 let doc_value = serde_json::to_value(&document)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 batch_validator.check_and_track(&doc_value)?;
 
                 // 🔒 CHECK UNIQUE CONSTRAINTS against existing index
@@ -978,7 +978,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
                 // Check for duplicates WITHIN the current batch
                 let doc_value = serde_json::to_value(&document)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 batch_validator.check_and_track(&doc_value)?;
 
                 // Check unique constraints against existing index
@@ -1155,13 +1155,13 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             let meta = storage
                 .get_collection_meta_mut(&self.name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
             let id = if let Some(existing_id) = fields.get("_id") {
                 // Use existing _id from fields
                 let parsed_id: DocumentId =
                     serde_json::from_value(existing_id.clone()).map_err(|e| {
-                        MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                        IronBaseError::Serialization(format!("Invalid _id format: {}", e))
                     })?;
 
                 // Ensure last_id tracks the highest numeric _id to avoid auto-ID collisions
@@ -1200,7 +1200,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // Prepare WAL document (PHASE 5: _collection is now added by commit_transaction)
         let wal_doc =
-            serde_json::to_value(&doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            serde_json::to_value(&doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
         Ok(InsertOnePrepared {
             doc_id,
@@ -1280,7 +1280,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             let meta = storage
                 .get_collection_meta_mut(&self.name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
             let start_id = meta.last_id;
             let mut auto_id_count = 0u64;
@@ -1290,7 +1290,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 let doc_id = if let Some(existing_id) = fields.get("_id") {
                     let parsed_id: DocumentId = serde_json::from_value(existing_id.clone())
                         .map_err(|e| {
-                            MongoLiteError::Serialization(format!("Invalid _id format: {}", e))
+                            IronBaseError::Serialization(format!("Invalid _id format: {}", e))
                         })?;
 
                     // Ensure last_id tracks highest numeric _id from manual inserts
@@ -1340,7 +1340,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             // Check for duplicates WITHIN the current batch
             let doc_value = serde_json::to_value(&doc)
-                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
             batch_validator.check_and_track(&doc_value)?;
 
             // Check against EXISTING documents in index
@@ -1501,7 +1501,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
                     // Convert new doc to Value for WAL
                     let new_doc_value = serde_json::to_value(&document)
-                        .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                        .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
                     return Ok(UpdateOnePrepared {
                         doc_id: Some(document.id),

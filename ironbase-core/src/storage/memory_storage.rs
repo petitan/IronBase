@@ -14,7 +14,7 @@
 //! ```
 
 use crate::document::{Document, DocumentId};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::storage::{CollectionFlags, CollectionMeta, RawStorage, Storage};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -84,27 +84,27 @@ impl Storage for MemoryStorage {
         // Parse document to extract/generate ID
         let mut doc_obj = doc
             .as_object()
-            .ok_or_else(|| MongoLiteError::Serialization("Document must be an object".to_string()))?
+            .ok_or_else(|| IronBaseError::Serialization("Document must be an object".to_string()))?
             .clone();
 
         // Get or generate document ID
         let doc_id = if let Some(id_value) = doc_obj.get("_id") {
             // Parse existing _id
             serde_json::from_value::<DocumentId>(id_value.clone())
-                .map_err(|e| MongoLiteError::Serialization(format!("Invalid _id: {}", e)))?
+                .map_err(|e| IronBaseError::Serialization(format!("Invalid _id: {}", e)))?
         } else {
             // Generate new auto-incrementing ID
             let meta = self
                 .metadata
                 .get_mut(collection)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
             meta.last_id += 1;
             let new_id = DocumentId::Int(meta.last_id as i64);
 
             // Add _id to document
             let id_value = serde_json::to_value(&new_id)
-                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
             doc_obj.insert("_id".to_string(), id_value);
 
             new_id
@@ -118,7 +118,7 @@ impl Storage for MemoryStorage {
         let docs = self
             .collections
             .get_mut(collection)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
         docs.push(document);
 
@@ -190,7 +190,7 @@ impl Storage for MemoryStorage {
 
     fn create_collection(&mut self, name: &str) -> Result<()> {
         if self.collections.contains_key(name) {
-            return Err(MongoLiteError::CollectionExists(name.to_string()));
+            return Err(IronBaseError::CollectionExists(name.to_string()));
         }
 
         // Create empty collection
@@ -219,7 +219,7 @@ impl Storage for MemoryStorage {
 
     fn drop_collection(&mut self, name: &str) -> Result<()> {
         if !self.collections.contains_key(name) {
-            return Err(MongoLiteError::CollectionNotFound(name.to_string()));
+            return Err(IronBaseError::CollectionNotFound(name.to_string()));
         }
 
         self.collections.remove(name);
@@ -319,7 +319,7 @@ impl RawStorage for MemoryStorage {
 
         // Check bounds
         if start + 4 > self.raw_data.len() {
-            return Err(MongoLiteError::Io(std::io::Error::new(
+            return Err(IronBaseError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!(
                     "Offset {} out of bounds (len={})",
@@ -331,7 +331,7 @@ impl RawStorage for MemoryStorage {
 
         // Read length prefix
         let len_bytes: [u8; 4] = self.raw_data[start..start + 4].try_into().map_err(|_| {
-            MongoLiteError::Io(std::io::Error::new(
+            IronBaseError::Io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "Failed to read length prefix",
             ))
@@ -340,7 +340,7 @@ impl RawStorage for MemoryStorage {
 
         // Check data bounds
         if start + 4 + len > self.raw_data.len() {
-            return Err(MongoLiteError::Io(std::io::Error::new(
+            return Err(IronBaseError::Io(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 format!("Data extends beyond buffer: offset={}, len={}", offset, len),
             )));
@@ -406,7 +406,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(MongoLiteError::CollectionExists(_)) => (),
+            Err(IronBaseError::CollectionExists(_)) => (),
             _ => panic!("Expected CollectionExists error"),
         }
     }
@@ -527,7 +527,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(MongoLiteError::CollectionNotFound(_)) => (),
+            Err(IronBaseError::CollectionNotFound(_)) => (),
             _ => panic!("Expected CollectionNotFound error"),
         }
     }

@@ -2,7 +2,7 @@
 // B+ Tree Index Implementation + Fuzzy Text Index + Full-Text Search Index
 
 use crate::document::DocumentId;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
 use crate::value_utils::get_nested_value;
 use serde::{Deserialize, Serialize};
@@ -360,7 +360,7 @@ impl BPlusTree {
     pub fn insert(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
         // Check unique constraint
         if self.metadata.unique && self.search(&key).is_some() {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Duplicate key: {:?} (unique index)",
                 key
             )));
@@ -457,7 +457,7 @@ impl BPlusTree {
 
                 // Get the child (must exist for internal nodes)
                 if child_idx >= internal.children.len() {
-                    return Err(MongoLiteError::IndexError(
+                    return Err(IronBaseError::IndexError(
                         "Internal node has no children".to_string(),
                     ));
                 }
@@ -561,7 +561,7 @@ impl BPlusTree {
         if check_unique && entries.len() > 1 {
             for i in 0..entries.len() - 1 {
                 if entries[i].0 == entries[i + 1].0 {
-                    return Err(MongoLiteError::IndexError(format!(
+                    return Err(IronBaseError::IndexError(format!(
                         "Duplicate key: {:?} (unique index)",
                         entries[i].0
                     )));
@@ -913,13 +913,13 @@ impl BPlusTree {
 
         // Serialize node to JSON (more compatible than bincode with untagged enums)
         let node_json = serde_json::to_string(node).map_err(|e| {
-            MongoLiteError::Serialization(format!("Failed to serialize node: {}", e))
+            IronBaseError::Serialization(format!("Failed to serialize node: {}", e))
         })?;
         let node_bytes = node_json.as_bytes();
 
         // Ensure node fits in a page (4KB)
         if node_bytes.len() > NODE_PAGE_SIZE - 5 {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Node size {} exceeds page size {}",
                 node_bytes.len(),
                 NODE_PAGE_SIZE - 5
@@ -970,17 +970,17 @@ impl BPlusTree {
 
         // Deserialize node from JSON
         let node_json = std::str::from_utf8(node_bytes).map_err(|e| {
-            MongoLiteError::Serialization(format!("Invalid UTF-8 in node data: {}", e))
+            IronBaseError::Serialization(format!("Invalid UTF-8 in node data: {}", e))
         })?;
         let node: BTreeNode = serde_json::from_str(node_json).map_err(|e| {
-            MongoLiteError::Serialization(format!("Failed to deserialize node: {}", e))
+            IronBaseError::Serialization(format!("Failed to deserialize node: {}", e))
         })?;
 
         // Verify node type matches
         match (&node, node_type) {
             (BTreeNode::Internal(_), NODE_TYPE_INTERNAL) => Ok(node),
             (BTreeNode::Leaf(_), NODE_TYPE_LEAF) => Ok(node),
-            _ => Err(MongoLiteError::Corruption(format!(
+            _ => Err(IronBaseError::Corruption(format!(
                 "Node type mismatch at offset {}",
                 offset
             ))),
@@ -1076,13 +1076,13 @@ impl BPlusTree {
             .write(true)
             .truncate(true)
             .open(&temp_path)
-            .map_err(MongoLiteError::Io)?;
+            .map_err(IronBaseError::Io)?;
 
         // Save current tree state to temp file
         self.save_to_file(&mut temp_file)?;
 
         // Ensure data is written to disk
-        temp_file.sync_all().map_err(MongoLiteError::Io)?;
+        temp_file.sync_all().map_err(IronBaseError::Io)?;
 
         Ok(temp_path)
     }
@@ -1095,11 +1095,11 @@ impl BPlusTree {
 
         // Ensure parent directory exists
         if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent).map_err(MongoLiteError::Io)?;
+            fs::create_dir_all(parent).map_err(IronBaseError::Io)?;
         }
 
         // Atomic rename: temp → final
-        fs::rename(temp_path, final_path).map_err(MongoLiteError::Io)?;
+        fs::rename(temp_path, final_path).map_err(IronBaseError::Io)?;
 
         Ok(())
     }
@@ -1109,7 +1109,7 @@ impl BPlusTree {
         use std::fs;
 
         if temp_path.exists() {
-            fs::remove_file(temp_path).map_err(MongoLiteError::Io)?;
+            fs::remove_file(temp_path).map_err(IronBaseError::Io)?;
         }
 
         Ok(())
@@ -1343,7 +1343,7 @@ impl Index {
 
     pub fn insert(&mut self, key: String, doc_id: DocumentId) -> Result<()> {
         if self.definition.unique && self.entries.contains_key(&key) {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Duplicate key: {} (unique index)",
                 key
             )));
@@ -1408,7 +1408,7 @@ impl IndexManager {
     /// Create B+ tree index (single field)
     pub fn create_btree_index(&mut self, name: String, field: String, unique: bool) -> Result<()> {
         if self.btree_indexes.contains_key(&name) {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
             )));
@@ -1441,14 +1441,14 @@ impl IndexManager {
         unique: bool,
     ) -> Result<()> {
         if self.btree_indexes.contains_key(&name) {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
             )));
         }
 
         if fields.is_empty() {
-            return Err(MongoLiteError::IndexError(
+            return Err(IronBaseError::IndexError(
                 "Compound index must have at least one field".to_string(),
             ));
         }
@@ -1463,7 +1463,7 @@ impl IndexManager {
         let name = definition.name.clone();
 
         if self.legacy_indexes.contains_key(&name) {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
             )));
@@ -1481,7 +1481,7 @@ impl IndexManager {
             || self.fulltext_indexes.remove(name).is_some();
 
         if !removed {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Index not found: {}",
                 name
             )));
@@ -1622,7 +1622,7 @@ impl IndexManager {
             || self.fuzzy_indexes.contains_key(&name)
             || self.fulltext_indexes.contains_key(&name)
         {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
             )));
@@ -1685,7 +1685,7 @@ impl IndexManager {
             || self.fuzzy_indexes.contains_key(&name)
             || self.fulltext_indexes.contains_key(&name)
         {
-            return Err(MongoLiteError::IndexError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
             )));
@@ -1937,7 +1937,7 @@ impl IndexManager {
                     } else {
                         index.metadata.field.clone()
                     };
-                    return Err(MongoLiteError::IndexError(format!(
+                    return Err(IronBaseError::IndexError(format!(
                         "Duplicate key: {:?} in field(s) '{}' (unique index)",
                         index_key, fields_str
                     )));

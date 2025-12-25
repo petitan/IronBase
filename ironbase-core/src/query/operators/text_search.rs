@@ -2,7 +2,7 @@
 // Text search operators: $regex, $fuzzy with caching
 
 use crate::document::Document;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use lazy_static::lazy_static;
 use lru::LruCache;
 use regex::Regex;
@@ -70,7 +70,7 @@ pub(crate) fn get_or_compile_regex(pattern: &str, options: &str) -> Result<Arc<R
     // Build and compile regex with options
     let regex_pattern = build_regex_pattern(pattern, options);
     let regex = Arc::new(Regex::new(&regex_pattern).map_err(|e| {
-        MongoLiteError::InvalidQuery(format!("Invalid regex pattern '{}': {}", pattern, e))
+        IronBaseError::InvalidQuery(format!("Invalid regex pattern '{}': {}", pattern, e))
     })?);
 
     // Store in cache
@@ -140,7 +140,7 @@ impl OperatorMatcher for RegexOperator {
                     // Full regex matching with compiled & cached regex
                     regex_match_with_options(s, pattern, "")
                 } else {
-                    Err(MongoLiteError::InvalidQuery(
+                    Err(IronBaseError::InvalidQuery(
                         "$regex operator requires a string pattern".to_string(),
                     ))
                 }
@@ -157,7 +157,7 @@ impl OperatorMatcher for RegexOperator {
                     }
                     Ok(false)
                 } else {
-                    Err(MongoLiteError::InvalidQuery(
+                    Err(IronBaseError::InvalidQuery(
                         "$regex operator requires a string pattern".to_string(),
                     ))
                 }
@@ -211,7 +211,7 @@ impl FuzzyAlgorithm {
             "damerau_levenshtein" | "damerau-levenshtein" | "dameraulevenshtein" => {
                 Ok(FuzzyAlgorithm::DamerauLevenshtein)
             }
-            _ => Err(MongoLiteError::InvalidQuery(format!(
+            _ => Err(IronBaseError::InvalidQuery(format!(
                 "Unknown fuzzy algorithm: '{}'. Supported: jaro_winkler, levenshtein, damerau_levenshtein",
                 s
             ))),
@@ -300,7 +300,7 @@ fn parse_fuzzy_filter(filter_value: &Value) -> Result<(String, FuzzyAlgorithm, f
                 .get("value")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    MongoLiteError::InvalidQuery(
+                    IronBaseError::InvalidQuery(
                         "$fuzzy object form requires 'value' field with string".to_string(),
                     )
                 })?
@@ -318,7 +318,7 @@ fn parse_fuzzy_filter(filter_value: &Value) -> Result<(String, FuzzyAlgorithm, f
 
             // Validate threshold
             if !(0.0..=1.0).contains(&threshold) {
-                return Err(MongoLiteError::InvalidQuery(format!(
+                return Err(IronBaseError::InvalidQuery(format!(
                     "$fuzzy threshold must be between 0.0 and 1.0, got {}",
                     threshold
                 )));
@@ -327,7 +327,7 @@ fn parse_fuzzy_filter(filter_value: &Value) -> Result<(String, FuzzyAlgorithm, f
             Ok((value, algorithm, threshold))
         }
 
-        _ => Err(MongoLiteError::InvalidQuery(
+        _ => Err(IronBaseError::InvalidQuery(
             "$fuzzy operator requires a string or object with 'value' field".to_string(),
         )),
     }

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use crate::collection_core::schema::CompiledSchema;
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
 use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
@@ -42,7 +42,7 @@ fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::Ind
 /// Returns error if _id is missing or has invalid type.
 fn extract_doc_id(doc: &Value) -> Result<DocumentId> {
     DocumentId::try_from_value(doc).ok_or_else(|| {
-        crate::error::MongoLiteError::InvalidQuery("Document missing _id".to_string())
+        crate::error::IronBaseError::InvalidQuery("Document missing _id".to_string())
     })
 }
 
@@ -139,7 +139,7 @@ impl DatabaseCore<StorageEngine> {
     ///     "app.mlite",
     ///     DurabilityMode::unsafe_auto(10000)
     /// )?;
-    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// # Ok::<(), ironbase_core::IronBaseError>(())
     /// ```
     pub fn open_with_durability<P: AsRef<Path>>(path: P, mode: DurabilityMode) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
@@ -241,7 +241,7 @@ impl DatabaseCore<MemoryStorage> {
     /// let users = db.collection("users")?;
     /// let count = users.count_documents(&serde_json::json!({}))?;
     /// assert_eq!(count, 1);
-    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// # Ok::<(), ironbase_core::IronBaseError>(())
     /// ```
     pub fn open_memory() -> Result<Self> {
         let storage = MemoryStorage::new();
@@ -271,7 +271,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Check if database is closed, return error if so
     pub(crate) fn check_not_closed(&self) -> Result<()> {
         if self.is_closed.load(Ordering::SeqCst) {
-            return Err(MongoLiteError::DatabaseClosed);
+            return Err(IronBaseError::DatabaseClosed);
         }
         Ok(())
     }
@@ -476,7 +476,7 @@ mod tests {
 
         // Should be TransactionAborted error
         match result {
-            Err(crate::error::MongoLiteError::TransactionAborted(_)) => {}
+            Err(crate::error::IronBaseError::TransactionAborted(_)) => {}
             _ => panic!("Expected TransactionAborted error"),
         }
     }
@@ -986,7 +986,7 @@ mod tests {
 
         let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
         let result = db.get_collection("nonexistent");
-        assert!(matches!(result, Err(MongoLiteError::CollectionNotFound(_))));
+        assert!(matches!(result, Err(IronBaseError::CollectionNotFound(_))));
     }
 
     #[test]
@@ -1021,7 +1021,7 @@ mod tests {
 
         let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
         let result = db.update_one("nonexistent", &json!({}), &json!({"$set": {"x": 1}}));
-        assert!(matches!(result, Err(MongoLiteError::CollectionNotFound(_))));
+        assert!(matches!(result, Err(IronBaseError::CollectionNotFound(_))));
     }
 
     #[test]
@@ -1030,7 +1030,7 @@ mod tests {
 
         let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
         let result = db.delete_one("nonexistent", &json!({}));
-        assert!(matches!(result, Err(MongoLiteError::CollectionNotFound(_))));
+        assert!(matches!(result, Err(IronBaseError::CollectionNotFound(_))));
     }
 
     #[test]
@@ -1048,16 +1048,16 @@ mod tests {
 
         // All operations after close should fail with DatabaseClosed error
         let result = db.insert_one("users", HashMap::new());
-        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+        assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
 
         let result = db.update_one("users", &json!({}), &json!({"$set": {"x": 1}}));
-        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+        assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
 
         let result = db.delete_one("users", &json!({}));
-        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+        assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
 
         let result = db.collection("users");
-        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+        assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
     }
 
     #[test]
@@ -1076,12 +1076,12 @@ mod tests {
 
         // All operations should fail
         let result = db.insert_one("users", HashMap::new());
-        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+        assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
 
         let result = db.update_one("users", &json!({}), &json!({"$set": {"x": 1}}));
-        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+        assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
 
         let result = db.delete_one("users", &json!({}));
-        assert!(matches!(result, Err(MongoLiteError::DatabaseClosed)));
+        assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
     }
 }

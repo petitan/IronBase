@@ -2,7 +2,7 @@
 // Array operators: $in, $nin, $all, $elemMatch, $size
 
 use crate::document::Document;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 use super::traits::OperatorMatcher;
@@ -46,7 +46,7 @@ impl OperatorMatcher for InOperator {
                         Ok(false)
                     }
                 } else {
-                    Err(MongoLiteError::InvalidQuery(
+                    Err(IronBaseError::InvalidQuery(
                         "$in operator requires an array".to_string(),
                     ))
                 }
@@ -97,7 +97,7 @@ impl OperatorMatcher for NinOperator {
                 }
             }
         } else {
-            Err(MongoLiteError::InvalidQuery(
+            Err(IronBaseError::InvalidQuery(
                 "$nin operator requires an array".to_string(),
             ))
         }
@@ -133,7 +133,7 @@ impl OperatorMatcher for AllOperator {
                     // All required values must be in the document array
                     Ok(required.iter().all(|req| doc_arr.contains(req)))
                 } else {
-                    Err(MongoLiteError::InvalidQuery(
+                    Err(IronBaseError::InvalidQuery(
                         "$all operator requires an array".to_string(),
                     ))
                 }
@@ -280,7 +280,7 @@ impl OperatorMatcher for SizeOperator {
                 } else if let Some(size) = filter_value.as_u64() {
                     Ok(arr.len() as u64 == size)
                 } else {
-                    Err(MongoLiteError::InvalidQuery(
+                    Err(IronBaseError::InvalidQuery(
                         "$size operator requires an integer".to_string(),
                     ))
                 }

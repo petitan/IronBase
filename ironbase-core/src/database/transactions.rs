@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use serde_json::Value;
 
 use crate::document::DocumentId;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::storage::{RawStorage, Storage, StorageEngine};
 use crate::transaction::{Transaction, TransactionId};
 
@@ -28,7 +28,7 @@ impl DatabaseCore<StorageEngine> {
             active.remove(&tx_id).ok_or_else(|| {
                 // Release lock even if transaction not found
                 self.release_write_lock(tx_id);
-                crate::error::MongoLiteError::TransactionAborted(format!(
+                crate::error::IronBaseError::TransactionAborted(format!(
                     "Transaction {} not found",
                     tx_id
                 ))
@@ -57,7 +57,7 @@ impl DatabaseCore<StorageEngine> {
             active.remove(&tx_id).ok_or_else(|| {
                 // Release lock even if transaction not found
                 self.release_write_lock(tx_id);
-                crate::error::MongoLiteError::TransactionAborted(format!(
+                crate::error::IronBaseError::TransactionAborted(format!(
                     "Transaction {} not found",
                     tx_id
                 ))
@@ -86,7 +86,7 @@ impl DatabaseCore<StorageEngine> {
             active.remove(&tx_id).ok_or_else(|| {
                 // Release lock even if transaction not found
                 self.release_write_lock(tx_id);
-                crate::error::MongoLiteError::TransactionAborted(format!(
+                crate::error::IronBaseError::TransactionAborted(format!(
                     "Transaction {} not found",
                     tx_id
                 ))
@@ -261,7 +261,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             // Check timeout
             if start.elapsed() >= timeout {
                 let holder = self.get_write_lock_holder();
-                return Err(MongoLiteError::TransactionAborted(format!(
+                return Err(IronBaseError::TransactionAborted(format!(
                     "Timeout waiting for write lock after {:?}. Lock held by transaction {}.",
                     timeout,
                     holder.map_or("unknown".to_string(), |h| h.to_string())
@@ -327,7 +327,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             // Check timeout
             if start.elapsed() >= timeout {
                 let holder = self.get_write_lock_holder();
-                return Err(MongoLiteError::TransactionAborted(format!(
+                return Err(IronBaseError::TransactionAborted(format!(
                     "Timeout waiting for write transaction to complete after {:?}. Lock held by transaction {}.",
                     timeout,
                     holder.map_or("unknown".to_string(), |h| h.to_string())
@@ -374,7 +374,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     {
         let mut active = self.active_transactions.write();
         let transaction = active.get_mut(&tx_id).ok_or_else(|| {
-            crate::error::MongoLiteError::TransactionAborted(format!(
+            crate::error::IronBaseError::TransactionAborted(format!(
                 "Transaction {} not found",
                 tx_id
             ))

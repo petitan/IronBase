@@ -3,7 +3,7 @@
 //! Provides error codes and thread-local error messages for FFI consumers.
 //! Pattern: Functions return error codes, detailed messages available via ironbase_get_last_error()
 
-use ironbase_core::MongoLiteError;
+use ironbase_core::IronBaseError;
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
@@ -72,27 +72,27 @@ pub enum IronBaseErrorCode {
     Unknown = -99,
 }
 
-impl From<&MongoLiteError> for IronBaseErrorCode {
-    fn from(err: &MongoLiteError) -> Self {
+impl From<&IronBaseError> for IronBaseErrorCode {
+    fn from(err: &IronBaseError) -> Self {
         match err {
-            MongoLiteError::Io(_) => IronBaseErrorCode::IoError,
-            MongoLiteError::Serialization(_) => IronBaseErrorCode::SerializationError,
-            MongoLiteError::Deserialization(_) => IronBaseErrorCode::SerializationError,
-            MongoLiteError::CollectionNotFound(_) => IronBaseErrorCode::CollectionNotFound,
-            MongoLiteError::CollectionExists(_) => IronBaseErrorCode::CollectionExists,
-            MongoLiteError::DocumentNotFound => IronBaseErrorCode::DocumentNotFound,
-            MongoLiteError::InvalidQuery(_) => IronBaseErrorCode::InvalidQuery,
-            MongoLiteError::Corruption(_) => IronBaseErrorCode::Corruption,
-            MongoLiteError::IndexError(_) => IronBaseErrorCode::IndexError,
-            MongoLiteError::AggregationError(_) => IronBaseErrorCode::AggregationError,
-            MongoLiteError::SchemaError(_) => IronBaseErrorCode::SchemaError,
-            MongoLiteError::TransactionCommitted => IronBaseErrorCode::TransactionCommitted,
-            MongoLiteError::TransactionAborted(_) => IronBaseErrorCode::TransactionAborted,
-            MongoLiteError::WALCorruption => IronBaseErrorCode::WalCorruption,
-            MongoLiteError::DatabaseLocked(_) => IronBaseErrorCode::DatabaseLocked,
-            MongoLiteError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
-            MongoLiteError::DatabaseClosed => IronBaseErrorCode::OperationNotAllowed,
-            MongoLiteError::Unknown(_) => IronBaseErrorCode::Unknown,
+            IronBaseError::Io(_) => IronBaseErrorCode::IoError,
+            IronBaseError::Serialization(_) => IronBaseErrorCode::SerializationError,
+            IronBaseError::Deserialization(_) => IronBaseErrorCode::SerializationError,
+            IronBaseError::CollectionNotFound(_) => IronBaseErrorCode::CollectionNotFound,
+            IronBaseError::CollectionExists(_) => IronBaseErrorCode::CollectionExists,
+            IronBaseError::DocumentNotFound => IronBaseErrorCode::DocumentNotFound,
+            IronBaseError::InvalidQuery(_) => IronBaseErrorCode::InvalidQuery,
+            IronBaseError::Corruption(_) => IronBaseErrorCode::Corruption,
+            IronBaseError::IndexError(_) => IronBaseErrorCode::IndexError,
+            IronBaseError::AggregationError(_) => IronBaseErrorCode::AggregationError,
+            IronBaseError::SchemaError(_) => IronBaseErrorCode::SchemaError,
+            IronBaseError::TransactionCommitted => IronBaseErrorCode::TransactionCommitted,
+            IronBaseError::TransactionAborted(_) => IronBaseErrorCode::TransactionAborted,
+            IronBaseError::WALCorruption => IronBaseErrorCode::WalCorruption,
+            IronBaseError::DatabaseLocked(_) => IronBaseErrorCode::DatabaseLocked,
+            IronBaseError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
+            IronBaseError::DatabaseClosed => IronBaseErrorCode::OperationNotAllowed,
+            IronBaseError::Unknown(_) => IronBaseErrorCode::Unknown,
         }
     }
 }
@@ -109,8 +109,8 @@ pub(crate) fn set_last_error(msg: &str) {
     });
 }
 
-/// Set error from MongoLiteError (internal use)
-pub(crate) fn set_error(err: &MongoLiteError) -> IronBaseErrorCode {
+/// Set error from IronBaseError (internal use)
+pub(crate) fn set_error(err: &IronBaseError) -> IronBaseErrorCode {
     set_last_error(&err.to_string());
     IronBaseErrorCode::from(err)
 }

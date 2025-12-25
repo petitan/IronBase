@@ -139,14 +139,14 @@ impl Query {
                                 // Valid - $options is allowed alongside $regex
                                 continue;
                             }
-                            return Err(crate::MongoLiteError::InvalidQuery(
+                            return Err(crate::IronBaseError::InvalidQuery(
                                 "$options can only be used with $regex".into(),
                             ));
                         }
 
                         // Not a wildcard - validate it's a known operator
                         if !operators::OPERATOR_REGISTRY.contains_key(key.as_str()) {
-                            return Err(crate::MongoLiteError::InvalidQuery(format!(
+                            return Err(crate::IronBaseError::InvalidQuery(format!(
                                 "Unknown query operator: {}",
                                 key
                             )));

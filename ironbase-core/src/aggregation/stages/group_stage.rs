@@ -2,7 +2,7 @@
 // $group stage implementation
 
 use crate::aggregation::types::{Accumulator, GroupId, GroupStage};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::get_nested_value;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -17,17 +17,17 @@ impl GroupStage {
                     if s.starts_with('$') {
                         GroupId::Field(s.to_string())
                     } else {
-                        return Err(MongoLiteError::AggregationError(
+                        return Err(IronBaseError::AggregationError(
                             "Group _id field reference must start with $".to_string(),
                         ));
                     }
                 } else {
-                    return Err(MongoLiteError::AggregationError(
+                    return Err(IronBaseError::AggregationError(
                         "Group _id must be null or field reference".to_string(),
                     ));
                 }
             } else {
-                return Err(MongoLiteError::AggregationError(
+                return Err(IronBaseError::AggregationError(
                     "Group stage must have _id field".to_string(),
                 ));
             };
@@ -44,7 +44,7 @@ impl GroupStage {
 
             Ok(GroupStage { id, accumulators })
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "$group must be an object".to_string(),
             ))
         }

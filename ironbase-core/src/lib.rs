@@ -70,7 +70,7 @@ pub use collection_core::{CollectionCore, FindCursor, InsertManyResult};
 pub use database::DatabaseCore;
 pub use document::{Document, DocumentId};
 pub use durability::DurabilityMode;
-pub use error::{MongoLiteError, Result};
+pub use error::{IronBaseError, Result};
 pub use find_options::FindOptions;
 pub use logging::{get_log_level, set_log_level, LogLevel};
 pub use query::Query;

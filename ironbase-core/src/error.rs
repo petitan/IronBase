@@ -2,7 +2,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum MongoLiteError {
+pub enum IronBaseError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -58,4 +58,4 @@ pub enum MongoLiteError {
     Unknown(String),
 }
 
-pub type Result<T> = std::result::Result<T, MongoLiteError>;
+pub type Result<T> = std::result::Result<T, IronBaseError>;

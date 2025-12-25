@@ -9,7 +9,7 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
 use crate::document::{Document, DocumentId};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::index::{IndexKey, IndexManager};
 use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
@@ -196,7 +196,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let storage_guard = storage.write();
             let meta = storage_guard
                 .get_collection_meta(&name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(name.clone()))?;
             meta.schema.clone()
         };
 
@@ -204,7 +204,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let storage_guard = storage.write();
             let meta = storage_guard
                 .get_collection_meta(&name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(name.clone()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(name.clone()))?;
 
             // Clone metadata to avoid borrow issues
             let catalog = meta.document_catalog.clone();
@@ -418,7 +418,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         {
             let storage_guard = storage.read();
             if storage_guard.get_collection_meta(&name).is_none() {
-                return Err(MongoLiteError::CollectionNotFound(name.clone()));
+                return Err(IronBaseError::CollectionNotFound(name.clone()));
             }
         }
 
@@ -435,7 +435,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Check if database is closed - prevents writes after db.close()
     pub(crate) fn check_not_closed(&self) -> Result<()> {
         if self.is_closed.load(Ordering::SeqCst) {
-            return Err(MongoLiteError::DatabaseClosed);
+            return Err(IronBaseError::DatabaseClosed);
         }
         Ok(())
     }
@@ -454,7 +454,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     fn validate_document(&self, document: &Document) -> Result<()> {
         let value = serde_json::to_value(document)
-            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         self.validate_value_against_schema(&value)
     }
 
@@ -471,7 +471,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let mut storage = self.storage.write();
             let meta = storage
                 .get_collection_meta_mut(&self.name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
             meta.schema = schema;
             storage.flush()?;
         }
@@ -511,7 +511,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         for document in documents {
             let doc_value = serde_json::to_value(document)
-                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
             // Check for duplicates WITHIN the batch
             batch_validator.check_and_track(&doc_value)?;
@@ -535,7 +535,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     {
                         let index_key = IndexKey::from(field_value);
                         if index.search(&index_key).is_some() {
-                            return Err(MongoLiteError::IndexError(format!(
+                            return Err(IronBaseError::IndexError(format!(
                                 "Duplicate key: {:?} in field '{}' (unique index)",
                                 index_key, field
                             )));
@@ -918,7 +918,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        Err(MongoLiteError::IndexError(format!(
+        Err(IronBaseError::IndexError(format!(
             "Cannot use index '{}' for this query",
             index_name
         )))
@@ -960,7 +960,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Remove from all other indexes - delegate to IndexManager
         let doc_value =
-            serde_json::to_value(doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            serde_json::to_value(doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         indexes.remove_document_from_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
 
         Ok(())
@@ -987,7 +987,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Add to all other indexes - delegate to IndexManager
         let doc_value =
-            serde_json::to_value(doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            serde_json::to_value(doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
 
         Ok(())
@@ -1241,7 +1241,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Add to all other indexes - delegate to IndexManager
             let doc_value = serde_json::to_value(doc)
-                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
             indexes.add_document_to_indexes(&doc_value, &doc.id, Some(&id_index_name))?;
         }
 
@@ -1263,7 +1263,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Convert Document to Value for IndexManager
         let doc_value =
-            serde_json::to_value(doc).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            serde_json::to_value(doc).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
         // Delegate to IndexManager - handles compound indexes correctly
         indexes.check_unique_constraints(&doc_value, exclude_id, Some(&id_index_name))
@@ -1288,7 +1288,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         {
             let indexes = self.indexes.read();
             if indexes.get_btree_index(hint).is_none() {
-                return Err(MongoLiteError::IndexError(format!(
+                return Err(IronBaseError::IndexError(format!(
                     "Index '{}' not found (hint)",
                     hint
                 )));
@@ -1392,7 +1392,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// ```
     pub fn create_compound_index(&self, fields: Vec<String>, unique: bool) -> Result<String> {
         if fields.is_empty() {
-            return Err(MongoLiteError::IndexError(
+            return Err(IronBaseError::IndexError(
                 "Compound index must have at least one field".to_string(),
             ));
         }
@@ -1689,7 +1689,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Find fuzzy index for this field
         let fuzzy_index = indexes.get_fuzzy_index_for_field(field).ok_or_else(|| {
-            crate::error::MongoLiteError::IndexError(format!(
+            crate::error::IronBaseError::IndexError(format!(
                 "No fuzzy index found for field '{}'",
                 field
             ))
@@ -1841,7 +1841,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Find fulltext index for this field
         let fulltext_index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
-            crate::error::MongoLiteError::IndexError(format!(
+            crate::error::IronBaseError::IndexError(format!(
                 "No fulltext index found for field '{}'",
                 field
             ))
@@ -1898,7 +1898,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut storage = self.storage.write();
         let meta = storage
             .get_collection_meta_mut(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
         let doc_id = DocumentId::new_auto(meta.last_id);
         meta.last_id += 1;
@@ -1962,25 +1962,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
-            let id_value = old_doc.get("_id").ok_or(MongoLiteError::DocumentNotFound)?;
+            let id_value = old_doc.get("_id").ok_or(IronBaseError::DocumentNotFound)?;
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
                 Value::Number(n) if n.is_u64() => {
                     let u = n.as_u64().unwrap();
                     if u > i64::MAX as u64 {
-                        return Err(MongoLiteError::Serialization(
+                        return Err(IronBaseError::Serialization(
                             "_id value too large for i64".to_string(),
                         ));
                     }
                     DocumentId::Int(u as i64)
                 }
                 Value::String(s) => DocumentId::String(s.clone()),
-                _ => {
-                    return Err(MongoLiteError::Serialization(
-                        "Invalid _id type".to_string(),
-                    ))
-                }
+                _ => return Err(IronBaseError::Serialization("Invalid _id type".to_string())),
             };
 
             // Ensure new_doc has _id and _collection fields
@@ -1989,7 +1985,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 map.insert("_collection".to_string(), Value::String(self.name.clone()));
                 Value::Object(map)
             } else {
-                return Err(MongoLiteError::Serialization(
+                return Err(IronBaseError::Serialization(
                     "new_doc must be an object".to_string(),
                 ));
             };
@@ -2068,25 +2064,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
-            let id_value = old_doc.get("_id").ok_or(MongoLiteError::DocumentNotFound)?;
+            let id_value = old_doc.get("_id").ok_or(IronBaseError::DocumentNotFound)?;
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
                 Value::Number(n) if n.is_u64() => {
                     let u = n.as_u64().unwrap();
                     if u > i64::MAX as u64 {
-                        return Err(MongoLiteError::Serialization(
+                        return Err(IronBaseError::Serialization(
                             "_id value too large for i64".to_string(),
                         ));
                     }
                     DocumentId::Int(u as i64)
                 }
                 Value::String(s) => DocumentId::String(s.clone()),
-                _ => {
-                    return Err(MongoLiteError::Serialization(
-                        "Invalid _id type".to_string(),
-                    ))
-                }
+                _ => return Err(IronBaseError::Serialization("Invalid _id type".to_string())),
             };
 
             // Add operation to transaction
@@ -2135,7 +2127,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut storage = self.storage.write();
         let meta = storage
             .get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
         log_trace!(
             "read_document_by_id({:?}) - catalog has {} entries",
@@ -2180,7 +2172,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let offsets: Vec<(DocumentId, u64)> = {
             let meta = storage
                 .get_collection_meta(&self.name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
             log_debug!(
                 "Collection '{}' has {} documents in catalog",
                 self.name,
@@ -2236,7 +2228,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut storage = self.storage.write();
         let meta = storage
             .get_collection_meta(&self.name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
 
         // Clone only the offsets we need
         let offsets: Vec<(DocumentId, u64)> = doc_ids
@@ -2289,7 +2281,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let catalog = {
             let meta = storage
                 .get_collection_meta(&self.name)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
             log_debug!(
                 "scan_documents_with_early_termination: collection '{}' has {} docs, skip={}, limit={:?}",
                 self.name,

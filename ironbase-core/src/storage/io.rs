@@ -36,14 +36,14 @@ impl StorageEngine {
 
     /// Read data from specified offset
     pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
-        use crate::error::MongoLiteError;
+        use crate::error::IronBaseError;
 
         // CRITICAL FIX: Validate offset is within file bounds BEFORE reading
         // Prevents race condition where flush_metadata() truncates file while reading
         let file_len = self.file.metadata()?.len();
 
         if offset >= file_len {
-            return Err(MongoLiteError::Corruption(format!(
+            return Err(IronBaseError::Corruption(format!(
                 "Attempted to read at offset {} but file is only {} bytes (likely metadata truncation race)",
                 offset, file_len
             )));
@@ -51,7 +51,7 @@ impl StorageEngine {
 
         // Additional validation: Ensure we can read at least the length header (4 bytes)
         if offset + 4 > file_len {
-            return Err(MongoLiteError::Corruption(format!(
+            return Err(IronBaseError::Corruption(format!(
                 "Insufficient space to read length header at offset {} (file: {} bytes)",
                 offset, file_len
             )));
@@ -66,7 +66,7 @@ impl StorageEngine {
 
         // Validate document length is sane
         if len == 0 {
-            return Err(MongoLiteError::Corruption(format!(
+            return Err(IronBaseError::Corruption(format!(
                 "Document at offset {} has zero length (corrupted or truncated)",
                 offset
             )));
@@ -74,7 +74,7 @@ impl StorageEngine {
 
         // Validate we can read the full document
         if offset + 4 + (len as u64) > file_len {
-            return Err(MongoLiteError::Corruption(format!(
+            return Err(IronBaseError::Corruption(format!(
                 "Document at offset {} claims length {} but would exceed file boundary (file: {} bytes)",
                 offset, len, file_len
             )));
@@ -104,7 +104,7 @@ impl StorageEngine {
         doc_id: &crate::document::DocumentId,
         data: &[u8],
     ) -> Result<u64> {
-        use crate::error::MongoLiteError;
+        use crate::error::IronBaseError;
 
         // Determine write position from data_end_offset (not SeekFrom::End!)
         // Migration: if data_end_offset is 0 (v2 database), use file end
@@ -138,7 +138,7 @@ impl StorageEngine {
         // Update catalog in metadata with ABSOLUTE offset
         let meta = self
             .get_collection_meta_mut(collection)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
         meta.document_catalog.insert(doc_id.clone(), write_offset);
         meta.document_count += 1;
@@ -173,7 +173,7 @@ impl StorageEngine {
         doc_id: &crate::document::DocumentId,
         data: &[u8],
     ) -> Result<u64> {
-        use crate::error::MongoLiteError;
+        use crate::error::IronBaseError;
 
         // Determine write position from data_end_offset (not SeekFrom::End!)
         // Migration: if data_end_offset is 0 (v2 database), use file end
@@ -206,7 +206,7 @@ impl StorageEngine {
         // Update ALL metadata fields in collection
         let meta = self
             .get_collection_meta_mut(collection)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
         // Check if this is an update (doc already exists in catalog)
         let is_update = meta.document_catalog.contains_key(doc_id);
@@ -242,7 +242,7 @@ impl StorageEngine {
         collection: &str,
         doc_id: &crate::document::DocumentId,
     ) -> Result<()> {
-        use crate::error::MongoLiteError;
+        use crate::error::IronBaseError;
 
         // Create tombstone document
         let tombstone = serde_json::json!({
@@ -251,7 +251,7 @@ impl StorageEngine {
             "_tombstone": true
         });
         let tombstone_json = serde_json::to_string(&tombstone)
-            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
         // Determine write position from data_end_offset (not SeekFrom::End!)
         let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
@@ -283,7 +283,7 @@ impl StorageEngine {
         // Update metadata
         let meta = self
             .get_collection_meta_mut(collection)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
         // Remove from catalog
         if meta.document_catalog.remove(doc_id).is_some() {
@@ -302,14 +302,14 @@ impl StorageEngine {
         file: &mut std::fs::File,
         max_doc_offset: u64,
     ) -> Result<u64> {
-        use crate::error::MongoLiteError;
+        use crate::error::IronBaseError;
 
         file.seek(SeekFrom::Start(max_doc_offset))?;
 
         // Read document length (4 bytes)
         let mut len_bytes = [0u8; 4];
         file.read_exact(&mut len_bytes).map_err(|e| {
-            MongoLiteError::Corruption(format!(
+            IronBaseError::Corruption(format!(
                 "Failed to read document length at offset {}: {}",
                 max_doc_offset, e
             ))
@@ -319,7 +319,7 @@ impl StorageEngine {
 
         // Sanity check: doc_len should be reasonable (< 16MB)
         if doc_len > 16 * 1024 * 1024 {
-            return Err(MongoLiteError::Corruption(format!(
+            return Err(IronBaseError::Corruption(format!(
                 "Suspiciously large document size: {} bytes at offset {}",
                 doc_len, max_doc_offset
             )));

@@ -3,7 +3,7 @@
 
 use crate::aggregation::helpers::{compute_extremum, parse_field_reference};
 use crate::aggregation::types::{Accumulator, SumExpression};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::{canonical_json_string, get_nested_value};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -12,7 +12,7 @@ impl Accumulator {
     pub(crate) fn from_json(spec: &Value) -> Result<Self> {
         if let Value::Object(obj) = spec {
             if obj.len() != 1 {
-                return Err(MongoLiteError::AggregationError(
+                return Err(IronBaseError::AggregationError(
                     "Accumulator must have exactly one operator".to_string(),
                 ));
             }
@@ -29,12 +29,12 @@ impl Accumulator {
                                 s.trim_start_matches('$').to_string(),
                             )))
                         } else {
-                            Err(MongoLiteError::AggregationError(
+                            Err(IronBaseError::AggregationError(
                                 "$sum field reference must start with $".to_string(),
                             ))
                         }
                     } else {
-                        Err(MongoLiteError::AggregationError(
+                        Err(IronBaseError::AggregationError(
                             "$sum must be a number or field reference".to_string(),
                         ))
                     }
@@ -49,13 +49,13 @@ impl Accumulator {
                     value,
                     "$addToSet",
                 )?)),
-                _ => Err(MongoLiteError::AggregationError(format!(
+                _ => Err(IronBaseError::AggregationError(format!(
                     "Unknown accumulator: {}",
                     op
                 ))),
             }
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "Accumulator must be an object".to_string(),
             ))
         }

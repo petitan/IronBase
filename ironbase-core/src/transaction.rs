@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::document::DocumentId;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 
 /// Unique transaction identifier
 pub type TransactionId = u64;
@@ -191,7 +191,7 @@ impl Transaction {
     /// Add an operation to the transaction buffer
     pub fn add_operation(&mut self, op: Operation) -> Result<()> {
         if !self.is_active() {
-            return Err(MongoLiteError::TransactionCommitted);
+            return Err(IronBaseError::TransactionCommitted);
         }
         self.operations.push(op);
         Ok(())
@@ -200,7 +200,7 @@ impl Transaction {
     /// Add an index change to be applied on commit
     pub fn add_index_change(&mut self, index_name: String, change: IndexChange) -> Result<()> {
         if !self.is_active() {
-            return Err(MongoLiteError::TransactionCommitted);
+            return Err(IronBaseError::TransactionCommitted);
         }
         self.index_changes
             .entry(index_name)
@@ -212,7 +212,7 @@ impl Transaction {
     /// Add a metadata change
     pub fn add_metadata_change(&mut self, change: MetadataChange) -> Result<()> {
         if !self.is_active() {
-            return Err(MongoLiteError::TransactionCommitted);
+            return Err(IronBaseError::TransactionCommitted);
         }
         self.metadata_changes.push(change);
         Ok(())
@@ -246,7 +246,7 @@ impl Transaction {
     /// Mark transaction as committed
     pub fn mark_committed(&mut self) -> Result<()> {
         if !self.is_active() {
-            return Err(MongoLiteError::TransactionCommitted);
+            return Err(IronBaseError::TransactionCommitted);
         }
         self.state = TransactionState::Committed;
         Ok(())
@@ -330,7 +330,7 @@ mod tests {
 
         assert!(matches!(
             tx.add_operation(op),
-            Err(MongoLiteError::TransactionCommitted)
+            Err(IronBaseError::TransactionCommitted)
         ));
     }
 

@@ -2,7 +2,7 @@
 // Replay WAL operations to storage
 
 use crate::document::DocumentId;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::storage::{RawStorage, Storage};
 use crate::transaction::Operation;
 use crate::wal::{WALEntry, WALEntryType};
@@ -28,7 +28,7 @@ impl OperationReplay {
             .filter(|e| e.entry_type == WALEntryType::Operation)
         {
             let op: Operation = serde_json::from_slice(&entry.data)
-                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
             Self::apply_operation(storage, &op)?;
             stats.operations_replayed += 1;
@@ -57,7 +57,7 @@ impl OperationReplay {
 
                 // Write document using raw storage
                 let doc_json = serde_json::to_string(doc)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 storage.write_document_raw(collection, &doc_id, doc_json.as_bytes())?;
 
                 // Update live document count for correct count_documents({}) after recovery
@@ -75,7 +75,7 @@ impl OperationReplay {
 
                 // Write updated document using raw storage
                 let doc_json = serde_json::to_string(new_doc)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 storage.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
             }
 
@@ -92,7 +92,7 @@ impl OperationReplay {
                     "_tombstone": true
                 });
                 let tombstone_json = serde_json::to_string(&tombstone)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 storage.write_document_raw(collection, doc_id, tombstone_json.as_bytes())?;
 
                 // Update live document count for correct count_documents({}) after recovery
@@ -115,7 +115,7 @@ impl OperationReplay {
     /// Extract DocumentId from a document Value
     fn extract_doc_id(doc: &serde_json::Value) -> Result<DocumentId> {
         DocumentId::try_from_value(doc).ok_or_else(|| {
-            MongoLiteError::Serialization("Missing or invalid _id in document".into())
+            IronBaseError::Serialization("Missing or invalid _id in document".into())
         })
     }
 }

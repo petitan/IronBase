@@ -45,7 +45,7 @@ impl DatabaseCore<StorageEngine> {
     /// let db = DatabaseCore::<StorageEngine>::open("data.mlite")?;
     /// db.collection("users")?; // Create collection
     /// db.close()?; // Flush and release lock - now safe to reopen
-    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// # Ok::<(), ironbase_core::IronBaseError>(())
     /// ```
     pub fn close(&self) -> Result<()> {
         // Mark as closed FIRST to prevent new operations

@@ -3,7 +3,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 
 use super::entry::{WALEntry, WALEntryType, MAX_WAL_ENTRY_SIZE, WAL_HEADER_SIZE};
 
@@ -39,7 +39,7 @@ impl<R: Read + Seek> WALEntryIterator<R> {
                 // End of file - no more entries
                 return Ok(None);
             }
-            Err(e) => return Err(MongoLiteError::Io(e)),
+            Err(e) => return Err(IronBaseError::Io(e)),
         }
 
         let tx_id = u64::from_le_bytes(header[0..8].try_into().unwrap());
@@ -48,7 +48,7 @@ impl<R: Read + Seek> WALEntryIterator<R> {
 
         // SECURITY: Prevent OOM from malformed WAL with huge data_len
         if data_len > MAX_WAL_ENTRY_SIZE {
-            return Err(MongoLiteError::WALCorruption);
+            return Err(IronBaseError::WALCorruption);
         }
 
         // Read data
@@ -69,7 +69,7 @@ impl<R: Read + Seek> WALEntryIterator<R> {
 
         // Verify checksum
         if entry.compute_checksum() != checksum {
-            return Err(MongoLiteError::WALCorruption);
+            return Err(IronBaseError::WALCorruption);
         }
 
         Ok(Some(entry))
@@ -155,7 +155,7 @@ mod tests {
         let mut iter = WALEntryIterator::new(cursor).unwrap();
         let result = iter.next();
 
-        assert!(matches!(result, Some(Err(MongoLiteError::WALCorruption))));
+        assert!(matches!(result, Some(Err(IronBaseError::WALCorruption))));
     }
 
     #[test]

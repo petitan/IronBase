@@ -144,7 +144,7 @@ impl StorageEngine {
         // Write header only (no metadata yet - documents start at HEADER_SIZE)
         new_file.seek(SeekFrom::Start(0))?;
         let header_bytes = bincode::serialize(&self.header)
-            .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+            .map_err(|e| crate::error::IronBaseError::Serialization(e.to_string()))?;
         new_file.write_all(&header_bytes)?;
 
         // Position at start of document region
@@ -308,7 +308,7 @@ impl StorageEngine {
         // Rewrite header at file start
         new_file.seek(SeekFrom::Start(0))?;
         let header_bytes = bincode::serialize(&updated_header)
-            .map_err(|e| crate::error::MongoLiteError::Serialization(e.to_string()))?;
+            .map_err(|e| crate::error::IronBaseError::Serialization(e.to_string()))?;
         new_file.write_all(&header_bytes)?;
 
         new_file.sync_all()?;

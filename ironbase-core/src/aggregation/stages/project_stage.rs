@@ -4,7 +4,7 @@
 use crate::aggregation::types::{
     ProjectExpression, ProjectField, ProjectStage, ReduceExpression, ReduceInExpr,
 };
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::get_nested_value;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ impl ProjectStage {
                         1 => ProjectField::Include,
                         0 => ProjectField::Exclude,
                         _ => {
-                            return Err(MongoLiteError::AggregationError(format!(
+                            return Err(IronBaseError::AggregationError(format!(
                                 "Invalid project value: {}",
                                 n
                             )))
@@ -30,7 +30,7 @@ impl ProjectStage {
                     if s.starts_with('$') {
                         ProjectField::Rename(s.to_string())
                     } else {
-                        return Err(MongoLiteError::AggregationError(format!(
+                        return Err(IronBaseError::AggregationError(format!(
                             "Invalid project expression: {}",
                             s
                         )));
@@ -38,7 +38,7 @@ impl ProjectStage {
                 } else if let Value::Object(expr_obj) = value {
                     Self::parse_expression(expr_obj)?
                 } else {
-                    return Err(MongoLiteError::AggregationError(
+                    return Err(IronBaseError::AggregationError(
                         "Project field must be 0, 1, field reference, or expression object"
                             .to_string(),
                     ));
@@ -49,7 +49,7 @@ impl ProjectStage {
 
             Ok(ProjectStage { fields })
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "$project must be an object".to_string(),
             ))
         }
@@ -57,7 +57,7 @@ impl ProjectStage {
 
     fn parse_expression(obj: &serde_json::Map<String, Value>) -> Result<ProjectField> {
         if obj.len() != 1 {
-            return Err(MongoLiteError::AggregationError(
+            return Err(IronBaseError::AggregationError(
                 "Expression object must have exactly one operator".to_string(),
             ));
         }
@@ -73,18 +73,18 @@ impl ProjectStage {
                             field_name,
                         )))
                     } else {
-                        Err(MongoLiteError::AggregationError(
+                        Err(IronBaseError::AggregationError(
                             "$size argument must be a field reference starting with $".to_string(),
                         ))
                     }
                 } else {
-                    Err(MongoLiteError::AggregationError(
+                    Err(IronBaseError::AggregationError(
                         "$size argument must be a string field reference".to_string(),
                     ))
                 }
             }
             "$reduce" => Self::parse_reduce_expression(arg),
-            _ => Err(MongoLiteError::AggregationError(format!(
+            _ => Err(IronBaseError::AggregationError(format!(
                 "Unknown projection expression operator: {}",
                 op
             ))),
@@ -93,15 +93,15 @@ impl ProjectStage {
 
     fn parse_reduce_expression(spec: &Value) -> Result<ProjectField> {
         let obj = spec.as_object().ok_or_else(|| {
-            MongoLiteError::AggregationError("$reduce must be an object".to_string())
+            IronBaseError::AggregationError("$reduce must be an object".to_string())
         })?;
 
         let input = obj.get("input").and_then(|v| v.as_str()).ok_or_else(|| {
-            MongoLiteError::AggregationError("$reduce requires 'input' field reference".to_string())
+            IronBaseError::AggregationError("$reduce requires 'input' field reference".to_string())
         })?;
 
         if !input.starts_with('$') {
-            return Err(MongoLiteError::AggregationError(
+            return Err(IronBaseError::AggregationError(
                 "$reduce input must be a field reference starting with $".to_string(),
             ));
         }
@@ -109,11 +109,11 @@ impl ProjectStage {
         let input_field = input.trim_start_matches('$').to_string();
 
         let initial_value = obj.get("initialValue").cloned().ok_or_else(|| {
-            MongoLiteError::AggregationError("$reduce requires 'initialValue'".to_string())
+            IronBaseError::AggregationError("$reduce requires 'initialValue'".to_string())
         })?;
 
         let in_expr = obj.get("in").ok_or_else(|| {
-            MongoLiteError::AggregationError("$reduce requires 'in' expression".to_string())
+            IronBaseError::AggregationError("$reduce requires 'in' expression".to_string())
         })?;
 
         let reduce_in = Self::parse_reduce_in_expr(in_expr)?;
@@ -129,13 +129,11 @@ impl ProjectStage {
 
     fn parse_reduce_in_expr(expr: &Value) -> Result<ReduceInExpr> {
         let obj = expr.as_object().ok_or_else(|| {
-            MongoLiteError::AggregationError(
-                "$reduce 'in' must be an expression object".to_string(),
-            )
+            IronBaseError::AggregationError("$reduce 'in' must be an expression object".to_string())
         })?;
 
         if obj.len() != 1 {
-            return Err(MongoLiteError::AggregationError(
+            return Err(IronBaseError::AggregationError(
                 "$reduce 'in' must have exactly one operator".to_string(),
             ));
         }
@@ -186,7 +184,7 @@ impl ProjectStage {
                     None => Ok(ReduceInExpr::Concat),
                 }
             }
-            _ => Err(MongoLiteError::AggregationError(format!(
+            _ => Err(IronBaseError::AggregationError(format!(
                 "Unsupported $reduce operator: {}. Supported: $add, $multiply, $concat",
                 op
             ))),
@@ -208,7 +206,7 @@ impl ProjectStage {
 
     fn validate_reduce_args(args: &Value, op_name: &str) -> Result<()> {
         let arr = args.as_array().ok_or_else(|| {
-            MongoLiteError::AggregationError(format!("{} arguments must be an array", op_name))
+            IronBaseError::AggregationError(format!("{} arguments must be an array", op_name))
         })?;
 
         let has_value = arr.iter().any(|v| v.as_str() == Some("$$value"));
@@ -219,7 +217,7 @@ impl ProjectStage {
         });
 
         if !has_value || !has_this {
-            return Err(MongoLiteError::AggregationError(format!(
+            return Err(IronBaseError::AggregationError(format!(
                 "{} in $reduce must use $$value and $$this (or $$this.field)",
                 op_name
             )));

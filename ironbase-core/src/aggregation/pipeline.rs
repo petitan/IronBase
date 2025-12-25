@@ -5,7 +5,7 @@ use crate::aggregation::types::{
     GroupStage, LimitStage, MatchStage, Pipeline, ProjectStage, SkipStage, SortStage, Stage,
     UnwindStage,
 };
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 impl Pipeline {
@@ -13,7 +13,7 @@ impl Pipeline {
     pub fn from_json(pipeline_json: &Value) -> Result<Self> {
         if let Value::Array(stages_array) = pipeline_json {
             if stages_array.is_empty() {
-                return Err(MongoLiteError::AggregationError(
+                return Err(IronBaseError::AggregationError(
                     "Pipeline cannot be empty".to_string(),
                 ));
             }
@@ -26,7 +26,7 @@ impl Pipeline {
 
             Ok(Pipeline { stages })
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "Pipeline must be an array".to_string(),
             ))
         }
@@ -46,7 +46,7 @@ impl Stage {
     pub(crate) fn from_json(stage_json: &Value) -> Result<Self> {
         if let Value::Object(obj) = stage_json {
             if obj.len() != 1 {
-                return Err(MongoLiteError::AggregationError(
+                return Err(IronBaseError::AggregationError(
                     "Each stage must have exactly one operator".to_string(),
                 ));
             }
@@ -61,13 +61,13 @@ impl Stage {
                 "$limit" => Ok(Stage::Limit(LimitStage::from_json(stage_spec)?)),
                 "$skip" => Ok(Stage::Skip(SkipStage::from_json(stage_spec)?)),
                 "$unwind" => Ok(Stage::Unwind(UnwindStage::from_json(stage_spec)?)),
-                _ => Err(MongoLiteError::AggregationError(format!(
+                _ => Err(IronBaseError::AggregationError(format!(
                     "Unknown pipeline stage: {}",
                     stage_name
                 ))),
             }
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "Stage must be an object".to_string(),
             ))
         }

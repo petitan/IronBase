@@ -11,7 +11,7 @@
 mod chaos_helpers;
 
 use chaos_helpers::*;
-use ironbase_core::error::MongoLiteError;
+use ironbase_core::error::IronBaseError;
 use ironbase_core::storage::StorageEngine;
 use ironbase_core::{WALEntry, WALEntryType, WriteAheadLog};
 use serde_json::json;
@@ -43,7 +43,7 @@ fn test_corrupted_magic_number() {
     assert!(result.is_err(), "Should fail with corrupted magic");
 
     match result {
-        Err(MongoLiteError::Corruption(msg)) => {
+        Err(IronBaseError::Corruption(msg)) => {
             assert!(
                 msg.contains("magic") || msg.contains("Invalid"),
                 "Error should mention magic: {}",
@@ -157,7 +157,7 @@ fn test_document_zero_length() {
 
     assert!(result.is_err());
     match result {
-        Err(MongoLiteError::Corruption(msg)) => {
+        Err(IronBaseError::Corruption(msg)) => {
             assert!(msg.contains("zero length"), "Should mention zero: {}", msg);
         }
         Err(e) => println!("Different error (ok): {:?}", e),
@@ -188,7 +188,7 @@ fn test_document_length_overflow() {
     assert!(result.is_err());
 
     match result {
-        Err(MongoLiteError::Corruption(msg)) => {
+        Err(IronBaseError::Corruption(msg)) => {
             assert!(
                 msg.contains("exceed") || msg.contains("boundary"),
                 "Should mention boundary: {}",
@@ -282,7 +282,7 @@ fn test_read_beyond_file() {
     assert!(result.is_err());
 
     match result {
-        Err(MongoLiteError::Corruption(msg)) => {
+        Err(IronBaseError::Corruption(msg)) => {
             assert!(
                 msg.contains("offset") || msg.contains("file"),
                 "Should mention offset: {}",

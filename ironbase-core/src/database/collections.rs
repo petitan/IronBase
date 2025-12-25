@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use crate::collection_core::{schema::CompiledSchema, CollectionCore};
 use crate::document::DocumentId;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::index::{IndexKey, IndexManager};
 use crate::storage::{RawStorage, Storage};
 
@@ -340,7 +340,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let storage_guard = self.storage.write();
         let meta = storage_guard
             .get_collection_meta(name)
-            .ok_or_else(|| crate::error::MongoLiteError::CollectionNotFound(name.to_string()))?;
+            .ok_or_else(|| crate::error::IronBaseError::CollectionNotFound(name.to_string()))?;
 
         let catalog = meta.document_catalog.clone();
         let persisted_indexes = meta.indexes.clone();
@@ -461,7 +461,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     // Check storage directly
                     let storage = self.storage.read();
                     if storage.get_collection_meta(name).is_none() {
-                        return Err(MongoLiteError::CollectionNotFound(name.to_string()));
+                        return Err(IronBaseError::CollectionNotFound(name.to_string()));
                     }
                     // Collection exists in storage but no index manager yet
                     // This can happen after database reopen - need to create manager
@@ -531,7 +531,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             let storage = self.storage.read();
             if let Some(meta) = storage.get_collection_meta(name) {
                 if meta.flags.protected {
-                    return Err(MongoLiteError::OperationNotAllowed(format!(
+                    return Err(IronBaseError::OperationNotAllowed(format!(
                         "Cannot drop protected collection '{}'",
                         name
                     )));
@@ -557,7 +557,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let mut storage = self.storage.write();
         let meta = storage
             .get_collection_meta_mut(name)
-            .ok_or_else(|| MongoLiteError::CollectionNotFound(name.to_string()))?;
+            .ok_or_else(|| IronBaseError::CollectionNotFound(name.to_string()))?;
         meta.flags = flags;
         Ok(())
     }

@@ -2,7 +2,7 @@
 // Main filter matching logic
 
 use crate::document::Document;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 use super::comparison::EqOperator;
@@ -60,14 +60,14 @@ pub fn matches_filter_value(
                         return Ok(false);
                     }
                 } else {
-                    return Err(MongoLiteError::InvalidQuery(format!(
+                    return Err(IronBaseError::InvalidQuery(format!(
                         "Unknown operator: {}",
                         op_name
                     )));
                 }
             } else {
                 // Field-level condition (shouldn't happen in this context)
-                return Err(MongoLiteError::InvalidQuery(
+                return Err(IronBaseError::InvalidQuery(
                     "Unexpected field in filter value".to_string(),
                 ));
             }
@@ -103,7 +103,7 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
 
     let filter_obj = filter
         .as_object()
-        .ok_or_else(|| MongoLiteError::InvalidQuery("Filter must be an object".to_string()))?;
+        .ok_or_else(|| IronBaseError::InvalidQuery("Filter must be an object".to_string()))?;
 
     for (key, value) in filter_obj {
         // Special handling for $** wildcard operator (must be checked BEFORE regular $ operators)
@@ -116,7 +116,7 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                     return Ok(false);
                 }
             } else {
-                return Err(MongoLiteError::InvalidQuery(format!(
+                return Err(IronBaseError::InvalidQuery(format!(
                     "Unknown operator: {}",
                     key
                 )));
@@ -132,7 +132,7 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                 // Validate: only simple field name, not a path
                 // Note: errors are swallowed by Query::matches() - invalid patterns just don't match
                 if field_name.contains('.') {
-                    return Err(MongoLiteError::InvalidQuery(format!(
+                    return Err(IronBaseError::InvalidQuery(format!(
                         "$** wildcard does not support nested paths. Use $**.{} instead of $**.{}",
                         field_name.split('.').next().unwrap(),
                         field_name
@@ -140,7 +140,7 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                 }
                 document.get_all_by_field_name(field_name)
             } else if key == "$**" {
-                return Err(MongoLiteError::InvalidQuery(
+                return Err(IronBaseError::InvalidQuery(
                     "$** must be followed by a field name (e.g., $**.fieldName)".to_string(),
                 ));
             } else {
@@ -180,7 +180,7 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                         .get("$regex")
                         .and_then(|v| v.as_str())
                         .ok_or_else(|| {
-                            MongoLiteError::InvalidQuery(
+                            IronBaseError::InvalidQuery(
                                 "$regex requires a string pattern".to_string(),
                             )
                         })?;
@@ -245,7 +245,7 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                                     return Ok(false);
                                 }
                             } else {
-                                return Err(MongoLiteError::InvalidQuery(format!(
+                                return Err(IronBaseError::InvalidQuery(format!(
                                     "Unknown operator: {}",
                                     op_name
                                 )));
@@ -268,7 +268,7 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
                                     return Ok(false);
                                 }
                             } else {
-                                return Err(MongoLiteError::InvalidQuery(format!(
+                                return Err(IronBaseError::InvalidQuery(format!(
                                     "Unknown operator: {}",
                                     op_name
                                 )));

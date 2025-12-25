@@ -5,7 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::index::{IndexKey, IndexManager};
 use crate::value_utils::get_nested_value;
 use serde_json::Value;
@@ -90,7 +90,7 @@ impl BatchConstraintValidator {
     /// # Returns
     ///
     /// * `Ok(())` if the document is unique within the batch
-    /// * `Err(MongoLiteError::IndexError)` if a duplicate is detected
+    /// * `Err(IronBaseError::IndexError)` if a duplicate is detected
     ///
     /// FIX #19: Now creates compound keys for compound unique indexes
     pub fn check_and_track(&mut self, doc: &Value) -> Result<()> {
@@ -118,7 +118,7 @@ impl BatchConstraintValidator {
 
             if !seen_set.insert(value_key.clone()) {
                 let fields_str = fields.join(", ");
-                return Err(MongoLiteError::IndexError(format!(
+                return Err(IronBaseError::IndexError(format!(
                     "Duplicate key in batch: {:?} in field(s) '{}' (unique index)",
                     key_values, fields_str
                 )));

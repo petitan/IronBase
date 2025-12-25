@@ -45,6 +45,10 @@ mongolite-core/*.mlite
 # Proptest regressions
 **/proptest-regressions/
 
+# Fuzz testing corpus and artifacts
+**/fuzz/corpus/
+**/fuzz/artifacts/
+
 # TLS test certificates
 mcp-server/cert.pem
 mcp-server/key.pem

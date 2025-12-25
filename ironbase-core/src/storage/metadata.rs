@@ -2,7 +2,7 @@
 // Metadata management for storage engine
 
 use super::{CollectionMeta, Header, StorageEngine};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -28,11 +28,11 @@ impl StorageEngine {
         file.read_exact(&mut header_bytes)?;
 
         let mut header: Header = bincode::deserialize(&header_bytes)
-            .map_err(|e| MongoLiteError::Corruption(format!("Invalid header: {}", e)))?;
+            .map_err(|e| IronBaseError::Corruption(format!("Invalid header: {}", e)))?;
 
         // Magic number check
         if &header.magic != b"MONGOLTE" {
-            return Err(MongoLiteError::Corruption("Invalid magic number".into()));
+            return Err(IronBaseError::Corruption("Invalid magic number".into()));
         }
 
         // Load collections based on version
@@ -80,7 +80,7 @@ impl StorageEngine {
 
         // Sanity check
         if doc_len > 16 * 1024 * 1024 {
-            return Err(MongoLiteError::Corruption(format!(
+            return Err(IronBaseError::Corruption(format!(
                 "Migration: suspiciously large document size: {} bytes",
                 doc_len
             )));
@@ -111,7 +111,7 @@ impl StorageEngine {
 
             // DoS protection: validate metadata size before allocation
             if len == 0 || len > MAX_METADATA_SIZE {
-                return Err(MongoLiteError::Corruption(format!(
+                return Err(IronBaseError::Corruption(format!(
                     "Collection metadata size {} exceeds maximum {} bytes",
                     len, MAX_METADATA_SIZE
                 )));
@@ -143,7 +143,7 @@ impl StorageEngine {
 
             // DoS protection: validate metadata size before allocation
             if len == 0 || len > MAX_METADATA_SIZE {
-                return Err(MongoLiteError::Corruption(format!(
+                return Err(IronBaseError::Corruption(format!(
                     "Collection metadata size {} exceeds maximum {} bytes",
                     len, MAX_METADATA_SIZE
                 )));
@@ -170,7 +170,7 @@ impl StorageEngine {
 
         // Write header
         let mut header_bytes =
-            bincode::serialize(header).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            bincode::serialize(header).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         if header_bytes.len() < super::HEADER_SIZE as usize {
             header_bytes.resize(super::HEADER_SIZE as usize, 0);
         }
@@ -262,7 +262,7 @@ impl StorageEngine {
 
                 // VALIDATION: Ensure calculated offset is sane
                 if calculated_offset > file_len {
-                    return Err(MongoLiteError::Corruption(format!(
+                    return Err(IronBaseError::Corruption(format!(
                         "Invalid metadata offset calculation: {} > file_len {}",
                         calculated_offset, file_len
                     )));
@@ -270,7 +270,7 @@ impl StorageEngine {
 
                 // Additional sanity check: doc_len should be reasonable (< 16MB)
                 if doc_len > 16 * 1024 * 1024 {
-                    return Err(MongoLiteError::Corruption(format!(
+                    return Err(IronBaseError::Corruption(format!(
                         "Suspiciously large document size: {} bytes at offset {}",
                         doc_len, max_doc_offset
                     )));
@@ -280,7 +280,7 @@ impl StorageEngine {
             }
             Err(e) => {
                 // Failed to read document - file might be corrupt
-                Err(MongoLiteError::Corruption(format!(
+                Err(IronBaseError::Corruption(format!(
                     "Failed to read document at offset {}: {}",
                     max_doc_offset, e
                 )))
@@ -370,7 +370,7 @@ impl StorageEngine {
         // 4. Rewrite header at file start
         file.seek(SeekFrom::Start(0))?;
         let header_bytes =
-            bincode::serialize(header).map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            bincode::serialize(header).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         file.write_all(&header_bytes)?;
 
         // 5. Sync all changes to disk

@@ -2,7 +2,7 @@
 // $unwind stage implementation
 
 use crate::aggregation::types::UnwindStage;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::{get_nested_value, set_nested_value};
 use serde_json::Value;
 
@@ -17,7 +17,7 @@ impl UnwindStage {
                     preserve_null_and_empty_arrays: false,
                 });
             }
-            return Err(MongoLiteError::AggregationError(
+            return Err(IronBaseError::AggregationError(
                 "$unwind path must start with $".to_string(),
             ));
         }
@@ -25,11 +25,11 @@ impl UnwindStage {
         // Extended form: {path: "$fieldName", ...}
         if let Value::Object(obj) = spec {
             let path = obj.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-                MongoLiteError::AggregationError("$unwind requires 'path' field".to_string())
+                IronBaseError::AggregationError("$unwind requires 'path' field".to_string())
             })?;
 
             if !path.starts_with('$') {
-                return Err(MongoLiteError::AggregationError(
+                return Err(IronBaseError::AggregationError(
                     "$unwind path must start with $".to_string(),
                 ));
             }
@@ -51,7 +51,7 @@ impl UnwindStage {
             });
         }
 
-        Err(MongoLiteError::AggregationError(
+        Err(IronBaseError::AggregationError(
             "$unwind must be a string or object".to_string(),
         ))
     }

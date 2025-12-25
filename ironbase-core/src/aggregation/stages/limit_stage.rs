@@ -2,7 +2,7 @@
 // $limit stage implementation
 
 use crate::aggregation::types::LimitStage;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 impl LimitStage {
@@ -10,7 +10,7 @@ impl LimitStage {
         if let Some(n) = spec.as_u64() {
             Ok(LimitStage { limit: n as usize })
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "$limit must be a positive number".to_string(),
             ))
         }

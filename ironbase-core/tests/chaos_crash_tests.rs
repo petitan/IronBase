@@ -13,7 +13,7 @@
 mod chaos_helpers;
 
 use chaos_helpers::*;
-use ironbase_core::error::MongoLiteError;
+use ironbase_core::error::IronBaseError;
 use ironbase_core::storage::StorageEngine;
 use ironbase_core::{WALEntry, WALEntryType, WriteAheadLog};
 use serde_json::json;
@@ -149,7 +149,7 @@ fn test_wal_corrupted_crc_middle() {
 
     assert!(result.is_err(), "Should detect CRC corruption");
     match result {
-        Err(MongoLiteError::WALCorruption) => {
+        Err(IronBaseError::WALCorruption) => {
             // Expected
         }
         Err(e) => panic!("Expected WALCorruption, got: {:?}", e),

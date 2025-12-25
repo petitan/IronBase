@@ -8,7 +8,7 @@ pub mod metadata; // Make metadata public for CollectionMeta
 pub mod traits; // NEW: Storage trait definitions
 
 use crate::document::{Document, DocumentId};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::transaction::{Transaction, TransactionId};
 use crate::wal::WriteAheadLog;
 use fs2::FileExt;
@@ -192,7 +192,7 @@ impl StorageEngine {
         // This is deadlock-free: try_lock returns immediately with error if locked
         lock_file
             .try_lock_exclusive()
-            .map_err(|_| MongoLiteError::DatabaseLocked(path_str.clone()))?;
+            .map_err(|_| IronBaseError::DatabaseLocked(path_str.clone()))?;
 
         let mut file = OpenOptions::new()
             .read(true)
@@ -212,12 +212,12 @@ impl StorageEngine {
                     // Check if this is a recoverable corruption error
                     // Magic number corruption is NOT recoverable - file may not be a valid database
                     let is_magic_corruption =
-                        matches!(&e, MongoLiteError::Corruption(msg) if msg.contains("magic"));
+                        matches!(&e, IronBaseError::Corruption(msg) if msg.contains("magic"));
 
                     let is_recoverable_corruption = !is_magic_corruption
                         && matches!(
                             &e,
-                            MongoLiteError::Corruption(_) | MongoLiteError::Serialization(_)
+                            IronBaseError::Corruption(_) | IronBaseError::Serialization(_)
                         );
 
                     if is_recoverable_corruption {
@@ -277,7 +277,7 @@ impl StorageEngine {
     /// Create a new collection
     pub fn create_collection(&mut self, name: &str) -> Result<()> {
         if self.collections.contains_key(name) {
-            return Err(MongoLiteError::CollectionExists(name.to_string()));
+            return Err(IronBaseError::CollectionExists(name.to_string()));
         }
 
         // Create new collection with placeholder offset (will be corrected by flush_metadata)
@@ -312,7 +312,7 @@ impl StorageEngine {
     /// Drop collection
     pub fn drop_collection(&mut self, name: &str) -> Result<()> {
         if !self.collections.contains_key(name) {
-            return Err(MongoLiteError::CollectionNotFound(name.to_string()));
+            return Err(IronBaseError::CollectionNotFound(name.to_string()));
         }
 
         self.collections.remove(name);
@@ -351,7 +351,7 @@ impl StorageEngine {
         };
 
         let entry_data = serde_json::to_vec(&metadata_entry)
-            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
         let entry = WALEntry::new(
             0, // No transaction ID for metadata snapshots
@@ -415,7 +415,7 @@ impl StorageEngine {
                 // No WAL file - cannot recover
                 return Ok(false);
             }
-            Err(e) => return Err(MongoLiteError::Io(e)),
+            Err(e) => return Err(IronBaseError::Io(e)),
         };
 
         let reader = BufReader::new(wal_file);
@@ -696,7 +696,7 @@ impl StorageEngine {
         }
 
         if !transaction.is_active() {
-            return Err(MongoLiteError::TransactionCommitted);
+            return Err(IronBaseError::TransactionCommitted);
         }
 
         let already_applied = transaction.operations_applied();
@@ -710,7 +710,7 @@ impl StorageEngine {
         for operation in transaction.operations() {
             let op_with_collection = add_collection_to_operation(operation);
             let op_json = serde_json::to_string(&op_with_collection)
-                .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
             let op_entry = WALEntry::new(
                 transaction.id,
                 WALEntryType::Operation,
@@ -744,7 +744,7 @@ impl StorageEngine {
                 });
 
                 let change_json = serde_json::to_string(&change_data)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
                 let index_entry = WALEntry::new(
                     transaction.id,
@@ -904,7 +904,7 @@ impl StorageEngine {
                 } => {
                     // Serialize and write document to storage with catalog update
                     let doc_json = serde_json::to_string(doc)
-                        .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                        .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                     // Use write_document_raw to properly update document_catalog
                     self.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
                     self.adjust_live_count(collection, 1);
@@ -917,7 +917,7 @@ impl StorageEngine {
                 } => {
                     // Write new version of document (append-only) with catalog update
                     let doc_json = serde_json::to_string(new_doc)
-                        .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                        .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                     // Use write_document_raw to properly update document_catalog
                     self.write_document_raw(collection, doc_id, doc_json.as_bytes())?;
                 }
@@ -933,7 +933,7 @@ impl StorageEngine {
                         "_tombstone": true
                     });
                     let tombstone_json = serde_json::to_string(&tombstone)
-                        .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                        .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                     // Use write_document_raw - it will handle tombstone in catalog properly
                     // (tombstones remove entry from catalog when processed by rebuild_catalog)
                     self.write_document_raw(collection, doc_id, tombstone_json.as_bytes())?;
@@ -969,7 +969,7 @@ impl StorageEngine {
 
                 // Serialize and write document with FULL metadata update
                 let doc_json = serde_json::to_string(doc)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 self.write_document_full(collection, doc_id, doc_json.as_bytes())?;
             }
             Operation::Update {
@@ -983,7 +983,7 @@ impl StorageEngine {
 
                 // Write new version with FULL metadata update
                 let doc_json = serde_json::to_string(new_doc)
-                    .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+                    .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
                 self.write_document_full(collection, doc_id, doc_json.as_bytes())?;
             }
             Operation::Delete {
@@ -1020,7 +1020,7 @@ impl StorageEngine {
                 match entry.entry_type {
                     crate::wal::WALEntryType::Operation => {
                         let op_str = std::str::from_utf8(&entry.data).map_err(|e| {
-                            MongoLiteError::Serialization(format!("UTF-8 error: {}", e))
+                            IronBaseError::Serialization(format!("UTF-8 error: {}", e))
                         })?;
                         let operation: crate::transaction::Operation =
                             serde_json::from_str(op_str)?;
@@ -1036,7 +1036,7 @@ impl StorageEngine {
                     crate::wal::WALEntryType::IndexChange => {
                         // Parse index change from JSON
                         let change_str = std::str::from_utf8(&entry.data).map_err(|e| {
-                            MongoLiteError::Serialization(format!("UTF-8 error: {}", e))
+                            IronBaseError::Serialization(format!("UTF-8 error: {}", e))
                         })?;
                         let change_json: serde_json::Value = serde_json::from_str(change_str)?;
 
@@ -1044,14 +1044,14 @@ impl StorageEngine {
                         let collection = change_json["collection"]
                             .as_str()
                             .ok_or_else(|| {
-                                MongoLiteError::Serialization("Missing collection".to_string())
+                                IronBaseError::Serialization("Missing collection".to_string())
                             })?
                             .to_string();
 
                         let index_name = change_json["index_name"]
                             .as_str()
                             .ok_or_else(|| {
-                                MongoLiteError::Serialization("Missing index_name".to_string())
+                                IronBaseError::Serialization("Missing index_name".to_string())
                             })?
                             .to_string();
 
@@ -1059,7 +1059,7 @@ impl StorageEngine {
                             Some("Insert") => crate::transaction::IndexOperation::Insert,
                             Some("Delete") => crate::transaction::IndexOperation::Delete,
                             _ => {
-                                return Err(MongoLiteError::Serialization(
+                                return Err(IronBaseError::Serialization(
                                     "Invalid operation".to_string(),
                                 ))
                             }
@@ -1244,7 +1244,7 @@ impl StorageEngine {
     /// This is primarily used by language bindings (Python, C#) where the
     /// garbage collector timing is unpredictable and explicit close() is needed.
     pub fn release_lock(&self) -> Result<()> {
-        self.lock_file.unlock().map_err(MongoLiteError::Io)
+        self.lock_file.unlock().map_err(IronBaseError::Io)
     }
 }
 
@@ -1271,7 +1271,7 @@ impl Storage for StorageEngine {
             // Generate auto-increment ID
             let meta = self
                 .get_collection_meta_mut(collection)
-                .ok_or_else(|| MongoLiteError::CollectionNotFound(collection.to_string()))?;
+                .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
             meta.last_id += 1;
             DocumentId::Int(meta.last_id as i64)
         };
@@ -1501,7 +1501,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(MongoLiteError::CollectionExists(_)) => (),
+            Err(IronBaseError::CollectionExists(_)) => (),
             _ => panic!("Expected CollectionExists error"),
         }
     }
@@ -1545,7 +1545,7 @@ mod tests {
 
         assert!(result.is_err());
         match result {
-            Err(MongoLiteError::CollectionNotFound(_)) => (),
+            Err(IronBaseError::CollectionNotFound(_)) => (),
             _ => panic!("Expected CollectionNotFound error"),
         }
     }
@@ -1731,7 +1731,7 @@ mod tests {
         assert!(result.is_err(), "Reading zero-length document should fail");
 
         match result {
-            Err(MongoLiteError::Corruption(msg)) => {
+            Err(IronBaseError::Corruption(msg)) => {
                 assert!(
                     msg.contains("zero length"),
                     "Error should mention zero length: {}",

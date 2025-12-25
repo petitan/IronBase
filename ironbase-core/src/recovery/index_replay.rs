@@ -2,7 +2,7 @@
 // Parse and replay index changes from WAL
 
 use crate::document::DocumentId;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::wal::{WALEntry, WALEntryType};
 
 /// Type of index operation
@@ -38,13 +38,13 @@ impl IndexReplay {
     /// Parse a single index change entry
     fn parse_index_change(data: &[u8]) -> Result<RecoveredIndexChange> {
         let json: serde_json::Value = serde_json::from_slice(data)
-            .map_err(|e| MongoLiteError::Serialization(e.to_string()))?;
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
         let collection = json
             .get("collection")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                MongoLiteError::Serialization("Missing collection in index change".into())
+                IronBaseError::Serialization("Missing collection in index change".into())
             })?
             .to_string();
 
@@ -52,7 +52,7 @@ impl IndexReplay {
             .get("index_name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                MongoLiteError::Serialization("Missing index_name in index change".into())
+                IronBaseError::Serialization("Missing index_name in index change".into())
             })?
             .to_string();
 
@@ -60,7 +60,7 @@ impl IndexReplay {
             Some("Insert") => IndexOperation::Insert,
             Some("Delete") => IndexOperation::Delete,
             _ => {
-                return Err(MongoLiteError::Serialization(
+                return Err(IronBaseError::Serialization(
                     "Invalid operation in index change".into(),
                 ))
             }
@@ -69,7 +69,7 @@ impl IndexReplay {
         let key = json
             .get("key")
             .cloned()
-            .ok_or_else(|| MongoLiteError::Serialization("Missing key in index change".into()))?;
+            .ok_or_else(|| IronBaseError::Serialization("Missing key in index change".into()))?;
 
         let doc_id = Self::parse_doc_id(&json)?;
 
@@ -84,16 +84,16 @@ impl IndexReplay {
 
     /// Parse document ID from JSON
     fn parse_doc_id(json: &serde_json::Value) -> Result<DocumentId> {
-        let doc_id_value = json.get("doc_id").ok_or_else(|| {
-            MongoLiteError::Serialization("Missing doc_id in index change".into())
-        })?;
+        let doc_id_value = json
+            .get("doc_id")
+            .ok_or_else(|| IronBaseError::Serialization("Missing doc_id in index change".into()))?;
 
         match doc_id_value {
             serde_json::Value::Number(n) => {
                 if let Some(i) = n.as_i64() {
                     Ok(DocumentId::Int(i))
                 } else {
-                    Err(MongoLiteError::Serialization(
+                    Err(IronBaseError::Serialization(
                         "Invalid doc_id number type".into(),
                     ))
                 }
@@ -115,12 +115,12 @@ impl IndexReplay {
                 } else if let Some(s) = obj.get("ObjectId").and_then(|v| v.as_str()) {
                     Ok(DocumentId::ObjectId(s.to_string()))
                 } else {
-                    Err(MongoLiteError::Serialization(
+                    Err(IronBaseError::Serialization(
                         "Invalid doc_id object format".into(),
                     ))
                 }
             }
-            _ => Err(MongoLiteError::Serialization("Invalid doc_id type".into())),
+            _ => Err(IronBaseError::Serialization("Invalid doc_id type".into())),
         }
     }
 }

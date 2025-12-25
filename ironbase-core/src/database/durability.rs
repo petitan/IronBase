@@ -165,7 +165,7 @@ impl DatabaseCore<StorageEngine> {
     ///     ("name".to_string(), json!("Alice")),
     ///     ("age".to_string(), json!(30)),
     /// ]))?;
-    /// # Ok::<(), ironbase_core::MongoLiteError>(())
+    /// # Ok::<(), ironbase_core::IronBaseError>(())
     /// ```
     pub fn insert_one(
         &self,

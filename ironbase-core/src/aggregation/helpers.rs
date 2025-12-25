@@ -1,7 +1,7 @@
 // src/aggregation/helpers.rs
 // Helper functions for aggregation pipeline
 
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::get_nested_value;
 use serde_json::Value;
 
@@ -13,13 +13,13 @@ pub(crate) fn parse_field_reference(value: &Value, op_name: &str) -> Result<Stri
         if s.starts_with('$') {
             Ok(s.trim_start_matches('$').to_string())
         } else {
-            Err(MongoLiteError::AggregationError(format!(
+            Err(IronBaseError::AggregationError(format!(
                 "{} field reference must start with $",
                 op_name
             )))
         }
     } else {
-        Err(MongoLiteError::AggregationError(format!(
+        Err(IronBaseError::AggregationError(format!(
             "{} must be a field reference",
             op_name
         )))

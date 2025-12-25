@@ -2,7 +2,7 @@
 // Element operators: $exists, $type
 
 use crate::document::Document;
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 use super::traits::OperatorMatcher;
@@ -44,7 +44,7 @@ impl OperatorMatcher for ExistsOperator {
         if let Value::Bool(should_exist) = filter_value {
             Ok(doc_value.is_some() == *should_exist)
         } else {
-            Err(MongoLiteError::InvalidQuery(
+            Err(IronBaseError::InvalidQuery(
                 "$exists operator requires a boolean".to_string(),
             ))
         }
@@ -91,14 +91,14 @@ impl OperatorMatcher for TypeOperator {
                         Some(BSON_TYPE_INT32) => "int",
                         Some(BSON_TYPE_INT64) => "long",
                         _ => {
-                            return Err(MongoLiteError::InvalidQuery(format!(
+                            return Err(IronBaseError::InvalidQuery(format!(
                                 "Unknown BSON type number: {}",
                                 n
                             )))
                         }
                     }
                 } else {
-                    return Err(MongoLiteError::InvalidQuery(
+                    return Err(IronBaseError::InvalidQuery(
                         "$type operator requires a string or number".to_string(),
                     ));
                 };
@@ -144,7 +144,7 @@ impl OperatorMatcher for TypeOperator {
                         }
                     }
                     _ => {
-                        return Err(MongoLiteError::InvalidQuery(format!(
+                        return Err(IronBaseError::InvalidQuery(format!(
                             "Unknown type name: {}",
                             type_name
                         )))

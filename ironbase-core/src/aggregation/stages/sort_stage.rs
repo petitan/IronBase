@@ -2,7 +2,7 @@
 // $sort stage implementation
 
 use crate::aggregation::types::{SortDirection, SortStage};
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 use crate::value_utils::{compare_values as compare_values_core, get_nested_value};
 use serde_json::Value;
 
@@ -17,13 +17,13 @@ impl SortStage {
                         1 => SortDirection::Ascending,
                         -1 => SortDirection::Descending,
                         _ => {
-                            return Err(MongoLiteError::AggregationError(
+                            return Err(IronBaseError::AggregationError(
                                 "Sort direction must be 1 or -1".to_string(),
                             ))
                         }
                     }
                 } else {
-                    return Err(MongoLiteError::AggregationError(
+                    return Err(IronBaseError::AggregationError(
                         "Sort direction must be 1 or -1".to_string(),
                     ));
                 };
@@ -33,7 +33,7 @@ impl SortStage {
 
             Ok(SortStage { fields })
         } else {
-            Err(MongoLiteError::AggregationError(
+            Err(IronBaseError::AggregationError(
                 "$sort must be an object".to_string(),
             ))
         }

@@ -43,11 +43,11 @@ impl fmt::Display for McpError {
 
 impl std::error::Error for McpError {}
 
-impl From<ironbase_core::MongoLiteError> for McpError {
-    fn from(err: ironbase_core::MongoLiteError) -> Self {
-        use ironbase_core::MongoLiteError;
+impl From<ironbase_core::IronBaseError> for McpError {
+    fn from(err: ironbase_core::IronBaseError) -> Self {
+        use ironbase_core::IronBaseError;
         match err {
-            MongoLiteError::CollectionNotFound(name) => McpError::CollectionNotFound(name),
+            IronBaseError::CollectionNotFound(name) => McpError::CollectionNotFound(name),
             other => McpError::Storage(other.to_string()),
         }
     }

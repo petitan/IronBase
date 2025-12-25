@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::error::{MongoLiteError, Result};
+use crate::error::{IronBaseError, Result};
 
 /// Compiled property schema with extended validation constraints
 #[derive(Clone, Debug)]
@@ -78,15 +78,15 @@ impl SchemaType {
 impl CompiledSchema {
     pub fn from_value(schema: &Value) -> Result<Self> {
         let obj = schema.as_object().ok_or_else(|| {
-            MongoLiteError::SchemaError("Schema must be a JSON object".to_string())
+            IronBaseError::SchemaError("Schema must be a JSON object".to_string())
         })?;
 
         if let Some(schema_type) = obj.get("type") {
             let type_str = schema_type.as_str().ok_or_else(|| {
-                MongoLiteError::SchemaError("Schema type must be a string".to_string())
+                IronBaseError::SchemaError("Schema type must be a string".to_string())
             })?;
             if type_str != "object" {
-                return Err(MongoLiteError::SchemaError(
+                return Err(IronBaseError::SchemaError(
                     "Only object schemas are supported".to_string(),
                 ));
             }
@@ -95,11 +95,11 @@ impl CompiledSchema {
         let mut required = Vec::new();
         if let Some(required_value) = obj.get("required") {
             let arr = required_value.as_array().ok_or_else(|| {
-                MongoLiteError::SchemaError("required must be an array of field names".to_string())
+                IronBaseError::SchemaError("required must be an array of field names".to_string())
             })?;
             for entry in arr {
                 let field = entry.as_str().ok_or_else(|| {
-                    MongoLiteError::SchemaError("required entries must be strings".to_string())
+                    IronBaseError::SchemaError("required entries must be strings".to_string())
                 })?;
                 required.push(field.to_string());
             }
@@ -108,18 +108,18 @@ impl CompiledSchema {
         let mut properties = HashMap::new();
         if let Some(props) = obj.get("properties") {
             let props_obj = props.as_object().ok_or_else(|| {
-                MongoLiteError::SchemaError("properties must be an object".to_string())
+                IronBaseError::SchemaError("properties must be an object".to_string())
             })?;
             for (field, spec) in props_obj {
                 if let Some(type_value) = spec.get("type") {
                     let type_str = type_value.as_str().ok_or_else(|| {
-                        MongoLiteError::SchemaError(format!(
+                        IronBaseError::SchemaError(format!(
                             "Property '{}' type must be a string",
                             field
                         ))
                     })?;
                     let parsed_type = SchemaType::from_str(type_str).ok_or_else(|| {
-                        MongoLiteError::SchemaError(format!(
+                        IronBaseError::SchemaError(format!(
                             "Unsupported type '{}' for field '{}'",
                             type_str, field
                         ))
@@ -130,7 +130,7 @@ impl CompiledSchema {
                     // Parse enum values
                     if let Some(enum_value) = spec.get("enum") {
                         let enum_arr = enum_value.as_array().ok_or_else(|| {
-                            MongoLiteError::SchemaError(format!(
+                            IronBaseError::SchemaError(format!(
                                 "Property '{}' enum must be an array",
                                 field
                             ))
@@ -141,13 +141,13 @@ impl CompiledSchema {
                     // Parse pattern (regex)
                     if let Some(pattern_value) = spec.get("pattern") {
                         let pattern_str = pattern_value.as_str().ok_or_else(|| {
-                            MongoLiteError::SchemaError(format!(
+                            IronBaseError::SchemaError(format!(
                                 "Property '{}' pattern must be a string",
                                 field
                             ))
                         })?;
                         let regex = Regex::new(pattern_str).map_err(|e| {
-                            MongoLiteError::SchemaError(format!(
+                            IronBaseError::SchemaError(format!(
                                 "Property '{}' has invalid regex pattern: {}",
                                 field, e
                             ))
@@ -158,7 +158,7 @@ impl CompiledSchema {
                     // Parse minItems (array constraint)
                     if let Some(min_value) = spec.get("minItems") {
                         let min = min_value.as_u64().ok_or_else(|| {
-                            MongoLiteError::SchemaError(format!(
+                            IronBaseError::SchemaError(format!(
                                 "Property '{}' minItems must be a non-negative integer",
                                 field
                             ))
@@ -169,7 +169,7 @@ impl CompiledSchema {
                     // Parse maxItems (array constraint)
                     if let Some(max_value) = spec.get("maxItems") {
                         let max = max_value.as_u64().ok_or_else(|| {
-                            MongoLiteError::SchemaError(format!(
+                            IronBaseError::SchemaError(format!(
                                 "Property '{}' maxItems must be a non-negative integer",
                                 field
                             ))
@@ -190,13 +190,13 @@ impl CompiledSchema {
 
     pub fn validate(&self, value: &Value) -> Result<()> {
         let obj = value.as_object().ok_or_else(|| {
-            MongoLiteError::SchemaError("Document must be a JSON object".to_string())
+            IronBaseError::SchemaError("Document must be a JSON object".to_string())
         })?;
 
         // Check required fields
         for field in &self.required {
             if !obj.contains_key(field) {
-                return Err(MongoLiteError::SchemaError(format!(
+                return Err(IronBaseError::SchemaError(format!(
                     "Missing required field '{}'",
                     field
                 )));
@@ -208,7 +208,7 @@ impl CompiledSchema {
             if let Some(field_value) = obj.get(field) {
                 // Type validation
                 if !prop_schema.schema_type.matches(field_value) {
-                    return Err(MongoLiteError::SchemaError(format!(
+                    return Err(IronBaseError::SchemaError(format!(
                         "Field '{}' expected type {}",
                         field,
                         prop_schema.schema_type.as_str()
@@ -218,7 +218,7 @@ impl CompiledSchema {
                 // Enum validation
                 if let Some(enum_values) = &prop_schema.enum_values {
                     if !enum_values.contains(field_value) {
-                        return Err(MongoLiteError::SchemaError(format!(
+                        return Err(IronBaseError::SchemaError(format!(
                             "Field '{}' value not in allowed enum values: {:?}",
                             field, enum_values
                         )));
@@ -229,7 +229,7 @@ impl CompiledSchema {
                 if let Some(pattern) = &prop_schema.pattern {
                     if let Some(s) = field_value.as_str() {
                         if !pattern.is_match(s) {
-                            return Err(MongoLiteError::SchemaError(format!(
+                            return Err(IronBaseError::SchemaError(format!(
                                 "Field '{}' does not match required pattern",
                                 field
                             )));
@@ -242,7 +242,7 @@ impl CompiledSchema {
                     // minItems validation
                     if let Some(min) = prop_schema.min_items {
                         if arr.len() < min {
-                            return Err(MongoLiteError::SchemaError(format!(
+                            return Err(IronBaseError::SchemaError(format!(
                                 "Field '{}' has {} items, minimum required is {}",
                                 field,
                                 arr.len(),
@@ -254,7 +254,7 @@ impl CompiledSchema {
                     // maxItems validation
                     if let Some(max) = prop_schema.max_items {
                         if arr.len() > max {
-                            return Err(MongoLiteError::SchemaError(format!(
+                            return Err(IronBaseError::SchemaError(format!(
                                 "Field '{}' has {} items, maximum allowed is {}",
                                 field,
                                 arr.len(),
