@@ -11,7 +11,9 @@ mod db;
 mod mcp;
 mod modals;
 mod panes;
+mod state;
 mod theme;
+mod ui;
 mod widgets;
 
 use app::{App, FulltextState, Modal, Pane};
@@ -43,7 +45,6 @@ use db::DbWrapper;
 use ratatui::prelude::*;
 use std::io;
 use std::path::PathBuf;
-use theme::Theme;
 
 #[derive(Parser)]
 #[command(name = "ironbase-tui")]
@@ -119,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
     app.update_page_size(size.height);
 
     // Show splash screen immediately
-    terminal.draw(|f| render_ui(f, &app))?;
+    terminal.draw(|f| ui::render_ui(f, &app))?;
 
     // Connect to database (with splash screen visible)
     match config.transport {
@@ -129,6 +130,8 @@ async fn main() -> anyhow::Result<()> {
             match DbWrapper::connect_http_with_options(&config.mcp_url, api_key, config.mcp_insecure).await {
                 Ok(db) => {
                     app.db = Some(db);
+                    // Set connection type based on URL
+                    app.connection_type = app::ConnectionType::from_url(&config.mcp_url);
                     // Fetch database path from MCP server
                     let _ = app.fetch_db_path_async().await;
                     if let Err(e) = app.refresh_collections_async().await {
@@ -148,6 +151,8 @@ async fn main() -> anyhow::Result<()> {
                     Ok(db) => {
                         app.db = Some(db);
                         app.db_path = Some(path.clone());
+                        // Stdio transport is always localhost
+                        app.connection_type = app::ConnectionType::Localhost;
                         if let Err(e) = app.refresh_collections_async().await {
                             app.set_error(format!("Nem sikerult betolteni: {}", e));
                         }
@@ -197,7 +202,7 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
         // Clear expired status messages
         app.clear_status_if_expired();
 
-        terminal.draw(|f| render_ui(f, app))?;
+        terminal.draw(|f| ui::render_ui(f, app))?;
 
         // Use poll with timeout for non-blocking check
         if event::poll(std::time::Duration::from_millis(100))? {
@@ -317,233 +322,6 @@ fn handle_error_modal_key(app: &mut App, key: KeyCode) {
     }
 }
 
-/// Handle keys in confirm dialog
-
-fn render_ui(frame: &mut Frame, app: &App) {
-    let theme = app.theme.clone();
-
-    // Main layout: Header + Content + Command Bar
-    let layout = Layout::vertical([
-        Constraint::Length(1), // Header
-        Constraint::Min(10),   // Content (3 panes)
-        Constraint::Length(1), // Command bar
-    ])
-    .split(frame.area());
-
-    // Background
-    frame.render_widget(
-        ratatui::widgets::Block::default().style(Style::default().bg(theme.bg)),
-        frame.area(),
-    );
-
-    // Header
-    render_header(frame, layout[0], app, &theme);
-
-    // 3-pane layout
-    let panes_layout = Layout::horizontal([
-        Constraint::Percentage(25), // Collections
-        Constraint::Percentage(35), // Documents
-        Constraint::Percentage(40), // Detail
-    ])
-    .split(layout[1]);
-
-    panes::collections::render(
-        frame,
-        panes_layout[0],
-        app,
-        &theme,
-        app.active_pane == Pane::Collections,
-    );
-    panes::documents::render(
-        frame,
-        panes_layout[1],
-        app,
-        &theme,
-        app.active_pane == Pane::Documents,
-    );
-    panes::detail::render(
-        frame,
-        panes_layout[2],
-        app,
-        &theme,
-        app.active_pane == Pane::Detail,
-    );
-
-    // Command bar
-    render_command_bar(frame, layout[2], app, &theme);
-
-    // Render modal if active
-    if let Some(modal) = app.modal {
-        match modal {
-            Modal::Search => modals::search::render(frame, frame.area(), app, &theme),
-            Modal::Actions => modals::actions::render(frame, frame.area(), app, &theme),
-            Modal::Help => modals::help::render(frame, frame.area(), app.help_scroll, &theme),
-            Modal::Confirm => modals::confirm::render(frame, frame.area(), &app.confirm, &theme),
-            Modal::Insert => modals::insert::render(frame, frame.area(), &app.insert, &theme),
-            Modal::Index => modals::index::render(frame, frame.area(), &app.index_state, &theme),
-            Modal::Query => modals::query::render(frame, frame.area(), &app.query_state, &theme),
-            Modal::Export => modals::export::render(frame, frame.area(), &app.export_state, &theme),
-            Modal::Filter => modals::filter::render(frame, frame.area(), &app.filter_state, &theme),
-            Modal::NewCollection => modals::new_collection::render(
-                frame,
-                frame.area(),
-                &app.new_collection_state,
-                &theme,
-            ),
-            Modal::ErrorDetail => {
-                if let Some(ref err) = app.error_message {
-                    modals::error::render(frame, frame.area(), err, app.error_scroll, &theme);
-                }
-            }
-            Modal::Script => {
-                modals::script::render(frame, frame.area(), &app.script_state, &theme);
-            }
-            Modal::ServerInfo => {
-                modals::server_info::render(frame, frame.area(), &app.server_info_state, app.server_info_scroll, &theme);
-            }
-            Modal::Update => {
-                modals::update::render(frame, frame.area(), &app.update_state, &theme);
-            }
-            Modal::Database => {
-                modals::database::render(frame, frame.area(), &app.database_state, &theme);
-            }
-            Modal::ApiKey => {
-                modals::api_key::render(frame, frame.area(), &app.api_key_state, &theme);
-            }
-            Modal::Fulltext => {
-                modals::fulltext::render(frame, frame.area(), &app.fulltext_state, &theme);
-            }
-        }
-    }
-
-}
-
-/// Render the header bar
-fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    use ratatui::widgets::Paragraph;
-
-    let header_style = Style::default().bg(theme.header_bg).fg(theme.fg);
-
-    // DB info with version
-    let db_info = format!(
-        " IronBase v{} | {} ({} coll, {} docs) ",
-        env!("CARGO_PKG_VERSION"),
-        app.db_name(),
-        app.collections.len(),
-        app.total_doc_count()
-    );
-
-    // Pane indicator
-    let pane_name = match app.active_pane {
-        Pane::Collections => "Collections",
-        Pane::Documents => "Documents",
-        Pane::Detail => "Detail",
-    };
-
-    // Build spans
-    let mut spans = vec![
-        Span::styled(db_info, Style::default().fg(theme.accent).bold()),
-        Span::raw(" | "),
-        Span::styled(pane_name, Style::default().fg(theme.fg)),
-    ];
-
-    let line = Line::from(spans).patch_style(header_style);
-
-    frame.render_widget(Paragraph::new(line), area);
-}
-
-/// Render the command bar at the bottom
-fn render_command_bar(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    use ratatui::widgets::Paragraph;
-
-    let bar_style = Style::default().bg(theme.header_bg).fg(theme.fg);
-
-    // Context-dependent commands based on active pane
-    let commands: Vec<(&str, String)> = match app.active_pane {
-        Pane::Collections => vec![
-            ("Tab", "Panel".into()),
-            ("j/k", "Navigate".into()),
-            ("Enter", "Select".into()),
-            ("r", "Refresh".into()),
-            ("f", "Filter".into()),
-            ("/", "Search".into()),
-            ("a", "Actions".into()),
-            ("?", "Sugo".into()),
-            ("q", "Quit".into()),
-        ],
-        Pane::Documents => vec![
-            ("Tab", "Panel".into()),
-            ("j/k", "Navigate".into()),
-            ("PgUp/Dn", "Page".into()),
-            ("r", "Refresh".into()),
-            ("f", "Filter".into()),
-            ("/", "Search".into()),
-            ("a", "Actions".into()),
-            ("?", "Sugo".into()),
-            ("q", "Quit".into()),
-        ],
-        Pane::Detail => {
-            let mut cmds = vec![
-                ("Tab", "Panel".into()),
-                ("j/k", "Scroll".into()),
-                ("/", "Search".into()),
-            ];
-            // Only show n/N if there are search matches
-            if !app.search.doc_matches.is_empty() {
-                let current = app.search.current_match + 1;
-                let total = app.search.doc_matches.len();
-                cmds.push(("n/N", format!("{}/{}", current, total)));
-            }
-            cmds.extend([
-                ("e", "Edit".into()),
-                ("d", "Delete".into()),
-                ("y", "Copy".into()),
-                ("?", "Sugo".into()),
-                ("q", "Quit".into()),
-            ]);
-            cmds
-        }
-    };
-
-    let mut spans = Vec::new();
-    spans.push(Span::raw(" "));
-
-    for (key, action) in commands {
-        spans.push(Span::styled(
-            format!("[{}]", key),
-            Style::default().fg(theme.accent),
-        ));
-        spans.push(Span::raw(format!(" {} ", action)));
-    }
-
-    // Add error/status message if present
-    if let Some(ref err) = app.error_message {
-        // Truncate long errors for status bar display (UTF-8 safe)
-        let max_err_len = 50;
-        let truncated = if err.chars().count() > max_err_len {
-            let chars: String = err.chars().take(max_err_len).collect();
-            format!("{}...", chars)
-        } else {
-            err.clone()
-        };
-        spans.push(Span::styled(
-            format!(" | Hiba: {}", truncated),
-            Style::default().fg(theme.error),
-        ));
-        // Add hint to open error detail modal
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled("[e]", Style::default().fg(theme.accent)));
-        spans.push(Span::styled(" Reszletek", Style::default().fg(theme.muted)));
-    } else if let Some(ref msg) = app.status_message {
-        spans.push(Span::styled(
-            format!(" | {}", msg),
-            Style::default().fg(theme.muted),
-        ));
-    }
-
-    let line = Line::from(spans).patch_style(bar_style);
-    frame.render_widget(Paragraph::new(line), area);
-}
 
 // === Async key handlers ===
 // These wrap the sync handlers and add async db operations where needed
@@ -570,6 +348,8 @@ async fn handle_modal_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
         Some(Modal::Database) => handle_database_key_async(app, key).await,
         Some(Modal::ApiKey) => handle_api_key_key_async(app, key).await,
         Some(Modal::Fulltext) => handle_fulltext_key_async(app, key).await,
+        Some(Modal::Acl) => handle_acl_key_async(app, key).await,
+        Some(Modal::Listener) => handle_listener_key_async(app, key).await,
         None => {}
     }
 }
@@ -642,6 +422,22 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
             app.open_delete_collection_confirm();
         }
 
+        // Set ACL/Permission for collection (Collections pane - Shift+P)
+        (KeyCode::Char('P'), KeyModifiers::SHIFT) if app.active_pane == Pane::Collections => {
+            if !app.connection_type.is_localhost() {
+                app.set_error("ACL editing requires localhost connection");
+            } else {
+                // Clone collection name before borrowing app mutably
+                let collection = app.current_collection_name().map(|s| s.to_string());
+                if let Some(coll) = collection {
+                    app.acl_state = modals::acl::AclState::new();
+                    app.acl_state.is_localhost = true;
+                    app.acl_state.start_edit(coll);
+                    app.modal = Some(Modal::Acl);
+                }
+            }
+        }
+
         // Insert (Collections, Documents pane)
         (KeyCode::Char('i'), _)
             if app.active_pane == Pane::Collections || app.active_pane == Pane::Documents =>
@@ -674,24 +470,77 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
         // API Key management (Shift+K)
         (KeyCode::Char('K'), KeyModifiers::SHIFT) => {
             app.api_key_state = modals::api_key::ApiKeyState::new();
+            app.api_key_state.is_localhost = app.connection_type.is_localhost();
             app.modal = Some(Modal::ApiKey);
-            // Load API keys if admin key is available
-            if let Some(ref admin_key) = app.api_key_state.admin_key {
-                if let Some(ref db) = app.db {
-                    app.api_key_state.loading = true;
-                    match db.list_api_keys(admin_key).await {
-                        Ok(keys) => {
-                            let infos: Vec<_> = keys
-                                .iter()
-                                .filter_map(modals::api_key::ApiKeyInfo::from_value)
-                                .collect();
-                            app.api_key_state.set_keys(infos);
-                            app.api_key_state.loading = false;
+            // Load API keys if admin key is available and can_admin
+            if app.api_key_state.can_admin() {
+                if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
+                    if let Some(ref db) = app.db {
+                        app.api_key_state.loading = true;
+                        match db.list_api_keys(&admin_key).await {
+                            Ok(keys) => {
+                                let infos: Vec<_> = keys
+                                    .iter()
+                                    .filter_map(modals::api_key::ApiKeyInfo::from_value)
+                                    .collect();
+                                app.api_key_state.set_keys(infos);
+                                app.api_key_state.loading = false;
+                            }
+                            Err(e) => {
+                                app.api_key_state.set_error(format!("Failed to load keys: {}", e));
+                                app.api_key_state.loading = false;
+                            }
                         }
-                        Err(e) => {
-                            app.api_key_state.set_error(format!("Failed to load keys: {}", e));
-                            app.api_key_state.loading = false;
-                        }
+                    }
+                }
+            }
+        }
+
+        // ACL management (Shift+A)
+        (KeyCode::Char('A'), KeyModifiers::SHIFT) => {
+            app.acl_state = modals::acl::AclState::new();
+            app.acl_state.is_localhost = app.connection_type.is_localhost();
+            app.modal = Some(Modal::Acl);
+            // Load ACL rules
+            if let Some(ref db) = app.db {
+                app.acl_state.loading = true;
+                match db.acl_list().await {
+                    Ok(rules) => {
+                        let acls: Vec<_> = rules
+                            .iter()
+                            .filter_map(modals::acl::CollectionAclInfo::from_value)
+                            .collect();
+                        app.acl_state.set_acls(acls);
+                        app.acl_state.loading = false;
+                    }
+                    Err(e) => {
+                        app.acl_state.set_error(format!("Failed to load ACL: {}", e));
+                        app.acl_state.loading = false;
+                    }
+                }
+            }
+        }
+
+        // Listener management (Shift+L)
+        (KeyCode::Char('L'), KeyModifiers::SHIFT) => {
+            app.listener_state = modals::listener::ListenerState::new();
+            app.listener_state.is_localhost = app.connection_type.is_localhost();
+            app.modal = Some(Modal::Listener);
+            // Load listeners
+            if let Some(ref db) = app.db {
+                app.listener_state.loading = true;
+                match db.listener_list().await {
+                    Ok(listeners) => {
+                        let infos: Vec<_> = listeners
+                            .iter()
+                            .filter_map(modals::listener::ListenerInfo::from_value)
+                            .collect();
+                        app.listener_state.set_listeners(infos);
+                        app.listener_state.loading = false;
+                    }
+                    Err(e) => {
+                        app.listener_state.set_error(format!("Failed to load listeners: {}", e));
+                        app.listener_state.loading = false;
                     }
                 }
             }
@@ -1231,6 +1080,336 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                     app.api_key_state.set_error(format!("Failed: {}", e));
                                     app.api_key_state.cancel();
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
+    }
+}
+
+/// ACL modal key handler
+async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
+    use crate::modals::acl::{AclModalMode, EditField};
+
+    match app.acl_state.mode {
+        AclModalMode::List => match key {
+            KeyCode::Esc => {
+                app.close_modal();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.acl_state.select_next();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.acl_state.select_prev();
+            }
+            KeyCode::Enter => {
+                app.acl_state.enter_collection();
+            }
+            KeyCode::Char('e') if app.acl_state.is_localhost => {
+                app.acl_state.start_edit_existing();
+            }
+            KeyCode::Char('d') if app.acl_state.is_localhost => {
+                app.acl_state.start_delete();
+            }
+            _ => {}
+        },
+        AclModalMode::ViewCollection => match key {
+            KeyCode::Esc | KeyCode::Backspace => {
+                app.acl_state.back_to_list();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.acl_state.select_next();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.acl_state.select_prev();
+            }
+            _ => {}
+        },
+        AclModalMode::ConfirmDelete => match key {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.acl_state.cancel_delete();
+            }
+            KeyCode::Char('y') => {
+                if let Some(acl) = app.acl_state.get_selected() {
+                    let collection = acl.collection.clone();
+                    if let Some(ref db) = app.db {
+                        match db.acl_delete(&collection).await {
+                            Ok(true) => {
+                                app.acl_state.set_success(format!("ACL for '{}' deleted!", collection));
+                                app.acl_state.mode = AclModalMode::List;
+
+                                // Refresh ACL list
+                                if let Ok(acls) = db.acl_list().await {
+                                    let infos: Vec<_> = acls
+                                        .iter()
+                                        .filter_map(modals::acl::CollectionAclInfo::from_value)
+                                        .collect();
+                                    app.acl_state.set_acls(infos);
+                                }
+                            }
+                            Ok(false) => {
+                                app.acl_state.set_error("ACL not found".to_string());
+                                app.acl_state.cancel_delete();
+                            }
+                            Err(e) => {
+                                app.acl_state.set_error(format!("Failed: {}", e));
+                                app.acl_state.cancel_delete();
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
+        AclModalMode::Edit => {
+            if app.acl_state.is_adding_rule {
+                // Adding a new rule
+                match key {
+                    KeyCode::Esc => {
+                        app.acl_state.cancel_add_rule();
+                    }
+                    KeyCode::Tab => {
+                        app.acl_state.next_field();
+                    }
+                    KeyCode::BackTab => {
+                        app.acl_state.prev_field();
+                    }
+                    KeyCode::Enter => {
+                        app.acl_state.confirm_add_rule();
+                    }
+                    KeyCode::Left if app.acl_state.edit_field == EditField::PrincipalType => {
+                        app.acl_state.cycle_principal_type(false);
+                    }
+                    KeyCode::Right if app.acl_state.edit_field == EditField::PrincipalType => {
+                        app.acl_state.cycle_principal_type(true);
+                    }
+                    KeyCode::Char(' ') => {
+                        match app.acl_state.edit_field {
+                            EditField::PermRead | EditField::PermWrite | EditField::PermAdmin => {
+                                app.acl_state.toggle_permission();
+                            }
+                            EditField::PrincipalType => {
+                                app.acl_state.cycle_principal_type(true);
+                            }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Char(c) if app.acl_state.edit_field == EditField::PrincipalValue => {
+                        app.acl_state.current_rule.principal_value.push(c);
+                    }
+                    KeyCode::Backspace if app.acl_state.edit_field == EditField::PrincipalValue => {
+                        app.acl_state.current_rule.principal_value.pop();
+                    }
+                    _ => {}
+                }
+            } else {
+                // Browsing rules list
+                match key {
+                    KeyCode::Esc => {
+                        app.acl_state.cancel_edit();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.acl_state.select_next();
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.acl_state.select_prev();
+                    }
+                    KeyCode::Char('n') => {
+                        app.acl_state.start_add_rule();
+                    }
+                    KeyCode::Char('d') => {
+                        app.acl_state.delete_selected_rule();
+                    }
+                    KeyCode::Enter => {
+                        app.acl_state.start_save();
+                    }
+                    _ => {}
+                }
+            }
+        }
+        AclModalMode::ConfirmSave => match key {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.acl_state.cancel_save();
+            }
+            KeyCode::Char('y') => {
+                let collection = app.acl_state.edit_collection.clone();
+                let rules = app.acl_state.get_rules_json();
+
+                if let Some(ref db) = app.db {
+                    match db.acl_set(&collection, &rules).await {
+                        Ok(true) => {
+                            app.acl_state.set_success(format!("ACL for '{}' saved!", collection));
+                            app.acl_state.mode = AclModalMode::List;
+                            app.acl_state.edit_rules.clear();
+                            app.acl_state.edit_collection.clear();
+
+                            // Refresh ACL list
+                            if let Ok(acls) = db.acl_list().await {
+                                let infos: Vec<_> = acls
+                                    .iter()
+                                    .filter_map(modals::acl::CollectionAclInfo::from_value)
+                                    .collect();
+                                app.acl_state.set_acls(infos);
+                            }
+                        }
+                        Ok(false) => {
+                            app.acl_state.set_error("Failed to save ACL".to_string());
+                            app.acl_state.cancel_save();
+                        }
+                        Err(e) => {
+                            app.acl_state.set_error(format!("Failed: {}", e));
+                            app.acl_state.cancel_save();
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
+    }
+}
+
+/// Listener modal key handler
+async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
+    use crate::modals::listener::{ListenerModalMode, ListenerAction, AddField};
+
+    match app.listener_state.mode {
+        ListenerModalMode::List => match key {
+            KeyCode::Esc => {
+                app.close_modal();
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                app.listener_state.select_next();
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                app.listener_state.select_prev();
+            }
+            KeyCode::Char('n') if app.listener_state.is_localhost => {
+                app.listener_state.start_add();
+            }
+            KeyCode::Char('e') if app.listener_state.is_localhost => {
+                app.listener_state.start_enable();
+            }
+            KeyCode::Char('x') if app.listener_state.is_localhost => {
+                app.listener_state.start_disable();
+            }
+            KeyCode::Char('d') if app.listener_state.is_localhost => {
+                app.listener_state.start_delete();
+            }
+            _ => {}
+        },
+        ListenerModalMode::Add => match key {
+            KeyCode::Esc => {
+                app.listener_state.cancel();
+            }
+            KeyCode::Tab => {
+                app.listener_state.next_add_field();
+            }
+            KeyCode::Char(' ') if app.listener_state.add_field == AddField::Tls => {
+                app.listener_state.toggle_tls();
+            }
+            KeyCode::Enter => {
+                let id = app.listener_state.add_id.trim().to_string();
+                let bind = app.listener_state.add_bind.trim().to_string();
+                let tls = app.listener_state.add_tls;
+
+                if id.is_empty() {
+                    app.listener_state.set_error("ID cannot be empty".to_string());
+                    return;
+                }
+                if bind.is_empty() {
+                    app.listener_state.set_error("Bind address cannot be empty".to_string());
+                    return;
+                }
+
+                if let Some(ref db) = app.db {
+                    match db.listener_add(&id, &bind, tls, None, None).await {
+                        Ok(true) => {
+                            app.listener_state.set_success(format!("Listener '{}' added!", id));
+                            app.listener_state.mode = ListenerModalMode::List;
+                            app.listener_state.add_id.clear();
+                            app.listener_state.add_bind.clear();
+
+                            // Refresh listener list
+                            if let Ok(listeners) = db.listener_list().await {
+                                let infos: Vec<_> = listeners
+                                    .iter()
+                                    .filter_map(modals::listener::ListenerInfo::from_value)
+                                    .collect();
+                                app.listener_state.set_listeners(infos);
+                            }
+                        }
+                        Ok(false) => {
+                            app.listener_state.set_error("Failed to add listener".to_string());
+                        }
+                        Err(e) => {
+                            app.listener_state.set_error(format!("Failed: {}", e));
+                        }
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                match app.listener_state.add_field {
+                    AddField::Id => app.listener_state.add_id.push(c),
+                    AddField::Bind => app.listener_state.add_bind.push(c),
+                    AddField::Tls => {}
+                }
+            }
+            KeyCode::Backspace => {
+                match app.listener_state.add_field {
+                    AddField::Id => { app.listener_state.add_id.pop(); }
+                    AddField::Bind => { app.listener_state.add_bind.pop(); }
+                    AddField::Tls => {}
+                }
+            }
+            _ => {}
+        },
+        ListenerModalMode::Confirm => match key {
+            KeyCode::Esc | KeyCode::Char('n') => {
+                app.listener_state.cancel();
+            }
+            KeyCode::Char('y') => {
+                if let Some(listener) = app.listener_state.get_selected() {
+                    let id = listener.id.clone();
+
+                    if let Some(ref db) = app.db {
+                        let result = match app.listener_state.confirm_action {
+                            Some(ListenerAction::Delete) => db.listener_delete(&id).await,
+                            Some(ListenerAction::Enable) => db.listener_enable(&id).await,
+                            Some(ListenerAction::Disable) => db.listener_disable(&id).await,
+                            None => Ok(false),
+                        };
+
+                        match result {
+                            Ok(true) => {
+                                let action = match app.listener_state.confirm_action {
+                                    Some(ListenerAction::Delete) => "deleted",
+                                    Some(ListenerAction::Enable) => "enabled",
+                                    Some(ListenerAction::Disable) => "disabled",
+                                    None => "modified",
+                                };
+                                app.listener_state.set_success(format!("Listener '{}' {}!", id, action));
+                                app.listener_state.mode = ListenerModalMode::List;
+                                app.listener_state.confirm_action = None;
+
+                                // Refresh listener list
+                                if let Ok(listeners) = db.listener_list().await {
+                                    let infos: Vec<_> = listeners
+                                        .iter()
+                                        .filter_map(modals::listener::ListenerInfo::from_value)
+                                        .collect();
+                                    app.listener_state.set_listeners(infos);
+                                }
+                            }
+                            Ok(false) => {
+                                app.listener_state.set_error("Listener not found".to_string());
+                                app.listener_state.cancel();
+                            }
+                            Err(e) => {
+                                app.listener_state.set_error(format!("Failed: {}", e));
+                                app.listener_state.cancel();
                             }
                         }
                     }

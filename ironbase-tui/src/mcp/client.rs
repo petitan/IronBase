@@ -550,6 +550,142 @@ impl McpClient {
         Ok(success)
     }
 
+    // === ACL Management ===
+
+    /// List all ACL rules
+    pub async fn acl_list(&self) -> McpResult<Vec<Value>> {
+        let result = self.call_tool("acl_list", serde_json::json!({})).await?;
+        // Result is {"rules": [...]} or {"builtin": [...], "custom": [...]}
+        if let Some(rules) = result.get("rules") {
+            Ok(serde_json::from_value(rules.clone()).unwrap_or_default())
+        } else {
+            // Combine builtin and custom rules
+            let mut all_rules: Vec<Value> = Vec::new();
+            if let Some(builtin) = result.get("builtin").and_then(|v| v.as_array()) {
+                all_rules.extend(builtin.clone());
+            }
+            if let Some(custom) = result.get("custom").and_then(|v| v.as_array()) {
+                all_rules.extend(custom.clone());
+            }
+            Ok(all_rules)
+        }
+    }
+
+    /// Get ACL for a specific collection
+    pub async fn acl_get(&self, collection: &str) -> McpResult<Option<Value>> {
+        let args = serde_json::json!({
+            "collection": collection
+        });
+        let result = self.call_tool("acl_get", args).await?;
+        // Result is {"acl": {...}} or {"acl": null}
+        match result.get("acl") {
+            Some(acl) if !acl.is_null() => Ok(Some(acl.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    /// Set ACL for a collection (localhost only)
+    pub async fn acl_set(&self, collection: &str, rules: &[Value]) -> McpResult<bool> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "rules": rules
+        });
+        let result = self.call_tool("acl_set", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+
+    /// Delete ACL for a collection (localhost only, reverts to default)
+    pub async fn acl_delete(&self, collection: &str) -> McpResult<bool> {
+        let args = serde_json::json!({
+            "collection": collection
+        });
+        let result = self.call_tool("acl_delete", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+
+    // === Listener Management ===
+
+    /// List all listeners
+    pub async fn listener_list(&self) -> McpResult<Vec<Value>> {
+        let result = self.call_tool("listener_list", serde_json::json!({})).await?;
+        // Result is {"listeners": [...]}
+        let listeners: Vec<Value> = result
+            .get("listeners")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(listeners)
+    }
+
+    /// Get listener by ID
+    pub async fn listener_get(&self, id: &str) -> McpResult<Option<Value>> {
+        let args = serde_json::json!({
+            "id": id
+        });
+        let result = self.call_tool("listener_get", args).await?;
+        // Result is {"listener": {...}} or {"listener": null}
+        match result.get("listener") {
+            Some(listener) if !listener.is_null() => Ok(Some(listener.clone())),
+            _ => Ok(None),
+        }
+    }
+
+    /// Add new listener (localhost only)
+    pub async fn listener_add(
+        &self,
+        id: &str,
+        bind: &str,
+        tls: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+    ) -> McpResult<bool> {
+        let mut args = serde_json::json!({
+            "id": id,
+            "bind": bind,
+            "tls": tls
+        });
+        if let Some(cert) = cert_path {
+            args["cert_path"] = serde_json::json!(cert);
+        }
+        if let Some(key) = key_path {
+            args["key_path"] = serde_json::json!(key);
+        }
+        let result = self.call_tool("listener_add", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+
+    /// Delete listener (localhost only)
+    pub async fn listener_delete(&self, id: &str) -> McpResult<bool> {
+        let args = serde_json::json!({
+            "id": id
+        });
+        let result = self.call_tool("listener_delete", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+
+    /// Enable listener (localhost only)
+    pub async fn listener_enable(&self, id: &str) -> McpResult<bool> {
+        let args = serde_json::json!({
+            "id": id
+        });
+        let result = self.call_tool("listener_enable", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+
+    /// Disable listener (localhost only)
+    pub async fn listener_disable(&self, id: &str) -> McpResult<bool> {
+        let args = serde_json::json!({
+            "id": id
+        });
+        let result = self.call_tool("listener_disable", args).await?;
+        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        Ok(success)
+    }
+
     // === Full-text Search operations ===
 
     /// Create a fulltext index on a field

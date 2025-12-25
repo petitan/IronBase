@@ -84,6 +84,8 @@ pub struct ApiKeyState {
     pub confirm_action: Option<ConfirmAction>,
     /// Admin key (from env or input)
     pub admin_key: Option<String>,
+    /// Is localhost connection (required for admin ops)
+    pub is_localhost: bool,
 }
 
 impl Default for ApiKeyState {
@@ -108,6 +110,7 @@ impl ApiKeyState {
             loading: false,
             confirm_action: None,
             admin_key,
+            is_localhost: false, // Will be set by App based on connection
         }
     }
 
@@ -179,6 +182,11 @@ impl ApiKeyState {
     pub fn has_admin_key(&self) -> bool {
         self.admin_key.is_some()
     }
+
+    /// Check if admin operations are available (need both admin key and localhost)
+    pub fn can_admin(&self) -> bool {
+        self.admin_key.is_some() && self.is_localhost
+    }
 }
 
 /// Render the API key management modal
@@ -201,8 +209,8 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
     ])
     .split(area);
 
-    // Help text
-    let help_spans = if state.has_admin_key() {
+    // Help text - use can_admin() which checks both admin key and localhost
+    let help_spans = if state.can_admin() {
         vec![
             Span::styled("[j/k]", Style::default().fg(theme.accent)),
             Span::raw(" Nav  "),
@@ -217,7 +225,17 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
             Span::raw(" Close"),
         ]
+    } else if !state.is_localhost {
+        // Not localhost - show localhost warning
+        vec![
+            Span::styled("[j/k]", Style::default().fg(theme.accent)),
+            Span::raw(" Nav  "),
+            Span::styled("[Esc]", Style::default().fg(theme.accent)),
+            Span::raw(" Close  "),
+            Span::styled("(Admin ops require localhost connection)", Style::default().fg(theme.warning)),
+        ]
     } else {
+        // Localhost but no admin key
         vec![
             Span::styled("[j/k]", Style::default().fg(theme.accent)),
             Span::raw(" Nav  "),

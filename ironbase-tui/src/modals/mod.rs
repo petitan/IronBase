@@ -1,5 +1,6 @@
 //! Modal dialogs - overlays for search, actions, etc.
 
+pub mod acl;
 pub mod actions;
 pub mod api_key;
 pub mod confirm;
@@ -11,6 +12,7 @@ pub mod fulltext;
 pub mod help;
 pub mod index;
 pub mod insert;
+pub mod listener;
 pub mod new_collection;
 pub mod query;
 pub mod script;

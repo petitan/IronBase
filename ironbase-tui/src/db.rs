@@ -441,6 +441,77 @@ impl DbWrapper {
             .await?;
         Ok(results)
     }
+
+    // === ACL Management ===
+
+    /// List all ACL rules
+    pub async fn acl_list(&self) -> Result<Vec<Value>> {
+        let rules = self.client.acl_list().await?;
+        Ok(rules)
+    }
+
+    /// Get ACL for a specific collection
+    pub async fn acl_get(&self, collection: &str) -> Result<Option<Value>> {
+        let acl = self.client.acl_get(collection).await?;
+        Ok(acl)
+    }
+
+    /// Set ACL for a collection
+    pub async fn acl_set(&self, collection: &str, rules: &[Value]) -> Result<bool> {
+        let success = self.client.acl_set(collection, rules).await?;
+        Ok(success)
+    }
+
+    /// Delete ACL for a collection
+    pub async fn acl_delete(&self, collection: &str) -> Result<bool> {
+        let success = self.client.acl_delete(collection).await?;
+        Ok(success)
+    }
+
+    // === Listener Management ===
+
+    /// List all listeners
+    pub async fn listener_list(&self) -> Result<Vec<Value>> {
+        let listeners = self.client.listener_list().await?;
+        Ok(listeners)
+    }
+
+    /// Get a specific listener
+    pub async fn listener_get(&self, id: &str) -> Result<Option<Value>> {
+        let listener = self.client.listener_get(id).await?;
+        Ok(listener)
+    }
+
+    /// Add a new listener
+    pub async fn listener_add(
+        &self,
+        id: &str,
+        bind: &str,
+        tls: bool,
+        cert_path: Option<&str>,
+        key_path: Option<&str>,
+    ) -> Result<bool> {
+        let success = self.client.listener_add(id, bind, tls, cert_path, key_path).await?;
+        Ok(success)
+    }
+
+    /// Delete a listener
+    pub async fn listener_delete(&self, id: &str) -> Result<bool> {
+        let success = self.client.listener_delete(id).await?;
+        Ok(success)
+    }
+
+    /// Enable a listener
+    pub async fn listener_enable(&self, id: &str) -> Result<bool> {
+        let success = self.client.listener_enable(id).await?;
+        Ok(success)
+    }
+
+    /// Disable a listener
+    pub async fn listener_disable(&self, id: &str) -> Result<bool> {
+        let success = self.client.listener_disable(id).await?;
+        Ok(success)
+    }
 }
 
 /// Recursively collect field names and types
