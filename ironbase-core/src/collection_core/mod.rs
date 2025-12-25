@@ -2197,7 +2197,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut sorted_offsets = offsets;
         sorted_offsets.sort_by_key(|(_, offset)| *offset);
 
-        let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::with_capacity(sorted_offsets.len());
+        let mut docs_by_id: HashMap<DocumentId, Value> =
+            HashMap::with_capacity(sorted_offsets.len());
 
         // Iterate in offset order for sequential disk I/O
         for (doc_id, offset) in sorted_offsets {

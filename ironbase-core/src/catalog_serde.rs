@@ -320,7 +320,9 @@ mod tests {
 
         assert_eq!(original, restored);
         // Verify it's still a String type, not converted to Int
-        assert!(restored.catalog.contains_key(&DocumentId::String("12345".to_string())));
+        assert!(restored
+            .catalog
+            .contains_key(&DocumentId::String("12345".to_string())));
         assert!(!restored.catalog.contains_key(&DocumentId::Int(12345)));
     }
 
@@ -336,7 +338,9 @@ mod tests {
         let restored: TestCatalog = serde_json::from_str(&json).unwrap();
 
         assert_eq!(original, restored);
-        assert!(restored.catalog.contains_key(&DocumentId::ObjectId("abc123".to_string())));
+        assert!(restored
+            .catalog
+            .contains_key(&DocumentId::ObjectId("abc123".to_string())));
     }
 
     #[test]

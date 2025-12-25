@@ -659,7 +659,13 @@ fn test_dispatch_index_list() {
     )
     .unwrap();
 
-    let result = dispatch_tool("index_list", json!({"collection": "users"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "index_list",
+        json!({"collection": "users"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
     assert!(value.get("indexes").is_some());
@@ -682,7 +688,13 @@ fn test_dispatch_schema_get_empty() {
     )
     .unwrap();
 
-    let result = dispatch_tool("schema_get", json!({"collection": "users"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "schema_get",
+        json!({"collection": "users"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
     assert_eq!(value.get("schema"), Some(&json!(null)));
@@ -719,7 +731,13 @@ fn test_dispatch_schema_set_and_get() {
     assert!(set_result.is_ok());
     assert_eq!(set_result.unwrap().get("schema_set"), Some(&json!(true)));
 
-    let get_result = dispatch_tool("schema_get", json!({"collection": "users"}), &adapter, None, None);
+    let get_result = dispatch_tool(
+        "schema_get",
+        json!({"collection": "users"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(get_result.is_ok());
     let value = get_result.unwrap();
     assert!(value.get("schema").unwrap().is_object());
@@ -1332,7 +1350,13 @@ fn test_script_get_existing() {
     .unwrap();
 
     // Get it back
-    let result = dispatch_tool("script_get", json!({"name": "test_script"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "script_get",
+        json!({"name": "test_script"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
 
@@ -1351,7 +1375,13 @@ fn test_script_get_existing() {
 #[test]
 fn test_script_get_nonexistent() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_get", json!({"name": "nonexistent"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "script_get",
+        json!({"name": "nonexistent"}),
+        &adapter,
+        None,
+        None,
+    );
     // script_get returns error for non-existent script
     assert!(result.is_err());
 }
@@ -1447,7 +1477,13 @@ fn test_script_update_existing() {
     .unwrap();
 
     // Verify update - script_get returns fields directly
-    let result = dispatch_tool("script_get", json!({"name": "updatable"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "script_get",
+        json!({"name": "updatable"}),
+        &adapter,
+        None,
+        None,
+    );
     let value = result.unwrap();
     assert_eq!(value.get("code"), Some(&json!("version_2")));
     assert_eq!(value.get("description"), Some(&json!("Updated version")));
@@ -1486,7 +1522,13 @@ fn test_script_delete_existing() {
     assert_eq!(value.get("deleted"), Some(&json!("to_delete")));
 
     // Verify it's gone (script_get returns error for non-existent)
-    let get_result = dispatch_tool("script_get", json!({"name": "to_delete"}), &adapter, None, None);
+    let get_result = dispatch_tool(
+        "script_get",
+        json!({"name": "to_delete"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(get_result.is_err());
 }
 
@@ -1507,7 +1549,13 @@ fn test_script_delete_nonexistent() {
 #[test]
 fn test_script_save_missing_name() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_save", json!({"code": "some code"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "script_save",
+        json!({"code": "some code"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(result.is_err());
 }
 
@@ -1573,7 +1621,13 @@ fn test_script_run_simple() {
     .unwrap();
 
     // Run it
-    let result = dispatch_tool("script_run", json!({"name": "add_numbers"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "script_run",
+        json!({"name": "add_numbers"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
     assert_eq!(value.get("success"), Some(&json!(true)));
@@ -1679,7 +1733,13 @@ fn test_script_run_db_operations() {
     )
     .unwrap();
 
-    let result = dispatch_tool("script_run", json!({"name": "db_script"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "script_run",
+        json!({"name": "db_script"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
 
@@ -1724,7 +1784,13 @@ fn test_script_run_db_update_delete() {
     )
     .unwrap();
 
-    let result = dispatch_tool("script_run", json!({"name": "crud_script"}), &adapter, None, None);
+    let result = dispatch_tool(
+        "script_run",
+        json!({"name": "crud_script"}),
+        &adapter,
+        None,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
 

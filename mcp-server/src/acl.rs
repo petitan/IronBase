@@ -190,7 +190,7 @@ impl Permissions {
     }
 
     /// Parse from string like "read,write" or "read,write,admin"
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         let s = s.to_lowercase();
         if s == "deny" || s == "none" {
             return Self::none();
@@ -258,7 +258,7 @@ impl Principal {
     }
 
     /// Parse from string like "interface:internal" or "apikey:abc123"
-    pub fn from_str(s: &str) -> Result<Self> {
+    pub fn parse(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
             return Err(McpError::InvalidParams(format!(
@@ -444,13 +444,14 @@ impl AclConfig {
         required: RequiredPermission,
     ) -> Result<()> {
         // Special case: _system.* collections can only be modified from localhost
-        if collection.starts_with("_system.") && required.is_write() {
-            if caller.interface != InterfaceType::Localhost {
-                return Err(McpError::Forbidden(format!(
-                    "'{}' can only be modified from localhost (current: {})",
-                    collection, caller.interface
-                )));
-            }
+        if collection.starts_with("_system.")
+            && required.is_write()
+            && caller.interface != InterfaceType::Localhost
+        {
+            return Err(McpError::Forbidden(format!(
+                "'{}' can only be modified from localhost (current: {})",
+                collection, caller.interface
+            )));
         }
 
         // Find matching ACL rules
@@ -481,9 +482,7 @@ impl AclConfig {
 
     /// Get the ACL for a specific collection (for listing)
     pub fn get_collection_acl(&self, collection: &str) -> Option<&CollectionAcl> {
-        self.rules
-            .iter()
-            .find(|acl| acl.collection == collection)
+        self.rules.iter().find(|acl| acl.collection == collection)
     }
 
     /// Get all ACL rules (for listing)
@@ -538,14 +537,13 @@ impl AclManager {
 
         // Upsert into _system.acl
         let filter = json!({ "collection": collection });
-        let existing = self.adapter.find_one(SYSTEM_ACL_COLLECTION, filter.clone())?;
+        let existing = self
+            .adapter
+            .find_one(SYSTEM_ACL_COLLECTION, filter.clone())?;
 
         if existing.is_some() {
-            self.adapter.update_one(
-                SYSTEM_ACL_COLLECTION,
-                filter,
-                json!({ "$set": doc }),
-            )?;
+            self.adapter
+                .update_one(SYSTEM_ACL_COLLECTION, filter, json!({ "$set": doc }))?;
         } else {
             self.adapter.insert_one(SYSTEM_ACL_COLLECTION, doc)?;
         }
@@ -582,23 +580,45 @@ impl AclManager {
 pub fn get_required_permission(tool_name: &str) -> RequiredPermission {
     match tool_name {
         // Read operations
-        "find" | "find_one" | "count_documents" | "distinct" | "aggregate" | "explain"
-        | "index_list" | "index_list_fulltext" | "schema_get" | "collection_list" | "db_stats"
-        | "db_open" | "find_with_hint" | "transaction_status"
-        | "fulltext_search" | "fuzzy_search" => RequiredPermission::Read,
+        "find"
+        | "find_one"
+        | "count_documents"
+        | "distinct"
+        | "aggregate"
+        | "explain"
+        | "index_list"
+        | "index_list_fulltext"
+        | "schema_get"
+        | "collection_list"
+        | "db_stats"
+        | "db_open"
+        | "find_with_hint"
+        | "transaction_status"
+        | "fulltext_search"
+        | "fuzzy_search" => RequiredPermission::Read,
 
         // Write operations
         "insert_one" | "insert_many" | "update_one" | "update_many" | "delete_one"
         | "delete_many" => RequiredPermission::Write,
 
         // Admin operations (structure changes)
-        "collection_create" | "collection_drop" | "index_create" | "index_drop"
-        | "index_create_fulltext" | "index_create_fuzzy" | "schema_set" | "db_compact"
+        "collection_create"
+        | "collection_drop"
+        | "index_create"
+        | "index_drop"
+        | "index_create_fulltext"
+        | "index_create_fuzzy"
+        | "schema_set"
+        | "db_compact"
         | "db_checkpoint" => RequiredPermission::Admin,
 
         // Transaction operations (write)
-        "begin_transaction" | "commit_transaction" | "rollback_transaction" | "insert_one_tx"
-        | "update_one_tx" | "delete_one_tx" => RequiredPermission::Write,
+        "begin_transaction"
+        | "commit_transaction"
+        | "rollback_transaction"
+        | "insert_one_tx"
+        | "update_one_tx"
+        | "delete_one_tx" => RequiredPermission::Write,
 
         // ACL operations
         "acl_list" | "acl_get" => RequiredPermission::Read,
@@ -618,11 +638,14 @@ pub fn get_required_permission(tool_name: &str) -> RequiredPermission {
         | "script_stats" | "script_version_get" => RequiredPermission::Read,
 
         // Admin tools (localhost only, all require Admin permission)
-        "admin_list_all_collections" | "admin_create_system_collection"
-        | "admin_set_collection_flags" | "admin_drop_protected" | "admin_apikey_create"
-        | "admin_apikey_list" | "admin_apikey_revoke" | "admin_apikey_delete" => {
-            RequiredPermission::Admin
-        }
+        "admin_list_all_collections"
+        | "admin_create_system_collection"
+        | "admin_set_collection_flags"
+        | "admin_drop_protected"
+        | "admin_apikey_create"
+        | "admin_apikey_list"
+        | "admin_apikey_revoke"
+        | "admin_apikey_delete" => RequiredPermission::Admin,
 
         // Default to read for unknown tools
         _ => RequiredPermission::Read,
@@ -657,11 +680,15 @@ pub fn get_system_collection_for_tool(tool_name: &str) -> Option<&'static str> {
             Some(SYSTEM_SCRIPTS_COLLECTION)
         }
         // API key operations use _system.api_keys
-        "admin_apikey_create" | "admin_apikey_list" | "admin_apikey_revoke"
+        "admin_apikey_create"
+        | "admin_apikey_list"
+        | "admin_apikey_revoke"
         | "admin_apikey_delete" => Some(SYSTEM_APIKEYS_COLLECTION),
         // Other admin operations use _system.acl (system config)
-        "admin_list_all_collections" | "admin_create_system_collection"
-        | "admin_set_collection_flags" | "admin_drop_protected" => Some(SYSTEM_ACL_COLLECTION),
+        "admin_list_all_collections"
+        | "admin_create_system_collection"
+        | "admin_set_collection_flags"
+        | "admin_drop_protected" => Some(SYSTEM_ACL_COLLECTION),
         _ => None,
     }
 }
@@ -739,23 +766,23 @@ mod tests {
     }
 
     #[test]
-    fn test_permissions_from_str() {
-        let perms = Permissions::from_str("read");
+    fn test_permissions_parse() {
+        let perms = Permissions::parse("read");
         assert!(perms.read);
         assert!(!perms.write);
         assert!(!perms.admin);
 
-        let perms = Permissions::from_str("read,write");
+        let perms = Permissions::parse("read,write");
         assert!(perms.read);
         assert!(perms.write);
         assert!(!perms.admin);
 
-        let perms = Permissions::from_str("all");
+        let perms = Permissions::parse("all");
         assert!(perms.read);
         assert!(perms.write);
         assert!(perms.admin);
 
-        let perms = Permissions::from_str("deny");
+        let perms = Permissions::parse("deny");
         assert!(!perms.read);
         assert!(!perms.write);
         assert!(!perms.admin);

@@ -449,7 +449,11 @@ mod tests {
     fn test_log_message_special_chars() {
         set_log_level(LogLevel::Trace);
         // Special characters should be handled
-        log_message(LogLevel::Info, "test_module", "Tab\there, quote\"here, backslash\\here");
+        log_message(
+            LogLevel::Info,
+            "test_module",
+            "Tab\there, quote\"here, backslash\\here",
+        );
     }
 
     #[test]

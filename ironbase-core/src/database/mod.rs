@@ -56,7 +56,8 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     pub(crate) storage: Arc<RwLock<S>>,
     pub(crate) db_path: String,
     pub(crate) next_tx_id: AtomicU64,
-    pub(crate) active_transactions: Arc<RwLock<std::collections::HashMap<TransactionId, Transaction>>>,
+    pub(crate) active_transactions:
+        Arc<RwLock<std::collections::HashMap<TransactionId, Transaction>>>,
 
     // NEW: Durability mode (safe by default like SQL databases)
     pub(crate) durability_mode: DurabilityMode,

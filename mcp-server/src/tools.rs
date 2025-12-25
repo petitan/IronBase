@@ -159,7 +159,8 @@ fn validate_script_name(name: &str) -> Result<()> {
         .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
     {
         return Err(McpError::InvalidParams(
-            "Script name can only contain alphanumeric characters, underscores, dots, and hyphens".into()
+            "Script name can only contain alphanumeric characters, underscores, dots, and hyphens"
+                .into(),
         ));
     }
     Ok(())
@@ -1561,21 +1562,27 @@ pub fn dispatch_tool(
             // Add server info if available
             if let Some(info) = server_info {
                 if let Some(obj) = stats.as_object_mut() {
-                    obj.insert("server".to_string(), json!({
-                        "version": crate::VERSION,
-                        "protocol": info.protocol,
-                        "host": info.host,
-                        "port": info.port,
-                        "require_api_key": info.require_api_key,
-                    }));
+                    obj.insert(
+                        "server".to_string(),
+                        json!({
+                            "version": crate::VERSION,
+                            "protocol": info.protocol,
+                            "host": info.host,
+                            "port": info.port,
+                            "require_api_key": info.require_api_key,
+                        }),
+                    );
                 }
             } else {
                 // Stdio mode - no server info
                 if let Some(obj) = stats.as_object_mut() {
-                    obj.insert("server".to_string(), json!({
-                        "version": crate::VERSION,
-                        "mode": "stdio",
-                    }));
+                    obj.insert(
+                        "server".to_string(),
+                        json!({
+                            "version": crate::VERSION,
+                            "mode": "stdio",
+                        }),
+                    );
                 }
             }
             Ok(stats)
@@ -1605,7 +1612,8 @@ pub fn dispatch_tool(
             // Also delete ACL for this collection
             let acl_deleted = adapter
                 .delete_one(SYSTEM_ACL_COLLECTION, json!({"collection": name}))
-                .unwrap_or(0) > 0;
+                .unwrap_or(0)
+                > 0;
 
             Ok(json!({
                 "success": true,
@@ -1831,53 +1839,55 @@ pub fn dispatch_tool(
 
             // Parse projection: {"field": 1} or {"field": 0}
             // BUG #10 fix: Validate BEFORE casting to prevent silent truncation
-            let projection: Option<std::collections::HashMap<String, i32>> =
-                if let Some(proj_value) = params.get("projection") {
-                    if proj_value.is_null() {
-                        None
-                    } else if let Some(obj) = proj_value.as_object() {
-                        let mut map = std::collections::HashMap::new();
-                        for (k, v) in obj {
-                            // BUG #10 fix: Check exact values BEFORE casting
-                            let int_val = if let Some(i) = v.as_i64() {
-                                // Validate integer is exactly 0 or 1 before casting
-                                if i != 0 && i != 1 {
-                                    return Err(McpError::InvalidParams(format!(
-                                        "Invalid projection value for '{}': expected 0 or 1, got {}",
-                                        k, i
-                                    )));
-                                }
-                                i as i32
-                            } else if let Some(f) = v.as_f64() {
-                                // Validate float is exactly 0.0 or 1.0 (no truncation)
-                                if f == 0.0 {
-                                    0
-                                } else if f == 1.0 {
-                                    1
-                                } else {
-                                    return Err(McpError::InvalidParams(format!(
-                                        "Invalid projection value for '{}': expected 0 or 1, got {}",
-                                        k, f
-                                    )));
-                                }
+            let projection: Option<std::collections::HashMap<String, i32>> = if let Some(
+                proj_value,
+            ) =
+                params.get("projection")
+            {
+                if proj_value.is_null() {
+                    None
+                } else if let Some(obj) = proj_value.as_object() {
+                    let mut map = std::collections::HashMap::new();
+                    for (k, v) in obj {
+                        // BUG #10 fix: Check exact values BEFORE casting
+                        let int_val = if let Some(i) = v.as_i64() {
+                            // Validate integer is exactly 0 or 1 before casting
+                            if i != 0 && i != 1 {
+                                return Err(McpError::InvalidParams(format!(
+                                    "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                    k, i
+                                )));
+                            }
+                            i as i32
+                        } else if let Some(f) = v.as_f64() {
+                            // Validate float is exactly 0.0 or 1.0 (no truncation)
+                            if f == 0.0 {
+                                0
+                            } else if f == 1.0 {
+                                1
                             } else {
                                 return Err(McpError::InvalidParams(format!(
-                                    "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                                    k, v
+                                    "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                    k, f
                                 )));
-                            };
-                            map.insert(k.clone(), int_val);
-                        }
-                        Some(map)
-                    } else {
-                        return Err(McpError::InvalidParams(
-                            "projection must be an object like {\"field\": 1} or {\"field\": 0}"
-                                .into(),
-                        ));
+                            }
+                        } else {
+                            return Err(McpError::InvalidParams(format!(
+                                "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                                k, v
+                            )));
+                        };
+                        map.insert(k.clone(), int_val);
                     }
+                    Some(map)
                 } else {
-                    None
-                };
+                    return Err(McpError::InvalidParams(
+                        "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
+                    ));
+                }
+            } else {
+                None
+            };
 
             let options = FulltextSearchOptions {
                 limit,
@@ -2351,13 +2361,11 @@ pub fn dispatch_tool(
 
             // List all ACL rules from _system.acl
             match adapter.find(SYSTEM_ACL_COLLECTION, json!({}), FindOptions::default()) {
-                Ok(result) => {
-                    Ok(json!({
-                        "rules": result.documents,
-                        "count": result.documents.len(),
-                        "note": "Built-in rules (_system.* protection) are not shown here"
-                    }))
-                }
+                Ok(result) => Ok(json!({
+                    "rules": result.documents,
+                    "count": result.documents.len(),
+                    "note": "Built-in rules (_system.* protection) are not shown here"
+                })),
                 Err(_) => {
                     // Collection doesn't exist yet - no custom rules
                     Ok(json!({
@@ -2420,8 +2428,8 @@ pub fn dispatch_tool(
                     .ok_or_else(|| McpError::InvalidParams("Rule missing 'permissions'".into()))?;
 
                 // Validate principal format
-                let principal = Principal::from_str(principal_str)?;
-                let permissions = Permissions::from_str(permissions_str);
+                let principal = Principal::parse(principal_str)?;
+                let permissions = Permissions::parse(permissions_str);
 
                 parsed_rules.push(json!({
                     "principal": principal,
@@ -2488,11 +2496,8 @@ pub fn dispatch_tool(
             let existing_collections = adapter.list_collections();
 
             // Get all ACL rules
-            let acl_result = adapter.find(
-                SYSTEM_ACL_COLLECTION,
-                json!({}),
-                FindOptions::default(),
-            )?;
+            let acl_result =
+                adapter.find(SYSTEM_ACL_COLLECTION, json!({}), FindOptions::default())?;
 
             let mut orphans: Vec<String> = Vec::new();
             for doc in &acl_result.documents {
@@ -2512,7 +2517,11 @@ pub fn dispatch_tool(
             let mut deleted_count = 0;
             for orphan in &orphans {
                 let filter = json!({"collection": orphan});
-                if adapter.delete_one(SYSTEM_ACL_COLLECTION, filter).unwrap_or(0) > 0 {
+                if adapter
+                    .delete_one(SYSTEM_ACL_COLLECTION, filter)
+                    .unwrap_or(0)
+                    > 0
+                {
                     deleted_count += 1;
                 }
             }
@@ -2563,9 +2572,18 @@ pub fn dispatch_tool(
             let id = get_string(&params, "id")?;
             let bind = get_string(&params, "bind")?;
             let tls = params.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
-            let cert_path = params.get("cert_path").and_then(|v| v.as_str()).map(String::from);
-            let key_path = params.get("key_path").and_then(|v| v.as_str()).map(String::from);
-            let description = params.get("description").and_then(|v| v.as_str()).map(String::from);
+            let cert_path = params
+                .get("cert_path")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let key_path = params
+                .get("key_path")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let description = params
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(String::from);
 
             let config = ListenerConfig {
                 id: id.clone(),

@@ -457,8 +457,12 @@ mod tests {
 
         let mut meta2 = create_test_collection("coll2");
         meta2.document_catalog.clear();
-        meta2.document_catalog.insert(DocumentId::String("a".to_string()), 8000);
-        meta2.document_catalog.insert(DocumentId::ObjectId("abc123".to_string()), 3000);
+        meta2
+            .document_catalog
+            .insert(DocumentId::String("a".to_string()), 8000);
+        meta2
+            .document_catalog
+            .insert(DocumentId::ObjectId("abc123".to_string()), 3000);
         collections.insert("coll2".to_string(), meta2);
 
         let (max_offset, has_docs) = StorageEngine::find_max_document_offset(&collections);
@@ -473,7 +477,10 @@ mod tests {
 
         // Should contain collection count (4 bytes) = 0
         assert_eq!(bytes.len(), 4);
-        assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 0);
+        assert_eq!(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            0
+        );
     }
 
     #[test]
@@ -487,7 +494,10 @@ mod tests {
         assert!(bytes.len() > 8);
 
         // First 4 bytes = collection count = 1
-        assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 1);
+        assert_eq!(
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            1
+        );
     }
 
     #[test]
@@ -707,7 +717,8 @@ mod tests {
 
         // Calculate data end
         let mut read_file = temp_file.reopen().unwrap();
-        let data_end = StorageEngine::calculate_data_end_from_catalog(&mut read_file, 1000).unwrap();
+        let data_end =
+            StorageEngine::calculate_data_end_from_catalog(&mut read_file, 1000).unwrap();
 
         // Should be: offset (1000) + length field (4) + doc data length
         assert_eq!(data_end, 1000 + 4 + doc_data.len() as u64);
@@ -731,6 +742,9 @@ mod tests {
         let mut read_file = temp_file.reopen().unwrap();
         let result = StorageEngine::calculate_data_end_from_catalog(&mut read_file, 1000);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("suspiciously large"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("suspiciously large"));
     }
 }

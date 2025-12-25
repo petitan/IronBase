@@ -190,7 +190,10 @@ fn get_default_db_path() -> String {
         let path = PathBuf::from("/usr/local/var/ironbase/ironbase_data.mlite");
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("Warning: Failed to create data directory {:?}: {}", parent, e);
+                eprintln!(
+                    "Warning: Failed to create data directory {:?}: {}",
+                    parent, e
+                );
             }
         }
         return path.to_string_lossy().to_string();
@@ -201,7 +204,10 @@ fn get_default_db_path() -> String {
         let path = PathBuf::from("/var/lib/ironbase/ironbase_data.mlite");
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                eprintln!("Warning: Failed to create data directory {:?}: {}", parent, e);
+                eprintln!(
+                    "Warning: Failed to create data directory {:?}: {}",
+                    parent, e
+                );
             }
         }
         return path.to_string_lossy().to_string();
@@ -269,8 +275,10 @@ fn run_stdio_server(cli: &Cli) {
                 let error_response =
                     create_error_response(-32700, &format!("Parse error: {}", e), None);
                 // BUG #14 fix: Handle JSON serialization errors gracefully
-                let response_str = serde_json::to_string(&error_response)
-                    .unwrap_or_else(|_| r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"}}"#.to_string());
+                let response_str = serde_json::to_string(&error_response).unwrap_or_else(|_| {
+                    r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"Parse error"}}"#
+                        .to_string()
+                });
                 let _ = writeln!(stdout, "{}", response_str);
                 let _ = stdout.flush();
                 continue;
@@ -280,11 +288,11 @@ fn run_stdio_server(cli: &Cli) {
         // Handle request with lifecycle enforcement
         if let Some(response) = handle_request(&request, &adapter, &mut initialized) {
             // BUG #14 fix: Handle JSON serialization errors gracefully
-            let response_str = serde_json::to_string(&response)
-                .unwrap_or_else(|e| {
-                    eprintln!("Response serialization error: {}", e);
-                    r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal error"}}"#.to_string()
-                });
+            let response_str = serde_json::to_string(&response).unwrap_or_else(|e| {
+                eprintln!("Response serialization error: {}", e);
+                r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal error"}}"#
+                    .to_string()
+            });
             // Write response only for requests, not notifications
             if let Err(e) = writeln!(stdout, "{}", response_str) {
                 eprintln!("Write error: {}", e);

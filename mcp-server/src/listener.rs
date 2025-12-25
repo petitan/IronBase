@@ -150,10 +150,11 @@ impl ListenerManager {
     /// Get all listener configurations
     pub fn list(&self) -> Result<Vec<ListenerConfig>> {
         // Handle missing collection gracefully (fresh database)
-        let result = match self
-            .adapter
-            .find(SYSTEM_LISTENERS_COLLECTION, json!({}), FindOptions::default())
-        {
+        let result = match self.adapter.find(
+            SYSTEM_LISTENERS_COLLECTION,
+            json!({}),
+            FindOptions::default(),
+        ) {
             Ok(r) => r,
             Err(_) => return Ok(Vec::new()), // Collection doesn't exist yet
         };
@@ -230,8 +231,7 @@ impl ListenerManager {
             )?;
         } else {
             // Insert new (this will create the collection if it doesn't exist)
-            self.adapter
-                .insert_one(SYSTEM_LISTENERS_COLLECTION, doc)?;
+            self.adapter.insert_one(SYSTEM_LISTENERS_COLLECTION, doc)?;
         }
 
         Ok(())
@@ -334,12 +334,8 @@ mod tests {
 
     #[test]
     fn test_listener_config_https() {
-        let config = ListenerConfig::new_https(
-            "secure",
-            "0.0.0.0:443",
-            "/path/cert.pem",
-            "/path/key.pem",
-        );
+        let config =
+            ListenerConfig::new_https("secure", "0.0.0.0:443", "/path/cert.pem", "/path/key.pem");
         assert!(config.tls);
         assert_eq!(config.cert_path, Some("/path/cert.pem".to_string()));
         assert_eq!(config.key_path, Some("/path/key.pem".to_string()));

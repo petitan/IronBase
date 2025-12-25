@@ -362,7 +362,11 @@ async fn run_http_server_internal(
         api_key_cache,
         require_api_key: config.require_api_key,
         server_info: crate::ServerInfo {
-            protocol: if config.tls_enabled { "https".to_string() } else { "http".to_string() },
+            protocol: if config.tls_enabled {
+                "https".to_string()
+            } else {
+                "http".to_string()
+            },
             host: config.host.clone(),
             port: config.port,
             require_api_key: config.require_api_key,
@@ -663,6 +667,7 @@ struct ServerInfo {
     version: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     request: &McpRequest,
     adapter: &Arc<IronBaseAdapter>,
@@ -809,7 +814,13 @@ fn handle_request(
                 }
             }
 
-            match dispatch_tool(&params.name, arguments, adapter, Some(api_key_cache), Some(server_info)) {
+            match dispatch_tool(
+                &params.name,
+                arguments,
+                adapter,
+                Some(api_key_cache),
+                Some(server_info),
+            ) {
                 Ok(result) => {
                     let response = serde_json::json!({
                         "content": [{

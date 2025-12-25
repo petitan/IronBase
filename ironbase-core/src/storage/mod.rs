@@ -211,13 +211,14 @@ impl StorageEngine {
                 Err(e) => {
                     // Check if this is a recoverable corruption error
                     // Magic number corruption is NOT recoverable - file may not be a valid database
-                    let is_magic_corruption = matches!(&e, MongoLiteError::Corruption(msg) if msg.contains("magic"));
+                    let is_magic_corruption =
+                        matches!(&e, MongoLiteError::Corruption(msg) if msg.contains("magic"));
 
-                    let is_recoverable_corruption = !is_magic_corruption && matches!(
-                        &e,
-                        MongoLiteError::Corruption(_)
-                            | MongoLiteError::Serialization(_)
-                    );
+                    let is_recoverable_corruption = !is_magic_corruption
+                        && matches!(
+                            &e,
+                            MongoLiteError::Corruption(_) | MongoLiteError::Serialization(_)
+                        );
 
                     if is_recoverable_corruption {
                         eprintln!("[WARN] Metadata corrupted: {}, attempting WAL recovery", e);
@@ -403,7 +404,7 @@ impl StorageEngine {
     /// Recover metadata from WAL if the file's metadata is corrupted
     /// Returns true if recovery was successful, false if no metadata snapshot found in WAL
     pub fn recover_metadata_from_wal(&mut self) -> Result<bool> {
-        use crate::wal::{WALEntryType, WALEntryIterator};
+        use crate::wal::{WALEntryIterator, WALEntryType};
         use std::io::BufReader;
 
         // Open WAL file for reading
@@ -426,12 +427,10 @@ impl StorageEngine {
         // Find the latest MetadataSnapshot entry
         let mut latest_snapshot: Option<MetadataWALEntry> = None;
 
-        for entry_result in iter {
-            if let Ok(entry) = entry_result {
-                if entry.entry_type == WALEntryType::MetadataSnapshot {
-                    if let Ok(snapshot) = serde_json::from_slice::<MetadataWALEntry>(&entry.data) {
-                        latest_snapshot = Some(snapshot);
-                    }
+        for entry in iter.flatten() {
+            if entry.entry_type == WALEntryType::MetadataSnapshot {
+                if let Ok(snapshot) = serde_json::from_slice::<MetadataWALEntry>(&entry.data) {
+                    latest_snapshot = Some(snapshot);
                 }
             }
         }
@@ -568,9 +567,8 @@ impl StorageEngine {
 
                         // Track max ID for last_id
                         if let DocumentId::Int(id_num) = &doc_id {
-                            let current_max = max_ids_by_collection
-                                .entry(collection_name)
-                                .or_insert(0);
+                            let current_max =
+                                max_ids_by_collection.entry(collection_name).or_insert(0);
                             if (*id_num as u64) > *current_max {
                                 *current_max = *id_num as u64;
                             }
@@ -630,7 +628,11 @@ impl StorageEngine {
     /// # Arguments
     /// * `transaction` - The transaction to commit
     /// * `sync_file` - Whether to sync the main file (false for batch mode)
-    fn commit_transaction_internal(&mut self, transaction: &mut Transaction, sync_file: bool) -> Result<()> {
+    fn commit_transaction_internal(
+        &mut self,
+        transaction: &mut Transaction,
+        sync_file: bool,
+    ) -> Result<()> {
         use crate::transaction::Operation;
         use crate::wal::{WALEntry, WALEntryType};
         use serde_json::Value;
@@ -2140,9 +2142,6 @@ mod tests {
         let recovered: MetadataWALEntry = serde_json::from_slice(&wal_entry.data).unwrap();
         assert_eq!(recovered.data_end_offset, 12345);
         assert!(recovered.collections.contains_key("test_collection"));
-        assert_eq!(
-            recovered.collections["test_collection"].document_count,
-            42
-        );
+        assert_eq!(recovered.collections["test_collection"].document_count, 42);
     }
 }

@@ -153,9 +153,7 @@ impl IronBaseAdapter {
         let path_str = db_path.display().to_string();
 
         // Get file size
-        let file_size = std::fs::metadata(&*db_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = std::fs::metadata(&*db_path).map(|m| m.len()).unwrap_or(0);
 
         // Format human-readable file size
         let file_size_human = if file_size >= 1_073_741_824 {

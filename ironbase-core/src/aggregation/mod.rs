@@ -168,8 +168,7 @@ mod tests {
     fn test_project_include() {
         let docs = vec![json!({"name": "Alice", "age": 30, "city": "NYC"})];
 
-        let pipeline =
-            Pipeline::from_json(&json!([{"$project": {"name": 1, "age": 1}}])).unwrap();
+        let pipeline = Pipeline::from_json(&json!([{"$project": {"name": 1, "age": 1}}])).unwrap();
 
         let results = pipeline.execute(docs).unwrap();
         assert_eq!(results.len(), 1);
