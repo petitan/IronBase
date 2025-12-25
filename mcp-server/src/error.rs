@@ -21,6 +21,8 @@ pub enum McpError {
     ScriptError(String),
     /// Internal error
     Internal(String),
+    /// Access denied (ACL)
+    Forbidden(String),
 }
 
 impl fmt::Display for McpError {
@@ -34,6 +36,7 @@ impl fmt::Display for McpError {
             McpError::Serialization(msg) => write!(f, "Serialization error: {}", msg),
             McpError::ScriptError(msg) => write!(f, "Script error: {}", msg),
             McpError::Internal(msg) => write!(f, "Internal error: {}", msg),
+            McpError::Forbidden(msg) => write!(f, "{}", msg),
         }
     }
 }

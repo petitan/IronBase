@@ -1175,7 +1175,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_list_all_collections",
                 "title": "Admin: List All Collections",
-                "description": "List ALL collections including hidden/system collections. Requires IRONBASE_ADMIN_KEY env var.",
+                "description": "List ALL collections including hidden/system collections. Only accessible from localhost. Requires IRONBASE_ADMIN_KEY.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1190,7 +1190,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_create_system_collection",
                 "title": "Admin: Create System Collection",
-                "description": "Create a system collection with protected/hidden flags. Requires IRONBASE_ADMIN_KEY env var.",
+                "description": "Create a system collection with protected/hidden flags. Only accessible from localhost. Requires IRONBASE_ADMIN_KEY.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1209,7 +1209,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_set_collection_flags",
                 "title": "Admin: Set Collection Flags",
-                "description": "Set collection flags (is_system, protected, hidden). Requires IRONBASE_ADMIN_KEY env var.",
+                "description": "Set collection flags (is_system, protected, hidden). Only accessible from localhost. Requires IRONBASE_ADMIN_KEY.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1240,7 +1240,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_drop_protected",
                 "title": "Admin: Drop Protected Collection",
-                "description": "Force drop a protected collection. Requires IRONBASE_ADMIN_KEY env var. USE WITH CAUTION!",
+                "description": "Force drop a protected collection. Only accessible from localhost. Requires IRONBASE_ADMIN_KEY. USE WITH CAUTION!",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1260,7 +1260,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_apikey_create",
                 "title": "Admin: Create API Key",
-                "description": "Create a new API key for accessing the MCP server. Requires IRONBASE_ADMIN_KEY env var.",
+                "description": "Create a new API key for accessing the MCP server. Only accessible from localhost. Requires IRONBASE_ADMIN_KEY.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1279,7 +1279,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_apikey_list",
                 "title": "Admin: List API Keys",
-                "description": "List all API keys (key values are masked). Requires IRONBASE_ADMIN_KEY env var.",
+                "description": "List all API keys (key values are masked). Only accessible from localhost. Requires IRONBASE_ADMIN_KEY.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1294,7 +1294,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_apikey_revoke",
                 "title": "Admin: Revoke API Key",
-                "description": "Revoke (disable) an API key by ID. Requires IRONBASE_ADMIN_KEY env var.",
+                "description": "Revoke (disable) an API key by ID. Only accessible from localhost. Requires IRONBASE_ADMIN_KEY.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1313,7 +1313,7 @@ pub fn get_tools_list() -> Value {
             {
                 "name": "admin_apikey_delete",
                 "title": "Admin: Delete API Key",
-                "description": "Permanently delete an API key by ID. Requires IRONBASE_ADMIN_KEY env var.",
+                "description": "Permanently delete an API key by ID. Only accessible from localhost. Requires IRONBASE_ADMIN_KEY.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -1327,6 +1327,198 @@ pub fn get_tools_list() -> Value {
                         }
                     },
                     "required": ["admin_key", "id"]
+                }
+            },
+
+            // ACL (Access Control List) Management
+            {
+                "name": "acl_list",
+                "title": "List ACL Rules",
+                "description": "List all ACL rules for collection-level access control. Shows both built-in and custom rules. Requires read permission on _system.acl.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "acl_get",
+                "title": "Get Collection ACL",
+                "description": "Get ACL rules for a specific collection. Requires read permission on _system.acl.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name to get ACL for"
+                        }
+                    },
+                    "required": ["collection"]
+                }
+            },
+            {
+                "name": "acl_set",
+                "title": "Set Collection ACL",
+                "description": "Set ACL rules for a collection. Only accessible from localhost. Rules format: [{\"principal\": \"interface:internal\", \"permissions\": \"read,write\"}]",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name to set ACL for (use '*' for default rules)"
+                        },
+                        "rules": {
+                            "type": "array",
+                            "description": "Array of ACL rules. Each rule has 'principal' (e.g., 'interface:internal', 'apikey:mykey') and 'permissions' (e.g., 'read', 'read,write', 'all', 'deny')",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "principal": {
+                                        "type": "string",
+                                        "description": "Who: interface:localhost|internal|external, apikey:keyname, ip:1.2.3.4, iprange:192.168.0.0/24, anyone"
+                                    },
+                                    "permissions": {
+                                        "type": "string",
+                                        "description": "What: read, write, admin, all, deny (comma-separated)"
+                                    }
+                                },
+                                "required": ["principal", "permissions"]
+                            }
+                        }
+                    },
+                    "required": ["collection", "rules"]
+                }
+            },
+            {
+                "name": "acl_delete",
+                "title": "Delete Collection ACL",
+                "description": "Delete custom ACL rules for a collection, reverting to defaults. Only accessible from localhost.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "collection": {
+                            "type": "string",
+                            "description": "Collection name to delete ACL for"
+                        }
+                    },
+                    "required": ["collection"]
+                }
+            },
+            {
+                "name": "acl_cleanup",
+                "title": "Cleanup Orphan ACLs",
+                "description": "Remove ACL rules for collections that no longer exist. Only accessible from localhost.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+
+            // Listener Management
+            {
+                "name": "listener_list",
+                "title": "List Listeners",
+                "description": "List all configured listeners (HTTP/HTTPS endpoints). Requires read permission on _system.listeners.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "listener_get",
+                "title": "Get Listener",
+                "description": "Get configuration for a specific listener by ID. Requires read permission on _system.listeners.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Listener ID"
+                        }
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "listener_add",
+                "title": "Add Listener",
+                "description": "Add a new HTTP/HTTPS listener. Only accessible from localhost. Requires server restart to take effect.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Unique identifier for the listener"
+                        },
+                        "bind": {
+                            "type": "string",
+                            "description": "Bind address (e.g., '0.0.0.0:8080', '192.168.1.100:443')"
+                        },
+                        "tls": {
+                            "type": "boolean",
+                            "description": "Enable TLS/HTTPS (default: false)"
+                        },
+                        "cert_path": {
+                            "type": "string",
+                            "description": "Path to TLS certificate file (required if tls=true)"
+                        },
+                        "key_path": {
+                            "type": "string",
+                            "description": "Path to TLS private key file (required if tls=true)"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional description for this listener"
+                        }
+                    },
+                    "required": ["id", "bind"]
+                }
+            },
+            {
+                "name": "listener_delete",
+                "title": "Delete Listener",
+                "description": "Delete a listener configuration. Only accessible from localhost. Requires server restart to take effect.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Listener ID to delete"
+                        }
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "listener_enable",
+                "title": "Enable Listener",
+                "description": "Enable a disabled listener. Only accessible from localhost. Requires server restart to take effect.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Listener ID to enable"
+                        }
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "listener_disable",
+                "title": "Disable Listener",
+                "description": "Disable a listener without deleting it. Only accessible from localhost. Requires server restart to take effect.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Listener ID to disable"
+                        }
+                    },
+                    "required": ["id"]
                 }
             }
         ]
@@ -1405,9 +1597,21 @@ pub fn dispatch_tool(
             Ok(json!({"success": true, "collection": name}))
         }
         "collection_drop" => {
+            use crate::acl::SYSTEM_ACL_COLLECTION;
+
             let name = get_string(&params, "name")?;
             adapter.drop_collection(&name)?;
-            Ok(json!({"success": true, "dropped": name}))
+
+            // Also delete ACL for this collection
+            let acl_deleted = adapter
+                .delete_one(SYSTEM_ACL_COLLECTION, json!({"collection": name}))
+                .unwrap_or(0) > 0;
+
+            Ok(json!({
+                "success": true,
+                "dropped": name,
+                "acl_deleted": acl_deleted
+            }))
         }
 
         // Document CRUD
@@ -2137,6 +2341,325 @@ pub fn dispatch_tool(
             Ok(json!({
                 "has_active_write_transaction": holder.is_some(),
                 "write_lock_holder": holder.map(|id| id.to_string())
+            }))
+        }
+
+        // ACL Management
+        "acl_list" => {
+            use crate::acl::SYSTEM_ACL_COLLECTION;
+            use crate::adapter::FindOptions;
+
+            // List all ACL rules from _system.acl
+            match adapter.find(SYSTEM_ACL_COLLECTION, json!({}), FindOptions::default()) {
+                Ok(result) => {
+                    Ok(json!({
+                        "rules": result.documents,
+                        "count": result.documents.len(),
+                        "note": "Built-in rules (_system.* protection) are not shown here"
+                    }))
+                }
+                Err(_) => {
+                    // Collection doesn't exist yet - no custom rules
+                    Ok(json!({
+                        "rules": [],
+                        "count": 0,
+                        "note": "No custom ACL rules defined. Default rules apply."
+                    }))
+                }
+            }
+        }
+
+        "acl_get" => {
+            use crate::acl::SYSTEM_ACL_COLLECTION;
+
+            let collection = get_string(&params, "collection")?;
+
+            match adapter.find_one(SYSTEM_ACL_COLLECTION, json!({"collection": collection})) {
+                Ok(Some(doc)) => Ok(doc),
+                Ok(None) => Ok(json!({
+                    "collection": collection,
+                    "rules": null,
+                    "note": "No custom ACL for this collection. Default rules apply."
+                })),
+                Err(_) => Ok(json!({
+                    "collection": collection,
+                    "rules": null,
+                    "note": "No custom ACL for this collection. Default rules apply."
+                })),
+            }
+        }
+
+        "acl_set" => {
+            use crate::acl::{Permissions, Principal, SYSTEM_ACL_COLLECTION};
+
+            let collection = get_string(&params, "collection")?;
+            let rules_arr = get_array(&params, "rules")?;
+
+            // Validate that collection exists (except for wildcard "*")
+            if collection != "*" {
+                let collections = adapter.list_collections();
+                if !collections.contains(&collection) {
+                    return Err(McpError::InvalidParams(format!(
+                        "Collection '{}' does not exist. Create it first before setting ACL.",
+                        collection
+                    )));
+                }
+            }
+
+            // Parse rules
+            let mut parsed_rules: Vec<Value> = Vec::new();
+            for rule_value in rules_arr {
+                let principal_str = rule_value
+                    .get("principal")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::InvalidParams("Rule missing 'principal'".into()))?;
+
+                let permissions_str = rule_value
+                    .get("permissions")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::InvalidParams("Rule missing 'permissions'".into()))?;
+
+                // Validate principal format
+                let principal = Principal::from_str(principal_str)?;
+                let permissions = Permissions::from_str(permissions_str);
+
+                parsed_rules.push(json!({
+                    "principal": principal,
+                    "permissions": permissions
+                }));
+            }
+
+            let acl_doc = json!({
+                "collection": collection,
+                "rules": parsed_rules
+            });
+
+            // Upsert into _system.acl
+            let filter = json!({"collection": collection});
+            match adapter.find_one(SYSTEM_ACL_COLLECTION, filter.clone()) {
+                Ok(Some(_)) => {
+                    // Update existing
+                    adapter.update_one(SYSTEM_ACL_COLLECTION, filter, json!({"$set": acl_doc}))?;
+                }
+                _ => {
+                    // Insert new
+                    adapter.insert_one(SYSTEM_ACL_COLLECTION, acl_doc)?;
+                }
+            }
+
+            Ok(json!({
+                "success": true,
+                "collection": collection,
+                "rules_count": parsed_rules.len(),
+                "note": "ACL updated. Changes take effect on next request."
+            }))
+        }
+
+        "acl_delete" => {
+            use crate::acl::SYSTEM_ACL_COLLECTION;
+
+            let collection = get_string(&params, "collection")?;
+
+            // Prevent deleting built-in rules
+            if collection == "_system.*" {
+                return Err(McpError::InvalidParams(
+                    "Cannot delete built-in _system.* ACL rules".into(),
+                ));
+            }
+
+            let filter = json!({"collection": collection});
+            let deleted = adapter.delete_one(SYSTEM_ACL_COLLECTION, filter)?;
+
+            Ok(json!({
+                "success": true,
+                "collection": collection,
+                "deleted": deleted > 0,
+                "note": if deleted > 0 {
+                    "ACL deleted. Default rules now apply."
+                } else {
+                    "No custom ACL found for this collection."
+                }
+            }))
+        }
+
+        "acl_cleanup" => {
+            use crate::acl::SYSTEM_ACL_COLLECTION;
+
+            let existing_collections = adapter.list_collections();
+
+            // Get all ACL rules
+            let acl_result = adapter.find(
+                SYSTEM_ACL_COLLECTION,
+                json!({}),
+                FindOptions::default(),
+            )?;
+
+            let mut orphans: Vec<String> = Vec::new();
+            for doc in &acl_result.documents {
+                if let Some(coll) = doc.get("collection").and_then(|v| v.as_str()) {
+                    // Skip wildcard rules
+                    if coll == "*" {
+                        continue;
+                    }
+                    // Check if collection exists
+                    if !existing_collections.contains(&coll.to_string()) {
+                        orphans.push(coll.to_string());
+                    }
+                }
+            }
+
+            // Delete orphan ACLs
+            let mut deleted_count = 0;
+            for orphan in &orphans {
+                let filter = json!({"collection": orphan});
+                if adapter.delete_one(SYSTEM_ACL_COLLECTION, filter).unwrap_or(0) > 0 {
+                    deleted_count += 1;
+                }
+            }
+
+            Ok(json!({
+                "success": true,
+                "orphans_found": orphans.len(),
+                "orphans_deleted": deleted_count,
+                "collections": orphans
+            }))
+        }
+
+        // Listener Management
+        "listener_list" => {
+            use crate::listener::{ListenerManager, SYSTEM_LISTENERS_COLLECTION};
+
+            let manager = ListenerManager::new(adapter.clone());
+            // Handle case where collection doesn't exist yet
+            let listeners = manager.list().unwrap_or_default();
+
+            Ok(json!({
+                "listeners": listeners,
+                "count": listeners.len(),
+                "collection": SYSTEM_LISTENERS_COLLECTION,
+                "note": "Changes require server restart to take effect"
+            }))
+        }
+
+        "listener_get" => {
+            use crate::listener::ListenerManager;
+
+            let id = get_string(&params, "id")?;
+            let manager = ListenerManager::new(adapter.clone());
+
+            // Handle case where collection doesn't exist yet
+            match manager.get(&id).unwrap_or(None) {
+                Some(listener) => Ok(serde_json::to_value(listener)?),
+                None => Err(McpError::InvalidParams(format!(
+                    "Listener not found: {}",
+                    id
+                ))),
+            }
+        }
+
+        "listener_add" => {
+            use crate::listener::{ListenerConfig, ListenerManager};
+
+            let id = get_string(&params, "id")?;
+            let bind = get_string(&params, "bind")?;
+            let tls = params.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
+            let cert_path = params.get("cert_path").and_then(|v| v.as_str()).map(String::from);
+            let key_path = params.get("key_path").and_then(|v| v.as_str()).map(String::from);
+            let description = params.get("description").and_then(|v| v.as_str()).map(String::from);
+
+            let config = ListenerConfig {
+                id: id.clone(),
+                bind: bind.clone(),
+                tls,
+                cert_path,
+                key_path,
+                enabled: true,
+                description,
+            };
+
+            // Validate before saving
+            config.validate()?;
+
+            let manager = ListenerManager::new(adapter.clone());
+            // Handle case where collection doesn't exist yet (is_update will be false)
+            let is_update = manager.get(&id).unwrap_or(None).is_some();
+            manager.set(&config)?;
+
+            Ok(json!({
+                "success": true,
+                "id": id,
+                "bind": bind,
+                "tls": tls,
+                "action": if is_update { "updated" } else { "created" },
+                "note": "Restart server for changes to take effect"
+            }))
+        }
+
+        "listener_delete" => {
+            use crate::listener::ListenerManager;
+
+            let id = get_string(&params, "id")?;
+
+            // Prevent deleting the default listener
+            if id == "default" {
+                return Err(McpError::InvalidParams(
+                    "Cannot delete the default listener. Use listener_disable instead.".into(),
+                ));
+            }
+
+            let manager = ListenerManager::new(adapter.clone());
+            // Handle case where collection doesn't exist yet
+            let deleted = manager.delete(&id).unwrap_or(false);
+
+            Ok(json!({
+                "success": true,
+                "id": id,
+                "deleted": deleted,
+                "note": if deleted {
+                    "Listener deleted. Restart server for changes to take effect."
+                } else {
+                    "Listener not found."
+                }
+            }))
+        }
+
+        "listener_enable" => {
+            use crate::listener::ListenerManager;
+
+            let id = get_string(&params, "id")?;
+            let manager = ListenerManager::new(adapter.clone());
+            // Handle case where collection doesn't exist yet
+            let updated = manager.enable(&id).unwrap_or(false);
+
+            Ok(json!({
+                "success": true,
+                "id": id,
+                "enabled": updated,
+                "note": if updated {
+                    "Listener enabled. Restart server for changes to take effect."
+                } else {
+                    "Listener not found."
+                }
+            }))
+        }
+
+        "listener_disable" => {
+            use crate::listener::ListenerManager;
+
+            let id = get_string(&params, "id")?;
+            let manager = ListenerManager::new(adapter.clone());
+            // Handle case where collection doesn't exist yet
+            let updated = manager.disable(&id).unwrap_or(false);
+
+            Ok(json!({
+                "success": true,
+                "id": id,
+                "disabled": updated,
+                "note": if updated {
+                    "Listener disabled. Restart server for changes to take effect."
+                } else {
+                    "Listener not found."
+                }
             }))
         }
 

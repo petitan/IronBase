@@ -2,6 +2,10 @@
 //!
 //! Provides HTTP server functionality that can be started with custom shutdown signals.
 
+use crate::acl::{
+    get_collection_from_args, get_required_permission, get_system_collection_for_tool,
+    requires_localhost, AclManager, CallerContext, InterfaceType,
+};
 use crate::{shutdown, ApiKeyCache, IronBaseAdapter, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -340,6 +344,18 @@ async fn run_http_server_internal(
         );
     }
 
+    // Create ACL manager
+    let acl_manager = Arc::new(AclManager::new(adapter.clone()));
+
+    // Initialize listener configuration in database
+    {
+        use crate::listener::ListenerManager;
+        let listener_manager = ListenerManager::new(adapter.clone());
+        if let Err(e) = listener_manager.init_default(&host, port, config.tls_enabled) {
+            tracing::warn!("Failed to initialize default listener: {}", e);
+        }
+    }
+
     let app_state = Arc::new(HttpAppState {
         adapter: adapter.clone(),
         initialized: std::sync::atomic::AtomicBool::new(false),
@@ -351,17 +367,19 @@ async fn run_http_server_internal(
             port: config.port,
             require_api_key: config.require_api_key,
         },
+        acl_manager,
     });
 
     // HTTP request handler
     async fn http_handle_mcp_request(
         State(state): State<Arc<HttpAppState>>,
+        axum::extract::ConnectInfo(remote_addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
         headers: axum::http::HeaderMap,
         body: axum::body::Bytes,
     ) -> Response {
         // RAW request logging
         let body_str = String::from_utf8_lossy(&body);
-        tracing::debug!(">>> MCP REQUEST: {}", body_str);
+        tracing::debug!(">>> MCP REQUEST from {}: {}", remote_addr, body_str);
 
         // Parse JSON
         let request: McpRequest = match serde_json::from_slice(&body) {
@@ -384,6 +402,8 @@ async fn run_http_server_internal(
             &state.api_key_cache,
             state.require_api_key,
             &state.server_info,
+            &state.acl_manager,
+            Some(remote_addr),
         ) {
             Some(response) => {
                 // RAW response logging
@@ -512,9 +532,11 @@ async fn run_http_server_internal(
             }
         };
 
+        // Use into_make_service_with_connect_info to enable ConnectInfo extraction
+        let app_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
         if let Err(e) = axum_server::bind_rustls(socket_addr, rustls_config)
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app_service)
             .await
         {
             tracing::error!("Server error: {}", e);
@@ -535,7 +557,9 @@ async fn run_http_server_internal(
             format_size(max_body_size)
         );
 
-        if let Err(e) = axum::serve(listener, app)
+        // Use into_make_service_with_connect_info to enable ConnectInfo extraction
+        let app_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
+        if let Err(e) = axum::serve(listener, app_service)
             .with_graceful_shutdown(shutdown_future)
             .await
         {
@@ -562,6 +586,8 @@ struct HttpAppState {
     require_api_key: bool,
     /// Server runtime info for db_stats
     server_info: crate::ServerInfo,
+    /// ACL manager for collection-level permissions
+    acl_manager: Arc<AclManager>,
 }
 
 // MCP Request/Response types (duplicated from main.rs for lib independence)
@@ -645,6 +671,8 @@ fn handle_request(
     api_key_cache: &ApiKeyCache,
     require_api_key: bool,
     server_info: &crate::ServerInfo,
+    acl_manager: &AclManager,
+    remote_addr: Option<std::net::SocketAddr>,
 ) -> Option<McpResponse> {
     use crate::{dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list};
     use std::sync::atomic::Ordering;
@@ -744,6 +772,42 @@ fn handle_request(
             };
 
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
+
+            // ACL check before dispatch
+            let caller = CallerContext::new(remote_addr, api_key.map(|s| s.to_string()));
+
+            // Check localhost requirement for system tools (acl_*, listener_*)
+            if requires_localhost(&params.name) && caller.interface != InterfaceType::Localhost {
+                let response = serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("'{}' can only be called from localhost (current: {})", params.name, caller.interface)
+                    }],
+                    "isError": true
+                });
+                return Some(create_success_response(response, request.id.clone()));
+            }
+
+            // Determine which collection to check:
+            // 1. From tool arguments (for regular collection operations)
+            // 2. From tool name (for system tools like acl_*, listener_*)
+            let collection_to_check = get_collection_from_args(&arguments)
+                .or_else(|| get_system_collection_for_tool(&params.name).map(String::from));
+
+            // Check ACL if tool operates on a collection
+            if let Some(collection) = collection_to_check {
+                let required = get_required_permission(&params.name);
+                if let Err(e) = acl_manager.check(&collection, &caller, required) {
+                    let response = serde_json::json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("Access denied: {}", e)
+                        }],
+                        "isError": true
+                    });
+                    return Some(create_success_response(response, request.id.clone()));
+                }
+            }
 
             match dispatch_tool(&params.name, arguments, adapter, Some(api_key_cache), Some(server_info)) {
                 Ok(result) => {
