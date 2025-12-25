@@ -661,6 +661,23 @@ Protected collections for internal server configuration.
 - `mcp-server/src/adapter.rs:56-75` - System collection constants
 - `mcp-server/src/acl.rs:334-370` - System collection ACL rules
 
+**System Collection JSON Schemas:**
+
+All system collections have strict JSON schema validation enforced automatically on startup.
+
+| Collection | Required Fields | Key Patterns |
+|------------|-----------------|--------------|
+| `_system.scripts` | `_id`, `code`, `version`, `tags`, `dependencies` | `_id`: `^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$` |
+| `_system.script_versions` | `script_name`, `version`, `code`, `created_at`, `tags`, `dependencies` | `script_name`: same as above |
+| `_system.api_keys` | `_id`, `key`, `name`, `created_at`, `enabled` | `key`: `^sk-[a-zA-Z0-9]{32,64}$` |
+| `_system.acl` | `collection`, `rules` | `collection`: `^[a-zA-Z_*][a-zA-Z0-9_.*-]{0,127}$` |
+| `_system.listeners` | `_id`, `bind` | `bind`: `^[0-9a-fA-F.:]+:[0-9]{1,5}$` |
+
+**Schema Implementation:**
+- Schemas defined in `mcp-server/src/adapter.rs:77-208`
+- Applied automatically via `ensure_system_collections()` on adapter initialization
+- Invalid documents are rejected with detailed validation errors
+
 ## Testing Strategy
 
 - **Test first** approach always
