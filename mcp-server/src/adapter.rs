@@ -58,6 +58,155 @@ pub const SCRIPTS_COLLECTION: &str = "_system.scripts";
 /// Script versions collection name (for version history)
 pub const SCRIPT_VERSIONS_COLLECTION: &str = "_system.script_versions";
 
+/// API keys collection name
+pub const API_KEYS_COLLECTION: &str = "_system.api_keys";
+
+/// ACL rules collection name
+pub const ACL_COLLECTION: &str = "_system.acl";
+
+/// Listeners collection name
+pub const LISTENERS_COLLECTION: &str = "_system.listeners";
+
+// ============================================================================
+// System Collection Schemas
+// ============================================================================
+
+/// Get strict JSON schema for _system.scripts
+/// Note: _id field serves as the script name (string identifier)
+/// Optional fields (description, created_at, etc.) are not type-checked to allow null values
+fn scripts_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["_id", "code", "version", "tags", "dependencies"],
+        "properties": {
+            "_id": {
+                "type": "string",
+                "pattern": "^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$"
+            },
+            "code": {
+                "type": "string"
+            },
+            "version": {
+                "type": "integer"
+            },
+            "tags": {
+                "type": "array"
+            },
+            "dependencies": {
+                "type": "array"
+            }
+        }
+    })
+}
+
+/// Get strict JSON schema for _system.script_versions
+fn script_versions_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["script_name", "version", "code", "created_at", "tags", "dependencies"],
+        "properties": {
+            "script_name": {
+                "type": "string",
+                "pattern": "^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$"
+            },
+            "version": {
+                "type": "integer"
+            },
+            "code": {
+                "type": "string"
+            },
+            "tags": {
+                "type": "array"
+            },
+            "dependencies": {
+                "type": "array"
+            },
+            "created_at": {
+                "type": "string"
+            }
+        }
+    })
+}
+
+/// Get strict JSON schema for _system.api_keys
+fn api_keys_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["_id", "key", "name", "created_at", "enabled"],
+        "properties": {
+            "_id": {
+                "type": "integer"
+            },
+            "key": {
+                "type": "string",
+                "pattern": "^sk-[a-zA-Z0-9]{32,64}$"
+            },
+            "name": {
+                "type": "string",
+                "pattern": "^[a-zA-Z0-9_-]{1,64}$"
+            },
+            "created_at": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"
+            },
+            "enabled": {
+                "type": "boolean"
+            }
+        }
+    })
+}
+
+/// Get strict JSON schema for _system.acl
+fn acl_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["collection", "rules"],
+        "properties": {
+            "collection": {
+                "type": "string",
+                "pattern": "^[a-zA-Z_*][a-zA-Z0-9_.*-]{0,127}$"
+            },
+            "rules": {
+                "type": "array",
+                "minItems": 1
+            }
+        }
+    })
+}
+
+/// Get strict JSON schema for _system.listeners
+fn listeners_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["_id", "bind"],
+        "properties": {
+            "_id": {
+                "type": "string",
+                "pattern": "^[a-zA-Z_][a-zA-Z0-9_-]{0,63}$"
+            },
+            "bind": {
+                "type": "string",
+                "pattern": "^[0-9a-fA-F.:]+:[0-9]{1,5}$"
+            },
+            "tls": {
+                "type": "boolean"
+            },
+            "cert_path": {
+                "type": "string"
+            },
+            "key_path": {
+                "type": "string"
+            },
+            "enabled": {
+                "type": "boolean"
+            },
+            "description": {
+                "type": "string"
+            }
+        }
+    })
+}
+
 impl IronBaseAdapter {
     /// Create a new adapter with the given database path
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
@@ -72,52 +221,76 @@ impl IronBaseAdapter {
         Ok(adapter)
     }
 
-    /// Ensure system collections exist with correct flags (_system.scripts, _system.script_versions)
+    /// Ensure system collections exist with correct flags and schemas
     fn ensure_system_collections(&self) -> Result<()> {
+        use ironbase_core::storage::CollectionFlags;
+
+        let system_flags = CollectionFlags {
+            is_system: true,
+            protected: true,
+            hidden: true,
+        };
+
+        // Define all system collections with their schemas
+        let system_collections: &[(&str, serde_json::Value)] = &[
+            (SCRIPTS_COLLECTION, scripts_schema()),
+            (SCRIPT_VERSIONS_COLLECTION, script_versions_schema()),
+            (API_KEYS_COLLECTION, api_keys_schema()),
+            (ACL_COLLECTION, acl_schema()),
+            (LISTENERS_COLLECTION, listeners_schema()),
+        ];
+
         let db = self.db.read();
-        let collections = db.list_all_collections();
+        let existing_collections = db.list_all_collections();
+        drop(db);
 
-        let scripts_exists = collections.contains(&SCRIPTS_COLLECTION.to_string());
-        let versions_exists = collections.contains(&SCRIPT_VERSIONS_COLLECTION.to_string());
+        // Process each system collection
+        for (collection_name, schema) in system_collections {
+            let exists = existing_collections.contains(&collection_name.to_string());
 
-        // Check flags on existing collections - fix if hidden != true
-        let scripts_needs_flags = scripts_exists
-            && db
-                .get_collection_flags(SCRIPTS_COLLECTION)
-                .map(|f| !f.hidden)
-                .unwrap_or(true);
-        let versions_needs_flags = versions_exists
-            && db
-                .get_collection_flags(SCRIPT_VERSIONS_COLLECTION)
-                .map(|f| !f.hidden)
-                .unwrap_or(true);
+            if !exists {
+                // Create collection with flags and schema
+                let db = self.db.write();
+                db.create_system_collection(collection_name)?;
+                db.set_collection_flags(collection_name, system_flags)?;
 
-        if !scripts_exists || !versions_exists || scripts_needs_flags || versions_needs_flags {
-            drop(db); // Release read lock
-            let db = self.db.write(); // Need write lock to create/modify collections
+                // Set schema
+                if let Ok(coll) = db.collection(collection_name) {
+                    let _ = coll.set_schema(Some(schema.clone()));
+                }
+            } else {
+                // Ensure flags are correct
+                let db = self.db.read();
+                let needs_flags = db
+                    .get_collection_flags(collection_name)
+                    .map(|f| !f.hidden || !f.protected || !f.is_system)
+                    .unwrap_or(true);
 
-            // Create if missing
-            if !scripts_exists {
-                db.create_system_collection(SCRIPTS_COLLECTION)?;
-            }
-            if !versions_exists {
-                db.create_system_collection(SCRIPT_VERSIONS_COLLECTION)?;
-            }
+                // Check if schema is set
+                let needs_schema = db
+                    .get_collection(collection_name)
+                    .ok()
+                    .and_then(|c| c.get_schema().ok().flatten())
+                    .is_none();
 
-            // Fix flags on existing collections (legacy data migration)
-            use ironbase_core::storage::CollectionFlags;
-            let system_flags = CollectionFlags {
-                is_system: true,
-                protected: true,
-                hidden: true,
-            };
-            if scripts_needs_flags {
-                db.set_collection_flags(SCRIPTS_COLLECTION, system_flags)?;
-            }
-            if versions_needs_flags {
-                db.set_collection_flags(SCRIPT_VERSIONS_COLLECTION, system_flags)?;
+                drop(db);
+
+                if needs_flags || needs_schema {
+                    let db = self.db.write();
+
+                    if needs_flags {
+                        db.set_collection_flags(collection_name, system_flags)?;
+                    }
+
+                    if needs_schema {
+                        if let Ok(coll) = db.collection(collection_name) {
+                            let _ = coll.set_schema(Some(schema.clone()));
+                        }
+                    }
+                }
             }
         }
+
         Ok(())
     }
 
