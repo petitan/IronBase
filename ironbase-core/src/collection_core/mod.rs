@@ -260,9 +260,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 "Starting index rebuild from {} catalog entries",
                 catalog.len()
             );
+
+            // OPTIMIZATION: Sort by offset for sequential disk reads
+            // This eliminates random disk seeks which are 5-10ms each on spinning disks.
+            // For N documents, this reduces I/O from O(N * 5-10ms) to O(N * 0.01ms).
+            let mut sorted_entries: Vec<_> = catalog.iter().collect();
+            sorted_entries.sort_by_key(|(_, offset)| *offset);
+
             let mut storage_guard = storage.write();
             let mut rebuilt_count = 0;
-            for (_id_key, offset) in catalog.iter() {
+            for (_id_key, offset) in sorted_entries {
                 // Read document from disk (absolute offset)
                 match storage_guard.read_document_at(&name, *offset) {
                     Ok(doc_bytes) => {
@@ -1959,7 +1966,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
-                Value::Number(n) if n.is_u64() => DocumentId::Int(n.as_u64().unwrap() as i64),
+                Value::Number(n) if n.is_u64() => {
+                    let u = n.as_u64().unwrap();
+                    if u > i64::MAX as u64 {
+                        return Err(MongoLiteError::Serialization(
+                            "_id value too large for i64".to_string(),
+                        ));
+                    }
+                    DocumentId::Int(u as i64)
+                }
                 Value::String(s) => DocumentId::String(s.clone()),
                 _ => {
                     return Err(MongoLiteError::Serialization(
@@ -2057,7 +2072,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             let doc_id = match id_value {
                 Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
-                Value::Number(n) if n.is_u64() => DocumentId::Int(n.as_u64().unwrap() as i64),
+                Value::Number(n) if n.is_u64() => {
+                    let u = n.as_u64().unwrap();
+                    if u > i64::MAX as u64 {
+                        return Err(MongoLiteError::Serialization(
+                            "_id value too large for i64".to_string(),
+                        ));
+                    }
+                    DocumentId::Int(u as i64)
+                }
                 Value::String(s) => DocumentId::String(s.clone()),
                 _ => {
                     return Err(MongoLiteError::Serialization(
@@ -2152,8 +2175,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     fn scan_documents_via_catalog(&self) -> Result<HashMap<DocumentId, Value>> {
         let mut storage = self.storage.write();
 
-        // Clone the catalog to avoid borrow checker issues
-        let catalog = {
+        // OPTIMIZATION: Clone only offsets, not the entire HashMap structure
+        // Vec<(DocId, u64)> is simpler and has less overhead than HashMap clone
+        let offsets: Vec<(DocumentId, u64)> = {
             let meta = storage
                 .get_collection_meta(&self.name)
                 .ok_or_else(|| MongoLiteError::CollectionNotFound(self.name.clone()))?;
@@ -2162,14 +2186,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 self.name,
                 meta.document_catalog.len()
             );
-            meta.document_catalog.clone()
+            meta.document_catalog
+                .iter()
+                .map(|(id, &offset)| (id.clone(), offset))
+                .collect()
         };
 
-        let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::new();
+        // OPTIMIZATION: Sort by offset for sequential disk reads
+        // This eliminates random disk seeks (5-10ms each on spinning disks)
+        let mut sorted_offsets = offsets;
+        sorted_offsets.sort_by_key(|(_, offset)| *offset);
 
-        // Iterate over catalog instead of sequential file scan (direct DocumentId iteration!)
-        for (doc_id, offset) in &catalog {
-            match storage.read_data(*offset) {
+        let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::with_capacity(sorted_offsets.len());
+
+        // Iterate in offset order for sequential disk I/O
+        for (doc_id, offset) in sorted_offsets {
+            match storage.read_data(offset) {
                 Ok(doc_bytes) => {
                     // Try to deserialize JSON - skip if corrupt
                     match serde_json::from_slice::<Value>(&doc_bytes) {
@@ -2180,7 +2212,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false)
                             {
-                                docs_by_id.insert(doc_id.clone(), doc);
+                                // doc_id already owned from the Vec, no clone needed
+                                docs_by_id.insert(doc_id, doc);
                             }
                         }
                         Err(_) => continue, // Skip corrupted JSON

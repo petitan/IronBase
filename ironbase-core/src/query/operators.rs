@@ -91,8 +91,9 @@ fn get_or_compile_regex(pattern: &str, options: &str) -> Result<Arc<Regex>> {
     let cache_key = format!("{}:{}", pattern, options);
 
     // Try cache first
+    // Note: unwrap_or_else recovers from poisoned mutex (another thread panicked while holding lock)
     {
-        let mut cache = REGEX_CACHE.lock().unwrap();
+        let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(regex) = cache.get(&cache_key) {
             return Ok(Arc::clone(regex)); // Cheap: just increments ref count
         }
@@ -106,7 +107,7 @@ fn get_or_compile_regex(pattern: &str, options: &str) -> Result<Arc<Regex>> {
 
     // Store in cache
     {
-        let mut cache = REGEX_CACHE.lock().unwrap();
+        let mut cache = REGEX_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         cache.put(cache_key, Arc::clone(&regex));
     }
 

@@ -343,6 +343,21 @@ impl DatabaseCore<StorageEngine> {
         Ok(())
     }
 
+    /// Commit auto-transaction for batch mode (skip file sync)
+    /// WAL is synced for durability, but file sync is deferred to batch end.
+    pub(crate) fn commit_auto_transaction_batch(&self, mut transaction: Transaction) -> Result<()> {
+        let mut storage = self.storage.write();
+        storage.commit_transaction_batch(&mut transaction)?;
+        Ok(())
+    }
+
+    /// Sync the database file to disk (for batch mode)
+    pub(crate) fn sync_storage_file(&self) -> Result<()> {
+        let mut storage = self.storage.write();
+        storage.sync_file()?;
+        Ok(())
+    }
+
     /// Write ABORT entry for a previously committed transaction
     ///
     /// This is called when the persist phase fails after WAL commit.
@@ -375,11 +390,16 @@ impl DatabaseCore<StorageEngine> {
         // Operations in batch were already applied when enqueued
         auto_tx.mark_operations_applied();
 
-        // Commit (WAL + fsync)
-        self.commit_auto_transaction(auto_tx)?;
+        // Commit with batch mode (WAL sync only, skip file sync)
+        self.commit_auto_transaction_batch(auto_tx)?;
 
         // Clear batch
         batch.clear();
+
+        // Now sync the file once for the entire batch
+        // This is the key optimization: one fsync per batch instead of per transaction
+        drop(batch); // Release the batch lock before sync
+        self.sync_storage_file()?;
 
         Ok(())
     }

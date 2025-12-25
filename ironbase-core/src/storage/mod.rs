@@ -345,9 +345,13 @@ impl StorageEngine {
         })
     }
 
-    /// Commit a transaction (9-step atomic operation)
+    /// Commit a transaction (9-step atomic operation) - internal implementation
     /// This is the core of ACD guarantee
-    pub fn commit_transaction(&mut self, transaction: &mut Transaction) -> Result<()> {
+    ///
+    /// # Arguments
+    /// * `transaction` - The transaction to commit
+    /// * `sync_file` - Whether to sync the main file (false for batch mode)
+    fn commit_transaction_internal(&mut self, transaction: &mut Transaction, sync_file: bool) -> Result<()> {
         use crate::transaction::Operation;
         use crate::wal::{WALEntry, WALEntryType};
         use serde_json::Value;
@@ -542,12 +546,34 @@ impl StorageEngine {
             }
         }
 
-        // Step 8: Fsync storage file
-        self.file.sync_all()?;
+        // Step 8: Fsync storage file (can be skipped for batch mode)
+        if sync_file {
+            self.file.sync_all()?;
+        }
 
         // Step 9: Mark transaction as committed
         transaction.mark_committed()?;
 
+        Ok(())
+    }
+
+    /// Commit a transaction with full durability (Safe mode)
+    /// This is the standard commit with both WAL and file sync.
+    pub fn commit_transaction(&mut self, transaction: &mut Transaction) -> Result<()> {
+        self.commit_transaction_internal(transaction, true)
+    }
+
+    /// Commit a transaction for batch mode (skip file sync)
+    /// WAL is still synced for durability, but file sync is deferred.
+    /// Caller must call sync_file() at the end of the batch.
+    pub fn commit_transaction_batch(&mut self, transaction: &mut Transaction) -> Result<()> {
+        self.commit_transaction_internal(transaction, false)
+    }
+
+    /// Sync the main database file to disk
+    /// Call this after a batch of commit_transaction_batch() calls.
+    pub fn sync_file(&mut self) -> Result<()> {
+        self.file.sync_all()?;
         Ok(())
     }
 
