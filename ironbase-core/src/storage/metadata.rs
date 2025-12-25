@@ -379,3 +379,358 @@ impl StorageEngine {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::document::DocumentId;
+    use crate::storage::{CollectionFlags, CollectionMeta, Header, HEADER_SIZE};
+    use std::io::Cursor;
+    use tempfile::NamedTempFile;
+
+    fn create_test_header() -> Header {
+        Header {
+            magic: *b"MONGOLTE",
+            version: 3,
+            page_size: 4096,
+            collection_count: 0,
+            free_list_head: 0,
+            index_section_offset: 0,
+            metadata_offset: 0,
+            metadata_size: 0,
+            data_end_offset: HEADER_SIZE,
+        }
+    }
+
+    fn create_test_collection(name: &str) -> CollectionMeta {
+        let mut meta = CollectionMeta {
+            name: name.to_string(),
+            document_count: 0,
+            live_document_count: 0,
+            data_offset: 0,
+            index_offset: 0,
+            last_id: 0,
+            document_catalog: HashMap::new(),
+            indexes: Vec::new(),
+            fuzzy_indexes: Vec::new(),
+            fulltext_indexes: Vec::new(),
+            schema: None,
+            flags: CollectionFlags::default(),
+        };
+        meta.document_catalog.insert(DocumentId::Int(1), 1000);
+        meta.document_catalog.insert(DocumentId::Int(2), 2000);
+        meta
+    }
+
+    #[test]
+    fn test_find_max_document_offset_empty() {
+        let collections: HashMap<String, CollectionMeta> = HashMap::new();
+        let (max_offset, has_docs) = StorageEngine::find_max_document_offset(&collections);
+        assert_eq!(max_offset, 0);
+        assert!(!has_docs);
+    }
+
+    #[test]
+    fn test_find_max_document_offset_with_docs() {
+        let mut collections = HashMap::new();
+        let mut meta = create_test_collection("test");
+        meta.document_catalog.clear();
+        meta.document_catalog.insert(DocumentId::Int(1), 1000);
+        meta.document_catalog.insert(DocumentId::Int(2), 5000);
+        meta.document_catalog.insert(DocumentId::Int(3), 3000);
+        collections.insert("test".to_string(), meta);
+
+        let (max_offset, has_docs) = StorageEngine::find_max_document_offset(&collections);
+        assert_eq!(max_offset, 5000);
+        assert!(has_docs);
+    }
+
+    #[test]
+    fn test_find_max_document_offset_multiple_collections() {
+        let mut collections = HashMap::new();
+
+        let mut meta1 = create_test_collection("coll1");
+        meta1.document_catalog.clear();
+        meta1.document_catalog.insert(DocumentId::Int(1), 1000);
+        meta1.document_catalog.insert(DocumentId::Int(2), 2000);
+        collections.insert("coll1".to_string(), meta1);
+
+        let mut meta2 = create_test_collection("coll2");
+        meta2.document_catalog.clear();
+        meta2.document_catalog.insert(DocumentId::String("a".to_string()), 8000);
+        meta2.document_catalog.insert(DocumentId::ObjectId("abc123".to_string()), 3000);
+        collections.insert("coll2".to_string(), meta2);
+
+        let (max_offset, has_docs) = StorageEngine::find_max_document_offset(&collections);
+        assert_eq!(max_offset, 8000);
+        assert!(has_docs);
+    }
+
+    #[test]
+    fn test_serialize_metadata_empty() {
+        let collections: HashMap<String, CollectionMeta> = HashMap::new();
+        let bytes = StorageEngine::serialize_metadata(&collections).unwrap();
+
+        // Should contain collection count (4 bytes) = 0
+        assert_eq!(bytes.len(), 4);
+        assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 0);
+    }
+
+    #[test]
+    fn test_serialize_metadata_with_collections() {
+        let mut collections = HashMap::new();
+        collections.insert("test".to_string(), create_test_collection("test"));
+
+        let bytes = StorageEngine::serialize_metadata(&collections).unwrap();
+
+        // Should contain: collection count (4 bytes) + length (4 bytes) + JSON data
+        assert!(bytes.len() > 8);
+
+        // First 4 bytes = collection count = 1
+        assert_eq!(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]), 1);
+    }
+
+    #[test]
+    fn test_write_metadata_body() {
+        let mut collections = HashMap::new();
+        collections.insert("users".to_string(), create_test_collection("users"));
+        collections.insert("orders".to_string(), create_test_collection("orders"));
+
+        let mut buffer = Cursor::new(Vec::new());
+        StorageEngine::write_metadata_body(&mut buffer, &collections).unwrap();
+
+        let data = buffer.into_inner();
+
+        // Collection count should be 2
+        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_write_metadata_to_cursor() {
+        let header = create_test_header();
+        let mut collections = HashMap::new();
+        collections.insert("test".to_string(), create_test_collection("test"));
+
+        let mut buffer = Cursor::new(vec![0u8; 1024]);
+        let end_offset = StorageEngine::write_metadata(&mut buffer, &header, &collections).unwrap();
+
+        assert!(end_offset > HEADER_SIZE as u64);
+    }
+
+    #[test]
+    fn test_load_metadata_invalid_magic() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        // Write invalid header with wrong magic
+        let mut header = create_test_header();
+        header.magic = *b"BADMAGIC";
+        let header_bytes = bincode::serialize(&header).unwrap();
+
+        let mut padded = vec![0u8; 256];
+        padded[..header_bytes.len()].copy_from_slice(&header_bytes);
+
+        use std::io::Write;
+        file.write_all(&padded).unwrap();
+        file.sync_all().unwrap();
+
+        // Try to load - should fail
+        let mut read_file = temp_file.reopen().unwrap();
+        let result = StorageEngine::load_metadata(&mut read_file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid magic"));
+    }
+
+    #[test]
+    fn test_load_metadata_dynamic_format() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        // Create header with dynamic metadata offset
+        let mut header = create_test_header();
+        header.version = 3;
+        header.metadata_offset = 512; // Metadata at offset 512
+        header.collection_count = 1;
+
+        // Write header (padded to 256 bytes)
+        let header_bytes = bincode::serialize(&header).unwrap();
+        let mut padded_header = vec![0u8; 256];
+        padded_header[..header_bytes.len()].copy_from_slice(&header_bytes);
+
+        use std::io::Write;
+        file.write_all(&padded_header).unwrap();
+
+        // Write padding until metadata offset
+        let padding = vec![0u8; (512 - 256) as usize];
+        file.write_all(&padding).unwrap();
+
+        // Write metadata: collection count = 1
+        let count_bytes = 1u32.to_le_bytes();
+        file.write_all(&count_bytes).unwrap();
+
+        // Write collection metadata
+        let meta = create_test_collection("dynamic_test");
+        let meta_json = serde_json::to_vec(&meta).unwrap();
+        let len_bytes = (meta_json.len() as u32).to_le_bytes();
+        file.write_all(&len_bytes).unwrap();
+        file.write_all(&meta_json).unwrap();
+        file.sync_all().unwrap();
+
+        // Load and verify
+        let mut read_file = temp_file.reopen().unwrap();
+        let (loaded_header, collections) = StorageEngine::load_metadata(&mut read_file).unwrap();
+
+        assert_eq!(loaded_header.version, 3);
+        assert_eq!(collections.len(), 1);
+        assert!(collections.contains_key("dynamic_test"));
+    }
+
+    #[test]
+    fn test_load_metadata_legacy_format() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        // Create legacy header (version 1, metadata_offset = 0)
+        let mut header = create_test_header();
+        header.version = 1;
+        header.metadata_offset = 0; // Legacy: no dynamic metadata
+        header.collection_count = 1;
+
+        // Write header (padded to 256 bytes)
+        let header_bytes = bincode::serialize(&header).unwrap();
+        let mut padded_header = vec![0u8; 256];
+        padded_header[..header_bytes.len()].copy_from_slice(&header_bytes);
+
+        use std::io::Write;
+        file.write_all(&padded_header).unwrap();
+
+        // Write collection metadata immediately after header (legacy format)
+        let meta = create_test_collection("legacy_test");
+        let meta_json = serde_json::to_vec(&meta).unwrap();
+        let len_bytes = (meta_json.len() as u32).to_le_bytes();
+        file.write_all(&len_bytes).unwrap();
+        file.write_all(&meta_json).unwrap();
+        file.sync_all().unwrap();
+
+        // Load and verify
+        let mut read_file = temp_file.reopen().unwrap();
+        let (loaded_header, collections) = StorageEngine::load_metadata(&mut read_file).unwrap();
+
+        assert_eq!(loaded_header.version, 1);
+        assert_eq!(collections.len(), 1);
+        assert!(collections.contains_key("legacy_test"));
+    }
+
+    #[test]
+    fn test_metadata_size_limit_protection() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        // Create header
+        let mut header = create_test_header();
+        header.version = 3;
+        header.metadata_offset = 256;
+        header.collection_count = 1;
+
+        // Write header
+        let header_bytes = bincode::serialize(&header).unwrap();
+        let mut padded_header = vec![0u8; 256];
+        padded_header[..header_bytes.len()].copy_from_slice(&header_bytes);
+
+        use std::io::Write;
+        file.write_all(&padded_header).unwrap();
+
+        // Write metadata with oversized length (DoS protection test)
+        let count_bytes = 1u32.to_le_bytes();
+        file.write_all(&count_bytes).unwrap();
+
+        // Write invalid metadata length (larger than MAX_METADATA_SIZE)
+        let huge_len = (100 * 1024 * 1024u32).to_le_bytes(); // 100MB
+        file.write_all(&huge_len).unwrap();
+        file.sync_all().unwrap();
+
+        // Load should fail with size limit error
+        let mut read_file = temp_file.reopen().unwrap();
+        let result = StorageEngine::load_metadata(&mut read_file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn test_metadata_zero_size_protection() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        // Create header
+        let mut header = create_test_header();
+        header.version = 3;
+        header.metadata_offset = 256;
+        header.collection_count = 1;
+
+        // Write header
+        let header_bytes = bincode::serialize(&header).unwrap();
+        let mut padded_header = vec![0u8; 256];
+        padded_header[..header_bytes.len()].copy_from_slice(&header_bytes);
+
+        use std::io::Write;
+        file.write_all(&padded_header).unwrap();
+
+        // Write metadata with zero length
+        let count_bytes = 1u32.to_le_bytes();
+        file.write_all(&count_bytes).unwrap();
+        let zero_len = 0u32.to_le_bytes();
+        file.write_all(&zero_len).unwrap();
+        file.sync_all().unwrap();
+
+        // Load should fail with zero size error
+        let mut read_file = temp_file.reopen().unwrap();
+        let result = StorageEngine::load_metadata(&mut read_file);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_calculate_data_end_from_catalog() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        // Write a fake document at offset 1000
+        // Document format: 4-byte length + data
+        use std::io::{Seek, Write};
+        file.seek(SeekFrom::Start(1000)).unwrap();
+
+        let doc_data = b"{\"_id\":1,\"name\":\"test\"}";
+        let doc_len = doc_data.len() as u32;
+        file.write_all(&doc_len.to_le_bytes()).unwrap();
+        file.write_all(doc_data).unwrap();
+        file.sync_all().unwrap();
+
+        // Calculate data end
+        let mut read_file = temp_file.reopen().unwrap();
+        let data_end = StorageEngine::calculate_data_end_from_catalog(&mut read_file, 1000).unwrap();
+
+        // Should be: offset (1000) + length field (4) + doc data length
+        assert_eq!(data_end, 1000 + 4 + doc_data.len() as u64);
+    }
+
+    #[test]
+    fn test_calculate_data_end_large_doc_protection() {
+        let temp_file = NamedTempFile::new().unwrap();
+        let mut file = temp_file.reopen().unwrap();
+
+        // Write a document with suspiciously large size
+        use std::io::{Seek, Write};
+        file.seek(SeekFrom::Start(1000)).unwrap();
+
+        // Write a size larger than 16MB (suspicious)
+        let huge_size = 20 * 1024 * 1024u32; // 20MB
+        file.write_all(&huge_size.to_le_bytes()).unwrap();
+        file.sync_all().unwrap();
+
+        // Should fail with corruption error
+        let mut read_file = temp_file.reopen().unwrap();
+        let result = StorageEngine::calculate_data_end_from_catalog(&mut read_file, 1000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("suspiciously large"));
+    }
+}
