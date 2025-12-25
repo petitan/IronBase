@@ -454,6 +454,94 @@ Collection-level permission system based on client origin (interface type).
 - `mcp-server/src/acl.rs` - ACL implementation
 - `mcp-server/src/tools.rs:2358-2520` - ACL tool handlers
 
+### JSON Schema Validation
+
+Collection-level document validation using JSON Schema.
+
+**Schema Tools:**
+```bash
+# Set schema for collection
+{"name": "schema_set", "arguments": {
+  "collection": "users",
+  "schema": {
+    "type": "object",
+    "required": ["name", "email"],
+    "properties": {
+      "name": {"type": "string"},
+      "email": {"type": "string", "pattern": "^[^@]+@[^@]+$"},
+      "age": {"type": "integer"},
+      "tags": {"type": "array", "minItems": 1, "maxItems": 10}
+    }
+  }
+}}
+
+# Get schema for collection
+{"name": "schema_get", "arguments": {"collection": "users"}}
+```
+
+**Supported Constraints:**
+| Constraint | Description | Example |
+|------------|-------------|---------|
+| `type` | Data type validation | `"string"`, `"integer"`, `"number"`, `"boolean"`, `"array"`, `"object"` |
+| `required` | Required fields list | `["name", "email"]` |
+| `properties` | Field type definitions | `{"name": {"type": "string"}}` |
+| `pattern` | Regex pattern (strings) | `"^[A-Z][a-z]+$"` |
+| `enum` | Allowed values list | `["active", "inactive", "pending"]` |
+| `minItems` | Min array length | `1` |
+| `maxItems` | Max array length | `100` |
+
+**Validation Errors:**
+```json
+// Insert with missing required field
+{"name": "insert_one", "arguments": {
+  "collection": "users",
+  "document": {"name": "Alice"}  // missing "email"
+}}
+// Error: "Validation error: Field 'email' is required"
+
+// Insert with wrong type
+{"name": "insert_one", "arguments": {
+  "collection": "users",
+  "document": {"name": "Alice", "email": "a@b.com", "age": "thirty"}
+}}
+// Error: "Validation error: Field 'age' type mismatch: expected integer"
+
+// Insert with pattern mismatch
+{"name": "insert_one", "arguments": {
+  "collection": "users",
+  "document": {"name": "Alice", "email": "invalid-email"}
+}}
+// Error: "Validation error: Field 'email' does not match pattern"
+```
+
+**Rust Usage:**
+```rust
+use ironbase_core::DatabaseCore;
+use serde_json::json;
+
+let db = DatabaseCore::open("data.mlite")?;
+let coll = db.collection("users")?;
+
+// Set schema
+coll.set_schema(json!({
+    "type": "object",
+    "required": ["name"],
+    "properties": {
+        "name": {"type": "string"},
+        "age": {"type": "integer"}
+    }
+}))?;
+
+// Get schema
+let schema = coll.get_schema()?;
+
+// Clear schema (allow any document)
+coll.clear_schema()?;
+```
+
+**Key Files:**
+- `ironbase-core/src/collection_core/schema.rs` - Schema validation logic
+
 ## Testing Strategy
 
 - **Test first** approach always
