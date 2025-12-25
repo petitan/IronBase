@@ -274,6 +274,7 @@ cd mcp-server && cargo build --release
 - `db_stats` - Database statistics
 - `script_save`, `script_list`, `script_get`, `script_delete`, `script_run` - Rhai scripting
 - `admin_apikey_create`, `admin_apikey_list`, `admin_apikey_revoke`, `admin_apikey_delete` - API key management
+- `acl_list`, `acl_get`, `acl_set`, `acl_delete`, `acl_cleanup` - Access Control List management
 
 ### Testing HTTP Mode
 ```bash
@@ -387,6 +388,71 @@ curl -X POST http://127.0.0.1:8080/mcp \
 - API keys are stored in `_system.api_keys` collection
 - Admin operations (admin_*) use `IRONBASE_ADMIN_KEY`, not API keys
 - API key validation uses constant-time comparison to prevent timing attacks
+
+### Access Control List (ACL)
+
+Collection-level permission system based on client origin (interface type).
+
+**Interface Types:**
+| Type | Description | Example IPs |
+|------|-------------|-------------|
+| `localhost` | Loopback address | 127.0.0.1, ::1 |
+| `internal` | Private network | 10.x.x.x, 172.16-31.x.x, 192.168.x.x |
+| `external` | Public internet | Everything else |
+
+**Permission Levels:**
+| Permission | Includes | Operations |
+|------------|----------|------------|
+| `read` | - | find, count, aggregate, explain |
+| `write` | read | insert, update, delete |
+| `admin` | read, write | create/drop index, schema, compact |
+
+**Default Permissions (no ACL defined):**
+- `localhost`: all (read, write, admin)
+- `internal`: read, write
+- `external`: read only
+
+**System Collections (`_system.*`):**
+- Always localhost-only for write operations
+- `_system.acl` - ACL rules storage
+- `_system.api_keys` - API key storage
+- `_system.scripts` - Rhai scripts (read allowed from internal/external)
+
+**ACL Tools:**
+```bash
+# List all ACL rules
+{"name": "acl_list"}
+
+# Get ACL for specific collection
+{"name": "acl_get", "arguments": {"collection": "users"}}
+
+# Set ACL for collection (localhost only)
+{"name": "acl_set", "arguments": {
+  "collection": "users",
+  "rules": [
+    {"principal": "interface:localhost", "permissions": "all"},
+    {"principal": "interface:internal", "permissions": "read,write"},
+    {"principal": "interface:external", "permissions": "read"}
+  ]
+}}
+
+# Delete ACL (revert to defaults)
+{"name": "acl_delete", "arguments": {"collection": "users"}}
+
+# Cleanup orphaned ACLs (collections that no longer exist)
+{"name": "acl_cleanup"}
+```
+
+**Principal Types:**
+- `interface:localhost` / `interface:internal` / `interface:external`
+- `apikey:sk-xxx` - Match specific API key
+- `ip:192.168.1.100` - Match exact IP
+- `iprange:192.168.1.0/24` - Match IP range (CIDR)
+- `anyone` - Match all clients
+
+**Key Files:**
+- `mcp-server/src/acl.rs` - ACL implementation
+- `mcp-server/src/tools.rs:2358-2520` - ACL tool handlers
 
 ## Testing Strategy
 
