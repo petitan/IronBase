@@ -571,7 +571,7 @@ fn test_database_persist_numeric_edge_cases() {
         doc.insert("min_i64".to_string(), json!(i64::MIN));
         doc.insert("zero".to_string(), json!(0));
         doc.insert("negative".to_string(), json!(-12345));
-        doc.insert("float".to_string(), json!(3.14159));
+        doc.insert("float".to_string(), json!(1.5));
         doc.insert("negative_float".to_string(), json!(-273.15));
         db.insert_one("numbers", doc).unwrap();
 

@@ -322,6 +322,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::clone_on_copy)] // Explicitly testing Clone trait
     fn test_log_level_clone() {
         let level = LogLevel::Debug;
         let cloned = level.clone();

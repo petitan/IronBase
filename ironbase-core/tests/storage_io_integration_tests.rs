@@ -79,7 +79,7 @@ fn test_storage_multiple_collections_in_single_file() {
     let files: Vec<_> = fs::read_dir(temp_dir.path())
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "mlite"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "mlite"))
         .collect();
 
     assert_eq!(files.len(), 1, "Should have exactly one .mlite file");

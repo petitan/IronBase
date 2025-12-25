@@ -276,7 +276,7 @@ mod tests {
     fn test_replay_multiple_operations() {
         let mut storage = MemoryStorage::new();
 
-        let ops = vec![
+        let ops = [
             Operation::Insert {
                 collection: "users".to_string(),
                 doc_id: DocumentId::Int(1),

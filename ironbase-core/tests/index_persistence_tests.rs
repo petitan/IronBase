@@ -619,7 +619,7 @@ fn test_index_query_performance_after_reopen() {
         assert!(
             range.iter().all(|r| {
                 let age = r["age"].as_i64().unwrap();
-                age >= 90 && age < 95
+                (90..95).contains(&age)
             }),
             "All range results should have 90 <= age < 95"
         );
