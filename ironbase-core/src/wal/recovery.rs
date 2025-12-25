@@ -114,6 +114,10 @@ impl<I: Iterator<Item = Result<WALEntry>>> Iterator for TransactionGrouper<I> {
                         // Transaction aborted - discard
                         self.active.remove(&entry.transaction_id);
                     }
+                    WALEntryType::MetadataSnapshot => {
+                        // Metadata snapshots are not part of transactions - ignore
+                        // They are handled separately during crash recovery
+                    }
                 },
                 Err(e) => return Some(Err(e)),
             }

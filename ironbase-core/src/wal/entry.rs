@@ -18,6 +18,8 @@ pub enum WALEntryType {
     Abort = 0x04,
     /// Index change entry (for atomic index updates)
     IndexChange = 0x05,
+    /// Metadata snapshot for crash recovery
+    MetadataSnapshot = 0x06,
 }
 
 impl WALEntryType {
@@ -28,6 +30,7 @@ impl WALEntryType {
             0x03 => Ok(WALEntryType::Commit),
             0x04 => Ok(WALEntryType::Abort),
             0x05 => Ok(WALEntryType::IndexChange),
+            0x06 => Ok(WALEntryType::MetadataSnapshot),
             _ => Err(MongoLiteError::WALCorruption),
         }
     }
@@ -176,6 +179,10 @@ mod tests {
         assert_eq!(
             WALEntryType::from_u8(0x05).unwrap(),
             WALEntryType::IndexChange
+        );
+        assert_eq!(
+            WALEntryType::from_u8(0x06).unwrap(),
+            WALEntryType::MetadataSnapshot
         );
         assert!(WALEntryType::from_u8(0xFF).is_err());
     }

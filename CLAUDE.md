@@ -717,6 +717,37 @@ self.file.sync_all()?;
 file.sync_all()?;
 ```
 
+### Metadata WAL Crash Safety
+
+A metadata változások is WAL-ba kerülnek a crash-safe recovery érdekében:
+
+**Write Path (storage/mod.rs:334-349):**
+```
+flush():
+  1. log_metadata_to_wal()  ← MetadataSnapshot WAL entry
+  2. wal.flush()            ← fsync WAL
+  3. flush_metadata()       ← Write to .mlite file
+  4. file.sync_all()        ← fsync .mlite
+  5. wal.clear()            ← Clear WAL (success)
+```
+
+**Recovery Path (storage/mod.rs:207-265):**
+```
+open() → load_metadata() fails:
+  1. Detect corruption (NOT magic number - that's unrecoverable)
+  2. recover_metadata_from_wal() ← Find latest MetadataSnapshot
+  3. If no WAL → rebuild_from_documents() ← Document scan fallback
+```
+
+**WAL Entry Types (wal/entry.rs):**
+- `MetadataSnapshot = 0x06` - Contains full collections HashMap + data_end_offset
+
+**Key Files:**
+- `storage/mod.rs:149-153` - MetadataWALEntry struct
+- `storage/mod.rs:309-332` - log_metadata_to_wal()
+- `storage/mod.rs:370-461` - recover_metadata_from_wal()
+- `storage/mod.rs:463-605` - rebuild_from_documents()
+
 ### Teljesítmény
 
 MCP HTTP benchmark (~64 insert/sec) bontása:
