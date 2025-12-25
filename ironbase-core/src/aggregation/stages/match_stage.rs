@@ -1,0 +1,41 @@
+// src/aggregation/stages/match_stage.rs
+// $match stage implementation
+
+use crate::aggregation::types::MatchStage;
+use crate::document::Document;
+use crate::error::Result;
+use crate::query::Query;
+use serde_json::Value;
+
+impl MatchStage {
+    pub(crate) fn from_json(spec: &Value) -> Result<Self> {
+        let query = Query::from_json(spec)?;
+        Ok(MatchStage { query })
+    }
+
+    pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
+        let mut results = Vec::new();
+
+        for doc in docs {
+            // Add _id if not present (for aggregation intermediate results)
+            let doc_with_id = if doc.get("_id").is_none() {
+                let mut doc_obj = doc.clone();
+                if let Value::Object(ref mut map) = doc_obj {
+                    map.insert("_id".to_string(), Value::from(0)); // Temporary _id
+                }
+                doc_obj
+            } else {
+                doc.clone()
+            };
+
+            let doc_json_str = serde_json::to_string(&doc_with_id)?;
+            let document = Document::from_json(&doc_json_str)?;
+
+            if self.query.matches(&document) {
+                results.push(doc);
+            }
+        }
+
+        Ok(results)
+    }
+}
