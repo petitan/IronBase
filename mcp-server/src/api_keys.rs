@@ -142,15 +142,25 @@ impl ApiKeyCache {
 }
 
 /// Constant-time string comparison to prevent timing attacks
+/// SECURITY FIX: Length comparison is now also constant-time to prevent
+/// attackers from determining the key length via timing analysis.
 fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    // Use the longer length to prevent length-based timing leak
+    let max_len = a.len().max(b.len());
+
+    // Track length mismatch (will be combined at the end)
+    let len_mismatch = if a.len() != b.len() { 1u8 } else { 0u8 };
+
     let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
+    for i in 0..max_len {
+        // Use 0 as default for out-of-bounds (constant-time)
+        let a_byte = if i < a.len() { a[i] } else { 0 };
+        let b_byte = if i < b.len() { b[i] } else { 0 };
+        result |= a_byte ^ b_byte;
     }
-    result == 0
+
+    // Combine XOR result with length mismatch
+    (result | len_mismatch) == 0
 }
 
 /// Generate a random API key using OS entropy via RandomState

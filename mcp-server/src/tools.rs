@@ -13,34 +13,48 @@ const MAX_QUERY_LIMIT: usize = 10_000;
 const MAX_COLLECTION_NAME_LEN: usize = 128;
 
 /// Constant-time string comparison to prevent timing attacks
+/// SECURITY FIX: Length comparison is now also constant-time to prevent
+/// attackers from determining the key length via timing analysis.
 fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    // XOR all bytes - result is 0 only if all match
+    // Use the longer length to prevent length-based timing leak
+    let max_len = a.len().max(b.len());
+
+    // Track length mismatch (will be combined at the end)
+    let len_mismatch = if a.len() != b.len() { 1u8 } else { 0u8 };
+
     let mut result = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        result |= x ^ y;
+    for i in 0..max_len {
+        // Use 0 as default for out-of-bounds (constant-time)
+        let a_byte = if i < a.len() { a[i] } else { 0 };
+        let b_byte = if i < b.len() { b[i] } else { 0 };
+        result |= a_byte ^ b_byte;
     }
-    result == 0
+
+    // Combine XOR result with length mismatch
+    (result | len_mismatch) == 0
 }
 
 /// Verify admin key from params against IRONBASE_ADMIN_KEY env var
+/// SECURITY FIX: Use generic error message to prevent enumeration attacks.
+/// Attacker cannot determine if IRONBASE_ADMIN_KEY is set or not.
 fn verify_admin_key(params: &Value) -> Result<()> {
-    let expected = std::env::var("IRONBASE_ADMIN_KEY").map_err(|_| {
-        McpError::InvalidParams(
-            "Admin operations require IRONBASE_ADMIN_KEY environment variable to be set".into(),
-        )
-    })?;
+    // Generic error message for all admin auth failures
+    const ADMIN_AUTH_ERROR: &str = "Admin authentication failed";
+
+    let expected = match std::env::var("IRONBASE_ADMIN_KEY") {
+        Ok(key) if !key.is_empty() => key,
+        _ => return Err(McpError::InvalidParams(ADMIN_AUTH_ERROR.into())),
+    };
 
     let provided = params
         .get("admin_key")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| McpError::InvalidParams("admin_key parameter is required".into()))?;
+        .unwrap_or("");
 
     // Use constant-time comparison to prevent timing attacks
-    if !constant_time_compare(provided.as_bytes(), expected.as_bytes()) {
-        return Err(McpError::InvalidParams("Invalid admin_key".into()));
+    // Even if provided is empty, we still do the comparison
+    if provided.is_empty() || !constant_time_compare(provided.as_bytes(), expected.as_bytes()) {
+        return Err(McpError::InvalidParams(ADMIN_AUTH_ERROR.into()));
     }
     Ok(())
 }
@@ -128,13 +142,25 @@ fn validate_collection_name(name: &str) -> Result<()> {
             MAX_COLLECTION_NAME_LEN
         )));
     }
-    // Check for invalid characters (allow alphanumeric, underscore, dot, hyphen)
+
+    // SECURITY FIX: Prevent users from creating collections that look like system collections
+    // The '.' character is NOT allowed in user collection names to prevent:
+    // - Creating fake system collections like "_system.custom"
+    // - Path-like obfuscation attacks
+    // System collections (_system.*) can only be created via admin_create_system_collection
+    if name.contains('.') {
+        return Err(McpError::InvalidParams(
+            "Collection name cannot contain dots. System collections can only be created via admin tools.".into()
+        ));
+    }
+
+    // Check for invalid characters (allow alphanumeric, underscore, hyphen)
     if !name
         .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
     {
         return Err(McpError::InvalidParams(
-            "Collection name can only contain alphanumeric characters, underscores, dots, and hyphens".into()
+            "Collection name can only contain alphanumeric characters, underscores, and hyphens".into()
         ));
     }
     Ok(())

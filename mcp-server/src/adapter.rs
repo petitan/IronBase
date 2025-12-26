@@ -254,9 +254,16 @@ impl IronBaseAdapter {
                 db.create_system_collection(collection_name)?;
                 db.set_collection_flags(collection_name, system_flags)?;
 
-                // Set schema
+                // Set schema - SECURITY FIX: Log errors instead of ignoring
                 if let Ok(coll) = db.collection(collection_name) {
-                    let _ = coll.set_schema(Some(schema.clone()));
+                    if let Err(e) = coll.set_schema(Some(schema.clone())) {
+                        tracing::error!(
+                            "SECURITY WARNING: Failed to set schema for {}: {}. \
+                             Collection may accept invalid documents!",
+                            collection_name,
+                            e
+                        );
+                    }
                 }
             } else {
                 // Ensure flags are correct
@@ -282,9 +289,17 @@ impl IronBaseAdapter {
                         db.set_collection_flags(collection_name, system_flags)?;
                     }
 
+                    // SECURITY FIX: Log errors instead of ignoring
                     if needs_schema {
                         if let Ok(coll) = db.collection(collection_name) {
-                            let _ = coll.set_schema(Some(schema.clone()));
+                            if let Err(e) = coll.set_schema(Some(schema.clone())) {
+                                tracing::error!(
+                                    "SECURITY WARNING: Failed to set schema for {}: {}. \
+                                     Collection may accept invalid documents!",
+                                    collection_name,
+                                    e
+                                );
+                            }
                         }
                     }
                 }

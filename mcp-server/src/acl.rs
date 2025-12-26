@@ -346,24 +346,16 @@ impl AclConfig {
     /// Built-in rules that cannot be overridden
     fn builtin_rules() -> Vec<CollectionAcl> {
         vec![
-            // _system.scripts - allow read from internal/external for script execution
-            // Write/admin still requires localhost (enforced by requires_localhost check)
+            // SECURITY FIX: _system.scripts is now localhost-only
+            // Script execution (script_run) is still allowed from internal/external,
+            // but direct read access to script code is restricted to localhost.
+            // This prevents leaking sensitive business logic or hardcoded credentials.
             CollectionAcl {
                 collection: "_system.scripts".to_string(),
-                rules: vec![
-                    AclRule {
-                        principal: Principal::Interface(InterfaceType::Localhost),
-                        permissions: Permissions::all(),
-                    },
-                    AclRule {
-                        principal: Principal::Interface(InterfaceType::Internal),
-                        permissions: Permissions::read_only(),
-                    },
-                    AclRule {
-                        principal: Principal::Interface(InterfaceType::External),
-                        permissions: Permissions::read_only(),
-                    },
-                ],
+                rules: vec![AclRule {
+                    principal: Principal::Interface(InterfaceType::Localhost),
+                    permissions: Permissions::all(),
+                }],
             },
             // Other _system.* collections are protected - only localhost
             CollectionAcl {
@@ -508,20 +500,26 @@ impl AclManager {
     }
 
     /// Check permission
+    /// SECURITY FIX: Handle poisoned RwLock gracefully instead of panicking
     pub fn check(
         &self,
         collection: &str,
         caller: &CallerContext,
         required: RequiredPermission,
     ) -> Result<()> {
-        let config = self.config.read().unwrap();
+        let config = self.config.read().map_err(|_| {
+            McpError::Internal("ACL config lock poisoned - service restart required".to_string())
+        })?;
         config.check(collection, caller, required)
     }
 
     /// Reload ACL from database
+    /// SECURITY FIX: Handle poisoned RwLock gracefully
     pub fn reload(&self) -> Result<()> {
         let new_config = AclConfig::load_from_db(&self.adapter)?;
-        let mut config = self.config.write().unwrap();
+        let mut config = self.config.write().map_err(|_| {
+            McpError::Internal("ACL config lock poisoned - service restart required".to_string())
+        })?;
         *config = new_config;
         Ok(())
     }
@@ -560,15 +558,27 @@ impl AclManager {
     }
 
     /// List all ACLs
+    /// SECURITY FIX: Handle poisoned RwLock gracefully
     pub fn list_all(&self) -> Vec<CollectionAcl> {
-        let config = self.config.read().unwrap();
-        config.list_all().to_vec()
+        match self.config.read() {
+            Ok(config) => config.list_all().to_vec(),
+            Err(_) => {
+                tracing::error!("ACL config lock poisoned in list_all");
+                Vec::new()
+            }
+        }
     }
 
     /// Get ACL for a collection
+    /// SECURITY FIX: Handle poisoned RwLock gracefully
     pub fn get_acl(&self, collection: &str) -> Option<CollectionAcl> {
-        let config = self.config.read().unwrap();
-        config.get_collection_acl(collection).cloned()
+        match self.config.read() {
+            Ok(config) => config.get_collection_acl(collection).cloned(),
+            Err(_) => {
+                tracing::error!("ACL config lock poisoned in get_acl");
+                None
+            }
+        }
     }
 }
 

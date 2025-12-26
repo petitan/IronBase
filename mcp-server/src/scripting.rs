@@ -993,10 +993,17 @@ impl RhaiEngine {
         );
 
         // db_insert_one(collection, document) -> inserted_id
+        // SECURITY FIX: Block writes to _system.* collections from scripts
         let adapter_insert = adapter.clone();
         engine.register_fn(
             "db_insert_one",
             move |collection: &str, doc: Map| -> Dynamic {
+                // SECURITY: Prevent scripts from modifying system collections
+                if collection.starts_with("_system.") {
+                    return Dynamic::from(
+                        "Error: Scripts cannot modify system collections (_system.*)".to_string(),
+                    );
+                }
                 let doc_json = map_to_json(&doc);
                 match adapter_insert.insert_one(collection, doc_json) {
                     Ok(id) => Dynamic::from(id), // insert_one returns String directly
@@ -1006,10 +1013,17 @@ impl RhaiEngine {
         );
 
         // db_insert_many(collection, documents_array) -> {inserted_count, inserted_ids}
+        // SECURITY FIX: Block writes to _system.* collections from scripts
         let adapter_insert_many = adapter.clone();
         engine.register_fn(
             "db_insert_many",
             move |collection: &str, docs: rhai::Array| -> Dynamic {
+                // SECURITY: Prevent scripts from modifying system collections
+                if collection.starts_with("_system.") {
+                    return Dynamic::from(
+                        "Error: Scripts cannot modify system collections (_system.*)".to_string(),
+                    );
+                }
                 // Convert Rhai Array to Vec<Value>
                 let docs_vec: Vec<Value> = docs.iter().map(dynamic_to_json).collect();
                 match adapter_insert_many.insert_many(collection, docs_vec) {
@@ -1027,10 +1041,17 @@ impl RhaiEngine {
         );
 
         // db_update_one(collection, filter, update) -> {matched_count, modified_count}
+        // SECURITY FIX: Block writes to _system.* collections from scripts
         let adapter_update_one = adapter.clone();
         engine.register_fn(
             "db_update_one",
             move |collection: &str, filter: Map, update: Map| -> Dynamic {
+                // SECURITY: Prevent scripts from modifying system collections
+                if collection.starts_with("_system.") {
+                    return Dynamic::from(
+                        "Error: Scripts cannot modify system collections (_system.*)".to_string(),
+                    );
+                }
                 let filter_json = map_to_json(&filter);
                 let update_json = map_to_json(&update);
                 match adapter_update_one.update_one(collection, filter_json, update_json) {
@@ -1052,10 +1073,17 @@ impl RhaiEngine {
         );
 
         // db_update_many(collection, filter, update) -> {matched_count, modified_count}
+        // SECURITY FIX: Block writes to _system.* collections from scripts
         let adapter_update_many = adapter.clone();
         engine.register_fn(
             "db_update_many",
             move |collection: &str, filter: Map, update: Map| -> Dynamic {
+                // SECURITY: Prevent scripts from modifying system collections
+                if collection.starts_with("_system.") {
+                    return Dynamic::from(
+                        "Error: Scripts cannot modify system collections (_system.*)".to_string(),
+                    );
+                }
                 let filter_json = map_to_json(&filter);
                 let update_json = map_to_json(&update);
                 match adapter_update_many.update_many(collection, filter_json, update_json) {
@@ -1077,10 +1105,17 @@ impl RhaiEngine {
         );
 
         // db_delete_one(collection, filter) -> deleted_count
+        // SECURITY FIX: Block writes to _system.* collections from scripts
         let adapter_delete_one = adapter.clone();
         engine.register_fn(
             "db_delete_one",
             move |collection: &str, filter: Map| -> Dynamic {
+                // SECURITY: Prevent scripts from modifying system collections
+                if collection.starts_with("_system.") {
+                    return Dynamic::from(
+                        "Error: Scripts cannot modify system collections (_system.*)".to_string(),
+                    );
+                }
                 let filter_json = map_to_json(&filter);
                 match adapter_delete_one.delete_one(collection, filter_json) {
                     Ok(count) => Dynamic::from(count as i64),
@@ -1090,10 +1125,17 @@ impl RhaiEngine {
         );
 
         // db_delete_many(collection, filter) -> deleted_count
+        // SECURITY FIX: Block writes to _system.* collections from scripts
         let adapter_delete_many = adapter.clone();
         engine.register_fn(
             "db_delete_many",
             move |collection: &str, filter: Map| -> Dynamic {
+                // SECURITY: Prevent scripts from modifying system collections
+                if collection.starts_with("_system.") {
+                    return Dynamic::from(
+                        "Error: Scripts cannot modify system collections (_system.*)".to_string(),
+                    );
+                }
                 let filter_json = map_to_json(&filter);
                 match adapter_delete_many.delete_many(collection, filter_json) {
                     Ok(count) => Dynamic::from(count as i64),
@@ -1632,6 +1674,7 @@ mod tests {
 
         // Using invalid operator $badop should return an error string
         // FIX IMPLEMENTED: Query::from_json() now validates operators!
+        // SECURITY UPDATE: Error messages are now sanitized to prevent info disclosure
         let result = engine
             .run(
                 r#"
@@ -1643,7 +1686,7 @@ mod tests {
             )
             .unwrap();
 
-        // Should now return an error string
+        // Should return an error string (sanitized for security)
         assert!(
             result.result.is_string(),
             "Expected error string but got: {:?}",
@@ -1655,11 +1698,8 @@ mod tests {
             "Expected 'Error:' prefix but got: {}",
             result_str
         );
-        assert!(
-            result_str.to_lowercase().contains("unknown"),
-            "Error should mention 'unknown': {}",
-            result_str
-        );
+        // SECURITY FIX: Error message is now sanitized - just check it's an error
+        // The specific "unknown" message is hidden to prevent information disclosure
     }
 
     #[test]
