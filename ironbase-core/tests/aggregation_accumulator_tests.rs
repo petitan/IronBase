@@ -696,3 +696,293 @@ fn test_accumulator_null_values() {
     let sum = results[0].get("sum").unwrap().as_i64().unwrap();
     assert!(sum == 30); // Depending on null handling
 }
+
+// ============================================================================
+// STREAMING AGGREGATION MEMORY OPTIMIZATION TEST
+// ============================================================================
+
+/// Test that streaming aggregation handles large documents efficiently.
+///
+/// This test verifies the fix for OOM issues where $group would store
+/// full documents in memory. The new streaming implementation only
+/// stores accumulator states, reducing memory from O(N * doc_size)
+/// to O(G * state_size) where G = number of groups.
+///
+/// Example from bug report:
+/// - 650K emails grouped by sender (10K groups)
+/// - OLD: 650K × 800 bytes = ~500MB stored in HashMap
+/// - NEW: 10K × 64 bytes = ~640KB (780× reduction!)
+#[test]
+fn test_streaming_aggregation_memory_efficiency() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert 1000 documents with 1KB body each (simulating large emails)
+    // 100 unique senders means 100 groups
+    for i in 0..1000 {
+        let sender = format!("sender{}@example.com", i % 100);
+        let body = "x".repeat(1000); // 1KB body
+        let mut doc = HashMap::new();
+        doc.insert("from".to_string(), json!({"name": sender, "email": sender}));
+        doc.insert("body".to_string(), json!(body));
+        doc.insert("index".to_string(), json!(i));
+        db.insert_one("emails", doc).unwrap();
+    }
+
+    // This would OOM with old implementation on larger datasets
+    // because it stored full 1KB documents in groups HashMap
+    let coll = db.collection("emails").unwrap();
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": "$from.name", "count": {"$sum": 1}}},
+            {"$limit": 15}
+        ]))
+        .unwrap();
+
+    // Verify aggregation worked correctly
+    assert_eq!(results.len(), 15); // $limit 15
+
+    // Each group should have exactly 10 documents (1000 docs / 100 senders)
+    for doc in &results {
+        let count = doc.get("count").unwrap().as_i64().unwrap();
+        assert_eq!(count, 10, "Each sender should have 10 emails");
+    }
+}
+
+/// Test streaming aggregation with nested field grouping
+/// (reproduces the exact query from the bug report)
+#[test]
+fn test_streaming_aggregation_nested_field_grouping() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert test data with nested "from.name" field
+    let docs = vec![
+        json!({"from": {"name": "Alice"}, "subject": "Hello"}),
+        json!({"from": {"name": "Bob"}, "subject": "Hi"}),
+        json!({"from": {"name": "Alice"}, "subject": "Bye"}),
+        json!({"from": {"name": "Charlie"}, "subject": "Test"}),
+        json!({"from": {"name": "Alice"}, "subject": "Again"}),
+    ];
+
+    for doc in docs {
+        if let serde_json::Value::Object(map) = doc {
+            let fields: HashMap<String, serde_json::Value> = map.into_iter().collect();
+            db.insert_one("emails", fields).unwrap();
+        }
+    }
+
+    // Exact query from bug report
+    let coll = db.collection("emails").unwrap();
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": "$from.name", "count": {"$sum": 1}}},
+            {"$limit": 15}
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 3); // Alice, Bob, Charlie
+
+    // Find Alice's count
+    let alice_count = results
+        .iter()
+        .find(|doc| doc.get("_id").unwrap() == "Alice")
+        .map(|doc| doc.get("count").unwrap().as_i64().unwrap())
+        .unwrap();
+    assert_eq!(alice_count, 3);
+}
+
+/// BUG TEST: $first should return null if first document has missing field
+/// Not skip to the second document's value
+#[test]
+fn test_first_with_missing_field_bug() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert docs where first doc is missing the "value" field
+    let docs = vec![
+        json!({"group": "A"}),                    // Missing "value" - should be $first
+        json!({"group": "A", "value": "second"}), // Has value
+        json!({"group": "A", "value": "third"}),  // Has value
+    ];
+
+    for doc in docs {
+        if let serde_json::Value::Object(map) = doc {
+            let fields: HashMap<String, serde_json::Value> = map.into_iter().collect();
+            db.insert_one("test", fields).unwrap();
+        }
+    }
+
+    let coll = db.collection("test").unwrap();
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": "$group", "first_val": {"$first": "$value"}}}
+        ]))
+        .unwrap();
+
+    // $first should return null because first doc has missing field
+    // BUG: streaming implementation skips missing and returns "second"
+    let first_val = &results[0].get("first_val").unwrap();
+    assert!(
+        first_val.is_null(),
+        "BUG: $first should return null for missing field, got {:?}",
+        first_val
+    );
+}
+
+/// BUG TEST: $last should return null if last document has missing field
+#[test]
+fn test_last_with_missing_field_bug() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert docs where last doc is missing the "value" field
+    let docs = vec![
+        json!({"group": "A", "value": "first"}),
+        json!({"group": "A", "value": "second"}),
+        json!({"group": "A"}), // Missing "value" - should be $last
+    ];
+
+    for doc in docs {
+        if let serde_json::Value::Object(map) = doc {
+            let fields: HashMap<String, serde_json::Value> = map.into_iter().collect();
+            db.insert_one("test2", fields).unwrap();
+        }
+    }
+
+    let coll = db.collection("test2").unwrap();
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": "$group", "last_val": {"$last": "$value"}}}
+        ]))
+        .unwrap();
+
+    // $last should return null because last doc has missing field
+    // BUG: streaming implementation keeps "second" (previous value)
+    let last_val = &results[0].get("last_val").unwrap();
+    assert!(
+        last_val.is_null(),
+        "BUG: $last should return null for missing field, got {:?}",
+        last_val
+    );
+}
+
+/// Test streaming $project before $group reduces memory usage
+/// Pipeline: [$project, $group] should stream both stages
+#[test]
+fn test_streaming_project_then_group() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert 100 documents with large "body" field (1KB each)
+    // but we only need "from.name" for grouping
+    for i in 0..100 {
+        let sender = format!("sender{}@example.com", i % 10);
+        let body = "x".repeat(1000); // 1KB body - should be discarded by $project
+        let mut doc = HashMap::new();
+        doc.insert("from".to_string(), json!({"name": sender, "email": sender}));
+        doc.insert("body".to_string(), json!(body));
+        doc.insert("subject".to_string(), json!(format!("Email {}", i)));
+        db.insert_one("emails", doc).unwrap();
+    }
+
+    let coll = db.collection("emails").unwrap();
+
+    // Pipeline with $project BEFORE $group
+    // $project discards the large "body" field before grouping
+    let results = coll
+        .aggregate(&json!([
+            {"$project": {"from": 1}},  // Only keep "from", discard "body" (1KB savings per doc!)
+            {"$group": {"_id": "$from.name", "count": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+    // Should have 10 unique senders
+    assert_eq!(results.len(), 10);
+
+    // Each sender should have 10 emails
+    for doc in &results {
+        let count = doc.get("count").unwrap().as_i64().unwrap();
+        assert_eq!(count, 10, "Each sender should have 10 emails");
+    }
+}
+
+/// Test $match + $project + $group all streaming
+#[test]
+fn test_streaming_match_project_group() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert documents with different categories
+    let docs = vec![
+        json!({"category": "A", "value": 10, "extra": "large data here"}),
+        json!({"category": "A", "value": 20, "extra": "large data here"}),
+        json!({"category": "B", "value": 30, "extra": "large data here"}),
+        json!({"category": "A", "value": 40, "extra": "large data here"}),
+        json!({"category": "B", "value": 50, "extra": "large data here"}),
+    ];
+
+    for doc in docs {
+        if let serde_json::Value::Object(map) = doc {
+            let fields: HashMap<String, serde_json::Value> = map.into_iter().collect();
+            db.insert_one("data", fields).unwrap();
+        }
+    }
+
+    let coll = db.collection("data").unwrap();
+
+    // Full streaming pipeline: $match → $project → $group
+    let results = coll
+        .aggregate(&json!([
+            {"$match": {"category": "A"}},           // Filter to category A only (streaming)
+            {"$project": {"category": 1, "value": 1}}, // Drop "extra" field (streaming)
+            {"$group": {"_id": "$category", "total": {"$sum": "$value"}}}  // Sum values (streaming)
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    let total = results[0].get("total").unwrap().as_i64().unwrap();
+    assert_eq!(total, 70); // 10 + 20 + 40 = 70
+}
+
+/// Test that $project with field rename works in streaming mode
+#[test]
+fn test_streaming_project_rename() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    let docs = vec![
+        json!({"original_field": "value1", "other": "data"}),
+        json!({"original_field": "value2", "other": "data"}),
+    ];
+
+    for doc in docs {
+        if let serde_json::Value::Object(map) = doc {
+            let fields: HashMap<String, serde_json::Value> = map.into_iter().collect();
+            db.insert_one("test", fields).unwrap();
+        }
+    }
+
+    let coll = db.collection("test").unwrap();
+
+    // $project with rename, then $group
+    let results = coll
+        .aggregate(&json!([
+            {"$project": {"renamed": "$original_field"}},  // Rename field
+            {"$group": {"_id": null, "values": {"$push": "$renamed"}}}
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    let values = results[0].get("values").unwrap().as_array().unwrap();
+    assert_eq!(values.len(), 2);
+    assert!(values.contains(&json!("value1")));
+    assert!(values.contains(&json!("value2")));
+}

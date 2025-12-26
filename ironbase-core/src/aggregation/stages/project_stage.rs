@@ -230,14 +230,18 @@ impl ProjectStage {
         let mut results = Vec::new();
 
         for doc in docs {
-            let projected = self.project_document(&doc)?;
+            let projected = self.project_one(&doc)?;
             results.push(projected);
         }
 
         Ok(results)
     }
 
-    fn project_document(&self, doc: &Value) -> Result<Value> {
+    /// Project a single document (for streaming execution)
+    ///
+    /// Used by the streaming pipeline to transform documents one at a time
+    /// without loading the entire collection into memory.
+    pub(crate) fn project_one(&self, doc: &Value) -> Result<Value> {
         let mut result = serde_json::Map::new();
 
         if let Value::Object(obj) = doc {

@@ -26,12 +26,16 @@ pub(crate) fn parse_field_reference(value: &Value, op_name: &str) -> Result<Stri
     }
 }
 
+/// DEPRECATED: Used by the old batch-based Accumulator::compute() method.
+/// The new streaming accumulators use compare_values() directly.
+///
 /// Compute min or max over documents with integer-first comparison
 ///
 /// BUG #15 FIX: Preserves integer precision for values > 2^53.
 /// Uses integer comparison when possible, only falls back to f64 for floats.
 ///
 /// Used by $min and $max accumulators
+#[allow(dead_code)]
 pub(crate) fn compute_extremum(docs: &[Value], field: &str, is_min: bool) -> Result<Value> {
     let mut result_i64: Option<i64> = None;
     let mut result_u64: Option<u64> = None;

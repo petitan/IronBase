@@ -123,6 +123,44 @@ pub enum Accumulator {
     AddToSet(String), // $addToSet - collect unique values into array
 }
 
+/// Streaming accumulator state - stores only the accumulated value, NOT full documents
+/// This reduces memory from O(N * doc_size) to O(G * state_size) where G = number of groups
+#[derive(Debug, Clone)]
+pub enum AccumulatorState {
+    /// Sum state: tracks integer and float sums separately for precision
+    Sum {
+        int_sum: i64,
+        float_sum: f64,
+        has_float: bool,
+        is_count: bool, // true if $sum: 1 (counting)
+    },
+    /// Avg state: tracks sum and count
+    Avg { sum: f64, count: usize },
+    /// Min state: tracks minimum value seen
+    Min { value: Option<Value> },
+    /// Max state: tracks maximum value seen
+    Max { value: Option<Value> },
+    /// First state: captures first value only
+    /// `captured` tracks if we've processed the first doc (even if field was missing)
+    First {
+        value: Option<Value>,
+        captured: bool,
+    },
+    /// Last state: always updates to latest value
+    /// We need to track the actual last doc's value, even if it was missing/null
+    Last {
+        value: Option<Value>,
+        doc_count: usize,
+    },
+    /// Push state: must store all values (no optimization possible)
+    Push { values: Vec<Value> },
+    /// AddToSet state: stores unique values
+    AddToSet {
+        seen: std::collections::HashSet<String>,
+        values: Vec<Value>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub enum SumExpression {
     Constant(i64), // {"$sum": 1} - count

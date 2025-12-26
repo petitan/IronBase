@@ -1334,33 +1334,42 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Parse pipeline
         let pipeline = Pipeline::from_json(pipeline_json)?;
 
-        // OPTIMIZATION: Use index if $match is first stage (query optimizer)
+        // STREAMING OPTIMIZATION (2024-12):
+        // Use cursor-based document loading to avoid loading all docs into memory.
         //
-        // Current: Always full collection scan (self.find on empty query)
-        // Impact: Aggregation pipelines with selective $match are slow
+        // Memory comparison for 650K emails grouped by sender:
+        // - OLD (find + execute): 650K × 800 bytes = ~500MB loaded upfront
+        // - NEW (streaming): ~0MB for docs (processed one at a time) + ~640KB for groups
+        //
+        // The streaming pipeline:
+        // 1. Uses find_streaming() to get a cursor (only doc IDs loaded)
+        // 2. Applies $match filters inline (no intermediate collection)
+        // 3. Streams docs through $group (accumulator states only)
+        // 4. Materializes for remaining stages ($sort, $limit, etc.)
+
+        // Get streaming cursor for all documents
+        let mut cursor = self.find_streaming(&serde_json::json!({}))?;
+
+        // Create iterator that yields Result<Value> from cursor
+        let doc_iter = std::iter::from_fn(move || match cursor.next() {
+            Ok(Some(doc)) => Some(Ok(doc)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        });
+
+        // Execute pipeline with streaming
+        pipeline.execute_streaming(doc_iter)
+
+        // FUTURE OPTIMIZATION: Use index if $match is first stage
         //
         // Index-based optimization:
         // 1. Check if pipeline[0] is $match stage
         // 2. Extract query from $match (e.g., {"age": {"$gt": 25}})
-        // 3. Use query optimizer to select best index (see IMPLEMENTATION_QUERY_OPTIMIZER.md)
-        // 4. Use index.search() or range_scan() to get filtered doc IDs
-        // 5. Load only matching documents (not entire collection)
+        // 3. Use query optimizer to select best index
+        // 4. Use index.search() to get filtered doc IDs
+        // 5. Create cursor from filtered IDs only
         //
         // Benefit: 10-1000x speedup for selective aggregations
-        // Example: db.collection.aggregate([{$match: {email: "foo@bar.com"}}, {$group: ...}])
-        //          - Without index: scan 650K docs → 33 seconds
-        //          - With index: 1 B+ tree lookup → <1ms
-        //
-        // Prerequisites:
-        // - Index child loading (index.rs:195 - documented in commit 90045d8)
-        // - Query optimizer (see IMPLEMENTATION_QUERY_OPTIMIZER.md)
-        // - Range scan support (B+ tree leaf sibling pointers)
-        //
-        // Priority: Medium (correctness unaffected, but significant performance gain)
-        let docs = self.find(&serde_json::json!({}))?;
-
-        // Execute pipeline
-        pipeline.execute(docs)
     }
 
     // ========== INDEX OPERATIONS ==========

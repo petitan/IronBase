@@ -1,10 +1,15 @@
 // src/aggregation/stages/accumulator.rs
 // Accumulator implementations for $group stage
+//
+// STREAMING OPTIMIZATION (2024-12):
+// The accumulator now supports streaming/incremental updates to prevent OOM.
+// Instead of storing all documents per group, we maintain only the accumulated state.
+// Memory: O(N * doc_size) → O(G * state_size) where G = number of groups
 
 use crate::aggregation::helpers::{compute_extremum, parse_field_reference};
-use crate::aggregation::types::{Accumulator, SumExpression};
+use crate::aggregation::types::{Accumulator, AccumulatorState, SumExpression};
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::{canonical_json_string, get_nested_value};
+use crate::value_utils::{canonical_json_string, compare_values, get_nested_value};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -61,6 +66,9 @@ impl Accumulator {
         }
     }
 
+    /// DEPRECATED: Use streaming accumulators (init_state + update + finalize) instead.
+    /// This method loads all documents into memory and is kept for backwards compatibility.
+    #[allow(dead_code)]
     pub(crate) fn compute(&self, docs: &[Value]) -> Result<Value> {
         match self {
             Accumulator::Sum(expr) => match expr {
@@ -151,6 +159,193 @@ impl Accumulator {
 
                 Ok(Value::Array(values))
             }
+        }
+    }
+
+    /// Initialize streaming accumulator state from accumulator definition
+    pub(crate) fn init_state(&self) -> AccumulatorState {
+        match self {
+            Accumulator::Sum(expr) => AccumulatorState::Sum {
+                int_sum: 0,
+                float_sum: 0.0,
+                has_float: false,
+                is_count: matches!(expr, SumExpression::Constant(_)),
+            },
+            Accumulator::Avg(_) => AccumulatorState::Avg { sum: 0.0, count: 0 },
+            Accumulator::Min(_) => AccumulatorState::Min { value: None },
+            Accumulator::Max(_) => AccumulatorState::Max { value: None },
+            Accumulator::First(_) => AccumulatorState::First {
+                value: None,
+                captured: false,
+            },
+            Accumulator::Last(_) => AccumulatorState::Last {
+                value: None,
+                doc_count: 0,
+            },
+            Accumulator::Push(_) => AccumulatorState::Push { values: Vec::new() },
+            Accumulator::AddToSet(_) => AccumulatorState::AddToSet {
+                seen: HashSet::new(),
+                values: Vec::new(),
+            },
+        }
+    }
+}
+
+impl AccumulatorState {
+    /// Update state with a single document (streaming/incremental)
+    /// This is the key optimization - we don't store the document, only update state
+    pub(crate) fn update(&mut self, doc: &Value, accumulator: &Accumulator) {
+        match (self, accumulator) {
+            (
+                AccumulatorState::Sum {
+                    int_sum,
+                    float_sum,
+                    has_float,
+                    is_count,
+                },
+                Accumulator::Sum(expr),
+            ) => match expr {
+                SumExpression::Constant(n) => {
+                    *int_sum = int_sum.saturating_add(*n);
+                    *is_count = true;
+                }
+                SumExpression::Field(field) => {
+                    if let Some(value) = get_nested_value(doc, field) {
+                        if let Some(n) = value.as_i64() {
+                            *int_sum = int_sum.saturating_add(n);
+                        } else if let Some(f) = value.as_f64() {
+                            *float_sum += f;
+                            *has_float = true;
+                        }
+                    }
+                }
+            },
+
+            (AccumulatorState::Avg { sum, count }, Accumulator::Avg(field)) => {
+                if let Some(value) = get_nested_value(doc, field) {
+                    if let Some(n) = value.as_f64() {
+                        *sum += n;
+                        *count = count.saturating_add(1);
+                    } else if let Some(n) = value.as_i64() {
+                        *sum += n as f64;
+                        *count = count.saturating_add(1);
+                    }
+                }
+            }
+
+            (AccumulatorState::Min { value: min_val }, Accumulator::Min(field)) => {
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    match min_val {
+                        None => *min_val = Some(doc_val.clone()),
+                        Some(current) => {
+                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Less) {
+                                *min_val = Some(doc_val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            (AccumulatorState::Max { value: max_val }, Accumulator::Max(field)) => {
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    match max_val {
+                        None => *max_val = Some(doc_val.clone()),
+                        Some(current) => {
+                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Greater)
+                            {
+                                *max_val = Some(doc_val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            (
+                AccumulatorState::First {
+                    value: first_val,
+                    captured,
+                },
+                Accumulator::First(field),
+            ) => {
+                // Only capture first document's value (even if missing/null)
+                if !*captured {
+                    *captured = true;
+                    // Store the value (or None if field is missing)
+                    *first_val = get_nested_value(doc, field).cloned();
+                }
+            }
+
+            (
+                AccumulatorState::Last {
+                    value: last_val,
+                    doc_count,
+                },
+                Accumulator::Last(field),
+            ) => {
+                // Always update to latest document's value (even if missing/null)
+                *doc_count += 1;
+                // Store the value (or None if field is missing)
+                *last_val = get_nested_value(doc, field).cloned();
+            }
+
+            (AccumulatorState::Push { values }, Accumulator::Push(field)) => {
+                // Must store all values - no optimization possible
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    values.push(doc_val.clone());
+                }
+            }
+
+            (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(field)) => {
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    let key = canonical_json_string(doc_val);
+                    if seen.insert(key) {
+                        values.push(doc_val.clone());
+                    }
+                }
+            }
+
+            _ => {
+                // Mismatched state/accumulator - should never happen
+                debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
+            }
+        }
+    }
+
+    /// Finalize state to produce the output value
+    pub(crate) fn finalize(self) -> Value {
+        match self {
+            AccumulatorState::Sum {
+                int_sum,
+                float_sum,
+                has_float,
+                ..
+            } => {
+                if has_float {
+                    Value::from(float_sum + int_sum as f64)
+                } else {
+                    Value::from(int_sum)
+                }
+            }
+
+            AccumulatorState::Avg { sum, count } => {
+                if count > 0 {
+                    Value::from(sum / count as f64)
+                } else {
+                    Value::Null
+                }
+            }
+
+            AccumulatorState::Min { value } => value.unwrap_or(Value::Null),
+
+            AccumulatorState::Max { value } => value.unwrap_or(Value::Null),
+
+            AccumulatorState::First { value, .. } => value.unwrap_or(Value::Null),
+
+            AccumulatorState::Last { value, .. } => value.unwrap_or(Value::Null),
+
+            AccumulatorState::Push { values } => Value::Array(values),
+
+            AccumulatorState::AddToSet { values, .. } => Value::Array(values),
         }
     }
 }

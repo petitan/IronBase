@@ -13,25 +13,39 @@ impl MatchStage {
         Ok(MatchStage { query })
     }
 
+    /// Check if a single document matches this stage's query
+    ///
+    /// Used for streaming execution where we filter documents one at a time.
+    pub(crate) fn matches(&self, doc: &Value) -> bool {
+        // Add _id if not present (for aggregation intermediate results)
+        let doc_with_id = if doc.get("_id").is_none() {
+            let mut doc_obj = doc.clone();
+            if let Value::Object(ref mut map) = doc_obj {
+                map.insert("_id".to_string(), Value::from(0)); // Temporary _id
+            }
+            doc_obj
+        } else {
+            doc.clone()
+        };
+
+        // Convert to Document and check query
+        let doc_json_str = match serde_json::to_string(&doc_with_id) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let document = match Document::from_json(&doc_json_str) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+
+        self.query.matches(&document)
+    }
+
     pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
         let mut results = Vec::new();
 
         for doc in docs {
-            // Add _id if not present (for aggregation intermediate results)
-            let doc_with_id = if doc.get("_id").is_none() {
-                let mut doc_obj = doc.clone();
-                if let Value::Object(ref mut map) = doc_obj {
-                    map.insert("_id".to_string(), Value::from(0)); // Temporary _id
-                }
-                doc_obj
-            } else {
-                doc.clone()
-            };
-
-            let doc_json_str = serde_json::to_string(&doc_with_id)?;
-            let document = Document::from_json(&doc_json_str)?;
-
-            if self.query.matches(&document) {
+            if self.matches(&doc) {
                 results.push(doc);
             }
         }
