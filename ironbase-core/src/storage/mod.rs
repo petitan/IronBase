@@ -825,9 +825,20 @@ impl StorageEngine {
             }
         }
 
-        // Step 8: Fsync storage file (can be skipped for batch mode)
+        // Step 8: Flush metadata to disk (CRITICAL FIX for crash safety)
+        //
+        // BUG FIXED (2024-12-26): Previously, commit_transaction only synced document
+        // data but NOT the header (data_end_offset, metadata_offset). This caused:
+        // 1. New documents written past old metadata_offset
+        // 2. On crash: header still points to old metadata location
+        // 3. Old metadata area now contains document data (e.g., '{"_i...')
+        // 4. Recovery reads document bytes as metadata size → corruption
+        //
+        // FIX: flush_metadata() updates header with current data_end_offset,
+        // ensuring crash recovery always finds valid metadata.
         if sync_file {
-            self.file.sync_all()?;
+            self.flush_metadata()?;
+            // Note: flush_metadata() includes sync_all(), no extra sync needed
         }
 
         // Step 9: Mark transaction as committed
