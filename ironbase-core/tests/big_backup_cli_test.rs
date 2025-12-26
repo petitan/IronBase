@@ -12,7 +12,7 @@ use std::time::Instant;
 const TEST_DIR: &str = "/tmp/rust_big_backup_test";
 const DB_PATH: &str = "/tmp/rust_big_backup_test/bigtest.mlite";
 const BACKUP_DIR: &str = "/tmp/rust_big_backup_test/backups";
-const BACKUP_CLI: &str = "/home/petitan/MongoLite/target/release/ironbase-backup";
+const BACKUP_CLI: &str = "/home/petitan/Ironbase/target/release/ironbase-backup";
 
 fn format_size(bytes: u64) -> String {
     if bytes < 1024 {

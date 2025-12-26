@@ -7,7 +7,7 @@ Generate a realistic test database for IronBase TUI
 """
 
 import sys
-sys.path.insert(0, '/home/petitan/MongoLite')
+sys.path.insert(0, '/home/petitan/Ironbase')
 
 import ironbase
 import random

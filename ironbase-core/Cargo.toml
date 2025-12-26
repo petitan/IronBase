@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Pure Rust core library for MongoLite - embedded document database"
+description = "Pure Rust core library for IronBase - embedded document database"
 
 [lib]
 name = "ironbase_core"

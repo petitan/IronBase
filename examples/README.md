@@ -1,10 +1,10 @@
-# MongoLite Examples
+# IronBase Examples
 
-Comprehensive example programs demonstrating all MongoLite features.
+Comprehensive example programs demonstrating all IronBase features.
 
 ## Overview
 
-This directory contains 6 example programs that showcase MongoLite's capabilities:
+This directory contains 6 example programs that showcase IronBase's capabilities:
 
 | Example | Topic | Description |
 |---------|-------|-------------|
@@ -20,7 +20,7 @@ This directory contains 6 example programs that showcase MongoLite's capabilitie
 All examples are standalone Python scripts that can be run directly:
 
 ```bash
-# Make sure MongoLite is installed
+# Make sure IronBase is installed
 maturin develop
 
 # Run any example
@@ -38,7 +38,7 @@ Each example will:
 
 ### 1. Basic CRUD Operations (`01_basic_crud.py`)
 
-Learn the fundamental operations for working with MongoLite:
+Learn the fundamental operations for working with IronBase:
 
 **Topics covered:**
 - Opening a database and accessing collections
@@ -52,7 +52,7 @@ Learn the fundamental operations for working with MongoLite:
 
 ```python
 # Quick example from 01_basic_crud.py
-db = mongolite.MongoLite("mydb.db")
+db = ironbase.IronBase("mydb.db")
 users = db.collection("users")
 
 # Insert
@@ -260,7 +260,7 @@ users.insert_one({
 
 # Create post
 posts.insert_one({
-    "title": "Getting Started with MongoLite",
+    "title": "Getting Started with IronBase",
     "author_id": alice_id,
     "content": "...",
     "tags": ["database", "mongodb", "python"],
@@ -388,4 +388,4 @@ If you encounter issues or have questions:
 
 ---
 
-**MongoLite** - MongoDB simplicity with embedded convenience ⚡
+**IronBase** - MongoDB simplicity with embedded convenience

@@ -1,4 +1,4 @@
-// Integration tests for MongoLite Core
+// Integration tests for IronBase Core
 use ironbase_core::{DatabaseCore, Document, DocumentId, StorageEngine};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};

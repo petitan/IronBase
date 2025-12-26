@@ -378,7 +378,7 @@ users.create_index("email", unique=True)
 
 # This will fail if email exists:
 users.insert_one({"email": "existing@example.com"})
-# Raises: MongoLiteError - Duplicate key
+# Raises: IronBaseError - Duplicate key
 ```
 
 ### 7. Monitor with explain()

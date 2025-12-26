@@ -48,7 +48,7 @@ pip3 install maturin
 
 ### Development Build (Fast, Debug)
 ```bash
-cd MongoLite
+cd IronBase
 
 # Build and install as Python package
 maturin develop

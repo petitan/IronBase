@@ -135,8 +135,8 @@ dotnet add package IronBase
 
 ### Rust (Forrásból)
 ```bash
-git clone https://github.com/petitan/MongoLite.git
-cd MongoLite
+git clone https://github.com/petitan/IronBase.git
+cd IronBase
 cargo build --release -p ironbase-core
 ```
 

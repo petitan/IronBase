@@ -1,6 +1,6 @@
-# MongoLite Performance Guide
+# IronBase Performance Guide
 
-This document describes performance testing and optimization for MongoLite.
+This document describes performance testing and optimization for IronBase.
 
 ## Performance Testing
 
@@ -187,7 +187,7 @@ Create a custom benchmark for your use case:
 import time
 import ironbase
 
-db = ironbase.MongoLite("my_benchmark.mlite")
+db = ironbase.IronBase("my_benchmark.mlite")
 coll = db.collection("test")
 
 # Your workload here
@@ -211,5 +211,5 @@ A: Yes, by reducing file size and removing tombstones, compaction can improve se
 **Q: How do I optimize bulk operations?**
 A: Use `insert_many()`, `update_many()`, `delete_many()` instead of loops with single-document operations.
 
-**Q: What's the largest database size MongoLite can handle?**
+**Q: What's the largest database size IronBase can handle?**
 A: Tested up to 1GB files (memory-mapped I/O limit). Larger files work but with standard file I/O (slower).

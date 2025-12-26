@@ -40,7 +40,7 @@ test_*.mlite
 # Test outputs
 examples/data/*.db
 examples/data/*.mlite
-mongolite-core/*.mlite
+ironbase-core/*.mlite
 
 # Proptest regressions
 **/proptest-regressions/

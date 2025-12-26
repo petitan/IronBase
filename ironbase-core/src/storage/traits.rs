@@ -1,5 +1,5 @@
 // src/storage/traits.rs
-//! Storage abstraction traits for MongoLite
+//! Storage abstraction traits for IronBase
 //!
 //! This module defines the core storage interface that all storage backends
 //! must implement. This enables:
@@ -22,7 +22,7 @@ use crate::storage::CollectionMeta; // CollectionMeta is in storage::mod.rs
 use serde_json::Value;
 use std::path::Path;
 
-/// Core storage abstraction for MongoLite
+/// Core storage abstraction for IronBase
 ///
 /// This trait defines the unified interface that all storage backends must implement.
 /// It provides document CRUD operations, collection management, and metadata access.

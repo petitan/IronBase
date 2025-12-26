@@ -1,4 +1,4 @@
-// Criterion benchmarks for MongoLite Core
+// Criterion benchmarks for IronBase Core
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use ironbase_core::{DatabaseCore, Document, DocumentId};
 use serde_json::{json, Value};

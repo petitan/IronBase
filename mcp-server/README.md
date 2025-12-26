@@ -34,7 +34,7 @@ Expand-Archive mcp-server.zip -DestinationPath .
 
 ```bash
 git clone https://github.com/petitan/IronBase.git
-cd MongoLite/mcp-server
+cd IronBase/mcp-server
 cargo build --release
 # Binary: ./target/release/mcp-ironbase-server
 ```

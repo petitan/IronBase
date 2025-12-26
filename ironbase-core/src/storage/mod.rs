@@ -1554,7 +1554,7 @@ mod tests {
     fn test_write_and_read_data() {
         let (_temp, mut storage) = setup_test_db();
 
-        let test_data = b"Hello, MongoLite!";
+        let test_data = b"Hello, IronBase!";
         let offset = storage.write_data(test_data).unwrap();
 
         let read_data = storage.read_data(offset).unwrap();

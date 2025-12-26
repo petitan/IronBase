@@ -49,7 +49,7 @@ cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_json_ops -- -max_total_tim
 ### Workspace Structure
 
 ```
-MongoLite/
+IronBase/
 ├── ironbase-core/           # Pure Rust core library
 │   └── src/
 │       ├── database.rs      # DatabaseCore, durability modes
@@ -191,7 +191,7 @@ MongoLite/
 - Read lock: find, count, list_collections
 
 ### Error Handling
-- Rust: `Result<T>` with `MongoLiteError` (thiserror)
+- Rust: `Result<T>` with `IronBaseError` (thiserror)
 - Python: Map to PyIOError, PyRuntimeError, PyValueError
 - C#: Map to appropriate .NET exceptions
 

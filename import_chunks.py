@@ -52,7 +52,7 @@ def import_chunks():
     print()
 
     # Load JSON file
-    json_path = "/home/petitan/MongoLite/PeTitanKalimpalo.Documents.chunks.json"
+    json_path = "/home/petitan/Ironbase/PeTitanKalimpalo.Documents.chunks.json"
     print(f"📂 Loading JSON file: {json_path}")
 
     start_time = time.time()
