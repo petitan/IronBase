@@ -559,6 +559,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             .get_collection_meta_mut(name)
             .ok_or_else(|| IronBaseError::CollectionNotFound(name.to_string()))?;
         meta.flags = flags;
+        // CRITICAL FIX: Flush metadata to persist flag changes
+        // Without this, flags could be lost on crash (bug found 2024-12-26)
+        storage.flush()?;
         Ok(())
     }
 

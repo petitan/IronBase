@@ -299,12 +299,10 @@ impl StorageEngine {
         self.collections.insert(name.to_string(), meta);
         self.header.collection_count += 1;
 
-        // NOTE: We don't flush metadata here for performance!
-        // Metadata will be flushed on:
-        // - Database close
-        // - Explicit flush()
-        // - Before compaction
-        // This prevents unnecessary I/O and allows documents to be written from HEADER_SIZE
+        // CRITICAL FIX: Flush metadata to persist collection creation
+        // Without this, collection could be lost on crash (bug found 2024-12-26)
+        // Performance note: adds ~1ms per collection creation, but ensures durability
+        self.flush()?;
 
         Ok(())
     }

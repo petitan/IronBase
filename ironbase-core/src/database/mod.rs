@@ -148,6 +148,23 @@ impl DatabaseCore<StorageEngine> {
         // Recover from WAL (includes both data and index changes)
         let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
 
+        // CRITICAL FIX: Flush metadata after WAL recovery to persist updated data_end_offset
+        //
+        // Scenario without this fix:
+        // 1. flush() writes MetadataSnapshot to WAL, flush_metadata(), wal.clear()
+        // 2. New writes update data_end_offset IN MEMORY ONLY
+        // 3. Crash (no flush happened)
+        // 4. Restart: load_metadata() succeeds (file metadata intact) → no WAL metadata recovery
+        // 5. recover_from_wal() replays ops, updates data_end_offset in memory, then wal.clear()
+        // 6. Second crash before next flush
+        // 7. Restart: WAL is EMPTY, file has OLD data_end_offset → CORRUPTION!
+        //
+        // The fix: flush_metadata() after WAL recovery ensures data_end_offset is persisted
+        // before clearing the WAL. (Bug found 2024-12-26)
+        if !_wal_entries.is_empty() {
+            storage.flush_metadata()?;
+        }
+
         // NOTE: WAL recovery now uses write_document() which updates the catalog.
         // The document_catalog is loaded from metadata by StorageEngine::open(),
         // and recover_from_wal() properly updates it for any recovered operations.

@@ -1789,6 +1789,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if let Some(coll_meta) = storage.get_collection_meta_mut(&self.name) {
                 coll_meta.fulltext_indexes.push(meta);
             }
+            // CRITICAL FIX: Flush metadata to persist index metadata to disk
+            // Without this, crash before next checkpoint would lose the index (bug found 2024-12-26)
+            storage.flush()?;
         }
 
         Ok(index_name)
