@@ -1,5 +1,6 @@
 // ironbase-core/src/transaction.rs
-// Transaction management for ACD (Atomicity, Consistency, Durability)
+// Transaction management for ACID (Atomicity, Consistency, Isolation, Durability)
+// Isolation level: Read Committed (exclusive write lock, SQLite-style)
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

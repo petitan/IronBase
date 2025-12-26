@@ -59,7 +59,7 @@ IronBase/
 │       ├── find_options.rs  # Projection, sort, limit, skip
 │       ├── index.rs         # B+ tree indexes
 │       ├── storage/         # Append-only storage engine
-│       ├── transaction.rs   # ACD transactions
+│       ├── transaction.rs   # ACID transactions
 │       └── wal.rs           # Write-Ahead Log
 ├── bindings/python/         # PyO3 Python bindings
 ├── IronBase.NET/            # C# .NET 8 bindings
@@ -112,10 +112,14 @@ IronBase/
 - explain() and find_with_hint() for query planning
 - Unique indexes enforce constraint on null/missing values (MongoDB behavior)
 
-**transaction.rs + wal.rs** - ACD transactions:
-- Write-Ahead Log with CRC32 checksums
+**transaction.rs + wal.rs** - ACID transactions:
+- **A**tomicity: WAL + rollback support
+- **C**onsistency: Schema validation
+- **I**solation: Read Committed (exclusive write lock, SQLite-style)
+- **D**urability: fsync + WAL with CRC32 checksums
 - Crash recovery with automatic replay
 - begin_transaction/commit_transaction/rollback_transaction
+- Only one write transaction at a time (5 sec timeout, 10ms polling)
 
 **query_cache.rs** - Query result caching:
 - LRU cache with configurable capacity (default: 1000)
@@ -168,7 +172,7 @@ IronBase/
 - FindOptions: projection, sort, limit, skip, include_total (all with dot notation)
 - B+ tree indexes: single-field, compound, unique, fuzzy
 - Query planning: explain(), find_with_hint()
-- ACD transactions with WAL
+- ACID transactions with WAL (Read Committed isolation)
 - Durability modes: Safe/Batch/Unsafe (see Durability section below)
 - In-memory mode for testing
 - Cursor/streaming for large results
