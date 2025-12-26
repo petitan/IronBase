@@ -306,6 +306,7 @@ The MCP server includes a Rhai scripting engine for server-side script execution
 **Available DB Functions in Scripts:**
 ```rhai
 db_find(collection, query)           // Find documents
+db_find(collection, query, options)  // Find with options: { limit, skip, sort, projection }
 db_find_one(collection, query)       // Find single document
 db_insert_one(collection, doc)       // Insert document
 db_update_one(collection, filter, update)   // Update one
@@ -335,6 +336,24 @@ for i in 0..params.count {
     count += 1;
 }
 count  // Return value
+```
+
+**Example with db_find options:**
+```rhai
+// Find top 10 users sorted by age (descending), skip first 5
+let users = db_find("users", #{}, #{
+    sort: #{ age: -1 },
+    skip: 5,
+    limit: 10,
+    projection: #{ name: 1, age: 1 }  // Only return name and age fields
+});
+
+// Process results
+let result = [];
+for user in users {
+    result.push(user.name + ": " + user.age);
+}
+result
 ```
 
 **Security Limits:**

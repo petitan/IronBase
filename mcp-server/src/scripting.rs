@@ -948,6 +948,79 @@ impl RhaiEngine {
             }
         });
 
+        // db_find(collection, query, options) -> array of documents
+        // Options: { limit: int, skip: int, sort: { field: 1|-1, ... }, projection: { field: 1|0, ... } }
+        let adapter_find_opts = adapter.clone();
+        engine.register_fn(
+            "db_find",
+            move |collection: &str, query: Map, options: Map| -> Dynamic {
+                let query_json = map_to_json(&query);
+
+                // Parse options
+                let mut find_options = AdapterFindOptions::default();
+
+                // limit
+                if let Some(limit_val) = options.get("limit") {
+                    if let Ok(limit) = limit_val.as_int() {
+                        if limit > 0 {
+                            find_options.limit = Some(limit as usize);
+                        }
+                    }
+                }
+
+                // skip
+                if let Some(skip_val) = options.get("skip") {
+                    if let Ok(skip) = skip_val.as_int() {
+                        if skip > 0 {
+                            find_options.skip = Some(skip as usize);
+                        }
+                    }
+                }
+
+                // sort: { field: 1 } or { field: -1 } or { a: 1, b: -1 }
+                if let Some(sort_val) = options.get("sort") {
+                    if let Some(sort_map) = sort_val.clone().try_cast::<Map>() {
+                        let mut sort_vec = Vec::new();
+                        for (key, val) in sort_map.iter() {
+                            if let Ok(dir) = val.as_int() {
+                                sort_vec.push((key.to_string(), dir as i32));
+                            }
+                        }
+                        if !sort_vec.is_empty() {
+                            find_options.sort = Some(sort_vec);
+                        }
+                    }
+                }
+
+                // projection: { field: 1 } or { field: 0 }
+                if let Some(proj_val) = options.get("projection") {
+                    let proj_json = dynamic_to_json(proj_val);
+                    if proj_json.is_object() {
+                        find_options.projection = Some(proj_json);
+                    }
+                }
+
+                // include_total
+                if let Some(include_val) = options.get("include_total") {
+                    if let Ok(include) = include_val.as_bool() {
+                        find_options.include_total = include;
+                    }
+                }
+
+                match adapter_find_opts.find(collection, query_json, find_options) {
+                    Ok(result) => {
+                        let docs: Vec<Dynamic> = result
+                            .documents
+                            .into_iter()
+                            .map(|d| json_to_dynamic(&d))
+                            .collect();
+                        Dynamic::from(docs)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
         // db_find_one(collection, query) -> document or ()
         // Note: Returns () if not found. Use is_null() to check, or use db_find_one_result() for explicit result.
         let adapter_find_one = adapter.clone();
@@ -1544,6 +1617,175 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.result, json!(1));
+    }
+
+    #[test]
+    fn test_rhai_db_find_with_limit() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine
+            .run(
+                r#"
+            // Insert 10 documents
+            for i in 0..10 {
+                db_insert_one("items", #{ idx: i });
+            }
+            // Find with limit 3
+            let found = db_find("items", #{}, #{ limit: 3 });
+            found.len()
+        "#,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.result, json!(3));
+    }
+
+    #[test]
+    fn test_rhai_db_find_with_skip() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine
+            .run(
+                r#"
+            // Insert 10 documents
+            for i in 0..10 {
+                db_insert_one("items", #{ idx: i });
+            }
+            // Find with skip 7 (should get 3 documents)
+            let found = db_find("items", #{}, #{ skip: 7 });
+            found.len()
+        "#,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.result, json!(3));
+    }
+
+    #[test]
+    fn test_rhai_db_find_with_limit_and_skip() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine
+            .run(
+                r#"
+            // Insert 10 documents
+            for i in 0..10 {
+                db_insert_one("items", #{ idx: i });
+            }
+            // Skip 2, limit 3
+            let found = db_find("items", #{}, #{ skip: 2, limit: 3 });
+            found.len()
+        "#,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.result, json!(3));
+    }
+
+    #[test]
+    fn test_rhai_db_find_with_sort() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine
+            .run(
+                r#"
+            db_insert_one("items", #{ name: "Charlie", val: 3 });
+            db_insert_one("items", #{ name: "Alice", val: 1 });
+            db_insert_one("items", #{ name: "Bob", val: 2 });
+
+            // Sort by val ascending
+            let found = db_find("items", #{}, #{ sort: #{ val: 1 } });
+            [found[0].name, found[1].name, found[2].name]
+        "#,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.result, json!(["Alice", "Bob", "Charlie"]));
+    }
+
+    #[test]
+    fn test_rhai_db_find_with_sort_descending() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine
+            .run(
+                r#"
+            db_insert_one("items", #{ name: "Alice", val: 1 });
+            db_insert_one("items", #{ name: "Bob", val: 2 });
+            db_insert_one("items", #{ name: "Charlie", val: 3 });
+
+            // Sort by val descending
+            let found = db_find("items", #{}, #{ sort: #{ val: -1 } });
+            [found[0].name, found[1].name, found[2].name]
+        "#,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.result, json!(["Charlie", "Bob", "Alice"]));
+    }
+
+    #[test]
+    fn test_rhai_db_find_with_projection() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine
+            .run(
+                r#"
+            db_insert_one("users", #{ name: "Alice", age: 30, secret: "hidden" });
+
+            // Only include name field
+            let found = db_find("users", #{}, #{ projection: #{ name: 1 } });
+            let user = found[0];
+            // secret field should be excluded
+            [user.name, is_null(user.secret)]
+        "#,
+                None,
+            )
+            .unwrap();
+
+        // name should be present, secret should be null (excluded)
+        assert_eq!(result.result, json!(["Alice", true]));
+    }
+
+    #[test]
+    fn test_rhai_db_find_combined_options() {
+        let (adapter, _temp) = create_test_adapter();
+        let engine = RhaiEngine::new(adapter);
+
+        let result = engine
+            .run(
+                r#"
+            // Insert documents
+            for i in 0..10 {
+                db_insert_one("items", #{ idx: i, name: "item" + i });
+            }
+
+            // Sort descending, skip 2, limit 3
+            let found = db_find("items", #{}, #{
+                sort: #{ idx: -1 },
+                skip: 2,
+                limit: 3
+            });
+
+            // Should get idx: 7, 6, 5 (descending, skipped 9, 8)
+            [found.len(), found[0].idx, found[1].idx, found[2].idx]
+        "#,
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(result.result, json!([3, 7, 6, 5]));
     }
 
     #[test]
