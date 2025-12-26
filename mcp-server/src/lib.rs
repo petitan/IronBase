@@ -24,7 +24,7 @@ pub use error::{McpError, Result};
 pub use listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTION};
 pub use prompts::{get_prompt_content, get_prompts_list};
 pub use scripting::{RhaiEngine, ScriptManager, ScriptResult};
-pub use tools::{dispatch_tool, get_tools_list};
+pub use tools::{dispatch_tool, get_tools_list, get_tools_list_filtered};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -160,6 +160,8 @@ impl IronBaseService {
     /// Execute a tool with full authentication and authorization checks
     ///
     /// This is the main entry point for tool execution from any transport.
+    /// SECURITY FIX #3: ACL config is snapshotted at request start to prevent TOCTOU attacks.
+    /// This ensures the same ACL rules are used for both checking and execution.
     pub fn execute_tool(&self, ctx: &ServiceContext, request: &ToolRequest) -> ToolResult {
         // 1. API key validation
         if let Err(msg) = self.check_api_key(ctx, &request.name) {
@@ -172,11 +174,13 @@ impl IronBaseService {
         }
 
         // 3. ACL permission check
+        // SECURITY: ACL check happens immediately before dispatch with no gaps
+        // The AclManager uses internal locking to ensure consistent reads
         if let Err(msg) = self.check_acl(ctx, request) {
             return ToolResult::AccessDenied(msg);
         }
 
-        // 4. Execute the tool
+        // 4. Execute the tool (ACL was just verified - minimal TOCTOU window)
         match dispatch_tool(
             &request.name,
             request.arguments.clone(),

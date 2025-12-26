@@ -194,6 +194,40 @@ fn validate_script_name(name: &str) -> Result<()> {
 
 /// Get the list of all available tools for MCP tools/list
 pub fn get_tools_list() -> Value {
+    get_tools_list_filtered(true) // Default: show all tools (localhost assumed)
+}
+
+/// Get filtered tools list based on caller context
+/// SECURITY FIX #14: Non-localhost callers don't see admin_* tools
+/// This prevents information disclosure about admin capabilities
+pub fn get_tools_list_filtered(is_localhost: bool) -> Value {
+    let all_tools = get_all_tools_json();
+
+    if is_localhost {
+        // Localhost sees everything
+        all_tools
+    } else {
+        // Filter out admin_* tools for non-localhost callers
+        if let Some(tools_array) = all_tools.get("tools").and_then(|t| t.as_array()) {
+            let filtered: Vec<Value> = tools_array
+                .iter()
+                .filter(|tool| {
+                    tool.get("name")
+                        .and_then(|n| n.as_str())
+                        .map(|name| !name.starts_with("admin_"))
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect();
+            json!({ "tools": filtered })
+        } else {
+            all_tools
+        }
+    }
+}
+
+/// Internal function that returns the full tools JSON
+fn get_all_tools_json() -> Value {
     json!({
         "tools": [
             // Database Management

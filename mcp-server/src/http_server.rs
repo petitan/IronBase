@@ -426,15 +426,24 @@ async fn run_http_server_internal(
     }
 
     /// Extract API key from Authorization header or JSON params
+    /// SECURITY FIX #13: Case-insensitive header lookup with fallback
     fn extract_api_key(
         headers: &axum::http::HeaderMap,
         params: &serde_json::Value,
     ) -> Option<String> {
-        // Try Authorization: Bearer header first
-        if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+        // Try Authorization: Bearer header first (case-insensitive)
+        // HTTP headers are case-insensitive per RFC 7230, hyper normalizes to lowercase
+        // But we check both the standard constant and lowercase string for robustness
+        let auth_header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .or_else(|| headers.get("authorization"));
+
+        if let Some(auth_header) = auth_header {
             if let Ok(auth_str) = auth_header.to_str() {
-                if let Some(key) = auth_str.strip_prefix("Bearer ") {
-                    return Some(key.to_string());
+                // Case-insensitive "Bearer " prefix check
+                let auth_lower = auth_str.to_lowercase();
+                if auth_lower.starts_with("bearer ") {
+                    return Some(auth_str[7..].to_string());
                 }
             }
         }
@@ -673,7 +682,7 @@ fn handle_request(
     remote_addr: Option<std::net::SocketAddr>,
 ) -> Option<McpResponse> {
     use crate::{
-        get_prompt_content, get_prompts_list, get_tools_list, ServiceContext, ToolRequest,
+        get_prompt_content, get_prompts_list, get_tools_list_filtered, ServiceContext, ToolRequest,
     };
     use std::sync::atomic::Ordering;
 
@@ -722,10 +731,16 @@ fn handle_request(
 
         "notifications/cancelled" => None,
 
-        "tools/list" => Some(create_success_response(
-            get_tools_list(),
-            request.id.clone(),
-        )),
+        "tools/list" => {
+            // SECURITY FIX #14: Filter admin tools for non-localhost callers
+            let is_localhost = remote_addr
+                .map(|addr| crate::InterfaceType::from_socket_addr(addr) == crate::InterfaceType::Localhost)
+                .unwrap_or(false);
+            Some(create_success_response(
+                get_tools_list_filtered(is_localhost),
+                request.id.clone(),
+            ))
+        }
 
         "tools/call" => {
             let params: ToolsCallParams = match serde_json::from_value(request.params.clone()) {
