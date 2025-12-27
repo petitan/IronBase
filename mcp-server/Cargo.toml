@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.66"
+version = "1.0.67"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
@@ -41,6 +41,9 @@ thiserror = "1.0"
 
 # Time handling
 chrono = "0.4"
+
+# UUID generation
+uuid = { version = "1.10", features = ["v4"] }
 
 # Scripting engine
 rhai = { version = "1.19", features = ["sync"] }

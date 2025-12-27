@@ -1245,6 +1245,185 @@ impl RhaiEngine {
             },
         );
 
+        // ============================================================
+        // Index Management
+        // ============================================================
+
+        // db_create_index(collection, field, unique) -> index_name
+        let adapter_idx = adapter.clone();
+        engine.register_fn(
+            "db_create_index",
+            move |collection: &str, field: &str, unique: bool| -> Dynamic {
+                match adapter_idx.create_index(collection, field, unique) {
+                    Ok(name) => Dynamic::from(name),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // db_create_compound_index(collection, fields_array, unique) -> index_name
+        let adapter_cidx = adapter.clone();
+        engine.register_fn(
+            "db_create_compound_index",
+            move |collection: &str, fields: rhai::Array, unique: bool| -> Dynamic {
+                let field_vec: Vec<String> = fields
+                    .iter()
+                    .filter_map(|f| f.clone().try_cast::<String>())
+                    .collect();
+                match adapter_cidx.create_compound_index(collection, &field_vec, unique) {
+                    Ok(name) => Dynamic::from(name),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // db_list_indexes(collection) -> array of index names
+        let adapter_lidx = adapter.clone();
+        engine.register_fn("db_list_indexes", move |collection: &str| -> Dynamic {
+            match adapter_lidx.list_indexes(collection) {
+                Ok(indexes) => {
+                    let result: Vec<Dynamic> = indexes.into_iter().map(Dynamic::from).collect();
+                    Dynamic::from(result)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        });
+
+        // db_drop_index(collection, index_name) -> bool
+        let adapter_didx = adapter.clone();
+        engine.register_fn(
+            "db_drop_index",
+            move |collection: &str, index_name: &str| -> Dynamic {
+                match adapter_didx.drop_index(collection, index_name) {
+                    Ok(()) => Dynamic::from(true),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // db_explain(collection, query) -> query plan
+        let adapter_expl = adapter.clone();
+        engine.register_fn(
+            "db_explain",
+            move |collection: &str, query: Map| -> Dynamic {
+                let query_json = map_to_json(&query);
+                match adapter_expl.explain(collection, query_json) {
+                    Ok(plan) => json_to_dynamic(&plan),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // ============================================================
+        // Distinct
+        // ============================================================
+
+        // db_distinct(collection, field, query) -> array of unique values
+        let adapter_dist = adapter.clone();
+        engine.register_fn(
+            "db_distinct",
+            move |collection: &str, field: &str, query: Map| -> Dynamic {
+                let query_json = map_to_json(&query);
+                match adapter_dist.distinct(collection, field, query_json) {
+                    Ok(values) => {
+                        let result: Vec<Dynamic> =
+                            values.into_iter().map(|v| json_to_dynamic(&v)).collect();
+                        Dynamic::from(result)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // ============================================================
+        // Fuzzy Search
+        // ============================================================
+
+        // db_create_fuzzy_index(collection, field, algorithm, threshold) -> index_name
+        // algorithm: "jaro_winkler" (default), "levenshtein", "damerau_levenshtein"
+        let adapter_fzidx = adapter.clone();
+        engine.register_fn(
+            "db_create_fuzzy_index",
+            move |collection: &str, field: &str, algorithm: &str, threshold: f64| -> Dynamic {
+                match adapter_fzidx.create_fuzzy_index(collection, field, algorithm, threshold) {
+                    Ok(name) => Dynamic::from(name),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // db_fuzzy_search(collection, field, query, threshold) -> array of {doc, score}
+        let adapter_fzsrch = adapter.clone();
+        engine.register_fn(
+            "db_fuzzy_search",
+            move |collection: &str, field: &str, query: &str, threshold: f64| -> Dynamic {
+                match adapter_fzsrch.fuzzy_search(collection, field, query, Some(threshold), None) {
+                    Ok(results) => {
+                        let result: Vec<Dynamic> = results
+                            .into_iter()
+                            .map(|(doc, score)| {
+                                let mut map = Map::new();
+                                map.insert("doc".into(), json_to_dynamic(&doc));
+                                map.insert("score".into(), Dynamic::from(score));
+                                Dynamic::from(map)
+                            })
+                            .collect();
+                        Dynamic::from(result)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // ============================================================
+        // Full-Text Search
+        // ============================================================
+
+        // db_create_fulltext_index(collection, field, language) -> index_name
+        // language: "hungarian", "english", "german", "none"
+        let adapter_ftidx = adapter.clone();
+        engine.register_fn(
+            "db_create_fulltext_index",
+            move |collection: &str, field: &str, language: &str| -> Dynamic {
+                match adapter_ftidx.create_fulltext_index(collection, field, language, None, None) {
+                    Ok(name) => Dynamic::from(name),
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
+        // db_fulltext_search(collection, field, query, limit) -> array of {doc, score, tokens}
+        let adapter_ftsrch = adapter.clone();
+        engine.register_fn(
+            "db_fulltext_search",
+            move |collection: &str, field: &str, query: &str, limit: i64| -> Dynamic {
+                let options = crate::adapter::FulltextSearchOptions {
+                    limit: Some(limit as usize),
+                    skip: None,
+                    min_score: None,
+                    projection: None,
+                };
+                match adapter_ftsrch.fulltext_search(collection, field, query, options) {
+                    Ok(results) => {
+                        let result: Vec<Dynamic> = results
+                            .into_iter()
+                            .map(|(doc, score, tokens)| {
+                                let mut map = Map::new();
+                                map.insert("doc".into(), json_to_dynamic(&doc));
+                                map.insert("score".into(), Dynamic::from(score));
+                                let token_dyn: Vec<Dynamic> =
+                                    tokens.into_iter().map(Dynamic::from).collect();
+                                map.insert("tokens".into(), Dynamic::from(token_dyn));
+                                Dynamic::from(map)
+                            })
+                            .collect();
+                        Dynamic::from(result)
+                    }
+                    Err(e) => Dynamic::from(format!("Error: {}", e)),
+                }
+            },
+        );
+
         Ok(())
     }
 
@@ -1335,6 +1514,26 @@ impl RhaiEngine {
             } else {
                 "unknown".to_string()
             }
+        });
+
+        // ============================================================
+        // UUID and Timestamp
+        // ============================================================
+
+        // uuid() -> random UUID v4 string
+        engine.register_fn("uuid", || -> String { uuid::Uuid::new_v4().to_string() });
+
+        // timestamp() -> current Unix timestamp in seconds (i64)
+        engine.register_fn("timestamp", || -> i64 { chrono::Utc::now().timestamp() });
+
+        // timestamp_ms() -> current Unix timestamp in milliseconds (i64)
+        engine.register_fn("timestamp_ms", || -> i64 {
+            chrono::Utc::now().timestamp_millis()
+        });
+
+        // now_iso() -> current time as ISO 8601 string
+        engine.register_fn("now_iso", || -> String {
+            chrono::Utc::now().to_rfc3339()
         });
     }
 }
