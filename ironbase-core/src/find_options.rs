@@ -51,8 +51,129 @@ impl FindOptions {
     }
 }
 
+/// Get nested value with array projection support
+/// When path crosses an array, projects the remaining path into each array element
+/// e.g., "to.email" where "to" is an array returns array of just email values
+fn get_nested_value_with_array_projection(doc: &Value, path: &str) -> Option<Value> {
+    // Fast path: no dots means simple field access
+    if !path.contains('.') {
+        return doc.get(path).cloned();
+    }
+
+    let parts: Vec<&str> = path.split('.').collect();
+    get_nested_value_recursive(doc, &parts, 0)
+}
+
+/// Recursive helper for nested value retrieval with array support
+fn get_nested_value_recursive(value: &Value, parts: &[&str], index: usize) -> Option<Value> {
+    if index >= parts.len() {
+        return Some(value.clone());
+    }
+
+    let part = parts[index];
+
+    match value {
+        Value::Object(map) => {
+            if let Some(child) = map.get(part) {
+                get_nested_value_recursive(child, parts, index + 1)
+            } else {
+                None
+            }
+        }
+        Value::Array(arr) => {
+            // Check if part is a numeric index
+            if let Ok(arr_index) = part.parse::<usize>() {
+                if let Some(element) = arr.get(arr_index) {
+                    get_nested_value_recursive(element, parts, index + 1)
+                } else {
+                    None
+                }
+            } else {
+                // MongoDB-style: project the remaining path into each array element
+                // e.g., for "to.email" where "to" is an array of {email, name} objects
+                // returns an array of just the nested values
+                let projected: Vec<Value> = arr
+                    .iter()
+                    .filter_map(|element| get_nested_value_recursive(element, parts, index))
+                    .collect();
+
+                if projected.is_empty() {
+                    None
+                } else {
+                    Some(Value::Array(projected))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Set nested value with array projection support
+/// When path crosses an array, creates projected structure for each element
+/// Merges with existing array elements if the array already exists
+fn set_nested_value_with_array(doc: &mut Value, path: &str, value: Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+    set_nested_value_recursive(doc, &parts, 0, &value);
+}
+
+/// Recursive helper for setting nested values with array support
+fn set_nested_value_recursive(doc: &mut Value, parts: &[&str], index: usize, value: &Value) {
+    if index >= parts.len() {
+        return;
+    }
+
+    let part = parts[index];
+    let is_last = index == parts.len() - 1;
+
+    if let Value::Object(map) = doc {
+        if is_last {
+            // Last part: set the value
+            map.insert(part.to_string(), value.clone());
+        } else {
+            // Check if the value we're setting is an array (from array projection)
+            if let Value::Array(arr) = value {
+                // Check if we already have an array at this position
+                if let Some(Value::Array(existing_arr)) = map.get_mut(part) {
+                    // MERGE: Add fields to existing array elements
+                    for (i, element) in arr.iter().enumerate() {
+                        if let Some(existing_element) = existing_arr.get_mut(i) {
+                            // Merge the new field into the existing element
+                            set_nested_value_recursive(existing_element, parts, index + 1, element);
+                        } else {
+                            // Array grew - create new element
+                            let mut obj = Value::Object(serde_json::Map::new());
+                            set_nested_value_recursive(&mut obj, parts, index + 1, element);
+                            existing_arr.push(obj);
+                        }
+                    }
+                    return;
+                }
+
+                // No existing array - create new array structure
+                let projected_array: Vec<Value> = arr
+                    .iter()
+                    .map(|element| {
+                        let mut obj = Value::Object(serde_json::Map::new());
+                        set_nested_value_recursive(&mut obj, parts, index + 1, element);
+                        obj
+                    })
+                    .collect();
+                map.insert(part.to_string(), Value::Array(projected_array));
+                return;
+            }
+
+            // Regular object case
+            let entry = map
+                .entry(part.to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            set_nested_value_recursive(entry, parts, index + 1, value);
+        }
+    }
+}
+
 /// Apply projection to a document
 /// Supports dot notation for nested fields (e.g., "address.city")
+/// Supports array element projection (e.g., "to.email" where "to" is an array)
 ///
 /// # Errors
 /// Returns `InvalidQuery` if projection mixes inclusion (1) and exclusion (0) fields.
@@ -84,11 +205,10 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Resul
             // Include specified fields
             for (field, &action) in projection {
                 if action == 1 {
-                    // Use get_nested_value to support dot notation (e.g., "address.city")
-                    if let Some(value) = get_nested_value(doc, field) {
-                        // Use set_nested_value to build proper nested structure
-                        // e.g., "address.city" → {"address": {"city": value}}
-                        set_nested_value(&mut result, field, value.clone());
+                    // Use array-aware nested value retrieval
+                    if let Some(value) = get_nested_value_with_array_projection(doc, field) {
+                        // Use array-aware nested value setting
+                        set_nested_value_with_array(&mut result, field, value);
                     }
                 }
             }

@@ -304,7 +304,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 if let Some(value) = crate::value_utils::get_nested_value(&doc, field) {
                     if let Some(s) = value.as_str() {
                         if let Some(index) = index_manager.get_fulltext_index_mut(index_name) {
-                            index.insert(&doc_id, s);
+                            let _ = index.insert(&doc_id, s);
                             rebuilt_count += 1;
                         }
                     }

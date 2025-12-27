@@ -1812,7 +1812,7 @@ impl IndexManager {
                 // Get field value - only index string values
                 if let Some(value) = get_nested_value(doc, &index.field) {
                     if let Some(s) = value.as_str() {
-                        index.insert(doc_id, s);
+                        let _ = index.insert(doc_id, s);
                     }
                 }
             }
@@ -1886,7 +1886,7 @@ impl IndexManager {
             }
 
             if let Some(index) = self.fulltext_indexes.get_mut(&index_name) {
-                index.remove(doc_id);
+                let _ = index.remove(doc_id);
             }
         }
 

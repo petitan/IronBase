@@ -209,12 +209,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // Clone metadata to avoid borrow issues
             let catalog = meta.document_catalog.clone();
             let persisted_indexes = meta.indexes.clone();
+            let persisted_fuzzy_indexes = meta.fuzzy_indexes.clone();
+            let persisted_fulltext_indexes = meta.fulltext_indexes.clone();
 
             log_debug!(
-                "Collection '{}' - catalog size: {}, persisted indexes: {}",
+                "Collection '{}' - catalog size: {}, persisted indexes: {}, fuzzy: {}, fulltext: {}",
                 name,
                 catalog.len(),
-                persisted_indexes.len()
+                persisted_indexes.len(),
+                persisted_fuzzy_indexes.len(),
+                persisted_fulltext_indexes.len()
             );
 
             // Get db_path for .idx file loading (before releasing lock)
@@ -253,6 +257,37 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         index_meta.unique,
                     )?;
                 }
+            }
+
+            // PERSISTENCE FIX: Load persisted fuzzy indexes
+            for fuzzy_meta in &persisted_fuzzy_indexes {
+                log_debug!(
+                    "Loading fuzzy index '{}' on field '{}' (will rebuild from documents)",
+                    fuzzy_meta.name,
+                    fuzzy_meta.field
+                );
+                index_manager.create_fuzzy_index(
+                    fuzzy_meta.name.clone(),
+                    fuzzy_meta.field.clone(),
+                    fuzzy_meta.algorithm,
+                    fuzzy_meta.threshold,
+                )?;
+            }
+
+            // PERSISTENCE FIX: Load persisted fulltext indexes
+            for ft_meta in &persisted_fulltext_indexes {
+                log_debug!(
+                    "Loading fulltext index '{}' on field '{}' (will rebuild from documents)",
+                    ft_meta.name,
+                    ft_meta.field
+                );
+                index_manager.create_fulltext_index(
+                    ft_meta.name.clone(),
+                    ft_meta.field.clone(),
+                    ft_meta.language,
+                    Some(ft_meta.min_word_length),
+                    Some(ft_meta.accent_folding),
+                )?;
             }
 
             // Rebuild all indexes from document catalog (always rebuild to ensure consistency)
@@ -325,6 +360,44 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                                 if !is_all_null || index.metadata.unique {
                                                     let _ = index.insert(key, doc_id.clone());
                                                     rebuilt_count += 1;
+                                                }
+                                            }
+                                        }
+
+                                        // PERSISTENCE FIX: Rebuild fuzzy indexes from documents
+                                        for fuzzy_meta in &persisted_fuzzy_indexes {
+                                            if let Some(fuzzy_index) =
+                                                index_manager.get_fuzzy_index_mut(&fuzzy_meta.name)
+                                            {
+                                                // Extract field value using dot notation
+                                                if let Some(value) =
+                                                    crate::value_utils::get_nested_value(
+                                                        &doc,
+                                                        &fuzzy_meta.field,
+                                                    )
+                                                {
+                                                    if let Some(text) = value.as_str() {
+                                                        fuzzy_index.insert(text, doc_id.clone());
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        // PERSISTENCE FIX: Rebuild fulltext indexes from documents
+                                        for ft_meta in &persisted_fulltext_indexes {
+                                            if let Some(ft_index) =
+                                                index_manager.get_fulltext_index_mut(&ft_meta.name)
+                                            {
+                                                // Extract field value using dot notation
+                                                if let Some(value) =
+                                                    crate::value_utils::get_nested_value(
+                                                        &doc,
+                                                        &ft_meta.field,
+                                                    )
+                                                {
+                                                    if let Some(text) = value.as_str() {
+                                                        let _ = ft_index.insert(&doc_id, text);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1165,12 +1238,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         // Update the fulltext index for this document
                         // First remove old entry (handles type changes too)
                         if old_value.is_some() {
-                            fts_index.remove(&original_doc.id);
+                            let _ = fts_index.remove(&original_doc.id);
                         }
                         // Then add new entry if it's a string
                         if let Some(new_val) = new_value {
                             if let Some(text) = new_val.as_str() {
-                                fts_index.update(&updated_doc.id, text);
+                                let _ = fts_index.update(&updated_doc.id, text);
                             }
                             // If new value is not a string, entry already removed above
                         }
@@ -1799,7 +1872,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 for (doc_id, doc) in &batch_docs {
                     if let Some(value) = get_nested_value(doc, &field_clone) {
                         if let Some(s) = value.as_str() {
-                            index.insert(doc_id, s);
+                            let _ = index.insert(doc_id, s);
                         }
                     }
                 }

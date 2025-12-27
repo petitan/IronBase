@@ -231,7 +231,14 @@ impl StorageEngine {
             }
         };
 
-        // 4. Write metadata and header atomically
+        // CRITICAL FIX: Update data_end_offset to AFTER metadata BEFORE writing header
+        // Without this, next document write would overwrite the metadata!
+        // The layout is: [HEADER][DOCUMENTS][METADATA]
+        // After flush, next document should be written AFTER metadata.
+        let new_data_end = metadata_offset + metadata_bytes.len() as u64;
+        self.header.data_end_offset = new_data_end;
+
+        // 4. Write metadata and header atomically (header now includes correct data_end_offset)
         Self::write_metadata_and_header(
             &mut self.file,
             &mut self.header,

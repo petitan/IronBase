@@ -3,6 +3,7 @@
 use crate::adapter::{FindOptions, FulltextSearchOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
 use crate::scripting::{RhaiEngine, ScriptManager, ScriptOptions};
+use ironbase_core::find_options::{apply_projection, apply_sort};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -126,6 +127,52 @@ fn parse_threshold(params: &Value) -> Result<Option<f64>> {
             t
         ))),
         t => Ok(t),
+    }
+}
+
+/// Parse projection: {"field": 1} or {"field": 0}
+fn parse_projection(params: &Value) -> Result<Option<std::collections::HashMap<String, i32>>> {
+    if let Some(proj_value) = params.get("projection") {
+        if proj_value.is_null() {
+            Ok(None)
+        } else if let Some(obj) = proj_value.as_object() {
+            let mut map = std::collections::HashMap::new();
+            for (k, v) in obj {
+                let int_val = if let Some(i) = v.as_i64() {
+                    if i != 0 && i != 1 {
+                        return Err(McpError::InvalidParams(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, i
+                        )));
+                    }
+                    i as i32
+                } else if let Some(f) = v.as_f64() {
+                    if f == 0.0 {
+                        0
+                    } else if f == 1.0 {
+                        1
+                    } else {
+                        return Err(McpError::InvalidParams(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, f
+                        )));
+                    }
+                } else {
+                    return Err(McpError::InvalidParams(format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                        k, v
+                    )));
+                };
+                map.insert(k.clone(), int_val);
+            }
+            Ok(Some(map))
+        } else {
+            Err(McpError::InvalidParams(
+                "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
+            ))
+        }
+    } else {
+        Ok(None)
     }
 }
 
@@ -405,7 +452,7 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "find_one",
                 "title": "Find One Document",
-                "description": "Find a single document matching the query",
+                "description": "Find a single document matching the query with optional projection",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -416,6 +463,10 @@ fn get_all_tools_json() -> Value {
                         "query": {
                             "type": "object",
                             "description": "MongoDB-style query filter"
+                        },
+                        "projection": {
+                            "type": "object",
+                            "description": "Fields to include (1) or exclude (0). Example: {\"name\": 1, \"age\": 1, \"_id\": 0}"
                         }
                     },
                     "required": ["collection", "query"]
@@ -452,6 +503,10 @@ fn get_all_tools_json() -> Value {
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of documents to return"
+                        },
+                        "projection": {
+                            "type": "object",
+                            "description": "Fields to include (1) or exclude (0). Example: {\"name\": 1, \"age\": 1, \"_id\": 0}"
                         }
                     },
                     "required": ["collection", "field", "query"]
@@ -811,7 +866,7 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "find_with_hint",
                 "title": "Find with Index Hint",
-                "description": "Find documents using a specific index (forces index usage)",
+                "description": "Find documents using a specific index (forces index usage), with full FindOptions support",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -826,6 +881,22 @@ fn get_all_tools_json() -> Value {
                         "hint": {
                             "type": "string",
                             "description": "Index name to use (from index_list)"
+                        },
+                        "projection": {
+                            "type": "object",
+                            "description": "Fields to include (1) or exclude (0). Example: {\"name\": 1, \"age\": 1, \"_id\": 0}"
+                        },
+                        "sort": {
+                            "type": "array",
+                            "description": "Sort order as array of [field, direction] pairs. Example: [[\"age\", -1], [\"name\", 1]]"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of documents to return"
+                        },
+                        "skip": {
+                            "type": "integer",
+                            "description": "Number of documents to skip (for pagination)"
                         }
                     },
                     "required": ["collection", "query", "hint"]
@@ -1723,8 +1794,17 @@ pub fn dispatch_tool(
         "find_one" => {
             let collection = get_string(&params, "collection")?;
             let query = params.get("query").cloned().unwrap_or(json!({}));
+            let projection = parse_projection(&params)?;
             let document = adapter.find_one(&collection, query)?;
-            Ok(json!({"document": document}))
+
+            // Apply projection if specified
+            let result = match (document, projection) {
+                (Some(doc), Some(proj)) => {
+                    Some(apply_projection(&doc, &proj).map_err(|e| McpError::InvalidParams(e.to_string()))?)
+                }
+                (doc, _) => doc,
+            };
+            Ok(json!({"document": result}))
         }
         "fuzzy_search" => {
             let collection = get_string(&params, "collection")?;
@@ -1734,6 +1814,7 @@ pub fn dispatch_tool(
             let threshold = parse_threshold(&params)?;
             let algorithm = params.get("algorithm").and_then(|v| v.as_str());
             let limit = parse_limit(&params);
+            let projection = parse_projection(&params)?;
 
             // Use the real fuzzy search with index
             let mut results =
@@ -1744,12 +1825,17 @@ pub fn dispatch_tool(
                 results.truncate(lim);
             }
 
-            // Format results with scores
+            // Format results with scores, applying projection if specified
             let documents: Vec<Value> = results
                 .into_iter()
                 .map(|(doc, score)| {
+                    let projected_doc = if let Some(ref proj) = projection {
+                        apply_projection(&doc, proj).unwrap_or(doc)
+                    } else {
+                        doc
+                    };
                     json!({
-                        "document": doc,
+                        "document": projected_doc,
                         "score": score
                     })
                 })
@@ -1993,7 +2079,44 @@ pub fn dispatch_tool(
             let collection = get_string(&params, "collection")?;
             let query = params.get("query").cloned().unwrap_or(json!({}));
             let hint = get_string(&params, "hint")?;
-            let documents = adapter.find_with_hint(&collection, query, &hint)?;
+            let projection = parse_projection(&params)?;
+            let sort = parse_sort(&params);
+            let limit = parse_limit(&params);
+            let skip = parse_skip(&params);
+
+            let mut documents = adapter.find_with_hint(&collection, query, &hint)?;
+
+            // Apply sort if specified
+            if let Some(ref sort_spec) = sort {
+                apply_sort(&mut documents, sort_spec)
+                    .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+            }
+
+            // Apply skip
+            if let Some(s) = skip {
+                if s < documents.len() {
+                    documents = documents.into_iter().skip(s).collect();
+                } else {
+                    documents = Vec::new();
+                }
+            }
+
+            // Apply limit
+            if let Some(l) = limit {
+                documents.truncate(l.min(MAX_QUERY_LIMIT));
+            }
+
+            // Apply projection if specified
+            let documents: Vec<Value> = if let Some(ref proj) = projection {
+                documents
+                    .into_iter()
+                    .map(|doc| apply_projection(&doc, proj))
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| McpError::InvalidParams(e.to_string()))?
+            } else {
+                documents
+            };
+
             Ok(json!({"documents": documents, "count": documents.len()}))
         }
 
