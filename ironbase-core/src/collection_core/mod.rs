@@ -1411,28 +1411,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut indexes = self.indexes.write();
         indexes.create_compound_index(index_name.clone(), fields.clone(), unique)?;
+        drop(indexes); // Release index lock before batch scanning
 
-        // Populate index with existing documents
-        let docs_by_id = {
-            drop(indexes); // Release write lock before acquiring storage lock
-            self.scan_documents_via_catalog()?
-        };
-
-        // Build entries using index's extract_key method
-        let mut indexes = self.indexes.write();
-
-        let mut entries: Vec<(IndexKey, DocumentId)> = Vec::with_capacity(docs_by_id.len());
-        for (doc_id, doc) in &docs_by_id {
-            if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                let key = index.extract_key(doc);
-                entries.push((key, doc_id.clone()));
+        // Collect (compound_key, doc_id) pairs in batches - full documents are NOT kept in memory
+        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        let mut entries: Vec<(IndexKey, DocumentId)> = Vec::new();
+        let fields_clone = fields.clone();
+        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            for (doc_id, doc) in batch_docs {
+                // Replicate extract_key logic inline to avoid holding index lock
+                let keys: Vec<IndexKey> = fields_clone
+                    .iter()
+                    .map(|field| {
+                        get_nested_value(&doc, field)
+                            .map(IndexKey::from)
+                            .unwrap_or(IndexKey::Null)
+                    })
+                    .collect();
+                entries.push((IndexKey::Compound(keys), doc_id));
             }
-        }
+            Ok(())
+        })?;
 
         // Sort by key - O(n log n)
         entries.sort_by(|a, b| a.0.cmp(&b.0));
 
         // Build index from sorted entries - O(n)
+        let mut indexes = self.indexes.write();
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
             index.build_from_sorted(entries, unique)?;
         }
@@ -1491,20 +1496,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut indexes = self.indexes.write();
         indexes.create_btree_index(index_name.clone(), field.clone(), unique)?;
 
-        // Populate index with existing documents
-        let docs_by_id = {
-            drop(indexes); // Release write lock before acquiring storage lock
-            self.scan_documents_via_catalog()?
-        };
+        // Release index lock before batch scanning
+        drop(indexes);
 
-        // Collect all (key, doc_id) pairs, sort once, and build index in O(n log n)
-        let mut entries: Vec<(IndexKey, DocumentId)> = docs_by_id
-            .iter()
-            .filter_map(|(doc_id, doc)| {
-                get_nested_value(doc, &field)
-                    .map(|field_value| (IndexKey::from(field_value), doc_id.clone()))
-            })
-            .collect();
+        // Collect (key, doc_id) pairs in batches - full documents are NOT kept in memory
+        // Only the small pairs accumulate, reducing memory from O(total_doc_size) to O(num_docs * pair_size)
+        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        let mut entries: Vec<(IndexKey, DocumentId)> = Vec::new();
+        let field_clone = field.clone();
+        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            for (doc_id, doc) in batch_docs {
+                if let Some(field_value) = get_nested_value(&doc, &field_clone) {
+                    entries.push((IndexKey::from(field_value), doc_id));
+                }
+            }
+            Ok(())
+        })?;
 
         // Sort by key - O(n log n)
         entries.sort_by(|a, b| a.0.cmp(&b.0));
