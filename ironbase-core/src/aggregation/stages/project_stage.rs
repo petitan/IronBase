@@ -2,7 +2,8 @@
 // $project stage implementation
 
 use crate::aggregation::types::{
-    ProjectExpression, ProjectField, ProjectStage, ReduceExpression, ReduceInExpr,
+    ArithmeticOperand, ProjectExpression, ProjectField, ProjectStage, ReduceExpression,
+    ReduceInExpr,
 };
 use crate::error::{IronBaseError, Result};
 use crate::value_utils::get_nested_value;
@@ -84,9 +85,156 @@ impl ProjectStage {
                 }
             }
             "$reduce" => Self::parse_reduce_expression(arg),
+            // Arithmetic operators
+            "$add" => Self::parse_variadic_arithmetic(arg, ProjectExpression::Add),
+            "$multiply" => Self::parse_variadic_arithmetic(arg, ProjectExpression::Multiply),
+            "$subtract" => Self::parse_binary_arithmetic(arg, "$subtract", |a, b| {
+                ProjectExpression::Subtract(Box::new(a), Box::new(b))
+            }),
+            "$divide" => Self::parse_binary_arithmetic(arg, "$divide", |a, b| {
+                ProjectExpression::Divide(Box::new(a), Box::new(b))
+            }),
+            "$mod" => Self::parse_binary_arithmetic(arg, "$mod", |a, b| {
+                ProjectExpression::Mod(Box::new(a), Box::new(b))
+            }),
+            "$abs" => {
+                Self::parse_unary_arithmetic(arg, "$abs", |a| ProjectExpression::Abs(Box::new(a)))
+            }
+            "$ceil" => {
+                Self::parse_unary_arithmetic(arg, "$ceil", |a| ProjectExpression::Ceil(Box::new(a)))
+            }
+            "$floor" => Self::parse_unary_arithmetic(arg, "$floor", |a| {
+                ProjectExpression::Floor(Box::new(a))
+            }),
+            "$round" => Self::parse_round_expression(arg),
             _ => Err(IronBaseError::AggregationError(format!(
                 "Unknown projection expression operator: {}",
                 op
+            ))),
+        }
+    }
+
+    /// Parse a variadic arithmetic expression like $add or $multiply
+    fn parse_variadic_arithmetic<F>(arg: &Value, constructor: F) -> Result<ProjectField>
+    where
+        F: FnOnce(Vec<ArithmeticOperand>) -> ProjectExpression,
+    {
+        let arr = arg.as_array().ok_or_else(|| {
+            IronBaseError::AggregationError("Arithmetic operator requires an array".to_string())
+        })?;
+
+        if arr.len() < 2 {
+            return Err(IronBaseError::AggregationError(
+                "Arithmetic operator requires at least 2 operands".to_string(),
+            ));
+        }
+
+        let operands: Result<Vec<ArithmeticOperand>> =
+            arr.iter().map(Self::parse_arithmetic_operand).collect();
+
+        Ok(ProjectField::Expression(constructor(operands?)))
+    }
+
+    /// Parse a binary arithmetic expression like $subtract or $divide
+    fn parse_binary_arithmetic<F>(
+        arg: &Value,
+        op_name: &str,
+        constructor: F,
+    ) -> Result<ProjectField>
+    where
+        F: FnOnce(ArithmeticOperand, ArithmeticOperand) -> ProjectExpression,
+    {
+        let arr = arg.as_array().ok_or_else(|| {
+            IronBaseError::AggregationError(format!("{} requires an array", op_name))
+        })?;
+
+        if arr.len() != 2 {
+            return Err(IronBaseError::AggregationError(format!(
+                "{} requires exactly 2 operands",
+                op_name
+            )));
+        }
+
+        let left = Self::parse_arithmetic_operand(&arr[0])?;
+        let right = Self::parse_arithmetic_operand(&arr[1])?;
+
+        Ok(ProjectField::Expression(constructor(left, right)))
+    }
+
+    /// Parse a unary arithmetic expression like $abs, $ceil, $floor
+    fn parse_unary_arithmetic<F>(arg: &Value, op_name: &str, constructor: F) -> Result<ProjectField>
+    where
+        F: FnOnce(ArithmeticOperand) -> ProjectExpression,
+    {
+        // Can be a direct operand or a single-element array
+        let operand = if let Some(arr) = arg.as_array() {
+            if arr.len() != 1 {
+                return Err(IronBaseError::AggregationError(format!(
+                    "{} requires exactly 1 operand",
+                    op_name
+                )));
+            }
+            Self::parse_arithmetic_operand(&arr[0])?
+        } else {
+            Self::parse_arithmetic_operand(arg)?
+        };
+
+        Ok(ProjectField::Expression(constructor(operand)))
+    }
+
+    /// Parse $round expression: { $round: ["$value", 2] } or { $round: "$value" }
+    fn parse_round_expression(arg: &Value) -> Result<ProjectField> {
+        if let Some(arr) = arg.as_array() {
+            if arr.is_empty() || arr.len() > 2 {
+                return Err(IronBaseError::AggregationError(
+                    "$round requires 1 or 2 operands".to_string(),
+                ));
+            }
+            let operand = Self::parse_arithmetic_operand(&arr[0])?;
+            let precision = if arr.len() == 2 {
+                arr[1].as_i64().map(|n| n as i32)
+            } else {
+                None
+            };
+            Ok(ProjectField::Expression(ProjectExpression::Round(
+                Box::new(operand),
+                precision,
+            )))
+        } else {
+            let operand = Self::parse_arithmetic_operand(arg)?;
+            Ok(ProjectField::Expression(ProjectExpression::Round(
+                Box::new(operand),
+                None,
+            )))
+        }
+    }
+
+    /// Parse an arithmetic operand: field reference, literal, or nested expression
+    fn parse_arithmetic_operand(value: &Value) -> Result<ArithmeticOperand> {
+        match value {
+            Value::String(s) if s.starts_with('$') => {
+                Ok(ArithmeticOperand::Field(s[1..].to_string()))
+            }
+            Value::Number(n) => {
+                let num = n.as_f64().ok_or_else(|| {
+                    IronBaseError::AggregationError("Invalid number in expression".to_string())
+                })?;
+                Ok(ArithmeticOperand::Literal(num))
+            }
+            Value::Object(obj) if obj.len() == 1 => {
+                // Nested expression like { "$add": [...] }
+                let field = Self::parse_expression(obj)?;
+                if let ProjectField::Expression(expr) = field {
+                    Ok(ArithmeticOperand::Expression(Box::new(expr)))
+                } else {
+                    Err(IronBaseError::AggregationError(
+                        "Expected expression in nested operand".to_string(),
+                    ))
+                }
+            }
+            _ => Err(IronBaseError::AggregationError(format!(
+                "Invalid arithmetic operand: {:?}",
+                value
             ))),
         }
     }
@@ -325,6 +473,95 @@ impl ProjectStage {
                 }
             }
             ProjectExpression::Reduce(reduce_expr) => Self::evaluate_reduce(reduce_expr, doc),
+            ProjectExpression::Add(operands) => {
+                let mut result = 0.0;
+                for op in operands {
+                    if let Some(val) = Self::evaluate_operand(op, doc) {
+                        result += val;
+                    } else {
+                        return Value::Null;
+                    }
+                }
+                Value::from(result)
+            }
+            ProjectExpression::Multiply(operands) => {
+                let mut result = 1.0;
+                for op in operands {
+                    if let Some(val) = Self::evaluate_operand(op, doc) {
+                        result *= val;
+                    } else {
+                        return Value::Null;
+                    }
+                }
+                Value::from(result)
+            }
+            ProjectExpression::Subtract(left, right) => {
+                match (
+                    Self::evaluate_operand(left, doc),
+                    Self::evaluate_operand(right, doc),
+                ) {
+                    (Some(l), Some(r)) => Value::from(l - r),
+                    _ => Value::Null,
+                }
+            }
+            ProjectExpression::Divide(left, right) => {
+                match (
+                    Self::evaluate_operand(left, doc),
+                    Self::evaluate_operand(right, doc),
+                ) {
+                    (Some(l), Some(r)) if r != 0.0 => Value::from(l / r),
+                    (Some(_), Some(_)) => Value::Null, // Division by zero
+                    _ => Value::Null,
+                }
+            }
+            ProjectExpression::Mod(left, right) => {
+                match (
+                    Self::evaluate_operand(left, doc),
+                    Self::evaluate_operand(right, doc),
+                ) {
+                    (Some(l), Some(r)) if r != 0.0 => Value::from(l % r),
+                    (Some(_), Some(_)) => Value::Null, // Mod by zero
+                    _ => Value::Null,
+                }
+            }
+            ProjectExpression::Abs(operand) => Self::evaluate_operand(operand, doc)
+                .map(|v| Value::from(v.abs()))
+                .unwrap_or(Value::Null),
+            ProjectExpression::Ceil(operand) => Self::evaluate_operand(operand, doc)
+                .map(|v| Value::from(v.ceil()))
+                .unwrap_or(Value::Null),
+            ProjectExpression::Floor(operand) => Self::evaluate_operand(operand, doc)
+                .map(|v| Value::from(v.floor()))
+                .unwrap_or(Value::Null),
+            ProjectExpression::Round(operand, precision) => Self::evaluate_operand(operand, doc)
+                .map(|v| {
+                    let p = precision.unwrap_or(0);
+                    let multiplier = 10_f64.powi(p);
+                    Value::from((v * multiplier).round() / multiplier)
+                })
+                .unwrap_or(Value::Null),
+        }
+    }
+
+    /// Evaluate an arithmetic operand to a numeric value
+    fn evaluate_operand(op: &ArithmeticOperand, doc: &Value) -> Option<f64> {
+        match op {
+            ArithmeticOperand::Field(field) => {
+                get_nested_value(doc, field).and_then(Self::value_to_f64_opt)
+            }
+            ArithmeticOperand::Literal(n) => Some(*n),
+            ArithmeticOperand::Expression(expr) => {
+                let result = Self::evaluate_expression(expr, doc);
+                Self::value_to_f64_opt(&result)
+            }
+        }
+    }
+
+    /// Convert Value to f64, returning None for non-numeric values
+    fn value_to_f64_opt(value: &Value) -> Option<f64> {
+        match value {
+            Value::Number(n) => n.as_f64(),
+            _ => None,
         }
     }
 
@@ -411,5 +648,172 @@ impl ProjectStage {
             Value::Null => String::new(),
             _ => String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_project_multiply() {
+        let stage = ProjectStage::from_json(&json!({
+            "total": {"$multiply": ["$price", "$qty"]}
+        }))
+        .unwrap();
+
+        let doc = json!({"price": 10, "qty": 5});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["total"], json!(50.0));
+    }
+
+    #[test]
+    fn test_project_add() {
+        let stage = ProjectStage::from_json(&json!({
+            "sum": {"$add": ["$a", "$b", "$c"]}
+        }))
+        .unwrap();
+
+        let doc = json!({"a": 10, "b": 20, "c": 30});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["sum"], json!(60.0));
+    }
+
+    #[test]
+    fn test_project_subtract() {
+        let stage = ProjectStage::from_json(&json!({
+            "diff": {"$subtract": ["$total", "$discount"]}
+        }))
+        .unwrap();
+
+        let doc = json!({"total": 100, "discount": 15});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["diff"], json!(85.0));
+    }
+
+    #[test]
+    fn test_project_divide() {
+        let stage = ProjectStage::from_json(&json!({
+            "avg": {"$divide": ["$sum", "$count"]}
+        }))
+        .unwrap();
+
+        let doc = json!({"sum": 150, "count": 3});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["avg"], json!(50.0));
+    }
+
+    #[test]
+    fn test_project_divide_by_zero() {
+        let stage = ProjectStage::from_json(&json!({
+            "result": {"$divide": ["$a", "$b"]}
+        }))
+        .unwrap();
+
+        let doc = json!({"a": 10, "b": 0});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["result"], Value::Null);
+    }
+
+    #[test]
+    fn test_project_nested_expression() {
+        // { $multiply: [{ $add: ["$price", "$tax"] }, "$qty"] }
+        let stage = ProjectStage::from_json(&json!({
+            "total": {"$multiply": [{"$add": ["$price", "$tax"]}, "$qty"]}
+        }))
+        .unwrap();
+
+        let doc = json!({"price": 100, "tax": 10, "qty": 2});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["total"], json!(220.0)); // (100+10) * 2
+    }
+
+    #[test]
+    fn test_project_abs() {
+        let stage = ProjectStage::from_json(&json!({
+            "absVal": {"$abs": "$diff"}
+        }))
+        .unwrap();
+
+        let doc = json!({"diff": -42});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["absVal"], json!(42.0));
+    }
+
+    #[test]
+    fn test_project_ceil_floor() {
+        let stage = ProjectStage::from_json(&json!({
+            "ceiling": {"$ceil": "$val"},
+            "flooring": {"$floor": "$val"}
+        }))
+        .unwrap();
+
+        let doc = json!({"val": 3.7});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["ceiling"], json!(4.0));
+        assert_eq!(result[0]["flooring"], json!(3.0));
+    }
+
+    #[test]
+    fn test_project_round() {
+        let stage = ProjectStage::from_json(&json!({
+            "rounded": {"$round": ["$val", 2]}
+        }))
+        .unwrap();
+
+        let doc = json!({"val": 3.14159});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["rounded"], json!(3.14));
+    }
+
+    #[test]
+    fn test_project_mod() {
+        let stage = ProjectStage::from_json(&json!({
+            "remainder": {"$mod": ["$value", 3]}
+        }))
+        .unwrap();
+
+        let doc = json!({"value": 17});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["remainder"], json!(2.0));
+    }
+
+    #[test]
+    fn test_project_with_literal() {
+        let stage = ProjectStage::from_json(&json!({
+            "withTax": {"$multiply": ["$price", 1.1]}
+        }))
+        .unwrap();
+
+        let doc = json!({"price": 100});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        // 100 * 1.1 = 110.0
+        let val = result[0]["withTax"].as_f64().unwrap();
+        assert!((val - 110.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_project_missing_field_returns_null() {
+        let stage = ProjectStage::from_json(&json!({
+            "total": {"$multiply": ["$price", "$qty"]}
+        }))
+        .unwrap();
+
+        let doc = json!({"price": 10}); // qty is missing
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["total"], Value::Null);
     }
 }

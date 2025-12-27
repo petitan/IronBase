@@ -50,6 +50,35 @@ pub enum ProjectExpression {
     Size(String), // Field name (e.g., "$tags" -> "tags")
     /// $reduce - apply a custom reduction to an array
     Reduce(ReduceExpression),
+    /// $add - add numbers: { $add: ["$price", "$tax"] }
+    Add(Vec<ArithmeticOperand>),
+    /// $subtract - subtract: { $subtract: ["$price", "$discount"] }
+    Subtract(Box<ArithmeticOperand>, Box<ArithmeticOperand>),
+    /// $multiply - multiply: { $multiply: ["$price", "$qty"] }
+    Multiply(Vec<ArithmeticOperand>),
+    /// $divide - divide: { $divide: ["$total", "$count"] }
+    Divide(Box<ArithmeticOperand>, Box<ArithmeticOperand>),
+    /// $mod - modulo: { $mod: ["$value", 10] }
+    Mod(Box<ArithmeticOperand>, Box<ArithmeticOperand>),
+    /// $abs - absolute value: { $abs: "$diff" }
+    Abs(Box<ArithmeticOperand>),
+    /// $ceil - ceiling: { $ceil: "$value" }
+    Ceil(Box<ArithmeticOperand>),
+    /// $floor - floor: { $floor: "$value" }
+    Floor(Box<ArithmeticOperand>),
+    /// $round - round: { $round: ["$value", 2] }
+    Round(Box<ArithmeticOperand>, Option<i32>),
+}
+
+/// Operand for arithmetic expressions - can be field reference, literal, or nested expression
+#[derive(Debug, Clone)]
+pub enum ArithmeticOperand {
+    /// Field reference: "$price"
+    Field(String),
+    /// Literal number
+    Literal(f64),
+    /// Nested expression: { $add: [...] }
+    Expression(Box<ProjectExpression>),
 }
 
 /// $reduce expression - reduces an array to a single value
