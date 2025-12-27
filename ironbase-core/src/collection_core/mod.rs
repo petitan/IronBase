@@ -1418,8 +1418,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             self.scan_documents_via_catalog()?
         };
 
-        // 🚀 OPTIMIZED: Bulk load for compound index
-        // We need to extract compound keys using the index's extract_key method
+        // Build entries using index's extract_key method
         let mut indexes = self.indexes.write();
 
         let mut entries: Vec<(IndexKey, DocumentId)> = Vec::with_capacity(docs_by_id.len());
@@ -1498,9 +1497,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             self.scan_documents_via_catalog()?
         };
 
-        // 🚀 OPTIMIZED: Bulk load instead of per-doc insert
         // Collect all (key, doc_id) pairs, sort once, and build index in O(n log n)
-        // instead of O(n²) from repeated Vec::insert() calls
         let mut entries: Vec<(IndexKey, DocumentId)> = docs_by_id
             .iter()
             .filter_map(|(doc_id, doc)| {
@@ -2176,6 +2173,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Scan documents via document_catalog instead of full file scan
     /// Much faster than scan_documents() for large collections
+    ///
+    /// When the `parallel` feature is enabled, JSON deserialization is parallelized
+    /// across CPU cores for significantly faster processing of large collections.
     fn scan_documents_via_catalog(&self) -> Result<HashMap<DocumentId, Value>> {
         let mut storage = self.storage.write();
 
@@ -2201,32 +2201,47 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut sorted_offsets = offsets;
         sorted_offsets.sort_by_key(|(_, offset)| *offset);
 
-        let mut docs_by_id: HashMap<DocumentId, Value> =
-            HashMap::with_capacity(sorted_offsets.len());
+        // PHASE 1: Sequential disk I/O (disk-bound, must be sequential for optimal read)
+        // Read raw bytes in offset order to minimize disk seeks
+        let raw_docs: Vec<(DocumentId, Vec<u8>)> = sorted_offsets
+            .into_iter()
+            .filter_map(|(doc_id, offset)| {
+                storage.read_data(offset).ok().map(|bytes| (doc_id, bytes))
+            })
+            .collect();
 
-        // Iterate in offset order for sequential disk I/O
-        for (doc_id, offset) in sorted_offsets {
-            match storage.read_data(offset) {
-                Ok(doc_bytes) => {
-                    // Try to deserialize JSON - skip if corrupt
-                    match serde_json::from_slice::<Value>(&doc_bytes) {
-                        Ok(doc) => {
-                            // Skip tombstones (deleted documents)
-                            if !doc
-                                .get("_tombstone")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false)
-                            {
-                                // doc_id already owned from the Vec, no clone needed
-                                docs_by_id.insert(doc_id, doc);
-                            }
-                        }
-                        Err(_) => continue, // Skip corrupted JSON
-                    }
-                }
-                Err(_) => continue, // Skip corrupted entries
-            }
-        }
+        // Release storage lock before CPU-intensive deserialization
+        drop(storage);
+
+        // PHASE 2: JSON deserialization (CPU-bound, parallelized when feature enabled)
+        #[cfg(feature = "parallel")]
+        let docs_by_id: HashMap<DocumentId, Value> = {
+            crate::parallel::parallel_deserialize(raw_docs)
+                .into_iter()
+                .filter(|(_, doc)| {
+                    // Skip tombstones (deleted documents)
+                    !doc.get("_tombstone")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+                .collect()
+        };
+
+        #[cfg(not(feature = "parallel"))]
+        let docs_by_id: HashMap<DocumentId, Value> = raw_docs
+            .into_iter()
+            .filter_map(|(doc_id, bytes)| {
+                serde_json::from_slice::<Value>(&bytes)
+                    .ok()
+                    .map(|doc| (doc_id, doc))
+            })
+            .filter(|(_, doc)| {
+                // Skip tombstones (deleted documents)
+                !doc.get("_tombstone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            })
+            .collect();
 
         Ok(docs_by_id)
     }
@@ -2289,8 +2304,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<Vec<DocumentId>> {
         let mut storage = self.storage.write();
 
-        // Clone the catalog to avoid borrow checker issues
-        let catalog = {
+        // MEMORY OPTIMIZATION: Don't clone entire catalog HashMap!
+        // Only extract what we need: Vec<(DocumentId, u64)> for offsets
+        let (catalog_entries, catalog_len, live_count) = {
             let meta = storage
                 .get_collection_meta(&self.name)
                 .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
@@ -2301,44 +2317,50 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 skip,
                 limit
             );
-            meta.document_catalog.clone()
+            let entries: Vec<(DocumentId, u64)> = meta
+                .document_catalog
+                .iter()
+                .map(|(id, &offset)| (id.clone(), offset))
+                .collect();
+            let len = entries.len();
+            let live = storage.get_live_count(&self.name).unwrap_or(0);
+            (entries, len, live)
         };
 
         // 🚀 FAST PATH: Empty query - skip directly from catalog without disk I/O
         // This is critical for pagination performance on large collections
         // NOTE: Only use fast path if there are no tombstones (live_count == catalog.len())
         // Otherwise tombstones would be incorrectly counted in skip/limit calculations
+        if parsed_query.is_match_all() && live_count == catalog_len as u64 {
+            // No tombstones - safe to use fast path
+            let effective_limit = limit.unwrap_or(usize::MAX);
+
+            // Sort keys for deterministic pagination across process restarts
+            // HashMap iteration order is non-deterministic due to ASLR hash seeds
+            let mut sorted_keys: Vec<DocumentId> =
+                catalog_entries.into_iter().map(|(id, _)| id).collect();
+            sorted_keys.sort();
+
+            let doc_ids: Vec<DocumentId> = sorted_keys
+                .into_iter()
+                .skip(skip)
+                .take(if effective_limit == 0 {
+                    usize::MAX
+                } else {
+                    effective_limit
+                })
+                .collect();
+            log_debug!(
+                "scan_documents_with_early_termination: FAST PATH (empty query, no tombstones) - skip={}, limit={:?}, returning {} docs",
+                skip,
+                limit,
+                doc_ids.len()
+            );
+            return Ok(doc_ids);
+        }
+
+        // Tombstones exist or query needs filtering - use slow path
         if parsed_query.is_match_all() {
-            let live_count = storage.get_live_count(&self.name).unwrap_or(0);
-            let catalog_len = catalog.len() as u64;
-
-            if live_count == catalog_len {
-                // No tombstones - safe to use fast path
-                let effective_limit = limit.unwrap_or(usize::MAX);
-
-                // Sort keys for deterministic pagination across process restarts
-                // HashMap iteration order is non-deterministic due to ASLR hash seeds
-                let mut sorted_keys: Vec<DocumentId> = catalog.keys().cloned().collect();
-                sorted_keys.sort();
-
-                let doc_ids: Vec<DocumentId> = sorted_keys
-                    .into_iter()
-                    .skip(skip)
-                    .take(if effective_limit == 0 {
-                        usize::MAX
-                    } else {
-                        effective_limit
-                    })
-                    .collect();
-                log_debug!(
-                    "scan_documents_with_early_termination: FAST PATH (empty query, no tombstones) - skip={}, limit={:?}, returning {} docs",
-                    skip,
-                    limit,
-                    doc_ids.len()
-                );
-                return Ok(doc_ids);
-            }
-            // Tombstones exist - fall through to slow path which filters them
             log_debug!(
                 "scan_documents_with_early_termination: tombstones detected (live={}, catalog={}), using slow path",
                 live_count,
@@ -2349,18 +2371,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut doc_ids = Vec::new();
         let mut skipped = 0usize;
 
-        // BUG #1 FIX: Sort keys for deterministic pagination
+        // BUG #1 FIX: Sort entries for deterministic pagination
         // HashMap iteration order is non-deterministic due to ASLR hash seeds
         // This ensures consistent results even when tombstones are present
-        let mut sorted_keys: Vec<DocumentId> = catalog.keys().cloned().collect();
-        sorted_keys.sort();
+        let mut sorted_entries = catalog_entries;
+        sorted_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
-        // Iterate over sorted keys with early termination (for filtered queries)
-        for doc_id in &sorted_keys {
-            let offset = match catalog.get(doc_id) {
-                Some(o) => *o,
-                None => continue, // Shouldn't happen, but be safe
-            };
+        // Iterate over sorted entries with early termination (for filtered queries)
+        for (doc_id, offset) in sorted_entries {
             // Check if we've collected enough documents
             // MongoDB compatibility: limit(0) means "no limit"
             if let Some(limit_count) = limit {
@@ -2403,7 +2421,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     skipped += 1;
                     continue;
                 }
-                doc_ids.push(doc_id.clone());
+                doc_ids.push(doc_id);
             }
         }
 

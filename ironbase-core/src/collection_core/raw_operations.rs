@@ -1631,7 +1631,8 @@ fn inline_scan_with_catalog<S: Storage + RawStorage>(
     storage: &mut S,
     catalog: &HashMap<DocumentId, u64>,
 ) -> Result<HashMap<DocumentId, Value>> {
-    let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::new();
+    // MEMORY OPTIMIZATION: Pre-allocate HashMap with known capacity
+    let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::with_capacity(catalog.len());
 
     for (doc_id, offset) in catalog {
         if let Ok(doc_bytes) = storage.read_data(*offset) {

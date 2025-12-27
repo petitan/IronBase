@@ -6,6 +6,10 @@ authors.workspace = true
 license.workspace = true
 description = "Pure Rust core library for IronBase - embedded document database"
 
+[features]
+default = ["parallel"]
+parallel = ["rayon"]
+
 [lib]
 name = "ironbase_core"
 crate-type = ["rlib"]
@@ -29,6 +33,7 @@ strsim = "0.11"    # For fuzzy text search ($fuzzy operator)
 fs2 = "0.4"        # Cross-platform file locking
 rust-stemmers = "1.2"           # For full-text search stemming (15+ languages)
 unicode-normalization = "0.1"   # For accent folding in full-text search
+rayon = { version = "1.10", optional = true }  # For parallel iteration (default: enabled)
 
 [dev-dependencies]
 tempfile = { workspace = true }
