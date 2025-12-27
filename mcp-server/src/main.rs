@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mcp_ironbase::{
-    dispatch_tool, get_prompt_content, get_prompts_list, get_tools_list, http_server, service,
+    dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list, get_tools_list,
+    http_server, read_resource, service,
     IronBaseAdapter, VERSION,
 };
 
@@ -335,6 +336,7 @@ fn handle_request(
                 capabilities: Capabilities {
                     tools: serde_json::json!({"listChanged": false}),
                     prompts: serde_json::json!({"listChanged": false}),
+                    resources: serde_json::json!({"subscribe": false, "listChanged": true}),
                 },
                 server_info: ServerInfo {
                     name: "ironbase-mcp".to_string(),
@@ -440,6 +442,34 @@ fn handle_request(
                     &format!("Prompt '{}' not found", params.name),
                     request.id.clone(),
                 )),
+            }
+        }
+
+        "resources/list" => Some(create_success_response(
+            get_resources_list(adapter),
+            request.id.clone(),
+        )),
+
+        "resources/read" => {
+            #[derive(Deserialize)]
+            struct ResourcesReadParams {
+                uri: String,
+            }
+
+            let params: ResourcesReadParams = match serde_json::from_value(request.params.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return Some(create_error_response(
+                        -32602,
+                        &format!("Invalid params: {}", e),
+                        request.id.clone(),
+                    ));
+                }
+            };
+
+            match read_resource(adapter, &params.uri) {
+                Ok(content) => Some(create_success_response(content, request.id.clone())),
+                Err(e) => Some(create_error_response(-32602, &e, request.id.clone())),
             }
         }
 
@@ -555,7 +585,7 @@ struct InitializeResult {
 struct Capabilities {
     tools: serde_json::Value,
     prompts: serde_json::Value,
-    // Note: resources and logging are intentionally omitted as we don't implement them
+    resources: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
