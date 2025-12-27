@@ -587,7 +587,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             let mut document = Document::from_json(&doc_json_str)?;
 
             // Check if matches query
-            if parsed_query.matches(&document) {
+            if parsed_query.matches(&document)? {
                 matched = 1;
 
                 // Save original document for index removal
@@ -807,7 +807,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             let document = Document::from_json(&doc_json_str)?;
 
             // Check if matches query
-            if parsed_query.matches(&document) {
+            if parsed_query.matches(&document)? {
                 // Remove from all indexes BEFORE deleting
                 // Drop storage lock temporarily to avoid potential deadlock
                 drop(storage);
@@ -879,7 +879,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             let document = Document::from_json(&doc_json_str)?;
 
             // Check if matches query
-            if parsed_query.matches(&document) {
+            if parsed_query.matches(&document)? {
                 // BUG #2 FIX: Collect deleted document for WAL BEFORE deletion
                 deleted_docs.push((document.id.clone(), doc.clone()));
 
@@ -1066,7 +1066,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             let doc_json_str = serde_json::to_string(&doc)?;
             let document = Document::from_json(&doc_json_str)?;
 
-            if parsed_query.matches(&document) {
+            if parsed_query.matches(&document)? {
                 // Collect for WAL
                 wal_entries.push((document.id.clone(), doc.clone()));
 
@@ -1464,7 +1464,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             let doc_json_str = serde_json::to_string(&doc)?;
             let mut document = Document::from_json(&doc_json_str)?;
 
-            if parsed_query.matches(&document) {
+            if parsed_query.matches(&document)? {
                 // Found match - save original for WAL
                 let old_doc_value = doc.clone();
                 let original_document = document.clone();
@@ -1572,7 +1572,7 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             let doc_json_str = serde_json::to_string(&doc)?;
             let document = Document::from_json(&doc_json_str)?;
 
-            if parsed_query.matches(&document) {
+            if parsed_query.matches(&document)? {
                 // Save old doc for WAL
                 let old_doc_value = doc.clone();
                 let doc_id = document.id.clone();

@@ -1190,3 +1190,271 @@ fn test_all_and_elemmatch_combined() {
 
     cleanup_test_db("all_elemmatch");
 }
+
+// ========== $elemMatch VALIDATION AND ERROR HANDLING TESTS ==========
+
+#[test]
+fn test_elemmatch_invalid_filter_value_should_error() {
+    let db = setup_test_db("elemmatch_invalid");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one("test", json_to_hashmap(json!({"items": [1, 2, 3]})))
+        .unwrap();
+
+    // $elemMatch with non-object filter value should throw error
+    let result = coll.find(&json!({
+        "items": {"$elemMatch": 5}
+    }));
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("$elemMatch requires an object"));
+
+    cleanup_test_db("elemmatch_invalid");
+}
+
+#[test]
+fn test_elemmatch_invalid_filter_string_should_error() {
+    let db = setup_test_db("elemmatch_invalid_str");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one("test", json_to_hashmap(json!({"items": [{"name": "a"}]})))
+        .unwrap();
+
+    // $elemMatch with string filter value should throw error
+    let result = coll.find(&json!({
+        "items": {"$elemMatch": "invalid"}
+    }));
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("$elemMatch requires an object"));
+
+    cleanup_test_db("elemmatch_invalid_str");
+}
+
+#[test]
+fn test_elemmatch_unknown_operator_should_error() {
+    let db = setup_test_db("elemmatch_unknown_op");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "items": [{"score": 85}, {"score": 90}]
+        })),
+    )
+    .unwrap();
+
+    // Unknown operator $gtt (typo of $gt) should throw error
+    let result = coll.find(&json!({
+        "items": {"$elemMatch": {"score": {"$gtt": 80}}}
+    }));
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Unknown operator: $gtt")
+            || err_msg.contains("Unknown query operator: $gtt")
+    );
+
+    cleanup_test_db("elemmatch_unknown_op");
+}
+
+#[test]
+fn test_elemmatch_unknown_toplevel_operator_should_error() {
+    let db = setup_test_db("elemmatch_unknown_toplevel");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one("test", json_to_hashmap(json!({"scores": [80, 85, 90]})))
+        .unwrap();
+
+    // Unknown top-level operator in $elemMatch for scalar array
+    let result = coll.find(&json!({
+        "scores": {"$elemMatch": {"$gtt": 80}}
+    }));
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("Unknown operator: $gtt")
+            || err_msg.contains("Unknown query operator: $gtt")
+    );
+
+    cleanup_test_db("elemmatch_unknown_toplevel");
+}
+
+#[test]
+fn test_elemmatch_regex_with_options() {
+    let db = setup_test_db("elemmatch_regex_options");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "items": [
+                {"tag": "RUST"},
+                {"tag": "Python"}
+            ]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "items": [
+                {"tag": "java"},
+                {"tag": "go"}
+            ]
+        })),
+    )
+    .unwrap();
+
+    // Case-insensitive regex inside $elemMatch
+    let results = coll
+        .find(&json!({
+            "items": {"$elemMatch": {"tag": {"$regex": "rust", "$options": "i"}}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("elemmatch_regex_options");
+}
+
+#[test]
+fn test_elemmatch_regex_without_options() {
+    let db = setup_test_db("elemmatch_regex_no_options");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "items": [{"tag": "rust"}]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "items": [{"tag": "RUST"}]
+        })),
+    )
+    .unwrap();
+
+    // Case-sensitive regex (no $options)
+    let results = coll
+        .find(&json!({
+            "items": {"$elemMatch": {"tag": {"$regex": "rust"}}}
+        }))
+        .unwrap();
+
+    // Only "rust" (lowercase) matches
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("elemmatch_regex_no_options");
+}
+
+#[test]
+fn test_elemmatch_options_without_regex_should_error() {
+    let db = setup_test_db("elemmatch_options_no_regex");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "items": [{"tag": "rust"}]
+        })),
+    )
+    .unwrap();
+
+    // $options without $regex should throw error
+    let result = coll.find(&json!({
+        "items": {"$elemMatch": {"tag": {"$options": "i"}}}
+    }));
+
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("$options requires $regex")
+            || err_msg.contains("$options can only be used with $regex")
+    );
+
+    cleanup_test_db("elemmatch_options_no_regex");
+}
+
+#[test]
+fn test_elemmatch_scalar_array_with_operators() {
+    let db = setup_test_db("elemmatch_scalar");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "scores": [75, 82, 90]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "scores": [60, 65, 70]
+        })),
+    )
+    .unwrap();
+
+    // Find where at least one score is > 80 AND < 85
+    let results = coll
+        .find(&json!({
+            "scores": {"$elemMatch": {"$gt": 80, "$lt": 85}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A"); // Has 82 which matches
+
+    cleanup_test_db("elemmatch_scalar");
+}
+
+#[test]
+fn test_elemmatch_scalar_array_with_regex() {
+    let db = setup_test_db("elemmatch_scalar_regex");
+    let coll = db.collection("test").unwrap();
+
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "A",
+            "tags": ["RUST", "python", "go"]
+        })),
+    )
+    .unwrap();
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "name": "B",
+            "tags": ["java", "kotlin"]
+        })),
+    )
+    .unwrap();
+
+    // Case-insensitive regex on scalar array
+    let results = coll
+        .find(&json!({
+            "tags": {"$elemMatch": {"$regex": "rust", "$options": "i"}}
+        }))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "A");
+
+    cleanup_test_db("elemmatch_scalar_regex");
+}

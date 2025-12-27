@@ -734,6 +734,54 @@ mod tests {
         assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
     }
 
+    #[test]
+    fn test_elemmatch_invalid_filter_value() {
+        // $elemMatch with non-object filter should return error
+        let op = ElemMatchOperator;
+        let doc_value = json!([1, 2, 3]);
+        let filter_value = json!(5); // Invalid: not an object
+        let result = op.matches(Some(&doc_value), &filter_value, None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("$elemMatch requires an object"));
+    }
+
+    #[test]
+    fn test_elemmatch_unknown_operator() {
+        // $elemMatch with unknown operator should return error
+        let op = ElemMatchOperator;
+        let doc_value = json!([{"score": 85}]);
+        let filter_value = json!({"score": {"$gtt": 80}}); // $gtt is typo
+        let result = op.matches(Some(&doc_value), &filter_value, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown operator"));
+    }
+
+    #[test]
+    fn test_elemmatch_options_without_regex() {
+        // $options without $regex should return error
+        let op = ElemMatchOperator;
+        let doc_value = json!([{"tag": "rust"}]);
+        let filter_value = json!({"tag": {"$options": "i"}});
+        let result = op.matches(Some(&doc_value), &filter_value, None);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("$options requires $regex"));
+    }
+
+    #[test]
+    fn test_elemmatch_regex_with_options() {
+        // $regex + $options should work together
+        let op = ElemMatchOperator;
+        let doc_value = json!([{"tag": "RUST"}]);
+        let filter_value = json!({"tag": {"$regex": "rust", "$options": "i"}});
+        assert!(op.matches(Some(&doc_value), &filter_value, None).unwrap());
+    }
+
     // ========== matches_filter_value tests ==========
 
     #[test]
@@ -1613,5 +1661,188 @@ mod tests {
             }
         });
         assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    // ========== $not + $regex + $options tests ==========
+
+    #[test]
+    fn test_not_with_regex_options_case_insensitive() {
+        let doc = create_test_document(1, vec![("name", json!("ALICE"))]);
+
+        // $not with $regex and $options should work
+        // This should NOT match because "ALICE" matches /alice/i
+        let filter = json!({"name": {"$not": {"$regex": "alice", "$options": "i"}}});
+        assert!(!matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_not_with_regex_options_no_match() {
+        let doc = create_test_document(1, vec![("name", json!("BOB"))]);
+
+        // $not with $regex and $options - should match because "BOB" doesn't match /alice/i
+        let filter = json!({"name": {"$not": {"$regex": "alice", "$options": "i"}}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_not_with_regex_options_multiline() {
+        let doc = create_test_document(1, vec![("text", json!("Hello\nWorld"))]);
+
+        // $not with $regex and multiline option
+        let filter = json!({"text": {"$not": {"$regex": "^World", "$options": "m"}}});
+        // "World" is at the start of a line, so regex matches -> $not returns false
+        assert!(!matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_not_with_regex_no_options() {
+        let doc = create_test_document(1, vec![("name", json!("alice"))]);
+
+        // $not with $regex but no $options - should still work
+        let filter = json!({"name": {"$not": {"$regex": "bob"}}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_not_options_without_regex_error() {
+        let doc = create_test_document(1, vec![("name", json!("alice"))]);
+
+        // $options without $regex inside $not should error
+        let filter = json!({"name": {"$not": {"$options": "i"}}});
+        let result = matches_filter(&doc, &filter);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("$options requires $regex"));
+    }
+
+    // ========== $expr arithmetic tests ==========
+
+    #[test]
+    fn test_expr_add_basic() {
+        let doc = create_test_document(1, vec![("a", json!(10)), ("b", json!(5))]);
+
+        // { $expr: { $gt: [{ $add: ["$a", "$b"] }, 14] } }
+        // 10 + 5 = 15 > 14 -> true
+        let filter = json!({"$expr": {"$gt": [{"$add": ["$a", "$b"]}, 14]}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_add_no_match() {
+        let doc = create_test_document(1, vec![("a", json!(10)), ("b", json!(5))]);
+
+        // 10 + 5 = 15 > 16 -> false
+        let filter = json!({"$expr": {"$gt": [{"$add": ["$a", "$b"]}, 16]}});
+        assert!(!matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_subtract() {
+        let doc = create_test_document(1, vec![("total", json!(100)), ("discount", json!(20))]);
+
+        // { $expr: { $gte: [{ $subtract: ["$total", "$discount"] }, 80] } }
+        // 100 - 20 = 80 >= 80 -> true
+        let filter = json!({"$expr": {"$gte": [{"$subtract": ["$total", "$discount"]}, 80]}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_multiply() {
+        let doc = create_test_document(1, vec![("price", json!(10)), ("quantity", json!(5))]);
+
+        // { $expr: { $eq: [{ $multiply: ["$price", "$quantity"] }, 50] } }
+        // 10 * 5 = 50 == 50 -> true
+        let filter = json!({"$expr": {"$eq": [{"$multiply": ["$price", "$quantity"]}, 50]}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_divide() {
+        let doc = create_test_document(1, vec![("total", json!(100)), ("count", json!(4))]);
+
+        // { $expr: { $eq: [{ $divide: ["$total", "$count"] }, 25] } }
+        // 100 / 4 = 25 == 25 -> true
+        let filter = json!({"$expr": {"$eq": [{"$divide": ["$total", "$count"]}, 25]}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_nested_arithmetic() {
+        let doc = create_test_document(1, vec![("a", json!(10)), ("b", json!(5)), ("c", json!(3))]);
+
+        // { $expr: { $eq: [{ $add: [{ $multiply: ["$a", "$b"] }, "$c"] }, 53] } }
+        // (10 * 5) + 3 = 53 == 53 -> true
+        let filter = json!({
+            "$expr": {
+                "$eq": [
+                    {"$add": [{"$multiply": ["$a", "$b"]}, "$c"]},
+                    53
+                ]
+            }
+        });
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_mod_operator() {
+        let doc = create_test_document(1, vec![("value", json!(17))]);
+
+        // { $expr: { $eq: [{ $mod: ["$value", 5] }, 2] } }
+        // 17 % 5 = 2 == 2 -> true
+        let filter = json!({"$expr": {"$eq": [{"$mod": ["$value", 5]}, 2]}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_abs_operator() {
+        let doc = create_test_document(1, vec![("balance", json!(-50))]);
+
+        // { $expr: { $gt: [{ $abs: ["$balance"] }, 40] } }
+        // |-50| = 50 > 40 -> true
+        let filter = json!({"$expr": {"$gt": [{"$abs": ["$balance"]}, 40]}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_floor_ceil() {
+        let doc = create_test_document(1, vec![("value", json!(3.7))]);
+
+        // floor(3.7) = 3
+        let floor_filter = json!({"$expr": {"$eq": [{"$floor": ["$value"]}, 3]}});
+        assert!(matches_filter(&doc, &floor_filter).unwrap());
+
+        // ceil(3.7) = 4
+        let ceil_filter = json!({"$expr": {"$eq": [{"$ceil": ["$value"]}, 4]}});
+        assert!(matches_filter(&doc, &ceil_filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_with_literals() {
+        let doc = create_test_document(1, vec![("value", json!(10))]);
+
+        // { $expr: { $gt: [{ $add: ["$value", 5] }, 14] } }
+        // 10 + 5 = 15 > 14 -> true
+        let filter = json!({"$expr": {"$gt": [{"$add": ["$value", 5]}, 14]}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_arithmetic_missing_field() {
+        let doc = create_test_document(1, vec![("a", json!(10))]);
+
+        // Missing field "$b" should make comparison return false
+        let filter = json!({"$expr": {"$gt": [{"$add": ["$a", "$b"]}, 10]}});
+        assert!(!matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_expr_divide_by_zero() {
+        let doc = create_test_document(1, vec![("a", json!(10)), ("b", json!(0))]);
+
+        // Division by zero returns null, comparison with null returns false
+        let filter = json!({"$expr": {"$gt": [{"$divide": ["$a", "$b"]}, 0]}});
+        assert!(!matches_filter(&doc, &filter).unwrap());
     }
 }

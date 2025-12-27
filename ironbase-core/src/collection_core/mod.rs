@@ -667,7 +667,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             let doc_json_str = serde_json::to_string(&doc)?;
                             let document = Document::from_json(&doc_json_str)?;
 
-                            if parsed_query.matches(&document) {
+                            if parsed_query.matches(&document)? {
                                 return Ok(Some(doc));
                             }
                         }
@@ -817,7 +817,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let document = Document::from_json(&doc_json_str)?;
 
             let matches = if let Some(query) = &parsed_query {
-                query.matches(&document)
+                query.matches(&document)?
             } else {
                 true
             };
@@ -2397,7 +2397,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Apply query filter
             let document = Document::from_value_owned(doc)?;
-            if parsed_query.matches(&document) {
+            if parsed_query.matches(&document)? {
                 // Apply skip
                 if skipped < skip {
                     skipped += 1;
@@ -2558,7 +2558,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 let doc_json_str = serde_json::to_string(&doc)?;
                 let document = Document::from_json(&doc_json_str)?;
 
-                if parsed_query.matches(&document) {
+                if parsed_query.matches(&document)? {
                     if skipped < skip {
                         skipped += 1;
                         continue;

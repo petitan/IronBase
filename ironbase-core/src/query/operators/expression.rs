@@ -27,19 +27,193 @@ use super::traits::OperatorMatcher;
 /// # Complexity: CC = 8
 pub struct ExprOperator;
 
-/// Helper: Resolve a value that might be a field reference
+/// Helper: Resolve a value that might be a field reference or a computed expression
 ///
+/// - If value is an object with an operator, evaluate it recursively
 /// - If value starts with "$", extract field from document
 /// - Otherwise return the literal value
-fn resolve_expr_value<'a>(value: &'a Value, document: &'a Document) -> Option<&'a Value> {
+fn resolve_expr_value(value: &Value, document: &Document) -> Result<Option<Value>> {
+    // Check if it's a computed expression (object with operator)
+    if let Some(obj) = value.as_object() {
+        if obj.len() == 1 {
+            let (op, _) = obj.iter().next().unwrap();
+            if op.starts_with('$') {
+                // It's an expression like { "$add": [...] } - evaluate it
+                let computed = evaluate_arithmetic_expr(value, document)?;
+                return Ok(computed.map(Value::from));
+            }
+        }
+    }
+
+    // Check if it's a field reference
     if let Some(field_ref) = value.as_str() {
         if let Some(field_name) = field_ref.strip_prefix('$') {
             // It's a field reference like "$quantity"
-            return document.get(field_name);
+            return Ok(document.get(field_name).cloned());
         }
     }
     // Return the literal value
-    Some(value)
+    Ok(Some(value.clone()))
+}
+
+/// Evaluate an arithmetic expression and return a numeric result
+fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<f64>> {
+    let expr_obj = match expr.as_object() {
+        Some(obj) => obj,
+        None => {
+            // It's a literal or field reference
+            let resolved = resolve_expr_value(expr, document)?;
+            return Ok(resolved.and_then(|v| value_to_number(&v)));
+        }
+    };
+
+    if expr_obj.len() != 1 {
+        return Err(IronBaseError::InvalidQuery(
+            "Arithmetic expression must have exactly one operator".to_string(),
+        ));
+    }
+
+    let (op, args) = expr_obj.iter().next().unwrap();
+
+    match op.as_str() {
+        "$add" => {
+            let arr = args
+                .as_array()
+                .ok_or_else(|| IronBaseError::InvalidQuery("$add requires an array".to_string()))?;
+            let mut result = 0.0;
+            for arg in arr {
+                if let Some(num) = evaluate_arithmetic_expr(arg, document)? {
+                    result += num;
+                } else {
+                    return Ok(None); // Missing field or non-numeric value
+                }
+            }
+            Ok(Some(result))
+        }
+        "$subtract" => {
+            let arr = args.as_array().ok_or_else(|| {
+                IronBaseError::InvalidQuery("$subtract requires an array".to_string())
+            })?;
+            if arr.len() != 2 {
+                return Err(IronBaseError::InvalidQuery(
+                    "$subtract requires exactly 2 arguments".to_string(),
+                ));
+            }
+            let left = evaluate_arithmetic_expr(&arr[0], document)?;
+            let right = evaluate_arithmetic_expr(&arr[1], document)?;
+            match (left, right) {
+                (Some(l), Some(r)) => Ok(Some(l - r)),
+                _ => Ok(None),
+            }
+        }
+        "$multiply" => {
+            let arr = args.as_array().ok_or_else(|| {
+                IronBaseError::InvalidQuery("$multiply requires an array".to_string())
+            })?;
+            let mut result = 1.0;
+            for arg in arr {
+                if let Some(num) = evaluate_arithmetic_expr(arg, document)? {
+                    result *= num;
+                } else {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(result))
+        }
+        "$divide" => {
+            let arr = args.as_array().ok_or_else(|| {
+                IronBaseError::InvalidQuery("$divide requires an array".to_string())
+            })?;
+            if arr.len() != 2 {
+                return Err(IronBaseError::InvalidQuery(
+                    "$divide requires exactly 2 arguments".to_string(),
+                ));
+            }
+            let left = evaluate_arithmetic_expr(&arr[0], document)?;
+            let right = evaluate_arithmetic_expr(&arr[1], document)?;
+            match (left, right) {
+                (Some(l), Some(r)) => {
+                    if r == 0.0 {
+                        Ok(None) // Division by zero returns null in MongoDB
+                    } else {
+                        Ok(Some(l / r))
+                    }
+                }
+                _ => Ok(None),
+            }
+        }
+        "$mod" => {
+            let arr = args
+                .as_array()
+                .ok_or_else(|| IronBaseError::InvalidQuery("$mod requires an array".to_string()))?;
+            if arr.len() != 2 {
+                return Err(IronBaseError::InvalidQuery(
+                    "$mod requires exactly 2 arguments".to_string(),
+                ));
+            }
+            let left = evaluate_arithmetic_expr(&arr[0], document)?;
+            let right = evaluate_arithmetic_expr(&arr[1], document)?;
+            match (left, right) {
+                (Some(l), Some(r)) => {
+                    if r == 0.0 {
+                        Ok(None)
+                    } else {
+                        Ok(Some(l % r))
+                    }
+                }
+                _ => Ok(None),
+            }
+        }
+        "$abs" => {
+            let arr = args
+                .as_array()
+                .ok_or_else(|| IronBaseError::InvalidQuery("$abs requires an array".to_string()))?;
+            if arr.len() != 1 {
+                return Err(IronBaseError::InvalidQuery(
+                    "$abs requires exactly 1 argument".to_string(),
+                ));
+            }
+            let val = evaluate_arithmetic_expr(&arr[0], document)?;
+            Ok(val.map(|v| v.abs()))
+        }
+        "$ceil" => {
+            let arr = args.as_array().ok_or_else(|| {
+                IronBaseError::InvalidQuery("$ceil requires an array".to_string())
+            })?;
+            if arr.len() != 1 {
+                return Err(IronBaseError::InvalidQuery(
+                    "$ceil requires exactly 1 argument".to_string(),
+                ));
+            }
+            let val = evaluate_arithmetic_expr(&arr[0], document)?;
+            Ok(val.map(|v| v.ceil()))
+        }
+        "$floor" => {
+            let arr = args.as_array().ok_or_else(|| {
+                IronBaseError::InvalidQuery("$floor requires an array".to_string())
+            })?;
+            if arr.len() != 1 {
+                return Err(IronBaseError::InvalidQuery(
+                    "$floor requires exactly 1 argument".to_string(),
+                ));
+            }
+            let val = evaluate_arithmetic_expr(&arr[0], document)?;
+            Ok(val.map(|v| v.floor()))
+        }
+        _ => {
+            // Not an arithmetic operator - try to resolve as a value
+            let resolved = resolve_expr_value(expr, document)?;
+            Ok(resolved.and_then(|v| value_to_number(&v)))
+        }
+    }
+}
+
+/// Convert a JSON Value to a number (f64)
+fn value_to_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        _ => None,
+    }
 }
 
 /// Evaluate an aggregation expression against a document
@@ -113,6 +287,7 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
 }
 
 /// Evaluate a comparison expression like { "$gt": ["$field1", "$field2"] }
+/// Supports computed expressions: { "$gt": [{ "$add": ["$a", "$b"] }, "$c"] }
 fn evaluate_comparison_expr<F>(args: &Value, document: &Document, compare_fn: F) -> Result<bool>
 where
     F: Fn(std::cmp::Ordering) -> bool,
@@ -127,12 +302,12 @@ where
         ));
     }
 
-    let left = resolve_expr_value(&arr[0], document);
-    let right = resolve_expr_value(&arr[1], document);
+    let left = resolve_expr_value(&arr[0], document)?;
+    let right = resolve_expr_value(&arr[1], document)?;
 
     match (left, right) {
         (Some(l), Some(r)) => {
-            if let Some(ordering) = compare_values(l, r) {
+            if let Some(ordering) = compare_values(&l, &r) {
                 Ok(compare_fn(ordering))
             } else {
                 // Incompatible types - return false for comparison

@@ -2453,14 +2453,15 @@ fn test_wildcard_operator_invalid_nested_path() {
     doc.insert("data".to_string(), json!({"value": 1}));
     db.insert_one("wildcard_invalid", doc).unwrap();
 
-    // $**.children.content (nested path after $**) returns 0 results
-    // Note: Query::matches() swallows errors and returns false for invalid queries
-    // This is consistent with MongoDB behavior where invalid queries return empty results
-    let results = coll.find(&json!({"$**.children.content": "test"})).unwrap();
-    assert_eq!(
-        results.len(),
-        0,
-        "$** with nested path should return no matches"
+    // $**.children.content (nested path after $**) should return error
+    // Invalid query syntax is now properly reported as an error
+    let result = coll.find(&json!({"$**.children.content": "test"}));
+    assert!(result.is_err(), "$** with nested path should return error");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("nested paths"),
+        "Error message should mention nested paths: {}",
+        err_msg
     );
 }
 
@@ -2473,10 +2474,16 @@ fn test_wildcard_operator_bare_dollar_star_star() {
     doc.insert("data".to_string(), json!({"value": 1}));
     db.insert_one("wildcard_bare", doc).unwrap();
 
-    // Bare $** without field name returns 0 results
-    // Note: Query::matches() swallows errors - invalid queries just don't match
-    let results = coll.find(&json!({"$**": "test"})).unwrap();
-    assert_eq!(results.len(), 0, "Bare $** should return no matches");
+    // Bare $** without field name should return error
+    // Invalid query syntax is now properly reported as an error
+    let result = coll.find(&json!({"$**": "test"}));
+    assert!(result.is_err(), "Bare $** should return error");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("field name"),
+        "Error message should mention field name: {}",
+        err_msg
+    );
 }
 
 #[test]

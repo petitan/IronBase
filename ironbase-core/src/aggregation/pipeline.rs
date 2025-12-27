@@ -137,8 +137,10 @@ impl Pipeline {
                 Ok(mut doc) => {
                     // Apply all $match filters first
                     for match_stage in &match_stages {
-                        if !match_stage.matches(&doc) {
-                            return None; // Filtered out
+                        match match_stage.matches(&doc) {
+                            Ok(true) => {}                 // Continue checking other match stages
+                            Ok(false) => return None,      // Filtered out
+                            Err(e) => return Some(Err(e)), // Propagate error
                         }
                     }
 

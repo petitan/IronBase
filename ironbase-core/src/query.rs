@@ -128,6 +128,11 @@ impl Query {
     /// This prevents "silent failures" where unknown operators don't match anything
     /// but don't report an error either.
     fn validate_query_operators(json: &Value) -> Result<()> {
+        Self::validate_query_operators_impl(json, false)
+    }
+
+    /// Internal implementation with context about whether we're inside $expr
+    fn validate_query_operators_impl(json: &Value, inside_expr: bool) -> Result<()> {
         if let Some(obj) = json.as_object() {
             for (key, value) in obj {
                 if key.starts_with('$') {
@@ -144,6 +149,22 @@ impl Query {
                             ));
                         }
 
+                        // SPECIAL CASE: $expr uses aggregation operators, not query operators
+                        // Skip validation of operators inside $expr - they have their own validation
+                        if key == "$expr" {
+                            // Just validate that $expr is a known operator, but don't recurse
+                            // into its contents since it uses aggregation expression syntax
+                            continue;
+                        }
+
+                        // Skip validation inside $expr - aggregation operators are different
+                        if inside_expr {
+                            // Inside $expr, we allow aggregation operators like $add, $subtract, etc.
+                            // These are validated by the expression evaluator, not here
+                            Self::validate_query_operators_impl(value, true)?;
+                            continue;
+                        }
+
                         // Not a wildcard - validate it's a known operator
                         if !operators::OPERATOR_REGISTRY.contains_key(key.as_str()) {
                             return Err(crate::IronBaseError::InvalidQuery(format!(
@@ -153,16 +174,16 @@ impl Query {
                         }
                     }
                     // Recursively validate nested structures
-                    Self::validate_query_operators(value)?;
+                    Self::validate_query_operators_impl(value, inside_expr)?;
                 } else {
                     // Field name - the value might contain operators
-                    Self::validate_query_operators(value)?;
+                    Self::validate_query_operators_impl(value, inside_expr)?;
                 }
             }
         } else if let Some(arr) = json.as_array() {
             // Array (e.g., $and, $or conditions)
             for item in arr {
-                Self::validate_query_operators(item)?;
+                Self::validate_query_operators_impl(item, inside_expr)?;
             }
         }
         Ok(())
@@ -179,8 +200,9 @@ impl Query {
     ///
     /// # Returns
     ///
-    /// * `true` if the document matches the query
-    /// * `false` otherwise
+    /// * `Ok(true)` if the document matches the query
+    /// * `Ok(false)` if the document does not match
+    /// * `Err(...)` if the query is invalid (unknown operator, malformed query, etc.)
     ///
     /// # Examples
     ///
@@ -188,15 +210,12 @@ impl Query {
     /// use serde_json::json;
     ///
     /// let query = Query::from_json(&json!({"age": {"$gt": 18}}))?;
-    /// let matches = query.matches(&document);
+    /// let matches = query.matches(&document)?;
     /// ```
-    pub fn matches(&self, document: &Document) -> bool {
+    pub fn matches(&self, document: &Document) -> Result<bool> {
         // Delegate to the new operator registry system
-        // This is MUCH simpler than the old 200+ line implementation!
-        match operators::matches_filter(document, &self.json) {
-            Ok(result) => result,
-            Err(_) => false, // Invalid queries don't match
-        }
+        // Errors are now properly propagated to the caller
+        operators::matches_filter(document, &self.json)
     }
 
     /// Get the JSON representation of this query
@@ -286,8 +305,8 @@ mod tests {
         let doc1 = create_test_document(1, vec![("name", json!("Alice"))]);
         let doc2 = create_test_document(2, vec![("name", json!("Bob"))]);
 
-        assert!(query.matches(&doc1));
-        assert!(!query.matches(&doc2));
+        assert!(query.matches(&doc1).unwrap());
+        assert!(!query.matches(&doc2).unwrap());
     }
 
     #[test]
@@ -298,9 +317,9 @@ mod tests {
         let doc2 = create_test_document(2, vec![("age", json!(15))]);
         let doc3 = create_test_document(3, vec![("age", json!(35))]);
 
-        assert!(query.matches(&doc1)); // 25 is >= 18 and < 30
-        assert!(!query.matches(&doc2)); // 15 is < 18
-        assert!(!query.matches(&doc3)); // 35 is >= 30
+        assert!(query.matches(&doc1).unwrap()); // 25 is >= 18 and < 30
+        assert!(!query.matches(&doc2).unwrap()); // 15 is < 18
+        assert!(!query.matches(&doc3).unwrap()); // 35 is >= 30
     }
 
     #[test]
@@ -317,9 +336,9 @@ mod tests {
         let doc2 = create_test_document(2, vec![("age", json!(15)), ("city", json!("NYC"))]);
         let doc3 = create_test_document(3, vec![("age", json!(25)), ("city", json!("LA"))]);
 
-        assert!(query.matches(&doc1));
-        assert!(!query.matches(&doc2));
-        assert!(!query.matches(&doc3));
+        assert!(query.matches(&doc1).unwrap());
+        assert!(!query.matches(&doc2).unwrap());
+        assert!(!query.matches(&doc3).unwrap());
     }
 
     #[test]
@@ -336,9 +355,9 @@ mod tests {
         let doc2 = create_test_document(2, vec![("age", json!(70))]);
         let doc3 = create_test_document(3, vec![("age", json!(30))]);
 
-        assert!(query.matches(&doc1));
-        assert!(query.matches(&doc2));
-        assert!(!query.matches(&doc3));
+        assert!(query.matches(&doc1).unwrap());
+        assert!(query.matches(&doc2).unwrap());
+        assert!(!query.matches(&doc3).unwrap());
     }
 
     #[test]
@@ -348,8 +367,8 @@ mod tests {
         let doc1 = create_test_document(1, vec![("city", json!("NYC"))]);
         let doc2 = create_test_document(2, vec![("city", json!("Chicago"))]);
 
-        assert!(query.matches(&doc1));
-        assert!(!query.matches(&doc2));
+        assert!(query.matches(&doc1).unwrap());
+        assert!(!query.matches(&doc2).unwrap());
     }
 
     #[test]
@@ -360,10 +379,10 @@ mod tests {
         let doc1 = create_test_document(1, vec![("email", json!("test@example.com"))]);
         let doc2 = create_test_document(2, vec![("name", json!("Alice"))]);
 
-        assert!(query_exists.matches(&doc1));
-        assert!(!query_exists.matches(&doc2));
-        assert!(!query_not_exists.matches(&doc1));
-        assert!(query_not_exists.matches(&doc2));
+        assert!(query_exists.matches(&doc1).unwrap());
+        assert!(!query_exists.matches(&doc2).unwrap());
+        assert!(!query_not_exists.matches(&doc1).unwrap());
+        assert!(query_not_exists.matches(&doc2).unwrap());
     }
 
     #[test]
@@ -409,9 +428,9 @@ mod tests {
             ],
         );
 
-        assert!(query.matches(&doc1));
-        assert!(!query.matches(&doc2)); // age < 25
-        assert!(!query.matches(&doc3)); // city not in [NYC, LA]
+        assert!(query.matches(&doc1).unwrap());
+        assert!(!query.matches(&doc2).unwrap()); // age < 25
+        assert!(!query.matches(&doc3).unwrap()); // city not in [NYC, LA]
     }
 
     #[test]
@@ -420,7 +439,7 @@ mod tests {
 
         let doc = create_test_document(1, vec![("name", json!("Alice"))]);
 
-        assert!(query.matches(&doc));
+        assert!(query.matches(&doc).unwrap());
     }
 
     #[test]

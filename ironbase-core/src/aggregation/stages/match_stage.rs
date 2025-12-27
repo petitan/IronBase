@@ -16,7 +16,7 @@ impl MatchStage {
     /// Check if a single document matches this stage's query
     ///
     /// Used for streaming execution where we filter documents one at a time.
-    pub(crate) fn matches(&self, doc: &Value) -> bool {
+    pub(crate) fn matches(&self, doc: &Value) -> Result<bool> {
         // Add _id if not present (for aggregation intermediate results)
         let doc_with_id = if doc.get("_id").is_none() {
             let mut doc_obj = doc.clone();
@@ -29,14 +29,8 @@ impl MatchStage {
         };
 
         // Convert to Document and check query
-        let doc_json_str = match serde_json::to_string(&doc_with_id) {
-            Ok(s) => s,
-            Err(_) => return false,
-        };
-        let document = match Document::from_json(&doc_json_str) {
-            Ok(d) => d,
-            Err(_) => return false,
-        };
+        let doc_json_str = serde_json::to_string(&doc_with_id)?;
+        let document = Document::from_json(&doc_json_str)?;
 
         self.query.matches(&document)
     }
@@ -45,7 +39,7 @@ impl MatchStage {
         let mut results = Vec::new();
 
         for doc in docs {
-            if self.matches(&doc) {
+            if self.matches(&doc)? {
                 results.push(doc);
             }
         }

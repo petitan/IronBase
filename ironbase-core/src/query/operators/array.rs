@@ -3,6 +3,7 @@
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
+use crate::query::operators::text_search::regex_match_with_options;
 use serde_json::Value;
 
 use super::traits::OperatorMatcher;
@@ -159,6 +160,97 @@ impl OperatorMatcher for AllOperator {
 /// # Complexity: CC = 8
 pub struct ElemMatchOperator;
 
+impl ElemMatchOperator {
+    /// Check if operators in condition_obj match the given value
+    /// Handles $regex + $options pair and throws error for unknown operators
+    fn check_operators_match(
+        condition_obj: &serde_json::Map<String, Value>,
+        value: Option<&Value>,
+    ) -> Result<bool> {
+        // Special handling for $regex + $options combination
+        let has_regex = condition_obj.contains_key("$regex");
+        let has_options = condition_obj.contains_key("$options");
+
+        if has_regex && has_options {
+            // Handle $regex with $options as a single operation
+            let pattern = condition_obj
+                .get("$regex")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    IronBaseError::InvalidQuery("$regex requires a string pattern".to_string())
+                })?;
+            let options = condition_obj
+                .get("$options")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // Check regex match on the value
+            let regex_matches = match value {
+                Some(Value::String(s)) => regex_match_with_options(s, pattern, options)?,
+                Some(Value::Array(arr)) => {
+                    let mut found = false;
+                    for v in arr {
+                        if let Value::String(s) = v {
+                            if regex_match_with_options(s, pattern, options)? {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    found
+                }
+                _ => false,
+            };
+
+            if !regex_matches {
+                return Ok(false);
+            }
+
+            // Process remaining operators (excluding $regex and $options)
+            for (op_name, op_value) in condition_obj {
+                if op_name == "$regex" || op_name == "$options" {
+                    continue; // Already handled
+                }
+                if op_name.starts_with('$') {
+                    if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
+                        if !operator.matches(value, op_value, None)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Unknown operator: {}",
+                            op_name
+                        )));
+                    }
+                }
+            }
+        } else if has_options && !has_regex {
+            // $options without $regex is an error
+            return Err(IronBaseError::InvalidQuery(
+                "$options requires $regex".to_string(),
+            ));
+        } else {
+            // Standard operator processing
+            for (op_name, op_value) in condition_obj {
+                if op_name.starts_with('$') {
+                    if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
+                        if !operator.matches(value, op_value, None)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Unknown operator: {}",
+                            op_name
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(true)
+    }
+}
+
 impl OperatorMatcher for ElemMatchOperator {
     fn name(&self) -> &'static str {
         "$elemMatch"
@@ -170,6 +262,16 @@ impl OperatorMatcher for ElemMatchOperator {
         filter_value: &Value,
         _document: Option<&Document>,
     ) -> Result<bool> {
+        // Validate that filter_value is an object
+        let conditions = match filter_value {
+            Value::Object(obj) => obj,
+            _ => {
+                return Err(IronBaseError::InvalidQuery(
+                    "$elemMatch requires an object with query conditions".to_string(),
+                ))
+            }
+        };
+
         match doc_value {
             None => Ok(false),
             Some(Value::Array(arr)) => {
@@ -179,23 +281,31 @@ impl OperatorMatcher for ElemMatchOperator {
                         // OBJECT ELEMENT: Check fields within the object
                         let mut matches_all = true;
 
-                        if let Value::Object(conditions) = filter_value {
-                            for (key, value) in conditions {
+                        for (key, value) in conditions {
+                            if key.starts_with('$') {
+                                // This is a top-level operator applied to the object element itself
+                                // e.g., {$elemMatch: {$gt: 5}} on [{a:1}, {a:10}] doesn't make sense
+                                // but we should handle operators properly
+                                if let Some(operator) = OPERATOR_REGISTRY.get(key.as_str()) {
+                                    if !operator.matches(Some(elem), value, None)? {
+                                        matches_all = false;
+                                        break;
+                                    }
+                                } else {
+                                    return Err(IronBaseError::InvalidQuery(format!(
+                                        "Unknown operator: {}",
+                                        key
+                                    )));
+                                }
+                            } else {
+                                // Field-based condition
                                 let field_value = obj.get(key);
 
                                 // If condition has operators, evaluate them
                                 if let Value::Object(op_obj) = value {
-                                    for (op_name, op_value) in op_obj {
-                                        if op_name.starts_with('$') {
-                                            if let Some(operator) =
-                                                OPERATOR_REGISTRY.get(op_name.as_str())
-                                            {
-                                                if !operator.matches(field_value, op_value, None)? {
-                                                    matches_all = false;
-                                                    break;
-                                                }
-                                            }
-                                        }
+                                    if !Self::check_operators_match(op_obj, field_value)? {
+                                        matches_all = false;
+                                        break;
                                     }
                                 } else {
                                     // Direct equality
@@ -213,31 +323,23 @@ impl OperatorMatcher for ElemMatchOperator {
                     } else {
                         // SCALAR ELEMENT: Apply operators directly to the element value
                         // E.g., {scores: {$elemMatch: {$gt: 80, $lt: 85}}} with [75, 82, 90]
-                        if let Value::Object(conditions) = filter_value {
-                            let mut matches_all = true;
+                        let mut matches_all = true;
 
-                            for (op_name, op_value) in conditions {
-                                if op_name.starts_with('$') {
-                                    // Operator condition: apply directly to scalar
-                                    if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str())
-                                    {
-                                        if !operator.matches(Some(elem), op_value, None)? {
-                                            matches_all = false;
-                                            break;
-                                        }
-                                    }
-                                } else {
-                                    // Non-operator key on scalar - this doesn't make sense
-                                    // (e.g., {$elemMatch: {field: value}} on [1, 2, 3])
-                                    // Skip this element as it can't match field-based conditions
-                                    matches_all = false;
-                                    break;
-                                }
+                        // Check for any non-operator keys (field-based conditions on scalar)
+                        let has_field_conditions = conditions.keys().any(|k| !k.starts_with('$'));
+                        if has_field_conditions {
+                            // Can't apply field-based conditions to scalar
+                            // (e.g., {$elemMatch: {field: value}} on [1, 2, 3])
+                            matches_all = false;
+                        } else {
+                            // All keys are operators - apply them to the scalar
+                            if !Self::check_operators_match(conditions, Some(elem))? {
+                                matches_all = false;
                             }
+                        }
 
-                            if matches_all {
-                                return Ok(true);
-                            }
+                        if matches_all {
+                            return Ok(true);
                         }
                     }
                 }

@@ -120,7 +120,7 @@ proptest! {
         })).unwrap();
 
         // Invariant: AND is commutative - order doesn't matter
-        assert_eq!(query1.matches(&doc), query2.matches(&doc));
+        assert_eq!(query1.matches(&doc).unwrap(), query2.matches(&doc).unwrap());
     }
 }
 
@@ -148,7 +148,7 @@ proptest! {
         })).unwrap();
 
         // Invariant: OR is commutative
-        assert_eq!(query1.matches(&doc), query2.matches(&doc));
+        assert_eq!(query1.matches(&doc).unwrap(), query2.matches(&doc).unwrap());
     }
 }
 
@@ -258,8 +258,8 @@ proptest! {
         let lte_query = Query::from_json(&json!({"value": {"$lte": threshold}})).unwrap();
 
         // Invariant: $gt and $lte are inverses (exactly one should match, unless edge case)
-        let gt_match = gt_query.matches(&doc);
-        let lte_match = lte_query.matches(&doc);
+        let gt_match = gt_query.matches(&doc).unwrap();
+        let lte_match = lte_query.matches(&doc).unwrap();
 
         // One and only one should be true (unless value == threshold, then lte is true)
         if value == threshold {
@@ -285,7 +285,7 @@ proptest! {
             "value": {"$in": values}
         })).unwrap();
 
-        let matches = query.matches(&doc);
+        let matches = query.matches(&doc).unwrap();
         let expected = values.contains(&test_value);
 
         // Invariant: $in matches iff value is in array

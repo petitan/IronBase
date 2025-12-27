@@ -44,7 +44,7 @@ pub(crate) fn check_operator_match(
 ///
 /// This is used by $not and other operators that need to recursively evaluate conditions
 ///
-/// # Complexity: CC = 6
+/// # Complexity: CC = 8
 pub fn matches_filter_value(
     doc_value: Option<&Value>,
     filter_value: &Value,
@@ -52,6 +52,73 @@ pub fn matches_filter_value(
 ) -> Result<bool> {
     // If filter is an object with operators, evaluate them
     if let Value::Object(filter_obj) = filter_value {
+        // Special handling for $regex + $options combination
+        // MongoDB allows: { $not: { $regex: "pattern", $options: "i" } }
+        let has_regex = filter_obj.contains_key("$regex");
+        let has_options = filter_obj.contains_key("$options");
+
+        if has_regex && has_options {
+            // Handle $regex with $options as a single operation
+            let pattern = filter_obj
+                .get("$regex")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    IronBaseError::InvalidQuery("$regex requires a string pattern".to_string())
+                })?;
+            let options = filter_obj
+                .get("$options")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            // Check regex match on the document value
+            let regex_matches = match doc_value {
+                Some(Value::String(s)) => regex_match_with_options(s, pattern, options)?,
+                Some(Value::Array(arr)) => {
+                    let mut found = false;
+                    for v in arr {
+                        if let Value::String(s) = v {
+                            if regex_match_with_options(s, pattern, options)? {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                    found
+                }
+                _ => false,
+            };
+
+            if !regex_matches {
+                return Ok(false);
+            }
+
+            // Process remaining operators (excluding $regex and $options)
+            for (op_name, op_value) in filter_obj {
+                if op_name == "$regex" || op_name == "$options" {
+                    continue; // Already handled
+                }
+                if op_name.starts_with('$') {
+                    if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {
+                        if !operator.matches(doc_value, op_value, document)? {
+                            return Ok(false);
+                        }
+                    } else {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Unknown operator: {}",
+                            op_name
+                        )));
+                    }
+                }
+            }
+            return Ok(true);
+        } else if has_options && !has_regex {
+            // $options without $regex is an error
+            return Err(IronBaseError::InvalidQuery(
+                "$options requires $regex".to_string(),
+            ));
+        }
+
+        // Standard operator processing
         for (op_name, op_value) in filter_obj {
             if op_name.starts_with('$') {
                 // Look up operator in registry
