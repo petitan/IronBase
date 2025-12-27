@@ -53,7 +53,7 @@ impl OperationReplay {
                 let _ = storage.create_collection(collection);
 
                 // Extract document ID
-                let doc_id = Self::extract_doc_id(doc)?;
+                let doc_id = DocumentId::extract_from_value(doc)?;
 
                 // Write document using raw storage
                 let doc_json = serde_json::to_string(doc)
@@ -112,12 +112,7 @@ impl OperationReplay {
         }
     }
 
-    /// Extract DocumentId from a document Value
-    fn extract_doc_id(doc: &serde_json::Value) -> Result<DocumentId> {
-        DocumentId::try_from_value(doc).ok_or_else(|| {
-            IronBaseError::Serialization("Missing or invalid _id in document".into())
-        })
-    }
+    // NOTE: Use DocumentId::extract_from_value() for _id extraction
 }
 
 /// Statistics from operation replay
@@ -138,28 +133,28 @@ mod tests {
     #[test]
     fn test_extract_doc_id_int() {
         let doc = json!({"_id": 42, "name": "test"});
-        let id = OperationReplay::extract_doc_id(&doc).unwrap();
+        let id = DocumentId::extract_from_value(&doc).unwrap();
         assert!(matches!(id, DocumentId::Int(42)));
     }
 
     #[test]
     fn test_extract_doc_id_string() {
         let doc = json!({"_id": "my-id", "name": "test"});
-        let id = OperationReplay::extract_doc_id(&doc).unwrap();
+        let id = DocumentId::extract_from_value(&doc).unwrap();
         assert!(matches!(id, DocumentId::String(s) if s == "my-id"));
     }
 
     #[test]
     fn test_extract_doc_id_objectid() {
         let doc = json!({"_id": "507f1f77bcf86cd799439011", "name": "test"});
-        let id = OperationReplay::extract_doc_id(&doc).unwrap();
+        let id = DocumentId::extract_from_value(&doc).unwrap();
         assert!(matches!(id, DocumentId::ObjectId(s) if s == "507f1f77bcf86cd799439011"));
     }
 
     #[test]
     fn test_extract_doc_id_missing() {
         let doc = json!({"name": "test"});
-        let result = OperationReplay::extract_doc_id(&doc);
+        let result = DocumentId::extract_from_value(&doc);
         assert!(result.is_err());
     }
 

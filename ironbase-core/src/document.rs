@@ -57,6 +57,18 @@ impl DocumentId {
             _ => None,
         }
     }
+
+    /// Extract DocumentId from a JSON Value's _id field, returning Result
+    ///
+    /// Use this when missing/invalid _id should be an error.
+    /// For loops where skipping is preferred, use `try_from_value()`.
+    pub fn extract_from_value(doc: &Value) -> crate::error::Result<DocumentId> {
+        Self::try_from_value(doc).ok_or_else(|| {
+            crate::error::IronBaseError::InvalidQuery(
+                "Document missing or has invalid _id".to_string(),
+            )
+        })
+    }
 }
 
 impl Document {

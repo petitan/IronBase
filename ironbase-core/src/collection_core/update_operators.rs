@@ -3,6 +3,7 @@
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
+use crate::value_utils::compare_values;
 use serde_json::Value;
 use std::cmp::Ordering;
 
@@ -402,25 +403,8 @@ pub fn value_matches_condition(value: &Value, condition: &Value) -> Result<bool>
     Ok(value == condition)
 }
 
-/// Compare two JSON values for ordering
-/// BUG #6 fix: Use integer comparison when both values are integers to preserve precision
-fn compare_values(a: &Value, b: &Value) -> Option<Ordering> {
-    match (a, b) {
-        (Value::Number(n1), Value::Number(n2)) => {
-            // Try integer comparison first to preserve precision for large integers
-            if let (Some(i1), Some(i2)) = (n1.as_i64(), n2.as_i64()) {
-                return Some(i1.cmp(&i2));
-            }
-            // Fall back to float comparison
-            let f1 = n1.as_f64()?;
-            let f2 = n2.as_f64()?;
-            f1.partial_cmp(&f2)
-        }
-        (Value::String(s1), Value::String(s2)) => Some(s1.cmp(s2)),
-        (Value::Bool(b1), Value::Bool(b2)) => Some(b1.cmp(b2)),
-        _ => None,
-    }
-}
+// NOTE: compare_values is now imported from crate::value_utils
+// which has full precision handling for i64/u64/mixed/f64 comparisons
 
 #[cfg(test)]
 mod tests {

@@ -15,13 +15,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::collection_core::schema::CompiledSchema;
-use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
 use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
-use serde_json::Value;
 
 /// Convert transaction::IndexKey to index::IndexKey
 fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
@@ -36,15 +34,8 @@ fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::Ind
     }
 }
 
-/// Extract DocumentId from a JSON Value's _id field
-///
-/// Handles Int, String, and ObjectId (24-char hex string) formats.
-/// Returns error if _id is missing or has invalid type.
-fn extract_doc_id(doc: &Value) -> Result<DocumentId> {
-    DocumentId::try_from_value(doc).ok_or_else(|| {
-        crate::error::IronBaseError::InvalidQuery("Document missing _id".to_string())
-    })
-}
+// NOTE: Use DocumentId::extract_from_value() for _id extraction with Result
+// This avoids code duplication across modules.
 
 /// Pure Rust IronBase Database - language-independent
 ///

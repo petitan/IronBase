@@ -632,7 +632,6 @@ impl BPlusTree {
                 } else {
                     false
                 }
-                // Note: Full B+ tree implementation would handle underflow and merges here
             }
         }
     }

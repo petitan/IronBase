@@ -345,7 +345,7 @@ impl DatabaseCore<StorageEngine> {
                 }
                 let old_doc = old_doc.unwrap();
 
-                let doc_id = super::extract_doc_id(&old_doc)?;
+                let doc_id = DocumentId::extract_from_value(&old_doc)?;
 
                 let (matched, modified) = collection.update_one_raw(query, update)?;
 
@@ -448,7 +448,7 @@ impl DatabaseCore<StorageEngine> {
                 }
                 let old_doc = old_doc.unwrap();
 
-                let doc_id = super::extract_doc_id(&old_doc)?;
+                let doc_id = DocumentId::extract_from_value(&old_doc)?;
 
                 let deleted = collection.delete_one_raw(query)?;
 
