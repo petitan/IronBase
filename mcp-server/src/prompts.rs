@@ -1067,6 +1067,26 @@ Rhai is a lightweight scripting language for server-side operations. Scripts can
 | `db_count(coll, query)` | Count documents | `db_count("users", #{active: true})` |
 | `db_aggregate(coll, pipeline)` | Aggregation | `db_aggregate("sales", [#{`$group`: ...}])` |
 
+## Index Management Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `db_create_index(coll, field, unique)` | Create single-field index | `db_create_index("users", "email", true)` |
+| `db_create_compound_index(coll, fields, unique)` | Create compound index | `db_create_compound_index("orders", ["user_id", "date"], false)` |
+| `db_list_indexes(coll)` | List all indexes | `db_list_indexes("users")` |
+| `db_drop_index(coll, name)` | Drop index by name | `db_drop_index("users", "email_1")` |
+| `db_explain(coll, query)` | Explain query plan | `db_explain("users", #{age: #{`$gt`: 18}})` |
+| `db_distinct(coll, field, query)` | Get distinct values | `db_distinct("users", "city", #{active: true})` |
+
+## Search Functions
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `db_create_fuzzy_index(coll, field, algo, threshold)` | Create fuzzy index | `db_create_fuzzy_index("users", "name", "jaro_winkler", 0.8)` |
+| `db_fuzzy_search(coll, field, query, threshold)` | Fuzzy text search | `db_fuzzy_search("users", "name", "john", 0.7)` |
+| `db_create_fulltext_index(coll, field, lang)` | Create fulltext index | `db_create_fulltext_index("articles", "content", "english")` |
+| `db_fulltext_search(coll, field, query, limit)` | Fulltext search with TF-IDF | `db_fulltext_search("articles", "content", "database", 10)` |
+
 ## Helper Functions
 
 | Function | Description | Example |
@@ -1111,6 +1131,10 @@ if result.error != () {
 | `base64_encode(str)` | Encode string to base64 |
 | `base64_decode(b64)` | Decode base64 to string |
 | `print(msg)` | Log message (captured in result.logs) |
+| `uuid()` | Generate UUID v4 string |
+| `timestamp()` | Current Unix timestamp (seconds) |
+| `timestamp_ms()` | Current Unix timestamp (milliseconds) |
+| `now_iso()` | Current datetime as ISO 8601 string |
 
 ## Rhai Syntax Basics
 
