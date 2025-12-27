@@ -250,6 +250,14 @@ impl CollectionWrapper {
         coll_dispatch!(self, find_with_options, query, options)
     }
 
+    fn find_with_result(
+        &self,
+        query: &Value,
+        options: ironbase_core::FindOptions,
+    ) -> Result<ironbase_core::FindResult, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, find_with_result, query, options)
+    }
+
     fn find_one(&self, query: &Value) -> Result<Option<Value>, ironbase_core::IronBaseError> {
         coll_dispatch!(self, find_one, query)
     }
@@ -804,6 +812,77 @@ impl Collection {
         }
 
         Ok(py_list)
+    }
+
+    /// Find documents with total count for pagination.
+    ///
+    /// Returns a dict with 'documents' (list) and 'total' (int).
+    ///
+    /// Example:
+    ///     >>> result = coll.find_with_total({}, limit=10, skip=20)
+    ///     >>> print(f"Page: {len(result['documents'])} of {result['total']}")
+    #[pyo3(signature = (query=None, projection=None, sort=None, limit=None, skip=None))]
+    fn find_with_total<'py>(
+        &self,
+        py: Python<'py>,
+        query: Option<Bound<'_, PyDict>>,
+        projection: Option<Bound<'_, PyDict>>,
+        sort: Option<Bound<'_, PyList>>,
+        limit: Option<usize>,
+        skip: Option<usize>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        use ironbase_core::find_options::FindOptions;
+
+        let query_json = match query {
+            Some(q) => python_dict_to_json_value(py, &q)?,
+            None => serde_json::json!({}),
+        };
+
+        let mut options = FindOptions::new().with_include_total(true);
+
+        if let Some(proj) = projection {
+            let mut projection_map = HashMap::new();
+            for (key, value) in proj.iter() {
+                let field: String = key.extract()?;
+                let action: i32 = value.extract()?;
+                projection_map.insert(field, action);
+            }
+            options.projection = Some(projection_map);
+        }
+
+        if let Some(sort_list) = sort {
+            let mut sort_vec = Vec::new();
+            for item in sort_list.iter() {
+                let tuple = item.downcast::<PyTuple>()?;
+                let field: String = tuple.get_item(0)?.extract()?;
+                let direction: i32 = tuple.get_item(1)?.extract()?;
+                sort_vec.push((field, direction));
+            }
+            options.sort = Some(sort_vec);
+        }
+
+        options.limit = limit;
+        options.skip = skip;
+
+        let result = self
+            .core
+            .find_with_result(&query_json, options)
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+
+        let py_dict = PyDict::new(py);
+
+        // Convert documents to Python list
+        let py_list = PyList::empty(py);
+        for doc in result.documents {
+            let doc_dict = json_to_python_dict(py, &doc)?;
+            py_list.append(doc_dict)?;
+        }
+        py_dict.set_item("documents", py_list)?;
+
+        // Set total count
+        py_dict.set_item("total", result.total.unwrap_or(0))?;
+
+        Ok(py_dict)
     }
 
     /// Find one document

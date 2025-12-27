@@ -528,14 +528,7 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
 
-        // Get total count before limit/skip if requested
-        let total = if options.include_total {
-            Some(coll.count_documents(&query)? as usize)
-        } else {
-            None
-        };
-
-        // Convert to IronBase FindOptions - clean pass-through, no conversion needed
+        // Convert to IronBase FindOptions - now uses core's include_total
         let ironbase_options = ironbase_core::FindOptions {
             projection: options.projection.as_ref().and_then(|p| {
                 p.as_object().map(|obj| {
@@ -548,10 +541,15 @@ impl IronBaseAdapter {
             sort: options.sort,
             limit: options.limit,
             skip: options.skip,
+            include_total: options.include_total,
         };
 
-        let documents = coll.find_with_options(&query, ironbase_options)?;
-        Ok(FindResult { documents, total })
+        // Use core's find_with_result which handles count internally
+        let result = coll.find_with_result(&query, ironbase_options)?;
+        Ok(FindResult {
+            documents: result.documents,
+            total: result.total.map(|t| t as usize),
+        })
     }
 
     /// Find a single document (uses get_collection - no implicit creation)

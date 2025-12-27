@@ -1101,6 +1101,7 @@ fn test_find_with_projection() {
         sort: None,
         limit: None,
         skip: None,
+        include_total: false,
     };
 
     let results = collection.find_with_options(&json!({}), options).unwrap();
@@ -1123,6 +1124,7 @@ fn test_find_with_sort() {
         sort: Some(vec![("value".to_string(), 1)]), // ascending
         limit: None,
         skip: None,
+        include_total: false,
     };
 
     let results = collection.find_with_options(&json!({}), options).unwrap();
@@ -1145,6 +1147,7 @@ fn test_find_with_limit_skip() {
         sort: Some(vec![("value".to_string(), 1)]),
         limit: Some(5),
         skip: Some(10),
+        include_total: false,
     };
 
     let results = collection.find_with_options(&json!({}), options).unwrap();

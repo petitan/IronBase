@@ -23,6 +23,21 @@ pub struct FindOptions {
 
     /// Skip: number of documents to skip (for pagination)
     pub skip: Option<usize>,
+
+    /// Include total count of matching documents (ignoring limit/skip)
+    /// Useful for pagination where you need to know total pages
+    pub include_total: bool,
+}
+
+/// Result of find_with_options when include_total is true
+#[derive(Debug, Clone, Default)]
+pub struct FindResult {
+    /// Documents matching the query (respecting limit/skip)
+    pub documents: Vec<Value>,
+
+    /// Total count of documents matching the filter (ignoring limit/skip)
+    /// Only populated when FindOptions.include_total is true
+    pub total: Option<u64>,
 }
 
 impl FindOptions {
@@ -48,6 +63,28 @@ impl FindOptions {
     pub fn with_skip(mut self, skip: usize) -> Self {
         self.skip = Some(skip);
         self
+    }
+
+    /// Include total count of matching documents in the result
+    pub fn with_include_total(mut self, include: bool) -> Self {
+        self.include_total = include;
+        self
+    }
+}
+
+impl FindResult {
+    pub fn new(documents: Vec<Value>) -> Self {
+        Self {
+            documents,
+            total: None,
+        }
+    }
+
+    pub fn with_total(documents: Vec<Value>, total: u64) -> Self {
+        Self {
+            documents,
+            total: Some(total),
+        }
     }
 }
 

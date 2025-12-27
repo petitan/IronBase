@@ -73,7 +73,7 @@ pub use database::DatabaseCore;
 pub use document::{Document, DocumentId};
 pub use durability::DurabilityMode;
 pub use error::{IronBaseError, Result};
-pub use find_options::FindOptions;
+pub use find_options::{FindOptions, FindResult};
 pub use logging::{get_log_level, set_log_level, LogLevel};
 pub use query::Query;
 pub use query_cache::{CacheStats, QueryCache, QueryHash};

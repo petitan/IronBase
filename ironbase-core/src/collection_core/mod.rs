@@ -693,6 +693,44 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(docs)
     }
 
+    /// Find documents with options and optionally include total count
+    ///
+    /// Returns a `FindResult` containing documents and optional total count.
+    /// When `options.include_total` is true, also runs a count query to get
+    /// the total number of matching documents (ignoring limit/skip).
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::FindOptions;
+    ///
+    /// let options = FindOptions::new()
+    ///     .with_limit(10)
+    ///     .with_skip(20)
+    ///     .with_include_total(true);
+    ///
+    /// let result = collection.find_with_result(&json!({}), options)?;
+    /// println!("Page: {} of {} total", result.documents.len(), result.total.unwrap());
+    /// ```
+    pub fn find_with_result(
+        &self,
+        query_json: &Value,
+        options: crate::find_options::FindOptions,
+    ) -> Result<crate::find_options::FindResult> {
+        let include_total = options.include_total;
+
+        // Get documents with options
+        let documents = self.find_with_options(query_json, options)?;
+
+        // Get total count if requested
+        let total = if include_total {
+            Some(self.count_documents(query_json)?)
+        } else {
+            None
+        };
+
+        Ok(crate::find_options::FindResult { documents, total })
+    }
+
     /// Streaming cursor for large result sets
     ///
     /// Returns a cursor that lazily loads documents, allowing memory-efficient
