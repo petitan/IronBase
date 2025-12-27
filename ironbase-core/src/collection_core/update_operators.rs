@@ -166,12 +166,15 @@ fn apply_pull(document: &mut Document, fields: &Value) -> Result<bool> {
     let mut modified = false;
     for (field, condition) in field_values {
         if let Some(Value::Array(ref arr)) = document.get(field) {
-            // Filter out matching elements
-            let filtered: Vec<Value> = arr
-                .iter()
-                .filter(|item| !value_matches_condition(item, condition))
-                .cloned()
-                .collect();
+            // Filter out matching elements, propagating any errors from condition evaluation
+            let mut filtered: Vec<Value> = Vec::with_capacity(arr.len());
+            for item in arr {
+                // Check if item matches condition - if error, propagate it
+                let matches = value_matches_condition(item, condition)?;
+                if !matches {
+                    filtered.push(item.clone());
+                }
+            }
 
             if filtered.len() != arr.len() {
                 document.set_nested(field, Value::Array(filtered));
@@ -337,7 +340,11 @@ fn apply_slice(array: &mut Vec<Value>, slice_val: i64) {
 /// Supports:
 /// - Direct equality: `{"tags": "obsolete"}` removes "obsolete"
 /// - Query operators: `{"score": {"$lt": 5}}` removes items < 5
-pub fn value_matches_condition(value: &Value, condition: &Value) -> bool {
+///
+/// # Errors
+/// Returns an error if an unknown query operator is used.
+/// This prevents silent failures where typos like `$gtt` are ignored.
+pub fn value_matches_condition(value: &Value, condition: &Value) -> Result<bool> {
     // If condition is an object with operators, evaluate them
     if let Value::Object(ref cond_obj) = condition {
         // Check if it contains query operators
@@ -375,19 +382,24 @@ pub fn value_matches_condition(value: &Value, condition: &Value) -> bool {
                             true
                         }
                     }
-                    _ => false, // Unknown operator: treat as no match (safe default)
+                    _ => {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "$pull: unknown query operator '{}'. Supported: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin",
+                            op
+                        )));
+                    }
                 };
 
                 if !matches {
-                    return false;
+                    return Ok(false);
                 }
             }
-            return true; // All operators matched
+            return Ok(true); // All operators matched
         }
     }
 
     // Direct equality comparison
-    value == condition
+    Ok(value == condition)
 }
 
 /// Compare two JSON values for ordering
@@ -517,15 +529,55 @@ mod tests {
     #[test]
     fn test_value_matches_condition() {
         // Direct equality
-        assert!(value_matches_condition(&json!(5), &json!(5)));
-        assert!(!value_matches_condition(&json!(5), &json!(6)));
+        assert!(value_matches_condition(&json!(5), &json!(5)).unwrap());
+        assert!(!value_matches_condition(&json!(5), &json!(6)).unwrap());
 
         // Query operators
-        assert!(value_matches_condition(&json!(5), &json!({"$gt": 3})));
-        assert!(!value_matches_condition(&json!(5), &json!({"$gt": 10})));
-        assert!(value_matches_condition(
-            &json!(5),
-            &json!({"$in": [1, 5, 10]})
-        ));
+        assert!(value_matches_condition(&json!(5), &json!({"$gt": 3})).unwrap());
+        assert!(!value_matches_condition(&json!(5), &json!({"$gt": 10})).unwrap());
+        assert!(value_matches_condition(&json!(5), &json!({"$in": [1, 5, 10]})).unwrap());
+    }
+
+    #[test]
+    fn test_value_matches_condition_unknown_operator_error() {
+        // Unknown operators should return an error, not silently fail
+        let result = value_matches_condition(&json!(5), &json!({"$unknown": 5}));
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unknown query operator"),
+            "Error should mention unknown operator: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("$unknown"),
+            "Error should include the operator name: {}",
+            err_msg
+        );
+
+        // Typo in operator name should also error
+        let result2 = value_matches_condition(&json!(5), &json!({"$gtt": 3})); // typo: $gtt instead of $gt
+        assert!(result2.is_err());
+
+        // $exists is not supported in $pull context
+        let result3 = value_matches_condition(&json!({"a": 1}), &json!({"$exists": true}));
+        assert!(result3.is_err());
+
+        // $regex is not supported in $pull context
+        let result4 = value_matches_condition(&json!("hello"), &json!({"$regex": "hel"}));
+        assert!(result4.is_err());
+    }
+
+    #[test]
+    fn test_pull_with_unknown_operator_returns_error() {
+        let mut doc = make_doc(json!({"scores": [1, 5, 10, 15]}));
+
+        // Using unknown operator in $pull should fail
+        let update = json!({"$pull": {"scores": {"$unknown": 5}}});
+        let result = apply_update_operators(&mut doc, &update);
+        assert!(result.is_err());
+
+        // Document should be unchanged
+        assert_eq!(doc.get("scores"), Some(&json!([1, 5, 10, 15])));
     }
 }
