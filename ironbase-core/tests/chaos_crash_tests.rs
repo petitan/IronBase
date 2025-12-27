@@ -593,7 +593,8 @@ fn test_checkpoint_clears_wal() {
         .unwrap();
 
         storage.commit_transaction(&mut tx).unwrap();
-        storage.flush().unwrap(); // This should clear WAL
+        storage.flush().unwrap();
+        storage.checkpoint().unwrap(); // Explicitly clear WAL
     }
 
     // Verify WAL is empty

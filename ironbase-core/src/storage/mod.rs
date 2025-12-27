@@ -170,6 +170,8 @@ pub struct StorageEngine {
     /// Separate lock file to allow other processes to read the DB during backup
     /// On Windows, file locks are mandatory and prevent ALL access including reads
     lock_file: File,
+    /// Counter for WAL operations since last clear (optimization to reduce fsync)
+    wal_ops_since_clear: u32,
 }
 
 impl StorageEngine {
@@ -254,6 +256,7 @@ impl StorageEngine {
             wal,
             metadata_dirty: false,
             lock_file,
+            wal_ops_since_clear: 0,
         };
 
         // If metadata was corrupted, attempt recovery
@@ -375,7 +378,12 @@ impl StorageEngine {
 
         // 3. Clear WAL AFTER metadata is safely on disk
         // This prevents WAL from growing indefinitely in long-running processes
-        self.wal.clear()?;
+        // PERF: Only clear every N operations to reduce fsync overhead
+        self.wal_ops_since_clear += 1;
+        if self.wal_ops_since_clear >= 100 {
+            self.wal.clear()?;
+            self.wal_ops_since_clear = 0;
+        }
 
         Ok(())
     }
@@ -396,6 +404,7 @@ impl StorageEngine {
 
         // Then clear the WAL (all operations already in main file)
         self.wal.clear()?;
+        self.wal_ops_since_clear = 0;
         Ok(())
     }
 
@@ -1261,6 +1270,8 @@ impl StorageEngine {
 impl Drop for StorageEngine {
     fn drop(&mut self) {
         let _ = self.flush();
+        // Clear WAL on close to keep it clean for next open
+        let _ = self.checkpoint();
         // Explicitly unlock the lock file to ensure other processes can access the database
         // This is more reliable than relying on File::drop() to release the flock
         let _ = self.lock_file.unlock();
