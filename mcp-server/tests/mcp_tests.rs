@@ -101,8 +101,8 @@ fn test_get_prompts_list_returns_prompts() {
 fn test_prompts_list_has_expected_count() {
     let result = get_prompts_list();
     let prompts = result.get("prompts").unwrap().as_array().unwrap();
-    // Expected: 12 prompts (including rhai-scripting, fuzzy-search, and best-practices)
-    assert_eq!(prompts.len(), 12);
+    // Expected: 17 prompts (including fulltext-search, acl-guide, database-admin, security-guide, listener-config)
+    assert_eq!(prompts.len(), 17);
 }
 
 #[test]
@@ -119,6 +119,11 @@ fn test_prompts_list_contains_expected_prompts() {
     assert!(prompt_names.contains(&"aggregation-guide"));
     assert!(prompt_names.contains(&"query-examples"));
     assert!(prompt_names.contains(&"date-query"));
+    assert!(prompt_names.contains(&"fulltext-search"));
+    assert!(prompt_names.contains(&"acl-guide"));
+    assert!(prompt_names.contains(&"database-admin"));
+    assert!(prompt_names.contains(&"security-guide"));
+    assert!(prompt_names.contains(&"listener-config"));
 }
 
 // ============================================================
@@ -153,6 +158,67 @@ fn test_get_prompt_content_discover_schema_with_args() {
     });
     let result = get_prompt_content("discover-schema", &args);
     assert!(result.is_some());
+}
+
+#[test]
+fn test_get_prompt_content_fulltext_search() {
+    let result = get_prompt_content("fulltext-search", &json!({}));
+    assert!(result.is_some());
+    let content = result.unwrap();
+    assert!(content.get("messages").is_some());
+    // Verify content mentions TF-IDF
+    let text = content["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("TF-IDF"));
+}
+
+#[test]
+fn test_get_prompt_content_fulltext_search_with_language() {
+    let args = json!({"language": "english"});
+    let result = get_prompt_content("fulltext-search", &args);
+    assert!(result.is_some());
+    let content = result.unwrap();
+    let text = content["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("english"));
+}
+
+#[test]
+fn test_get_prompt_content_acl_guide() {
+    let result = get_prompt_content("acl-guide", &json!({}));
+    assert!(result.is_some());
+    let content = result.unwrap();
+    let text = content["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("interface:localhost"));
+    assert!(text.contains("permissions"));
+}
+
+#[test]
+fn test_get_prompt_content_database_admin() {
+    let result = get_prompt_content("database-admin", &json!({}));
+    assert!(result.is_some());
+    let content = result.unwrap();
+    let text = content["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("db_stats"));
+    assert!(text.contains("compact"));
+}
+
+#[test]
+fn test_get_prompt_content_security_guide() {
+    let result = get_prompt_content("security-guide", &json!({}));
+    assert!(result.is_some());
+    let content = result.unwrap();
+    let text = content["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("API Key"));
+    assert!(text.contains("TLS"));
+}
+
+#[test]
+fn test_get_prompt_content_listener_config() {
+    let result = get_prompt_content("listener-config", &json!({}));
+    assert!(result.is_some());
+    let content = result.unwrap();
+    let text = content["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("listener_add"));
+    assert!(text.contains("HTTPS"));
 }
 
 // ============================================================
