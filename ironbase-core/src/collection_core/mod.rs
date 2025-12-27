@@ -1630,22 +1630,31 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             indexes.create_fuzzy_index(index_name.clone(), field.clone(), algorithm, threshold)?;
         }
 
-        // Step 2: Scan existing documents (requires storage lock internally)
-        let docs_by_id = self.scan_documents_via_catalog()?;
+        // Step 2 & 3: Scan documents IN BATCHES and populate index
+        // This is memory-efficient for large collections
+        const INDEX_BUILD_BATCH_SIZE: usize = 100;
 
-        // Step 3: Populate index with existing documents AND get metadata for persistence
-        let metadata = {
-            let mut indexes = self.indexes.write();
-            if let Some(index) = indexes.get_fuzzy_index_mut(&index_name) {
-                for (doc_id, doc) in &docs_by_id {
-                    if let Some(value) = get_nested_value(doc, &field) {
+        let field_clone = field.clone();
+        let index_name_clone = index_name.clone();
+        let indexes_ref = self.indexes.clone();
+
+        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            let mut indexes = indexes_ref.write();
+            if let Some(index) = indexes.get_fuzzy_index_mut(&index_name_clone) {
+                for (doc_id, doc) in &batch_docs {
+                    if let Some(value) = get_nested_value(doc, &field_clone) {
                         if let Some(s) = value.as_str() {
                             index.insert(s, doc_id.clone());
                         }
                     }
                 }
             }
-            // Get metadata while we still have the lock (avoids extra read lock)
+            Ok(())
+        })?;
+
+        // Step 4: Get metadata for persistence
+        let metadata = {
+            let indexes = self.indexes.read();
             indexes
                 .get_fuzzy_index(&index_name)
                 .map(|idx| idx.metadata.clone())
@@ -1768,22 +1777,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             )?;
         }
 
-        // Step 2: Scan existing documents (requires storage lock internally)
-        let docs_by_id = self.scan_documents_via_catalog()?;
+        // Step 2 & 3: Scan documents IN BATCHES and populate index
+        // This is memory-efficient for large collections (e.g., 10GB+ email databases)
+        // Each batch is processed and then dropped before loading the next batch
+        const INDEX_BUILD_BATCH_SIZE: usize = 100;
 
-        // Step 3: Populate index with existing documents AND get metadata for persistence
-        let metadata = {
-            let mut indexes = self.indexes.write();
-            if let Some(index) = indexes.get_fulltext_index_mut(&index_name) {
-                for (doc_id, doc) in &docs_by_id {
-                    if let Some(value) = get_nested_value(doc, &field) {
+        let field_clone = field.clone();
+        let index_name_clone = index_name.clone();
+        let indexes_ref = self.indexes.clone();
+
+        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            let mut indexes = indexes_ref.write();
+            if let Some(index) = indexes.get_fulltext_index_mut(&index_name_clone) {
+                for (doc_id, doc) in &batch_docs {
+                    if let Some(value) = get_nested_value(doc, &field_clone) {
                         if let Some(s) = value.as_str() {
                             index.insert(doc_id, s);
                         }
                     }
                 }
             }
-            // Get metadata while we still have the lock (avoids extra read lock)
+            Ok(())
+        })?;
+
+        // Step 4: Get metadata for persistence
+        let metadata = {
+            let indexes = self.indexes.read();
             indexes
                 .get_fulltext_index(&index_name)
                 .map(|i| i.metadata())
@@ -2290,6 +2309,89 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         Ok(docs_by_id)
+    }
+
+    /// Scan documents in batches for memory-efficient processing
+    ///
+    /// This is designed for operations that need to process ALL documents
+    /// but want to control memory usage (e.g., fulltext index building).
+    ///
+    /// # Arguments
+    /// * `batch_size` - Number of documents to load per batch
+    /// * `callback` - Called for each batch with (batch_number, documents)
+    ///
+    /// # Returns
+    /// Total number of documents processed
+    fn scan_documents_in_batches<F>(&self, batch_size: usize, mut callback: F) -> Result<usize>
+    where
+        F: FnMut(usize, HashMap<DocumentId, Value>) -> Result<()>,
+    {
+        // Step 1: Get all document offsets (hold lock briefly)
+        let sorted_offsets: Vec<(DocumentId, u64)> = {
+            let storage = self.storage.read();
+            let meta = storage
+                .get_collection_meta(&self.name)
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+            let mut offsets: Vec<(DocumentId, u64)> = meta
+                .document_catalog
+                .iter()
+                .map(|(id, &offset)| (id.clone(), offset))
+                .collect();
+            // Sort by offset for sequential disk reads
+            offsets.sort_by_key(|(_, offset)| *offset);
+            offsets
+        }; // storage lock released here
+
+        let total_docs = sorted_offsets.len();
+        let mut processed = 0;
+        let mut batch_num = 0;
+
+        // Step 2: Process in batches, releasing storage lock between batches
+        for chunk in sorted_offsets.chunks(batch_size) {
+            // Read raw bytes from disk (hold storage lock briefly)
+            let raw_batch: Vec<(DocumentId, Vec<u8>)> = {
+                let mut storage = self.storage.write();
+                chunk
+                    .iter()
+                    .filter_map(|(doc_id, offset)| {
+                        storage
+                            .read_data(*offset)
+                            .ok()
+                            .map(|bytes| (doc_id.clone(), bytes))
+                    })
+                    .collect()
+            }; // storage lock released here
+
+            // Deserialize and filter (no lock needed)
+            let mut batch_docs: HashMap<DocumentId, Value> =
+                HashMap::with_capacity(raw_batch.len());
+            for (doc_id, bytes) in raw_batch {
+                if let Ok(doc) = serde_json::from_slice::<Value>(&bytes) {
+                    // Skip tombstones
+                    if !doc
+                        .get("_tombstone")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        batch_docs.insert(doc_id, doc);
+                    }
+                }
+            }
+
+            let batch_count = batch_docs.len();
+            callback(batch_num, batch_docs)?;
+            processed += batch_count;
+            batch_num += 1;
+
+            log_debug!(
+                "scan_documents_in_batches: processed batch {} ({}/{} docs)",
+                batch_num,
+                processed,
+                total_docs
+            );
+        }
+
+        Ok(processed)
     }
 
     /// 🚀 OPTIMIZED: Scan documents with early termination support
