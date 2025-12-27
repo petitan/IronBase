@@ -8,13 +8,373 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ironbase_core::{
-    index::FuzzyAlgorithm, CollectionCore, DatabaseCore, DocumentId, DurabilityMode, StorageEngine,
+    index::FuzzyAlgorithm, storage::MemoryStorage, CollectionCore, DatabaseCore, DocumentId,
+    DurabilityMode, StorageEngine,
 };
+
+/// Database wrapper enum to support both file and memory storage
+#[derive(Clone)]
+enum DatabaseWrapper {
+    File(Arc<DatabaseCore<StorageEngine>>),
+    Memory(Arc<DatabaseCore<MemoryStorage>>),
+}
+
+/// Collection wrapper enum
+enum CollectionWrapper {
+    File(CollectionCore<StorageEngine>),
+    Memory(CollectionCore<MemoryStorage>),
+}
+
+// Macro to reduce boilerplate for DatabaseWrapper methods
+macro_rules! db_dispatch {
+    ($self:expr, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            DatabaseWrapper::File(db) => db.$method($($arg),*),
+            DatabaseWrapper::Memory(db) => db.$method($($arg),*),
+        }
+    };
+}
+
+// Macro to reduce boilerplate for CollectionWrapper methods
+macro_rules! coll_dispatch {
+    ($self:expr, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            CollectionWrapper::File(c) => c.$method($($arg),*),
+            CollectionWrapper::Memory(c) => c.$method($($arg),*),
+        }
+    };
+}
+
+impl DatabaseWrapper {
+    fn list_collections(&self) -> Vec<String> {
+        db_dispatch!(self, list_collections)
+    }
+
+    fn path(&self) -> String {
+        match self {
+            DatabaseWrapper::File(db) => db.path().to_string(),
+            DatabaseWrapper::Memory(_) => ":memory:".to_string(),
+        }
+    }
+
+    fn collection(&self, name: &str) -> Result<CollectionWrapper, ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.collection(name).map(CollectionWrapper::File),
+            DatabaseWrapper::Memory(db) => db.collection(name).map(CollectionWrapper::Memory),
+        }
+    }
+
+    fn set_collection_schema(
+        &self,
+        name: &str,
+        schema: Option<Value>,
+    ) -> Result<(), ironbase_core::IronBaseError> {
+        db_dispatch!(self, set_collection_schema, name, schema)
+    }
+
+    fn drop_collection(&self, name: &str) -> Result<(), ironbase_core::IronBaseError> {
+        db_dispatch!(self, drop_collection, name)
+    }
+
+    fn close(&self) -> Result<(), ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.close(),
+            DatabaseWrapper::Memory(_) => Ok(()), // No-op for memory storage
+        }
+    }
+
+    fn checkpoint(&self) -> Result<(), ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.checkpoint(),
+            DatabaseWrapper::Memory(_) => Ok(()), // No-op for memory storage
+        }
+    }
+
+    fn stats(&self) -> Value {
+        match self {
+            DatabaseWrapper::File(db) => db.stats(),
+            DatabaseWrapper::Memory(db) => {
+                // Basic stats for memory storage
+                serde_json::json!({
+                    "storage": "memory",
+                    "collections": db.list_collections()
+                })
+            }
+        }
+    }
+
+    fn compact(&self) -> Result<ironbase_core::CompactionStats, ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.compact(),
+            DatabaseWrapper::Memory(_) => Ok(ironbase_core::CompactionStats::default()),
+        }
+    }
+
+    fn begin_transaction(&self) -> u64 {
+        db_dispatch!(self, begin_transaction)
+    }
+
+    fn commit_transaction(&self, tx_id: u64) -> Result<(), ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.commit_transaction(tx_id),
+            DatabaseWrapper::Memory(_) => Err(ironbase_core::IronBaseError::OperationNotAllowed(
+                "Transactions are not supported for in-memory databases".to_string(),
+            )),
+        }
+    }
+
+    fn rollback_transaction(&self, tx_id: u64) -> Result<(), ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.rollback_transaction(tx_id),
+            DatabaseWrapper::Memory(_) => Err(ironbase_core::IronBaseError::OperationNotAllowed(
+                "Transactions are not supported for in-memory databases".to_string(),
+            )),
+        }
+    }
+
+    fn insert_one(
+        &self,
+        collection: &str,
+        doc: HashMap<String, Value>,
+    ) -> Result<DocumentId, ironbase_core::IronBaseError> {
+        db_dispatch!(self, insert_one, collection, doc)
+    }
+
+    fn insert_many(
+        &self,
+        collection: &str,
+        docs: Vec<HashMap<String, Value>>,
+    ) -> Result<Vec<DocumentId>, ironbase_core::IronBaseError> {
+        db_dispatch!(self, insert_many, collection, docs)
+    }
+
+    fn update_one(
+        &self,
+        collection: &str,
+        query: &Value,
+        update: &Value,
+    ) -> Result<(u64, u64), ironbase_core::IronBaseError> {
+        db_dispatch!(self, update_one, collection, query, update)
+    }
+
+    fn update_many(
+        &self,
+        collection: &str,
+        query: &Value,
+        update: &Value,
+    ) -> Result<(u64, u64), ironbase_core::IronBaseError> {
+        db_dispatch!(self, update_many, collection, query, update)
+    }
+
+    fn delete_one(
+        &self,
+        collection: &str,
+        query: &Value,
+    ) -> Result<u64, ironbase_core::IronBaseError> {
+        db_dispatch!(self, delete_one, collection, query)
+    }
+
+    fn delete_many(
+        &self,
+        collection: &str,
+        query: &Value,
+    ) -> Result<u64, ironbase_core::IronBaseError> {
+        db_dispatch!(self, delete_many, collection, query)
+    }
+
+    fn insert_one_tx(
+        &self,
+        collection: &str,
+        doc: HashMap<String, Value>,
+        tx_id: u64,
+    ) -> Result<DocumentId, ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.insert_one_tx(collection, doc, tx_id),
+            DatabaseWrapper::Memory(_) => Err(ironbase_core::IronBaseError::OperationNotAllowed(
+                "Transactions are not supported for in-memory databases".to_string(),
+            )),
+        }
+    }
+
+    fn update_one_tx(
+        &self,
+        collection: &str,
+        query: &Value,
+        update: Value,
+        tx_id: u64,
+    ) -> Result<(u64, u64), ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.update_one_tx(collection, query, update, tx_id),
+            DatabaseWrapper::Memory(_) => Err(ironbase_core::IronBaseError::OperationNotAllowed(
+                "Transactions are not supported for in-memory databases".to_string(),
+            )),
+        }
+    }
+
+    fn delete_one_tx(
+        &self,
+        collection: &str,
+        query: &Value,
+        tx_id: u64,
+    ) -> Result<u64, ironbase_core::IronBaseError> {
+        match self {
+            DatabaseWrapper::File(db) => db.delete_one_tx(collection, query, tx_id),
+            DatabaseWrapper::Memory(_) => Err(ironbase_core::IronBaseError::OperationNotAllowed(
+                "Transactions are not supported for in-memory databases".to_string(),
+            )),
+        }
+    }
+}
+
+impl CollectionWrapper {
+    fn name(&self) -> &str {
+        match self {
+            CollectionWrapper::File(c) => &c.name,
+            CollectionWrapper::Memory(c) => &c.name,
+        }
+    }
+
+    fn set_schema(&self, schema: Option<Value>) -> Result<(), ironbase_core::IronBaseError> {
+        coll_dispatch!(self, set_schema, schema)
+    }
+
+    fn get_schema(&self) -> Result<Option<Value>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, get_schema)
+    }
+
+    fn find_with_options(
+        &self,
+        query: &Value,
+        options: ironbase_core::FindOptions,
+    ) -> Result<Vec<Value>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, find_with_options, query, options)
+    }
+
+    fn find_one(&self, query: &Value) -> Result<Option<Value>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, find_one, query)
+    }
+
+    fn count_documents(&self, query: &Value) -> Result<u64, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, count_documents, query)
+    }
+
+    fn distinct(
+        &self,
+        field: &str,
+        query: &Value,
+    ) -> Result<Vec<Value>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, distinct, field, query)
+    }
+
+    fn create_index(
+        &self,
+        field: String,
+        unique: bool,
+    ) -> Result<String, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, create_index, field, unique)
+    }
+
+    fn create_compound_index(
+        &self,
+        fields: Vec<String>,
+        unique: bool,
+    ) -> Result<String, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, create_compound_index, fields, unique)
+    }
+
+    fn drop_index(&self, name: &str) -> Result<(), ironbase_core::IronBaseError> {
+        coll_dispatch!(self, drop_index, name)
+    }
+
+    fn list_indexes(&self) -> Result<Vec<String>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, list_indexes)
+    }
+
+    fn create_fuzzy_index(
+        &self,
+        field: String,
+        algo: FuzzyAlgorithm,
+        threshold: f64,
+    ) -> Result<String, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, create_fuzzy_index, field, algo, threshold)
+    }
+
+    fn fuzzy_search(
+        &self,
+        field: &str,
+        query: &str,
+        threshold: Option<f64>,
+        algo: Option<FuzzyAlgorithm>,
+    ) -> Result<Vec<(Value, f64)>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, fuzzy_search, field, query, threshold, algo)
+    }
+
+    fn create_fulltext_index(
+        &self,
+        field: String,
+        language: &str,
+        min_word_length: Option<usize>,
+        accent_folding: Option<bool>,
+    ) -> Result<String, ironbase_core::IronBaseError> {
+        coll_dispatch!(
+            self,
+            create_fulltext_index,
+            field,
+            language,
+            min_word_length,
+            accent_folding
+        )
+    }
+
+    fn fulltext_search(
+        &self,
+        field: &str,
+        query: &str,
+        limit: Option<usize>,
+        skip: Option<usize>,
+        min_score: Option<f64>,
+        projection: Option<HashMap<String, i32>>,
+    ) -> Result<Vec<(Value, f64, Vec<String>)>, ironbase_core::IronBaseError> {
+        coll_dispatch!(
+            self,
+            fulltext_search,
+            field,
+            query,
+            limit,
+            skip,
+            min_score,
+            projection
+        )
+    }
+
+    fn list_fulltext_indexes(
+        &self,
+    ) -> Result<Vec<ironbase_core::fulltext::FulltextIndexMetadata>, ironbase_core::IronBaseError>
+    {
+        coll_dispatch!(self, list_fulltext_indexes)
+    }
+
+    fn explain(&self, query: &Value) -> Result<Value, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, explain, query)
+    }
+
+    fn find_with_hint(
+        &self,
+        query: &Value,
+        hint: &str,
+    ) -> Result<Vec<Value>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, find_with_hint, query, hint)
+    }
+
+    fn aggregate(&self, pipeline: &Value) -> Result<Vec<Value>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, aggregate, pipeline)
+    }
+}
 
 /// IronBase Database - Python wrapper
 #[pyclass]
 pub struct IronBase {
-    db: Arc<DatabaseCore<StorageEngine>>,
+    db: DatabaseWrapper,
 }
 
 #[pymethods]
@@ -49,19 +409,40 @@ impl IronBase {
         let db = DatabaseCore::open_with_durability(&path, mode)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
 
-        Ok(IronBase { db: Arc::new(db) })
+        Ok(IronBase {
+            db: DatabaseWrapper::File(Arc::new(db)),
+        })
+    }
+
+    /// Create an in-memory database (10-100x faster, no persistence)
+    ///
+    /// Use this for testing and temporary data. Data is lost when the database
+    /// is closed or when the Python process exits.
+    ///
+    /// Example:
+    ///     >>> db = IronBase.open_memory()
+    ///     >>> coll = db.collection("test")
+    ///     >>> coll.insert_one({"name": "Alice"})
+    #[staticmethod]
+    fn open_memory() -> PyResult<Self> {
+        let db = DatabaseCore::<MemoryStorage>::open_memory()
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+
+        Ok(IronBase {
+            db: DatabaseWrapper::Memory(Arc::new(db)),
+        })
     }
 
     /// Get or create a collection
     fn collection(&self, name: String) -> PyResult<Collection> {
-        let coll_core = self
+        let coll_wrapper = self
             .db
             .collection(&name)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
 
         Ok(Collection {
-            core: coll_core,
-            db: Arc::clone(&self.db),
+            core: coll_wrapper,
+            db: self.db.clone(),
             name: name.clone(),
         })
     }
@@ -117,6 +498,11 @@ impl IronBase {
         Ok(serde_json::to_string_pretty(&self.db.stats()).unwrap())
     }
 
+    /// Check if database is in-memory
+    fn is_memory(&self) -> bool {
+        matches!(self.db, DatabaseWrapper::Memory(_))
+    }
+
     /// Set global log level
     #[staticmethod]
     fn set_log_level(level: String) -> PyResult<()> {
@@ -159,6 +545,14 @@ impl IronBase {
 
     fn __repr__(&self) -> String {
         format!("IronBase('{}')", self.db.path())
+    }
+
+    fn __str__(&self) -> String {
+        if self.is_memory() {
+            "IronBase(:memory:)".to_string()
+        } else {
+            format!("IronBase('{}')", self.db.path())
+        }
     }
 
     // ========== ACD TRANSACTION API ==========
@@ -258,8 +652,8 @@ impl IronBase {
 /// Collection wrapper
 #[pyclass]
 pub struct Collection {
-    core: CollectionCore<StorageEngine>,
-    db: Arc<DatabaseCore<StorageEngine>>,
+    core: CollectionWrapper,
+    db: DatabaseWrapper,
     name: String,
 }
 
@@ -901,7 +1295,7 @@ impl Collection {
 
         // Don't load documents yet - lazy loading on iteration
         Ok(Cursor {
-            db: Arc::clone(&self.db),
+            db: self.db.clone(),
             collection_name: self.name.clone(),
             query: query_json,
             position: 0,
@@ -914,7 +1308,7 @@ impl Collection {
     }
 
     fn __repr__(&self) -> String {
-        format!("Collection('{}')", self.core.name)
+        format!("Collection('{}')", self.core.name())
     }
 }
 
@@ -924,7 +1318,7 @@ impl Collection {
 /// This allows processing millions of documents without memory exhaustion.
 #[pyclass]
 pub struct Cursor {
-    db: Arc<DatabaseCore<StorageEngine>>,
+    db: DatabaseWrapper,
     collection_name: String,
     query: Value,
     position: usize, // Global position (skip offset for DB query)

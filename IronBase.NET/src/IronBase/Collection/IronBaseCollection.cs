@@ -228,6 +228,71 @@ namespace IronBase
             }
         }
 
+        /// <summary>
+        /// Find documents with options and optionally include total count for pagination.
+        /// </summary>
+        /// <param name="filter">Query filter</param>
+        /// <param name="options">Find options (use IncludeTotal = true to get total count)</param>
+        /// <returns>FindResult with Documents and optional Total count</returns>
+        /// <example>
+        /// // Paginated query with total count
+        /// var options = new FindOptions { Limit = 10, Skip = 20, IncludeTotal = true };
+        /// var result = collection.FindWithTotal(new FilterDefinition&lt;User&gt;("{}"), options);
+        /// Console.WriteLine($"Showing {result.Documents.Count} of {result.Total} total");
+        /// </example>
+        public FindResult<T> FindWithTotal(FilterDefinition<T> filter, FindOptions options)
+        {
+            var filterJson = filter?.ToJson() ?? "{}";
+            var optionsJson = options?.ToJson() ?? "{}";
+
+            var result = new FindResult<T>();
+
+            unsafe
+            {
+                fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
+                fixed (byte* optionsPtr = NativeHelper.ToUtf8(optionsJson))
+                {
+                    var resultPtr = NativeMethods.ironbase_find_with_options(
+                        (CollectionHandle*)_handle,
+                        filterPtr,
+                        optionsPtr
+                    );
+
+                    if (resultPtr == null)
+                    {
+                        var error = NativeHelper.GetLastError();
+                        if (!string.IsNullOrEmpty(error))
+                            throw new IronBaseQueryException(error);
+                        return result;
+                    }
+
+                    var json = NativeHelper.PtrToStringUtf8AndFree(resultPtr);
+                    if (!string.IsNullOrEmpty(json) && json != "[]")
+                    {
+                        result.Documents = JsonSerializer.Deserialize<List<T>>(json) ?? new List<T>();
+                    }
+                }
+
+                // If IncludeTotal is requested, run a separate count query
+                if (options?.IncludeTotal == true)
+                {
+                    fixed (byte* filterPtr = NativeHelper.ToUtf8(filterJson))
+                    {
+                        ulong count;
+                        int countResult = NativeMethods.ironbase_count_documents(
+                            (CollectionHandle*)_handle,
+                            filterPtr,
+                            &count
+                        );
+                        NativeHelper.ThrowIfError(countResult);
+                        result.Total = (long)count;
+                    }
+                }
+            }
+
+            return result;
+        }
+
         // ============== UPDATE ==============
 
         /// <summary>
@@ -841,6 +906,12 @@ namespace IronBase
         public int? Limit { get; set; }
         public int? Skip { get; set; }
 
+        /// <summary>
+        /// If true, FindWithTotal will also return the total count of matching documents.
+        /// Useful for pagination where you need to know total pages.
+        /// </summary>
+        public bool IncludeTotal { get; set; }
+
         public string ToJson()
         {
             var options = new Dictionary<string, object?>();
@@ -864,5 +935,22 @@ namespace IronBase
 
             return JsonSerializer.Serialize(options);
         }
+    }
+
+    /// <summary>
+    /// Result of find with total count (for pagination).
+    /// </summary>
+    public class FindResult<T>
+    {
+        /// <summary>
+        /// Documents matching the query (respecting limit/skip).
+        /// </summary>
+        public List<T> Documents { get; set; } = new List<T>();
+
+        /// <summary>
+        /// Total count of documents matching the filter (ignoring limit/skip).
+        /// Only populated when FindOptions.IncludeTotal is true.
+        /// </summary>
+        public long? Total { get; set; }
     }
 }

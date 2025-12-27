@@ -9,7 +9,7 @@
 
     <!-- Package metadata -->
     <PackageId>IronBase</PackageId>
-    <Version>0.3.20</Version>
+    <Version>0.3.27</Version>
     <Authors>Petitan</Authors>
     <Description>IronBase - Rust-powered embedded document database with MongoDB-like API</Description>
     <PackageTags>database;nosql;document;embedded;mongodb;rust</PackageTags>
