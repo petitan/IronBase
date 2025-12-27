@@ -4,6 +4,10 @@
 //!
 //! Uses MCP (Model Context Protocol) to communicate with IronBase.
 
+// Suppress warnings for code under development
+#![allow(dead_code)]
+#![allow(unused_imports)]
+
 mod app;
 mod base64_detect;
 mod config;

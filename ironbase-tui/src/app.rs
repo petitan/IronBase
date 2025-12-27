@@ -1782,7 +1782,7 @@ impl App {
         let collection = self.export_state.collection.clone();
         let file_path = self.export_state.file_path.clone();
         let format = self.export_state.format;
-        let total_docs = self.export_state.doc_count;
+        let _total_docs = self.export_state.doc_count;
 
         let file = match File::create(&file_path) {
             Ok(f) => f,
