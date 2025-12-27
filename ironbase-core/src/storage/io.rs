@@ -92,6 +92,108 @@ impl StorageEngine {
         Ok(self.file.metadata()?.len())
     }
 
+    /// Positioned read - read data at offset WITHOUT changing file position
+    ///
+    /// Uses `pread()` on Unix and `seek_read()` on Windows.
+    /// This allows concurrent reads because it doesn't modify the file descriptor's position.
+    ///
+    /// # Thread Safety
+    /// Safe to call from multiple threads simultaneously.
+    #[cfg(unix)]
+    pub fn read_data_at(&self, offset: u64) -> Result<Vec<u8>> {
+        use crate::error::IronBaseError;
+        use std::os::unix::fs::FileExt;
+
+        let file_len = self.file.metadata()?.len();
+
+        if offset >= file_len {
+            return Err(IronBaseError::Corruption(format!(
+                "Attempted to read at offset {} but file is only {} bytes",
+                offset, file_len
+            )));
+        }
+
+        if offset + 4 > file_len {
+            return Err(IronBaseError::Corruption(format!(
+                "Insufficient space to read length header at offset {} (file: {} bytes)",
+                offset, file_len
+            )));
+        }
+
+        // Read length header using pread (no seek, no position change)
+        let mut len_bytes = [0u8; 4];
+        self.file.read_at(&mut len_bytes, offset)?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
+
+        if len == 0 {
+            return Err(IronBaseError::Corruption(format!(
+                "Document at offset {} has zero length",
+                offset
+            )));
+        }
+
+        if offset + 4 + (len as u64) > file_len {
+            return Err(IronBaseError::Corruption(format!(
+                "Document at offset {} claims length {} but would exceed file boundary",
+                offset, len
+            )));
+        }
+
+        // Read data using pread
+        let mut data = vec![0u8; len];
+        self.file.read_at(&mut data, offset + 4)?;
+
+        Ok(data)
+    }
+
+    /// Positioned read - Windows implementation using seek_read
+    #[cfg(windows)]
+    pub fn read_data_at(&self, offset: u64) -> Result<Vec<u8>> {
+        use crate::error::IronBaseError;
+        use std::os::windows::fs::FileExt;
+
+        let file_len = self.file.metadata()?.len();
+
+        if offset >= file_len {
+            return Err(IronBaseError::Corruption(format!(
+                "Attempted to read at offset {} but file is only {} bytes",
+                offset, file_len
+            )));
+        }
+
+        if offset + 4 > file_len {
+            return Err(IronBaseError::Corruption(format!(
+                "Insufficient space to read length header at offset {} (file: {} bytes)",
+                offset, file_len
+            )));
+        }
+
+        // Read length header using seek_read (atomic positioned read on Windows)
+        let mut len_bytes = [0u8; 4];
+        self.file.seek_read(&mut len_bytes, offset)?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
+
+        if len == 0 {
+            return Err(IronBaseError::Corruption(format!(
+                "Document at offset {} has zero length",
+                offset
+            )));
+        }
+
+        if offset + 4 + (len as u64) > file_len {
+            return Err(IronBaseError::Corruption(format!(
+                "Document at offset {} claims length {} but would exceed file boundary",
+                offset, len
+            )));
+        }
+
+        // Read data using seek_read
+        let mut data = vec![0u8; len];
+        self.file.seek_read(&mut data, offset + 4)?;
+
+        Ok(data)
+    }
+
     /// Write document and update catalog
     /// This is the new persistent write method that tracks document offsets
     /// Stores ABSOLUTE offsets in catalog for simplicity and correctness

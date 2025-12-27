@@ -240,6 +240,27 @@ pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
     /// Raw bytes
     fn read_data(&mut self, offset: u64) -> Result<Vec<u8>>;
 
+    /// Positioned read - read raw data at offset WITHOUT changing file position
+    ///
+    /// This method uses `pread()` on Unix and `seek_read()` on Windows,
+    /// which allows reading without modifying the file descriptor's position.
+    /// Because of this, it only requires `&self` (not `&mut self`), enabling
+    /// concurrent reads with a read lock instead of write lock.
+    ///
+    /// # Arguments
+    ///
+    /// * `offset` - File offset
+    ///
+    /// # Returns
+    ///
+    /// Raw bytes
+    ///
+    /// # Thread Safety
+    ///
+    /// This method is safe to call concurrently from multiple threads
+    /// because it doesn't modify shared state (file position).
+    fn read_data_at(&self, offset: u64) -> Result<Vec<u8>>;
+
     /// Get current file length
     ///
     /// # Returns

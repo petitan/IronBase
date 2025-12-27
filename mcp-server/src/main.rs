@@ -17,6 +17,58 @@ use mcp_ironbase::{
 };
 
 // ============================================================
+// PANIC HANDLER - Ensure graceful shutdown on crash
+// ============================================================
+
+/// Install a global panic handler that:
+/// 1. Logs the panic to stderr
+/// 2. Attempts to flush any pending data
+/// 3. Exits with a non-zero status
+///
+/// This helps prevent data corruption by ensuring the process
+/// terminates cleanly rather than being killed by the OS.
+fn install_panic_handler() {
+    let default_hook = std::panic::take_hook();
+
+    std::panic::set_hook(Box::new(move |panic_info| {
+        // Log panic information to stderr
+        eprintln!("\n=== IRONBASE MCP SERVER PANIC ===");
+        eprintln!("Version: {}", VERSION);
+        eprintln!("Time: {:?}", std::time::SystemTime::now());
+
+        // Get panic location
+        if let Some(location) = panic_info.location() {
+            eprintln!("Location: {}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            );
+        }
+
+        // Get panic message
+        if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            eprintln!("Message: {}", s);
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            eprintln!("Message: {}", s);
+        }
+
+        // Get backtrace if available
+        eprintln!("Backtrace:\n{}", std::backtrace::Backtrace::force_capture());
+        eprintln!("=================================\n");
+
+        // Call the default panic hook for any additional handling
+        default_hook(panic_info);
+
+        // Force stderr flush
+        let _ = std::io::stderr().flush();
+
+        // Exit with error code - don't let the panic propagate
+        // This ensures a clean exit rather than potential undefined behavior
+        std::process::exit(101);
+    }));
+}
+
+// ============================================================
 // CLI Definition
 // ============================================================
 
@@ -72,6 +124,9 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    // Install panic handler FIRST - before any other code runs
+    install_panic_handler();
+
     let cli = Cli::parse();
 
     // Handle subcommands first

@@ -2354,15 +2354,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut batch_num = 0;
 
         // Step 2: Process in batches, releasing storage lock between batches
+        // CRITICAL FIX: Use read lock + read_data_at (positioned read) instead of
+        // write lock + read_data. This allows concurrent reads during index building
+        // and prevents deadlock with concurrent batch inserts.
         for chunk in sorted_offsets.chunks(batch_size) {
-            // Read raw bytes from disk (hold storage lock briefly)
+            // Read raw bytes from disk using positioned read (no file position change)
             let raw_batch: Vec<(DocumentId, Vec<u8>)> = {
-                let mut storage = self.storage.write();
+                let storage = self.storage.read(); // READ lock instead of WRITE lock
                 chunk
                     .iter()
                     .filter_map(|(doc_id, offset)| {
                         storage
-                            .read_data(*offset)
+                            .read_data_at(*offset)  // pread - no position change
                             .ok()
                             .map(|bytes| (doc_id.clone(), bytes))
                     })

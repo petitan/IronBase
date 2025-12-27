@@ -1422,6 +1422,10 @@ impl RawStorage for StorageEngine {
         StorageEngine::read_data(self, offset)
     }
 
+    fn read_data_at(&self, offset: u64) -> Result<Vec<u8>> {
+        StorageEngine::read_data_at(self, offset)
+    }
+
     fn file_len(&self) -> Result<u64> {
         StorageEngine::file_len(self)
     }

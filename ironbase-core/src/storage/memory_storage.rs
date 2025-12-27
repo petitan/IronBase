@@ -373,6 +373,44 @@ impl RawStorage for MemoryStorage {
         self.read_document_at("", offset)
     }
 
+    /// Positioned read - for MemoryStorage this is identical to read_data
+    /// but takes &self instead of &mut self (no file position to track)
+    fn read_data_at(&self, offset: u64) -> Result<Vec<u8>> {
+        let start = offset as usize;
+
+        // Check bounds
+        if start + 4 > self.raw_data.len() {
+            return Err(IronBaseError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "Offset {} out of bounds (len={})",
+                    offset,
+                    self.raw_data.len()
+                ),
+            )));
+        }
+
+        // Read length prefix
+        let len_bytes: [u8; 4] = self.raw_data[start..start + 4].try_into().map_err(|_| {
+            IronBaseError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Failed to read length prefix",
+            ))
+        })?;
+        let len = u32::from_le_bytes(len_bytes) as usize;
+
+        // Check data bounds
+        if start + 4 + len > self.raw_data.len() {
+            return Err(IronBaseError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!("Data extends beyond buffer: offset={}, len={}", offset, len),
+            )));
+        }
+
+        // Return raw bytes (without length prefix)
+        Ok(self.raw_data[start + 4..start + 4 + len].to_vec())
+    }
+
     /// Get current "file" length (raw_data buffer size)
     fn file_len(&self) -> Result<u64> {
         Ok(self.raw_data.len() as u64)
