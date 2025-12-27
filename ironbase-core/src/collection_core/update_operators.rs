@@ -206,14 +206,19 @@ fn apply_add_to_set(document: &mut Document, fields: &Value) -> Result<bool> {
         let mut array = get_array_field(document, field, "$addToSet")?;
 
         // Add items if not already present
+        let mut field_modified = false;
         for item in items {
             if !array.contains(&item) {
                 array.push(item);
-                modified = true;
+                field_modified = true;
             }
         }
 
-        document.set_nested(field, Value::Array(array));
+        // Only update document if this field was actually modified
+        if field_modified {
+            document.set_nested(field, Value::Array(array));
+            modified = true;
+        }
     }
     Ok(modified)
 }

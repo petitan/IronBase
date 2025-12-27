@@ -28,9 +28,8 @@ impl MatchStage {
             doc.clone()
         };
 
-        // Convert to Document and check query
-        let doc_json_str = serde_json::to_string(&doc_with_id)?;
-        let document = Document::from_json(&doc_json_str)?;
+        // Convert Value directly to Document (no JSON roundtrip)
+        let document = Document::from_value(&doc_with_id)?;
 
         self.query.matches(&document)
     }
