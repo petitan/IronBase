@@ -323,9 +323,6 @@ impl StorageEngine {
         // Close new file before renaming
         drop(new_file);
 
-        // Close old file and mmap
-        drop(self.mmap.take());
-
         // Replace old file with new file (atomic on most filesystems)
         fs::rename(temp_path, &self.file_path)?;
 
@@ -342,7 +339,6 @@ impl StorageEngine {
         self.file = file;
         self.header = header;
         self.collections = collections;
-        self.mmap = None; // Reset mmap
 
         Ok(())
     }

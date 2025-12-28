@@ -96,36 +96,89 @@ impl DatabaseCore<StorageEngine> {
         storage.write_abort_entry(tx_id)
     }
 
-    /// Flush batch operations to WAL
+    /// Flush batch operations to WAL with proper WAL-first ordering
     ///
     /// Used by Batch mode when batch_buffer reaches batch_size.
     /// Creates a single transaction with all buffered operations.
+    ///
+    /// ## WAL-FIRST ORDERING (FIX for durability bug)
+    ///
+    /// BEFORE (incorrect):
+    /// 1. insert_one_persist() → storage write
+    /// 2. add_to_batch() → buffer operation
+    /// 3. flush_batch() → WAL write + fsync
+    /// CRASH WINDOW: If crash between 1 and 3, doc in storage but NOT in WAL!
+    ///
+    /// AFTER (correct):
+    /// 1. insert_one_prepare() → validate, generate ID (NO storage write)
+    /// 2. buffer prepared doc in batch_doc_buffer
+    /// 3. add_to_batch() → buffer WAL operation
+    /// 4. flush_batch():
+    ///    a) WAL write all ops
+    ///    b) WAL fsync ← ATOMIC POINT
+    ///    c) Persist all buffered docs to storage
+    ///    d) Clear buffers
+    ///    e) Sync storage file
     pub(crate) fn flush_batch(&self) -> Result<()> {
         let mut batch = self.batch_buffer.write();
+        let mut doc_buffer = self.batch_doc_buffer.write();
 
-        if batch.is_empty() {
+        // Nothing to flush
+        if batch.is_empty() && doc_buffer.is_empty() {
             return Ok(());
         }
 
-        // Create auto-transaction with all operations
+        // 1. Create auto-transaction with all WAL operations
         let mut auto_tx = self.begin_auto_transaction();
+        let tx_id = auto_tx.id;
 
         for op in batch.iter() {
             auto_tx.add_operation(op.clone())?;
         }
-        // Operations in batch were already applied when enqueued
+
+        // Mark as already_applied - we'll persist ourselves after WAL commit
+        // This prevents commit_transaction from calling apply_operations()
         auto_tx.mark_operations_applied();
 
-        // Commit with batch mode (WAL sync only, skip file sync)
+        // 2. WAL COMMIT FIRST (atomic point)
+        // This writes BEGIN + OPERATIONS + COMMIT to WAL and fsyncs
         self.commit_auto_transaction_batch(auto_tx)?;
 
-        // Clear batch
-        batch.clear();
+        // 3. PERSIST all buffered documents to storage
+        // At this point, if we crash, recovery will replay from WAL
+        if let Err(e) = self.persist_buffered_inserts(&mut doc_buffer) {
+            // Persist failed → write ABORT to WAL
+            // This ensures recovery will skip this transaction
+            let _ = self.abort_committed_transaction(tx_id);
+            return Err(e);
+        }
 
-        // Now sync the file once for the entire batch
-        // This is the key optimization: one fsync per batch instead of per transaction
-        drop(batch); // Release the batch lock before sync
+        // 4. Clear buffers
+        batch.clear();
+        doc_buffer.clear();
+
+        // 5. Sync storage file (one fsync per batch - key optimization)
+        drop(batch);
+        drop(doc_buffer);
         self.sync_storage_file()?;
+
+        Ok(())
+    }
+
+    /// Persist all buffered insert documents to storage
+    ///
+    /// Called after WAL commit in flush_batch() to actually write documents.
+    fn persist_buffered_inserts(&self, doc_buffer: &mut super::BatchDocBuffer) -> Result<()> {
+        // Iterate over all collections with buffered inserts
+        for (collection_name, prepared_docs) in doc_buffer.inserts.drain() {
+            let collection = self.collection(&collection_name)?;
+
+            // Persist each prepared document
+            for prepared in prepared_docs {
+                // insert_one_persist writes to storage + updates indexes + invalidates cache
+                collection.insert_one_persist(prepared)?;
+            }
+        }
 
         Ok(())
     }
@@ -228,29 +281,44 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                // Batch mode: Add to batch, flush when full
+                // WAL-FIRST BATCH MODE: Guaranteed crash safety
+                //
+                // Documents are buffered and only persisted AFTER WAL commit.
+                // This means documents are NOT visible until flush_batch() is called.
+                //
+                // Trade-off: Delayed visibility for guaranteed durability.
+                // Use Safe mode if you need immediate read-after-write.
+
                 let collection = self.collection(collection_name)?;
 
-                // 1. PREPARE phase: validate, generate ID, build WAL doc
+                // 1. PREPARE phase: validate, generate ID, build WAL doc (NO storage write!)
                 let prepared = collection.insert_one_prepare(document)?;
 
-                // 2. Extract WAL data before persist consumes prepared
+                // 2. Extract data before moving prepared into buffer
+                let doc_id = prepared.doc_id.clone();
                 let wal_doc = prepared.wal_doc.clone();
-                let doc_id_for_batch = prepared.doc_id.clone();
 
-                // 3. PERSIST phase: write to storage immediately
-                // (Batch mode writes storage first, WAL later)
-                let doc_id = collection.insert_one_persist(prepared)?;
+                // 3. BUFFER phase: store prepared doc for later persist
+                {
+                    let mut doc_buffer = self.batch_doc_buffer.write();
+                    doc_buffer.add_insert(collection_name.to_string(), prepared);
+                }
 
-                // 4. Add to batch buffer (wal_doc has _id and _collection)
+                // 4. Add operation to WAL batch buffer
                 let should_flush = self.add_to_batch(Operation::Insert {
                     collection: collection_name.to_string(),
-                    doc_id: doc_id_for_batch,
+                    doc_id: doc_id.clone(),
                     doc: wal_doc,
                 })?;
 
-                // 5. Flush if batch is full
-                if should_flush {
+                // 5. Check if memory limit exceeded (early flush trigger)
+                let memory_exceeded = {
+                    let doc_buffer = self.batch_doc_buffer.read();
+                    doc_buffer.memory_limit_exceeded()
+                };
+
+                // 6. Flush if batch is full OR memory limit exceeded
+                if should_flush || memory_exceeded {
                     self.flush_batch()?;
                 }
 
@@ -336,6 +404,12 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Batch { .. } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
+
+                // TODO: WAL ordering bug - update_one_raw writes to storage before WAL commit.
+                // This is harder to fix than INSERT because update_one_prepare already writes
+                // to storage (for atomic read-modify-write). Need update_one_prepare_batch()
+                // that buffers the operation instead of persisting immediately.
+                // For now, recovery via WAL replay still works (albeit with potential orphaned docs).
 
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
@@ -439,6 +513,10 @@ impl DatabaseCore<StorageEngine> {
             DurabilityMode::Batch { .. } => {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
+
+                // TODO: WAL ordering bug - delete_one_raw writes tombstone before WAL commit.
+                // Same issue as update_one. Need delete_one_prepare_batch() that buffers.
+                // For now, recovery via WAL replay still works.
 
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;

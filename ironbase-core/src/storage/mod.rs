@@ -12,7 +12,6 @@ use crate::error::{IronBaseError, Result};
 use crate::transaction::{Transaction, TransactionId};
 use crate::wal::WriteAheadLog;
 use fs2::FileExt;
-use memmap2::{MmapMut, MmapOptions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -40,12 +39,7 @@ pub struct RecoveredIndexChange {
     pub doc_id: crate::document::DocumentId,
 }
 
-/// RESERVED SPACE for metadata at the beginning of file (after header)
-/// This ensures documents ALWAYS start at a fixed offset (HEADER_SIZE + RESERVED_METADATA_SIZE)
-/// preventing corruption during metadata growth when document_catalog grows
-pub const RESERVED_METADATA_SIZE: u64 = 10 * 1024 * 1024; // 10MB reserved for metadata (supports 400K+ docs)
 pub const HEADER_SIZE: u64 = 256; // Fixed header size
-pub const DATA_START_OFFSET: u64 = HEADER_SIZE + RESERVED_METADATA_SIZE; // Documents start here
 
 /// Database file header
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -161,7 +155,6 @@ pub struct MetadataWALEntry {
 /// Storage engine - file-based storage
 pub struct StorageEngine {
     file: File,
-    mmap: Option<MmapMut>,
     header: Header,
     collections: HashMap<String, CollectionMeta>,
     file_path: String,
@@ -239,17 +232,8 @@ impl StorageEngine {
             (header, collections, false)
         };
 
-        // Memory-mapped file (if file is small enough)
-        let mmap = if file.metadata()?.len() < 1_000_000_000 {
-            // Use mmap for files under 1GB
-            unsafe { MmapOptions::new().map_mut(&file).ok() }
-        } else {
-            None
-        };
-
         let mut storage = StorageEngine {
             file,
-            mmap,
             header,
             collections,
             file_path: path_str,
@@ -373,8 +357,8 @@ impl StorageEngine {
         self.log_metadata_to_wal()?;
 
         // 2. Flush metadata to disk (can be interrupted - WAL has backup)
+        // Note: flush_metadata() already calls file.sync_all() internally
         self.flush_metadata()?;
-        self.file.sync_all()?;
 
         // 3. Clear WAL AFTER metadata is safely on disk
         // This prevents WAL from growing indefinitely in long-running processes

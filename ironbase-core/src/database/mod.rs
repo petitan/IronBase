@@ -15,11 +15,66 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::collection_core::schema::CompiledSchema;
+use crate::collection_core::InsertOnePrepared;
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
 use crate::storage::{MemoryStorage, RawStorage, Storage, StorageEngine};
 use crate::transaction::{Operation, Transaction, TransactionId};
+
+/// Maximum memory for batch document buffer (10MB safety limit)
+/// When exceeded, triggers an early flush even if batch_size not reached
+pub const MAX_BATCH_MEMORY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Buffer for documents prepared but not yet persisted in Batch mode
+///
+/// In Batch mode, documents are buffered here after insert_one_prepare()
+/// but BEFORE storage write. The actual persist happens in flush_batch()
+/// AFTER WAL commit (fsync), ensuring proper WAL-first ordering.
+#[derive(Debug, Default)]
+pub struct BatchDocBuffer {
+    /// Buffered insert operations by collection name
+    pub(crate) inserts: HashMap<String, Vec<InsertOnePrepared>>,
+    /// Approximate memory usage in bytes
+    pub(crate) memory_bytes: usize,
+}
+
+impl BatchDocBuffer {
+    /// Create a new empty buffer
+    pub fn new() -> Self {
+        Self {
+            inserts: HashMap::new(),
+            memory_bytes: 0,
+        }
+    }
+
+    /// Check if the buffer is empty
+    pub fn is_empty(&self) -> bool {
+        self.inserts.is_empty()
+    }
+
+    /// Clear all buffered documents
+    pub fn clear(&mut self) {
+        self.inserts.clear();
+        self.memory_bytes = 0;
+    }
+
+    /// Add a prepared insert to the buffer
+    pub fn add_insert(&mut self, collection: String, prepared: InsertOnePrepared) {
+        // Estimate memory usage (rough approximation)
+        let doc_size = serde_json::to_string(&prepared.document)
+            .map(|s| s.len())
+            .unwrap_or(100);
+        self.memory_bytes += doc_size;
+
+        self.inserts.entry(collection).or_default().push(prepared);
+    }
+
+    /// Check if memory limit exceeded
+    pub fn memory_limit_exceeded(&self) -> bool {
+        self.memory_bytes >= MAX_BATCH_MEMORY_BYTES
+    }
+}
 
 /// Convert transaction::IndexKey to index::IndexKey
 fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
@@ -53,8 +108,12 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // NEW: Durability mode (safe by default like SQL databases)
     pub(crate) durability_mode: DurabilityMode,
 
-    // NEW: Batch buffer for Batch mode
+    // NEW: Batch buffer for Batch mode (WAL operations)
     pub(crate) batch_buffer: Arc<RwLock<Vec<Operation>>>,
+
+    // NEW: Batch document buffer for Batch mode (documents prepared but not persisted)
+    // This enables WAL-first ordering: prepare → buffer → WAL commit → persist
+    pub(crate) batch_doc_buffer: Arc<RwLock<BatchDocBuffer>>,
 
     // NEW: Operation counter for Unsafe mode auto-checkpoint
     pub(crate) unsafe_op_counter: AtomicU64,
@@ -168,6 +227,7 @@ impl DatabaseCore<StorageEngine> {
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: mode,
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
+            batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
@@ -261,6 +321,7 @@ impl DatabaseCore<MemoryStorage> {
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: DurabilityMode::default(),
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
+            batch_doc_buffer: Arc::new(RwLock::new(BatchDocBuffer::new())),
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),

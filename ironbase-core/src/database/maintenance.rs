@@ -75,14 +75,31 @@ impl DatabaseCore<StorageEngine> {
 
 impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
     fn drop(&mut self) {
-        // Flush fulltext indexes to disk on drop
-        // This ensures data is persisted even if close() is not called explicitly
+        // Skip flush if already closed
+        if self.is_closed.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // 1. Flush fulltext indexes to disk
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
             if let Err(e) = manager.flush_fulltext_indexes() {
                 eprintln!("Warning: Failed to flush fulltext indexes on drop: {}", e);
             }
+        }
+        drop(index_managers); // Release lock before storage flush
+
+        // 2. Flush storage (metadata + sync)
+        // Note: Batch mode pending operations are NOT flushed here because
+        // flush_batch() requires StorageEngine-specific methods.
+        // For full safety in Batch mode, always call close() explicitly.
+        if let Some(mut storage) = self.storage.try_write() {
+            if let Err(e) = storage.flush() {
+                eprintln!("Warning: Failed to flush storage on drop: {}", e);
+            }
+        } else {
+            eprintln!("Warning: Could not acquire storage lock on drop");
         }
     }
 }

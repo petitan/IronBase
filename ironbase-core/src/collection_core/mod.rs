@@ -35,6 +35,9 @@ use self::schema::CompiledSchema;
 // Re-export the sealed RawOperations trait for crate-internal use
 pub(crate) use self::raw_operations::RawOperations;
 
+// Re-export prepared operation structs for WAL-first batch mode
+pub(crate) use self::raw_operations::InsertOnePrepared;
+
 // ============================================================================
 // CONSTANTS
 // ============================================================================

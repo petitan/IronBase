@@ -86,13 +86,24 @@ mod tests {
             db.insert_one("test", doc).unwrap();
         }
 
-        // Verify all documents were written
+        // WAL-FIRST DESIGN: Before flush, only the first batch (3 docs) is persisted.
+        // The remaining 2 are buffered and not yet visible in queries.
         let collection = db.collection("test").unwrap();
-        let count = collection.count_documents(&json!({})).unwrap();
-        assert_eq!(count, 5);
+        let count_before_flush = collection.count_documents(&json!({})).unwrap();
+        assert_eq!(
+            count_before_flush, 3,
+            "Only first batch should be persisted before flush"
+        );
 
         // Manual flush to commit remaining batch
         db.flush_batch().unwrap();
+
+        // After flush, all 5 documents should be visible
+        let count_after_flush = collection.count_documents(&json!({})).unwrap();
+        assert_eq!(
+            count_after_flush, 5,
+            "All documents should be visible after flush"
+        );
 
         // Cleanup
         std::fs::remove_file(db_path).unwrap();
