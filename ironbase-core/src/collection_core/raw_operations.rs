@@ -784,49 +784,58 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
     /// Delete one document (raw, no WAL) - use DatabaseCore::delete_one for durability
     /// Returns deleted_count
+    ///
+    /// MEMORY FIX: Uses streaming document loading instead of scan_documents_via_catalog().
+    /// Previously loaded ALL documents into memory, causing OOM on large collections.
+    /// Now uses collect_doc_ids (with limit=1) + streaming read.
     fn delete_one_raw(&self, query_json: &Value) -> Result<u64> {
         self.check_not_closed()?;
         let parsed_query = Query::from_json(query_json)?;
 
-        // OPTIMIZATION: Try O(1) _id lookup first, fallback to full scan
-        let docs_by_id = match self.try_id_query_optimization(query_json)? {
-            Some(docs) => docs,
-            None => self.scan_documents_via_catalog()?,
-        };
+        // STREAMING FIX: Collect only document IDs first (with limit=1 for efficiency)
+        // This avoids bulk-loading all documents into memory
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, Some(1), true)?;
 
-        // Find first matching and delete (skip tombstones already filtered by catalog scan)
+        // Find first matching and delete
         let mut deleted = 0u64;
-        let mut storage = self.storage.write();
 
-        for (_, doc) in docs_by_id {
+        for doc_id in doc_ids {
             if deleted > 0 {
                 break; // Only delete first match
             }
 
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
+            // Stream-load document one at a time
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
 
-            // Check if matches query
-            if parsed_query.matches(&document)? {
-                // Remove from all indexes BEFORE deleting
-                // Drop storage lock temporarily to avoid potential deadlock
-                drop(storage);
-                self.remove_from_indexes(&document)?;
-                storage = self.storage.write();
+                // Check if matches query (should always match due to collect_doc_ids)
+                if parsed_query.matches(&document)? {
+                    // Remove from all indexes BEFORE deleting
+                    self.remove_from_indexes(&document)?;
 
-                // Mark as tombstone (logical delete)
-                let mut tombstone = doc.clone();
-                if let Value::Object(ref mut map) = tombstone {
-                    map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    // Acquire write lock for deletion
+                    let mut storage = self.storage.write();
+
+                    // Mark as tombstone (logical delete)
+                    let mut tombstone = doc.clone();
+                    if let Value::Object(ref mut map) = tombstone {
+                        map.insert("_tombstone".to_string(), Value::Bool(true));
+                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    }
+                    let tombstone_json = serde_json::to_string(&tombstone)?;
+
+                    // Write tombstone WITH catalog tracking (updates catalog entry)
+                    storage.write_document_raw(
+                        &self.name,
+                        &document.id,
+                        tombstone_json.as_bytes(),
+                    )?;
+                    storage.adjust_live_count(&self.name, -1);
+
+                    deleted = 1;
                 }
-                let tombstone_json = serde_json::to_string(&tombstone)?;
-
-                // Write tombstone WITH catalog tracking (updates catalog entry)
-                storage.write_document_raw(&self.name, &document.id, tombstone_json.as_bytes())?;
-                storage.adjust_live_count(&self.name, -1);
-
-                deleted = 1;
             }
         }
 
@@ -852,61 +861,66 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// BUG #2 FIX: This method returns the ACTUAL documents that were deleted,
     /// eliminating the race condition where a concurrent insert could be deleted
     /// but not logged in the WAL.
+    ///
+    /// MEMORY FIX: Uses streaming document loading instead of scan_documents_via_catalog().
+    /// Previously loaded ALL documents into memory, causing OOM on large collections.
+    /// Now uses collect_doc_ids + streaming read.
     fn delete_many_raw_with_docs(
         &self,
         query_json: &Value,
     ) -> Result<(u64, Vec<(DocumentId, Value)>)> {
         self.check_not_closed()?;
         let parsed_query = Query::from_json(query_json)?;
-        let docs_by_id = self.scan_documents_via_catalog()?;
-        let mut storage = self.storage.write();
+
+        // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
+        // This avoids bulk-loading all documents into memory
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
 
         let mut deleted = 0u64;
         // BUG #2 FIX: Track actual deleted documents for WAL
         let mut deleted_docs: Vec<(DocumentId, Value)> = Vec::new();
 
-        for (_, doc) in docs_by_id {
-            // Skip tombstones (already deleted documents)
-            if doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                continue;
-            }
+        for doc_id in doc_ids {
+            // Stream-load document one at a time
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
 
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
+                // Check if matches query (should always match due to collect_doc_ids)
+                if parsed_query.matches(&document)? {
+                    // BUG #2 FIX: Collect deleted document for WAL BEFORE deletion
+                    deleted_docs.push((document.id.clone(), doc.clone()));
 
-            // Check if matches query
-            if parsed_query.matches(&document)? {
-                // BUG #2 FIX: Collect deleted document for WAL BEFORE deletion
-                deleted_docs.push((document.id.clone(), doc.clone()));
+                    // Remove from all indexes BEFORE deleting
+                    self.remove_from_indexes(&document)?;
 
-                // Remove from all indexes BEFORE deleting
-                // Drop storage lock temporarily to avoid potential deadlock
-                drop(storage);
-                self.remove_from_indexes(&document)?;
-                storage = self.storage.write();
+                    // Acquire write lock for deletion
+                    let mut storage = self.storage.write();
 
-                // Mark as tombstone (logical delete)
-                let mut tombstone = doc.clone();
-                if let Value::Object(ref mut map) = tombstone {
-                    map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    // Mark as tombstone (logical delete)
+                    let mut tombstone = doc.clone();
+                    if let Value::Object(ref mut map) = tombstone {
+                        map.insert("_tombstone".to_string(), Value::Bool(true));
+                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    }
+                    let tombstone_json = serde_json::to_string(&tombstone)?;
+
+                    storage.write_document_raw(
+                        &self.name,
+                        &document.id,
+                        tombstone_json.as_bytes(),
+                    )?;
+                    storage.adjust_live_count(&self.name, -1);
+
+                    deleted += 1;
                 }
-                let tombstone_json = serde_json::to_string(&tombstone)?;
-
-                storage.write_document_raw(&self.name, &document.id, tombstone_json.as_bytes())?;
-
-                deleted += 1;
             }
         }
 
         // Invalidate query cache if any document was deleted
         if deleted > 0 {
             self.query_cache.invalidate_collection(&self.name);
-            storage.adjust_live_count(&self.name, -(deleted as i64));
         }
 
         Ok((deleted, deleted_docs))
@@ -1048,41 +1062,52 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// - Finds matching documents
     /// - Validates deletions
     /// - Returns prepared data for WAL and persist phase
+    ///
+    /// MEMORY FIX: Uses streaming document loading instead of scan_documents_via_catalog().
+    /// Previously loaded ALL documents into memory, causing OOM on large collections.
+    /// Now uses collect_doc_ids + streaming read.
     fn delete_many_prepare(&self, query_json: &Value) -> Result<DeleteManyPrepared> {
         self.check_not_closed()?;
         let parsed_query = Query::from_json(query_json)?;
-        let docs_by_id = self.scan_documents_via_catalog()?;
+
+        // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
+        // This avoids bulk-loading all documents into memory
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
 
         let mut deleted = 0u64;
         let mut wal_entries: Vec<(DocumentId, Value)> = Vec::new();
         let mut index_removals: Vec<Document> = Vec::new();
         let mut tombstone_writes: Vec<(DocumentId, String)> = Vec::new();
 
-        for (_, doc) in docs_by_id {
-            if is_tombstone(&doc) {
-                continue;
-            }
-
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
-
-            if parsed_query.matches(&document)? {
-                // Collect for WAL
-                wal_entries.push((document.id.clone(), doc.clone()));
-
-                // Collect for index removal in persist phase
-                index_removals.push(document.clone());
-
-                // Prepare tombstone for persist phase
-                let mut tombstone = doc.clone();
-                if let Value::Object(ref mut map) = tombstone {
-                    map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+        for doc_id in doc_ids {
+            // Stream-load document one at a time
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                if is_tombstone(&doc) {
+                    continue;
                 }
-                let tombstone_json = serde_json::to_string(&tombstone)?;
-                tombstone_writes.push((document.id.clone(), tombstone_json));
 
-                deleted += 1;
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
+
+                if parsed_query.matches(&document)? {
+                    // Collect for WAL
+                    wal_entries.push((document.id.clone(), doc.clone()));
+
+                    // Collect for index removal in persist phase
+                    index_removals.push(document.clone());
+
+                    // Prepare tombstone for persist phase
+                    let mut tombstone = doc.clone();
+                    if let Value::Object(ref mut map) = tombstone {
+                        map.insert("_tombstone".to_string(), Value::Bool(true));
+                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    }
+                    let tombstone_json = serde_json::to_string(&tombstone)?;
+                    tombstone_writes.push((document.id.clone(), tombstone_json));
+
+                    deleted += 1;
+                }
             }
         }
 
@@ -1555,49 +1580,53 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     ///
     /// PHASE 6: All I/O happens here under write lock for atomicity.
     /// The persist phase only does cache invalidation.
+    ///
+    /// MEMORY FIX: Uses streaming document loading instead of scan_documents_via_catalog().
+    /// Previously loaded ALL documents into memory, causing OOM on large collections.
+    /// Now uses collect_doc_ids (with limit=1) + streaming read.
     fn delete_one_prepare(&self, query_json: &Value) -> Result<DeleteOnePrepared> {
         self.check_not_closed()?;
         let parsed_query = Query::from_json(query_json)?;
 
-        // Read documents (optimization for _id queries)
-        let docs_by_id = match self.try_id_query_optimization(query_json)? {
-            Some(docs) => docs,
-            None => self.scan_documents_via_catalog()?,
-        };
+        // STREAMING FIX: Collect only document IDs first (with limit=1 for efficiency)
+        // This avoids bulk-loading all documents into memory
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, Some(1), true)?;
 
-        // 🔒 ATOMIC: Acquire write lock for delete operation
-        let mut storage = self.storage.write();
+        for doc_id in doc_ids {
+            // Stream-load document one at a time
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
 
-        for (_, doc) in docs_by_id {
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
+                if parsed_query.matches(&document)? {
+                    // Save old doc for WAL
+                    let old_doc_value = doc.clone();
+                    let doc_id = document.id.clone();
 
-            if parsed_query.matches(&document)? {
-                // Save old doc for WAL
-                let old_doc_value = doc.clone();
-                let doc_id = document.id.clone();
+                    // Remove from indexes
+                    self.remove_from_indexes(&document)?;
 
-                // Remove from indexes (drop storage lock temporarily to avoid deadlock)
-                drop(storage);
-                self.remove_from_indexes(&document)?;
-                storage = self.storage.write();
+                    // 🔒 ATOMIC: Acquire write lock for delete operation
+                    let mut storage = self.storage.write();
 
-                // Write tombstone
-                let mut tombstone = old_doc_value.clone();
-                if let Value::Object(ref mut map) = tombstone {
-                    map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    // Write tombstone
+                    let mut tombstone = old_doc_value.clone();
+                    if let Value::Object(ref mut map) = tombstone {
+                        map.insert("_tombstone".to_string(), Value::Bool(true));
+                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    }
+                    let tombstone_json = serde_json::to_string(&tombstone)?;
+                    storage.write_document_raw(&self.name, &doc_id, tombstone_json.as_bytes())?;
+                    storage.adjust_live_count(&self.name, -1);
+
+                    return Ok(DeleteOnePrepared {
+                        doc_id: Some(doc_id),
+                        old_doc: Some(old_doc_value),
+                        deleted: 1,
+                        collection_name: self.name.clone(),
+                    });
                 }
-                let tombstone_json = serde_json::to_string(&tombstone)?;
-                storage.write_document_raw(&self.name, &doc_id, tombstone_json.as_bytes())?;
-                storage.adjust_live_count(&self.name, -1);
-
-                return Ok(DeleteOnePrepared {
-                    doc_id: Some(doc_id),
-                    old_doc: Some(old_doc_value),
-                    deleted: 1,
-                    collection_name: self.name.clone(),
-                });
             }
         }
 

@@ -649,17 +649,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     // ========== QUERY OPERATIONS ==========
 
     /// Find documents matching query
+    ///
+    /// MEMORY FIX: Removed scan_documents_via_catalog() optimization for find({}).
+    /// That optimization loaded ALL documents into a HashMap at once, causing OOM
+    /// on large collections (e.g., 21GB emails). Now uses streaming: collect IDs first,
+    /// then load documents one by one. Slightly slower but memory-safe.
+    ///
+    /// For large collections, consider using find_streaming() instead.
     pub fn find(&self, query_json: &Value) -> Result<Vec<Value>> {
         self.check_not_closed()?;
         log_debug!("find() called with query: {:?}", query_json);
 
-        // 🚀 OPTIMIZED: find({}) special case - return all docs directly
-        // Avoids ID collection + re-read cycle - significant speedup for full scans
-        if query_json.as_object().is_some_and(|o| o.is_empty()) {
-            let docs_by_id = self.scan_documents_via_catalog()?;
-            return Ok(docs_by_id.into_values().collect());
-        }
-
+        // STREAMING: Collect IDs first (small), then load docs one by one
+        // This avoids bulk-loading all documents into memory at once
         let doc_ids = self.collect_doc_ids(query_json)?;
         let mut results = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
@@ -863,6 +865,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Returns:
     /// - `Ok(Some(docs))` if _id optimization was successful (may be empty if doc not found)
     /// - `Ok(None)` if query doesn't match _id pattern, caller should fallback to scan
+    ///
+    /// NOTE: Currently unused after streaming refactor, kept for potential future use.
+    #[allow(dead_code)]
     fn try_id_query_optimization(
         &self,
         query_json: &Value,
@@ -910,6 +915,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Distinct values for a field
     /// FIX #19: Now supports nested fields via get_nested_value (e.g., "address.city")
+    ///
+    /// MEMORY FIX: Uses streaming document loading instead of bulk load.
+    /// Previously used scan_documents_via_catalog() which loaded ALL documents
+    /// into memory at once - causing OOM on large collections (e.g., 21GB emails).
+    /// Now uses collect_doc_ids + streaming read - only IDs in memory, docs loaded one by one.
     pub fn distinct(&self, field: &str, query_json: &Value) -> Result<Vec<Value>> {
         self.check_not_closed()?;
         use crate::value_utils::canonical_json_string;
@@ -926,40 +936,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             return Ok(Vec::new());
         }
 
-        let match_all = Self::query_matches_all(query_json);
-        let parsed_query = if match_all {
-            None
-        } else {
-            Some(Query::from_json(query_json)?)
-        };
+        // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
+        // Then stream-load documents one by one - never bulk load all docs into memory
+        let (doc_ids, _) =
+            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
 
-        let docs_by_id = self.scan_documents_via_catalog()?;
-
-        // Collect distinct values from matching documents (skip tombstones)
+        // Collect distinct values - stream documents one by one
         let mut seen_values: HashSet<String> = HashSet::new();
         let mut distinct_values = Vec::new();
 
-        for (_, doc) in docs_by_id {
-            // Skip tombstones (deleted documents)
-            if doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                continue;
-            }
+        for doc_id in doc_ids {
+            // Load document one at a time - O(1) memory per iteration
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                // Create Document from Value for proper array handling
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
 
-            // Create Document from Value for proper array handling
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let document = Document::from_json(&doc_json_str)?;
-
-            let matches = if let Some(query) = &parsed_query {
-                query.matches(&document)?
-            } else {
-                true
-            };
-
-            if matches {
                 // Use Document::get_all() for MongoDB-style implicit array traversal
                 // This properly handles dot notation with arrays like "items.name"
                 for field_value in document.get_all(field) {
@@ -1758,6 +1750,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// When the `parallel` feature is enabled, JSON deserialization is parallelized
     /// across CPU cores for significantly faster processing of large collections.
+    ///
+    /// WARNING: This loads ALL documents into memory at once!
+    /// For large collections, use collect_doc_ids + read_document_by_id streaming instead.
+    ///
+    /// NOTE: Currently unused after streaming refactor to prevent OOM, kept for potential use.
+    #[allow(dead_code)]
     fn scan_documents_via_catalog(&self) -> Result<HashMap<DocumentId, Value>> {
         let mut storage = self.storage.write();
 

@@ -16,6 +16,9 @@ use crate::value_utils::get_nested_value;
 ///
 /// Takes raw bytes and deserializes them in parallel across CPU cores.
 /// Memory efficient: uses into_par_iter() to consume input, avoiding copies.
+///
+/// NOTE: Currently unused after streaming refactor (was used by scan_documents_via_catalog).
+#[allow(dead_code)]
 pub fn parallel_deserialize(raw_docs: Vec<(DocumentId, Vec<u8>)>) -> HashMap<DocumentId, Value> {
     raw_docs
         .into_par_iter()
