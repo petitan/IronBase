@@ -253,9 +253,9 @@ impl Storage for MemoryStorage {
         Ok(())
     }
 
-    fn checkpoint(&mut self) -> Result<()> {
-        // No-op for memory storage (no WAL)
-        Ok(())
+    fn checkpoint(&mut self) -> Result<crate::storage::compaction::CheckpointStats> {
+        // No-op for memory storage (no WAL) - return empty stats
+        Ok(crate::storage::compaction::CheckpointStats::default())
     }
 
     fn adjust_live_count(&mut self, collection: &str, delta: i64) {

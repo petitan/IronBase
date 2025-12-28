@@ -126,8 +126,8 @@ pub trait Storage: Send + Sync {
     /// Checkpoint - Clear WAL without flushing metadata
     ///
     /// Use this in long-running processes to prevent WAL file growth.
-    /// For MemoryStorage, this is a no-op.
-    fn checkpoint(&mut self) -> Result<()>;
+    /// For MemoryStorage, this is a no-op that returns empty stats.
+    fn checkpoint(&mut self) -> Result<crate::storage::compaction::CheckpointStats>;
 
     /// Adjust the live document count for a collection
     fn adjust_live_count(&mut self, collection: &str, delta: i64);

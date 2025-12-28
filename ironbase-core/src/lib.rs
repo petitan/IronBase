@@ -81,7 +81,7 @@ pub use recovery::{
     IndexOperation, IndexReplay, IndexReplayStats, OperationReplay, RecoveredIndexChange,
     RecoveryCoordinator, RecoveryStats, ReplayStats,
 };
-pub use storage::{CompactionStats, StorageEngine};
+pub use storage::{CheckpointStats, CompactionStats, StorageEngine};
 pub use transaction::{Operation, Transaction, TransactionId, TransactionState};
 pub use wal::{
     CommittedTransaction, TransactionGrouper, WALEntry, WALEntryIterator, WALEntryType,

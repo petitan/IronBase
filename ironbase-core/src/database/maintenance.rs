@@ -123,7 +123,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
     /// Checkpoint - Clear WAL without flushing metadata
     /// Use this in long-running processes to prevent WAL file growth
-    pub fn checkpoint(&self) -> Result<()> {
+    ///
+    /// Returns checkpoint statistics including WAL size before/after.
+    pub fn checkpoint(&self) -> Result<crate::storage::CheckpointStats> {
         let mut storage = self.storage.write();
         storage.checkpoint()
     }

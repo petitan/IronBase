@@ -8,6 +8,26 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Format bytes as human-readable string (e.g., "15.50 GB")
+fn format_bytes(bytes: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = 1024 * KB;
+    const GB: u64 = 1024 * MB;
+    const TB: u64 = 1024 * GB;
+
+    if bytes >= TB {
+        format!("{:.2} TB", bytes as f64 / TB as f64)
+    } else if bytes >= GB {
+        format!("{:.2} GB", bytes as f64 / GB as f64)
+    } else if bytes >= MB {
+        format!("{:.2} MB", bytes as f64 / MB as f64)
+    } else if bytes >= KB {
+        format!("{:.2} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
 /// Find options for queries
 #[derive(Debug, Default)]
 pub struct FindOptions {
@@ -467,22 +487,47 @@ impl IronBaseAdapter {
 
     /// Compact the database
     pub fn compact(&self) -> Result<Value> {
+        let start = std::time::Instant::now();
         let db = self.db.write();
         let result = db.compact()?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let space_freed = result.size_before.saturating_sub(result.size_after);
+
         Ok(serde_json::json!({
-            "size_before": result.size_before,
-            "size_after": result.size_after,
+            "success": true,
+            "size_before": format_bytes(result.size_before),
+            "size_after": format_bytes(result.size_after),
+            "space_freed": format_bytes(space_freed),
+            "size_before_bytes": result.size_before,
+            "size_after_bytes": result.size_after,
+            "space_freed_bytes": space_freed,
             "documents_scanned": result.documents_scanned,
             "documents_kept": result.documents_kept,
             "tombstones_removed": result.tombstones_removed,
+            "compression_ratio": format!("{:.1}%", result.compression_ratio()),
+            "duration_ms": duration_ms,
         }))
     }
 
     /// Force checkpoint (flush to disk)
-    pub fn checkpoint(&self) -> Result<()> {
+    ///
+    /// Returns checkpoint statistics including WAL size before/after.
+    pub fn checkpoint(&self) -> Result<Value> {
+        let start = std::time::Instant::now();
         let db = self.db.write();
-        db.checkpoint()?;
-        Ok(())
+        let result = db.checkpoint()?;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        Ok(serde_json::json!({
+            "success": true,
+            "wal_size_before": format_bytes(result.wal_size_before),
+            "wal_size_after": format_bytes(result.wal_size_after),
+            "wal_size_before_bytes": result.wal_size_before,
+            "wal_size_after_bytes": result.wal_size_after,
+            "wal_ops_cleared": result.wal_ops_cleared,
+            "duration_ms": duration_ms,
+        }))
     }
 
     // ============================================================

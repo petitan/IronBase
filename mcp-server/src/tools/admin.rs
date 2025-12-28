@@ -91,8 +91,7 @@ fn handle_db_compact(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 }
 
 fn handle_db_checkpoint(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    adapter.checkpoint()?;
-    Ok(json!({"success": true, "message": "Checkpoint completed"}))
+    adapter.checkpoint()
 }
 
 fn handle_admin_list_all_collections(

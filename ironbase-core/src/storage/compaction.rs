@@ -46,6 +46,17 @@ impl CompactionStats {
     }
 }
 
+/// Checkpoint statistics
+#[derive(Debug, Clone, Default)]
+pub struct CheckpointStats {
+    /// WAL file size before checkpoint (bytes)
+    pub wal_size_before: u64,
+    /// WAL file size after checkpoint (always 0 after clear)
+    pub wal_size_after: u64,
+    /// Number of operations that were in the WAL
+    pub wal_ops_cleared: u64,
+}
+
 impl StorageEngine {
     /// Storage compaction - removes tombstones and old document versions
     /// Uses chunked processing to minimize memory usage

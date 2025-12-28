@@ -85,7 +85,10 @@ impl DatabaseWrapper {
 
     fn checkpoint(&self) -> Result<(), ironbase_core::IronBaseError> {
         match self {
-            DatabaseWrapper::File(db) => db.checkpoint(),
+            DatabaseWrapper::File(db) => {
+                db.checkpoint()?;
+                Ok(())
+            }
             DatabaseWrapper::Memory(_) => Ok(()), // No-op for memory storage
         }
     }

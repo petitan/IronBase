@@ -38,6 +38,11 @@ impl WriteAheadLog {
         &self.path
     }
 
+    /// Get the current WAL file size in bytes
+    pub fn file_size(&self) -> Result<u64> {
+        Ok(self.file.metadata()?.len())
+    }
+
     /// Append an entry to the WAL
     pub fn append(&mut self, entry: &WALEntry) -> Result<u64> {
         let serialized = entry.serialize();

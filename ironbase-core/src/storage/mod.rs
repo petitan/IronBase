@@ -18,7 +18,7 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 // Re-export public types
-pub use compaction::{CompactionConfig, CompactionStats};
+pub use compaction::{CheckpointStats, CompactionConfig, CompactionStats};
 
 // Re-export traits module
 // NOTE: RawStorage is intentionally NOT public - it uses sealed trait pattern
@@ -382,14 +382,28 @@ impl StorageEngine {
     ///
     /// CRITICAL FIX: Must call flush_metadata() before clearing WAL!
     /// Without this, document_catalog only exists in memory and is lost on restart.
-    pub fn checkpoint(&mut self) -> Result<()> {
+    ///
+    /// Returns checkpoint statistics including WAL size before/after.
+    pub fn checkpoint(&mut self) -> Result<compaction::CheckpointStats> {
+        // Get WAL size before checkpoint
+        let wal_size_before = self.wal.file_size().unwrap_or(0);
+        let wal_ops_cleared = self.wal_ops_since_clear;
+
         // First flush metadata to ensure document_catalog is persisted
         self.flush_metadata()?;
 
         // Then clear the WAL (all operations already in main file)
         self.wal.clear()?;
         self.wal_ops_since_clear = 0;
-        Ok(())
+
+        // Get WAL size after (should be 0)
+        let wal_size_after = self.wal.file_size().unwrap_or(0);
+
+        Ok(compaction::CheckpointStats {
+            wal_size_before,
+            wal_size_after,
+            wal_ops_cleared: wal_ops_cleared as u64,
+        })
     }
 
     /// Recover metadata from WAL if the file's metadata is corrupted
@@ -1364,7 +1378,7 @@ impl Storage for StorageEngine {
         self.flush()
     }
 
-    fn checkpoint(&mut self) -> Result<()> {
+    fn checkpoint(&mut self) -> Result<compaction::CheckpointStats> {
         self.checkpoint()
     }
 
