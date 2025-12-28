@@ -123,5 +123,14 @@ pub fn try_load_fulltext_index_from_file(
         return None;
     }
 
-    FulltextIndex::load_from_file(ftidx_path).ok()
+    match FulltextIndex::load_from_file(ftidx_path.clone()) {
+        Ok(index) => Some(index),
+        Err(e) => {
+            eprintln!(
+                "[WARN] Failed to load fulltext index from {:?}: {:?}",
+                ftidx_path, e
+            );
+            None
+        }
+    }
 }

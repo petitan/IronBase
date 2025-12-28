@@ -1,0 +1,284 @@
+// Index operations for CollectionCore
+// B+ tree index creation, management, and query optimization
+
+use serde_json::Value;
+
+use crate::error::{IronBaseError, Result};
+use crate::index::{IndexKey, IndexMetadata};
+use crate::query::Query;
+use crate::query_planner::QueryPlanner;
+use crate::storage::{RawStorage, Storage};
+use crate::value_utils::get_nested_value;
+
+use super::index_persistence::persist_index_to_disk;
+use super::CollectionCore;
+
+/// Index operations for CollectionCore
+impl<S: Storage + RawStorage> CollectionCore<S> {
+    /// Explain query execution plan without executing
+    pub fn explain(&self, query_json: &Value) -> Result<Value> {
+        let indexes = self.indexes.read();
+        let index_fields = indexes.list_indexes_with_compound_info();
+
+        let plan = QueryPlanner::explain_query_with_fields(query_json, &index_fields);
+        Ok(plan)
+    }
+
+    /// Find with manual index hint
+    pub fn find_with_hint(&self, query_json: &Value, hint: &str) -> Result<Vec<Value>> {
+        let parsed_query = Query::from_json(query_json)?;
+
+        // Verify hint index exists
+        {
+            let indexes = self.indexes.read();
+            if indexes.get_btree_index(hint).is_none() {
+                return Err(IronBaseError::IndexError(format!(
+                    "Index '{}' not found (hint)",
+                    hint
+                )));
+            }
+        }
+
+        // Try to create a plan using the hinted index
+        // For now, we try to match the query to the index field
+        let field = self.extract_field_from_index_name(hint);
+
+        // Create a forced plan
+        let plan = self.create_plan_for_hint(query_json, hint, &field)?;
+
+        // Execute with the forced plan
+        self.find_with_index(parsed_query, plan)
+    }
+
+    /// Create a compound B+ tree index on multiple fields
+    ///
+    /// Compound indexes allow efficient queries on multiple fields in order.
+    /// The field order matters - queries can use the index if they query
+    /// the first N fields in order (prefix matching).
+    ///
+    /// # Arguments
+    /// * `fields` - Ordered list of fields (e.g., ["country", "city"])
+    /// * `unique` - Whether the compound key must be unique
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Create compound index on (country, city)
+    /// collection.create_compound_index(
+    ///     vec!["country".to_string(), "city".to_string()],
+    ///     false
+    /// )?;
+    ///
+    /// // These queries can use the index:
+    /// // - {"country": "US"}                    (prefix match)
+    /// // - {"country": "US", "city": "NYC"}    (full match)
+    ///
+    /// // This query CANNOT use the index efficiently:
+    /// // - {"city": "NYC"}                      (not a prefix)
+    /// ```
+    pub fn create_compound_index(&self, fields: Vec<String>, unique: bool) -> Result<String> {
+        if fields.is_empty() {
+            return Err(IronBaseError::IndexError(
+                "Compound index must have at least one field".to_string(),
+            ));
+        }
+
+        // Create index name from all fields: users_country_city
+        let index_name = format!("{}_{}", self.name, fields.join("_"));
+
+        let mut indexes = self.indexes.write();
+        indexes.create_compound_index(index_name.clone(), fields.clone(), unique)?;
+        drop(indexes); // Release index lock before batch scanning
+
+        // Collect (compound_key, doc_id) pairs in batches - full documents are NOT kept in memory
+        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let fields_clone = fields.clone();
+        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            for (doc_id, doc) in batch_docs {
+                // Replicate extract_key logic inline to avoid holding index lock
+                let keys: Vec<IndexKey> = fields_clone
+                    .iter()
+                    .map(|field| {
+                        get_nested_value(&doc, field)
+                            .map(IndexKey::from)
+                            .unwrap_or(IndexKey::Null)
+                    })
+                    .collect();
+                entries.push((IndexKey::Compound(keys), doc_id));
+            }
+            Ok(())
+        })?;
+
+        // Sort by key - O(n log n)
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Build index from sorted entries - O(n)
+        let mut indexes = self.indexes.write();
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.build_from_sorted(entries, unique)?;
+        }
+        drop(indexes); // Release index lock
+
+        // PERSIST index data to .idx file FIRST (to get correct root_offset)
+        let root_offset = {
+            let storage = self.storage.read();
+            let db_file_path = storage.get_file_path().to_string();
+            drop(storage);
+
+            if !db_file_path.is_empty() {
+                let mut indexes = self.indexes.write();
+                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                    persist_index_to_disk(&db_file_path, &index_name, |file| {
+                        index.save_to_file(file)
+                    })?;
+                    index.metadata.root_offset
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // THEN persist metadata with correct root_offset
+        {
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                let index_meta = IndexMetadata {
+                    name: index_name.clone(),
+                    field: fields[0].clone(), // Primary field for backward compat
+                    fields: fields.clone(),
+                    unique,
+                    sparse: false,
+                    num_keys: 0,
+                    tree_height: 1,
+                    root_offset,
+                };
+
+                meta.indexes.push(index_meta);
+                storage.flush()?;
+            }
+        }
+
+        Ok(index_name)
+    }
+
+    /// Create a B+ tree index on a field
+    pub fn create_index(&self, field: String, unique: bool) -> Result<String> {
+        self.check_not_closed()?;
+        let index_name = format!("{}_{}", self.name, field);
+
+        let mut indexes = self.indexes.write();
+        indexes.create_btree_index(index_name.clone(), field.clone(), unique)?;
+
+        // Release index lock before batch scanning
+        drop(indexes);
+
+        // Collect (key, doc_id) pairs in batches - full documents are NOT kept in memory
+        // Only the small pairs accumulate, reducing memory from O(total_doc_size) to O(num_docs * pair_size)
+        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let field_clone = field.clone();
+        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            for (doc_id, doc) in batch_docs {
+                if let Some(field_value) = get_nested_value(&doc, &field_clone) {
+                    entries.push((IndexKey::from(field_value), doc_id));
+                }
+            }
+            Ok(())
+        })?;
+
+        // Sort by key - O(n log n)
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        // Re-acquire write lock and build index from sorted entries - O(n)
+        let mut indexes = self.indexes.write();
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.build_from_sorted(entries, unique)?;
+        }
+        drop(indexes); // Release index lock
+
+        // PERSIST index data to .idx file FIRST (to get correct root_offset)
+        let root_offset = {
+            let storage = self.storage.read();
+            let db_file_path = storage.get_file_path().to_string();
+            drop(storage);
+
+            if !db_file_path.is_empty() {
+                let mut indexes = self.indexes.write();
+                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                    persist_index_to_disk(&db_file_path, &index_name, |file| {
+                        index.save_to_file(file)
+                    })?;
+                    index.metadata.root_offset
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // THEN persist metadata with correct root_offset
+        {
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                let index_meta = IndexMetadata {
+                    name: index_name.clone(),
+                    field: field.clone(),
+                    fields: vec![field.clone()], // Single-field index
+                    unique,
+                    sparse: false,
+                    num_keys: 0,
+                    tree_height: 1,
+                    root_offset,
+                };
+
+                meta.indexes.push(index_meta);
+                storage.flush()?;
+            }
+        }
+
+        Ok(index_name)
+    }
+
+    /// Drop an index
+    pub fn drop_index(&self, index_name: &str) -> Result<()> {
+        self.check_not_closed()?;
+        let mut indexes = self.indexes.write();
+        indexes.drop_index(index_name)?;
+
+        // FIX: Hold index lock while updating metadata to prevent race condition
+        // where another thread sees inconsistent state (index gone but metadata present)
+        let mut storage = self.storage.write();
+        if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+            // Remove from B+ tree indexes
+            meta.indexes.retain(|idx| idx.name != index_name);
+            // Remove from fuzzy indexes
+            meta.fuzzy_indexes.retain(|idx| idx.name != index_name);
+            // Remove from fulltext indexes
+            meta.fulltext_indexes.retain(|idx| idx.name != index_name);
+            storage.flush()?;
+        }
+        // Both locks released here atomically
+
+        Ok(())
+    }
+
+    /// List all indexes
+    pub fn list_indexes(&self) -> Result<Vec<String>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        Ok(indexes.list_indexes())
+    }
+
+    /// List all indexes with their prefix field (for QueryPlanner)
+    ///
+    /// Returns tuples of (index_name, first_field) - compound indexes only
+    /// return their FIRST field, as they can only be used for prefix queries.
+    pub fn list_indexes_with_prefix_field(&self) -> Result<Vec<(String, String)>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        Ok(indexes.list_indexes_with_prefix_field())
+    }
+}

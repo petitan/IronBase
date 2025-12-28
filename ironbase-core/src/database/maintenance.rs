@@ -22,7 +22,12 @@ impl DatabaseCore<StorageEngine> {
     }
 
     /// Storage compaction - removes tombstones and old document versions (StorageEngine-specific)
+    ///
+    /// Also flushes fulltext indexes to disk (converting V1 to V2 format for lazy loading).
     pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
+        // Flush fulltext indexes first (converts V1 to V2 lazy loading format)
+        self.flush_fulltext_indexes()?;
+
         let mut storage = self.storage.write();
         storage.compact()
     }

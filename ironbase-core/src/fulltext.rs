@@ -25,6 +25,14 @@ use std::path::PathBuf;
 use unicode_normalization::UnicodeNormalization;
 
 // ============================================================================
+// Type Aliases
+// ============================================================================
+
+/// Token entry with term frequency: (document_id, term_frequency)
+/// Used in V3 format where TF is embedded directly in the inverted index
+pub type TokenEntry = (DocumentId, u32);
+
+// ============================================================================
 // Stop Words
 // ============================================================================
 
@@ -479,8 +487,14 @@ struct FulltextIndexMetadataForSave {
 //   FulltextIndexMetadataForSave - name, field, options
 
 const FTIDX_MAGIC: &[u8; 8] = b"IRONFTX\0";
-const FTIDX_VERSION: u32 = 1;
+const FTIDX_VERSION_V1: u32 = 1;
+const FTIDX_VERSION_V2: u32 = 2; // Lazy loading support
+const FTIDX_VERSION_V3: u32 = 3; // TF embedded in inverted index entries
 const FTIDX_HEADER_SIZE: u64 = 64;
+
+// Header layout (64 bytes):
+// V1: magic(8) + version(4) + doc_count(8) + offsets_offset(8) + inverted_offset(8) + metadata_offset(8) + padding(20)
+// V2: magic(8) + version(4) + doc_count(8) + offsets_offset(8) + token_entries_offset(8) + token_offsets_offset(8) + metadata_offset(8) + padding(12)
 
 /// Full-text search index using inverted index with TF-IDF scoring
 ///
@@ -508,8 +522,10 @@ pub struct FulltextIndex {
     pub field: String,
     /// Tokenization options
     pub options: FtsOptions,
-    /// Inverted index: token -> set of document IDs (IN MEMORY - fast lookup)
-    inverted_index: HashMap<String, HashSet<DocumentId>>,
+    /// Inverted index: token -> list of (doc_id, term_frequency) entries (IN MEMORY - fast lookup)
+    /// V3 format: TF is embedded directly, eliminating disk I/O during search
+    /// In lazy mode, this only contains tokens inserted since last flush
+    inverted_index: HashMap<String, Vec<TokenEntry>>,
     /// Path to .ftidx file for disk-based doc_tokens storage
     storage_path: Option<PathBuf>,
     /// Offset table: doc_id -> file offset (IN MEMORY - small)
@@ -521,6 +537,23 @@ pub struct FulltextIndex {
     /// Memory-only doc_tokens (used when no storage_path is set)
     /// This is for backward compatibility with tests that don't use disk storage
     doc_tokens_memory: HashMap<DocumentId, HashMap<String, u32>>,
+
+    // === Lazy Loading Support (v2/v3 format) ===
+    /// Token offsets table: token -> (file_offset, doc_count)
+    /// Used for lazy loading - only loaded at startup, actual entries loaded on demand
+    token_offsets: HashMap<String, (u64, u32)>,
+    /// Lazy loading mode flag
+    /// When true: inverted_index only contains new inserts, token_offsets used for disk lookup
+    /// When false: inverted_index contains all data (backward compatible mode)
+    lazy_mode: bool,
+    /// File format version (2 or 3). Used to determine how to read token entries.
+    /// V2: token -> HashSet<DocumentId> (TF loaded separately from doc_tokens)
+    /// V3: token -> Vec<(DocumentId, u32)> (TF embedded in inverted index)
+    file_version: u32,
+    /// Deleted document IDs (tracked for lazy mode)
+    /// In lazy mode, removed docs can't be deleted from disk immediately,
+    /// so we track them here and filter them out during search.
+    deleted_doc_ids: HashSet<DocumentId>,
 }
 
 /// Search result with score and matched tokens
@@ -544,6 +577,10 @@ impl FulltextIndex {
             write_offset: FTIDX_HEADER_SIZE,
             file_handle: None,
             doc_tokens_memory: HashMap::new(),
+            token_offsets: HashMap::new(),
+            lazy_mode: false,
+            file_version: FTIDX_VERSION_V3, // New indexes use V3 format
+            deleted_doc_ids: HashSet::new(),
         }
     }
 
@@ -564,6 +601,10 @@ impl FulltextIndex {
             write_offset: FTIDX_HEADER_SIZE,
             file_handle: None,
             doc_tokens_memory: HashMap::new(),
+            token_offsets: HashMap::new(),
+            lazy_mode: false,
+            file_version: FTIDX_VERSION_V3, // New indexes use V3 format
+            deleted_doc_ids: HashSet::new(),
         };
 
         // Create and initialize the file with header
@@ -594,14 +635,15 @@ impl FulltextIndex {
 
         let mut writer = BufWriter::new(file);
 
-        // Write header
+        // Write V2 header
         writer.write_all(FTIDX_MAGIC)?;
-        writer.write_all(&FTIDX_VERSION.to_le_bytes())?;
+        writer.write_all(&FTIDX_VERSION_V2.to_le_bytes())?;
         writer.write_all(&0u64.to_le_bytes())?; // doc_count (placeholder)
         writer.write_all(&0u64.to_le_bytes())?; // offsets_offset (placeholder)
-        writer.write_all(&0u64.to_le_bytes())?; // inverted_offset (placeholder)
+        writer.write_all(&0u64.to_le_bytes())?; // token_entries_offset (placeholder)
+        writer.write_all(&0u64.to_le_bytes())?; // token_offsets_offset (placeholder)
         writer.write_all(&0u64.to_le_bytes())?; // metadata_offset (placeholder)
-        writer.write_all(&[0u8; 20])?; // padding (64 - 8 - 4 - 8*4 = 20)
+        writer.write_all(&[0u8; 12])?; // padding (64 - 8 - 4 - 8*5 = 12)
 
         writer.flush()?;
 
@@ -612,6 +654,21 @@ impl FulltextIndex {
                 .map_err(|e| std::io::Error::other(e.to_string()))?,
         );
 
+        Ok(())
+    }
+
+    /// Open the storage file for read/write without truncating
+    ///
+    /// Used when flushing an index that was loaded from disk.
+    fn open_storage_file_rw(&mut self) -> Result<()> {
+        let path = self
+            .storage_path
+            .as_ref()
+            .ok_or_else(|| IronBaseError::IndexError("No storage path set".to_string()))?;
+
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+
+        self.file_handle = Some(file);
         Ok(())
     }
 
@@ -694,6 +751,240 @@ impl FulltextIndex {
         Ok(tokens)
     }
 
+    // =========================================================================
+    // Lazy Loading: Token-Level Disk I/O (V2 Format)
+    // =========================================================================
+
+    /// Write a single token's doc_ids to disk (for lazy loading)
+    ///
+    /// Format: [token_len:u32][token:bytes][doc_ids_len:u32][doc_ids:json]
+    #[allow(dead_code)]
+    fn write_token_entry(&mut self, token: &str, doc_ids: &HashSet<DocumentId>) -> Result<u64> {
+        let file = self.file_handle.as_mut().ok_or_else(|| {
+            IronBaseError::IndexError("No file handle for disk storage".to_string())
+        })?;
+
+        let offset = self.write_offset;
+        file.seek(SeekFrom::Start(offset))?;
+
+        // Serialize token
+        let token_bytes = token.as_bytes();
+        let token_len = token_bytes.len() as u32;
+
+        // Serialize doc_ids as JSON (preserves DocumentId type info)
+        let doc_ids_bytes = serde_json::to_vec(doc_ids)?;
+        let doc_ids_len = doc_ids_bytes.len() as u32;
+
+        // Write: token_len + token + doc_ids_len + doc_ids
+        file.write_all(&token_len.to_le_bytes())?;
+        file.write_all(token_bytes)?;
+        file.write_all(&doc_ids_len.to_le_bytes())?;
+        file.write_all(&doc_ids_bytes)?;
+
+        self.write_offset = offset + 4 + token_bytes.len() as u64 + 4 + doc_ids_bytes.len() as u64;
+
+        Ok(offset)
+    }
+
+    /// Read a single token's doc_ids from disk (for lazy loading)
+    fn read_token_entry(&self, offset: u64) -> Result<HashSet<DocumentId>> {
+        let path = self
+            .storage_path
+            .as_ref()
+            .ok_or_else(|| IronBaseError::IndexError("No storage path set".to_string()))?;
+
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+
+        let mut reader = BufReader::new(file);
+        let mut len_buf = [0u8; 4];
+
+        // Read and skip token (we already know which token we're looking for)
+        reader.read_exact(&mut len_buf)?;
+        let token_len = u32::from_le_bytes(len_buf) as usize;
+        let mut token_buf = vec![0u8; token_len];
+        reader.read_exact(&mut token_buf)?;
+
+        // Read doc_ids
+        reader.read_exact(&mut len_buf)?;
+        let doc_ids_len = u32::from_le_bytes(len_buf) as usize;
+        let mut doc_ids_buf = vec![0u8; doc_ids_len];
+        reader.read_exact(&mut doc_ids_buf)?;
+
+        let doc_ids: HashSet<DocumentId> = serde_json::from_slice(&doc_ids_buf)?;
+
+        Ok(doc_ids)
+    }
+
+    /// Write a single token's entries to disk (V3 format with TF embedded)
+    ///
+    /// Format: [token_len:u32][token:bytes][entries_len:u32][entries:json]
+    /// where entries is Vec<(DocumentId, u32)> - (doc_id, term_frequency)
+    #[allow(dead_code)]
+    fn write_token_entry_v3(&mut self, token: &str, entries: &[TokenEntry]) -> Result<u64> {
+        let file = self.file_handle.as_mut().ok_or_else(|| {
+            IronBaseError::IndexError("No file handle for disk storage".to_string())
+        })?;
+
+        let offset = self.write_offset;
+        file.seek(SeekFrom::Start(offset))?;
+
+        // Serialize token
+        let token_bytes = token.as_bytes();
+        let token_len = token_bytes.len() as u32;
+
+        // Serialize entries as JSON: Vec<(DocumentId, u32)>
+        let entries_bytes = serde_json::to_vec(entries)?;
+        let entries_len = entries_bytes.len() as u32;
+
+        // Write: token_len + token + entries_len + entries
+        file.write_all(&token_len.to_le_bytes())?;
+        file.write_all(token_bytes)?;
+        file.write_all(&entries_len.to_le_bytes())?;
+        file.write_all(&entries_bytes)?;
+
+        self.write_offset = offset + 4 + token_bytes.len() as u64 + 4 + entries_bytes.len() as u64;
+
+        Ok(offset)
+    }
+
+    /// Read a single token's entries from disk (V3 format with TF embedded)
+    fn read_token_entry_v3(&self, offset: u64) -> Result<Vec<TokenEntry>> {
+        let path = self
+            .storage_path
+            .as_ref()
+            .ok_or_else(|| IronBaseError::IndexError("No storage path set".to_string()))?;
+
+        let mut file = File::open(path)?;
+        file.seek(SeekFrom::Start(offset))?;
+
+        let mut reader = BufReader::new(file);
+        let mut len_buf = [0u8; 4];
+
+        // Read and skip token (we already know which token we're looking for)
+        reader.read_exact(&mut len_buf)?;
+        let token_len = u32::from_le_bytes(len_buf) as usize;
+        let mut token_buf = vec![0u8; token_len];
+        reader.read_exact(&mut token_buf)?;
+
+        // Read entries: Vec<(DocumentId, u32)>
+        reader.read_exact(&mut len_buf)?;
+        let entries_len = u32::from_le_bytes(len_buf) as usize;
+        let mut entries_buf = vec![0u8; entries_len];
+        reader.read_exact(&mut entries_buf)?;
+
+        let entries: Vec<TokenEntry> = serde_json::from_slice(&entries_buf)?;
+
+        Ok(entries)
+    }
+
+    /// Get token entries from memory only (V3 format: doc_id + TF)
+    ///
+    /// This is the core lazy loading method:
+    /// 1. First checks in-memory inverted_index (new inserts since last flush)
+    /// 2. If not found and lazy_mode is active, loads from disk via token_offsets
+    /// 3. Returns None if token doesn't exist anywhere
+    #[allow(dead_code)]
+    fn get_token_entries(&self, token: &str) -> Option<Vec<TokenEntry>> {
+        // First check in-memory (for inserts since last flush, or non-lazy mode)
+        if let Some(entries) = self.inverted_index.get(token) {
+            return Some(entries.clone());
+        }
+
+        // If lazy mode, load from disk (V2 format: HashSet → Vec with TF=1)
+        if self.lazy_mode {
+            if let Some((offset, _count)) = self.token_offsets.get(token) {
+                if let Ok(doc_ids) = self.read_token_entry(*offset) {
+                    // Convert V2 HashSet to V3 Vec<TokenEntry> with TF=1 (placeholder)
+                    return Some(doc_ids.into_iter().map(|id| (id, 1)).collect());
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Get token entries, merging memory and disk data (V3 format: doc_id + TF)
+    ///
+    /// In lazy mode, a token may have entries in both:
+    /// - token_offsets (from previous flush, on disk - V2 or V3 format)
+    /// - inverted_index (new inserts since last flush, in memory - V3 format)
+    ///
+    /// This method merges both sources.
+    /// V3 format: TF is embedded in disk entries (no placeholder needed)
+    /// V2 format: TF=1 placeholder (backward compatible)
+    fn get_token_entries_merged(&self, token: &str) -> Option<Vec<TokenEntry>> {
+        let mem_entries = self.inverted_index.get(token);
+        let disk_entries: Option<Vec<TokenEntry>> = if self.lazy_mode {
+            self.token_offsets.get(token).and_then(|(offset, _)| {
+                if self.file_version >= FTIDX_VERSION_V3 {
+                    // V3: Read entries with TF embedded
+                    self.read_token_entry_v3(*offset).ok()
+                } else {
+                    // V2: Convert HashSet to Vec<TokenEntry> with TF=1 placeholder
+                    self.read_token_entry(*offset)
+                        .ok()
+                        .map(|doc_ids| doc_ids.into_iter().map(|id| (id, 1)).collect())
+                }
+            })
+        } else {
+            None
+        };
+
+        let result = match (mem_entries, disk_entries) {
+            (Some(mem), Some(disk)) => {
+                // Merge with deduplication: memory entries take priority (have accurate TF)
+                let mem_doc_ids: std::collections::HashSet<_> =
+                    mem.iter().map(|(id, _)| id.clone()).collect();
+                let mut merged = mem.clone();
+                // Only add disk entries for doc_ids NOT already in memory
+                for (doc_id, tf) in disk {
+                    if !mem_doc_ids.contains(&doc_id) {
+                        merged.push((doc_id, tf));
+                    }
+                }
+                Some(merged)
+            }
+            (Some(mem), None) => Some(mem.clone()),
+            (None, Some(disk)) => Some(disk),
+            (None, None) => None,
+        };
+
+        // Filter out deleted documents (important for lazy mode correctness)
+        result.map(|entries| {
+            if self.deleted_doc_ids.is_empty() {
+                entries
+            } else {
+                entries
+                    .into_iter()
+                    .filter(|(doc_id, _)| !self.deleted_doc_ids.contains(doc_id))
+                    .collect()
+            }
+        })
+    }
+
+    /// Check if a token exists in the index (memory or disk)
+    #[allow(dead_code)]
+    fn has_token(&self, token: &str) -> bool {
+        self.inverted_index.contains_key(token)
+            || (self.lazy_mode && self.token_offsets.contains_key(token))
+    }
+
+    /// Get total unique token count (memory + disk, may overlap)
+    #[allow(dead_code)]
+    fn total_token_count(&self) -> usize {
+        if self.lazy_mode {
+            // Union of memory and disk tokens
+            let mem_tokens: std::collections::HashSet<&str> =
+                self.inverted_index.keys().map(|s| s.as_str()).collect();
+            let disk_tokens: std::collections::HashSet<&str> =
+                self.token_offsets.keys().map(|s| s.as_str()).collect();
+            mem_tokens.union(&disk_tokens).count()
+        } else {
+            self.inverted_index.len()
+        }
+    }
+
     /// Insert a document's field value into the index
     pub fn insert(&mut self, doc_id: &DocumentId, text: &str) -> Result<()> {
         let tokens = tokenize(text, &self.options);
@@ -707,12 +998,12 @@ impl FulltextIndex {
             *token_counts.entry(token.clone()).or_insert(0) += 1;
         }
 
-        // Add to inverted index (always in memory for fast lookup)
-        for token in token_counts.keys() {
+        // Add to inverted index with TF (V3 format: doc_id + term_frequency)
+        for (token, count) in &token_counts {
             self.inverted_index
                 .entry(token.clone())
                 .or_default()
-                .insert(doc_id.clone());
+                .push((doc_id.clone(), *count));
         }
 
         // Store token frequencies - disk or memory
@@ -744,11 +1035,17 @@ impl FulltextIndex {
         // Remove from offsets
         self.doc_tokens_offsets.remove(doc_id);
 
-        // Update inverted_index
+        // Track deleted doc_id for lazy mode filtering
+        // This ensures the doc won't appear in search results even if still on disk
+        if self.lazy_mode {
+            self.deleted_doc_ids.insert(doc_id.clone());
+        }
+
+        // Update inverted_index (V3: Vec.retain instead of HashSet.remove)
         if let Some(tokens) = token_counts {
             for token in tokens.keys() {
-                if let Some(doc_ids) = self.inverted_index.get_mut(token) {
-                    doc_ids.remove(doc_id);
+                if let Some(entries) = self.inverted_index.get_mut(token) {
+                    entries.retain(|(id, _)| id != doc_id);
                 }
             }
         }
@@ -794,14 +1091,25 @@ impl FulltextIndex {
             return Vec::new();
         }
 
-        // Phase 1: Find candidate documents from inverted_index (memory-only, fast)
-        let mut candidate_docs: HashSet<DocumentId> = HashSet::new();
+        // V3 Optimized Search: TF is embedded in inverted index, NO disk I/O for TF!
+        //
+        // Phase 1+2 Combined: Get candidates WITH TF in one pass
+        // - get_token_entries_merged returns Vec<(DocumentId, TF)>
+        // - Calculate IDF and accumulate scores directly
+        // - NO read_doc_tokens_from_disk calls needed!
+
+        let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
         let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
 
         for token in &query_tokens {
-            if let Some(doc_ids) = self.inverted_index.get(token) {
-                for doc_id in doc_ids {
-                    candidate_docs.insert(doc_id.clone());
+            if let Some(entries) = self.get_token_entries_merged(token) {
+                // IDF = log(1 + total_docs / docs_with_token)
+                let idf = (1.0 + total_docs / entries.len() as f64).ln();
+
+                for (doc_id, tf) in entries {
+                    // TF-IDF score: TF comes directly from inverted index (V3 format)
+                    *doc_scores.entry(doc_id.clone()).or_default() += (tf as f64) * idf;
+
                     matched
                         .entry(doc_id.clone())
                         .or_default()
@@ -810,46 +1118,13 @@ impl FulltextIndex {
             }
         }
 
-        if candidate_docs.is_empty() {
+        if doc_scores.is_empty() {
             return Vec::new();
         }
 
-        // Phase 2: Calculate TF-IDF scores (with lazy loading from disk or memory)
-        let mut scores: HashMap<DocumentId, f64> = HashMap::new();
-
-        for doc_id in &candidate_docs {
-            // Load doc_tokens: disk-based or memory-based
-            let doc_tokens = if self.storage_path.is_some() {
-                // Disk-based: load from file
-                match self.read_doc_tokens_from_disk(doc_id) {
-                    Ok(tokens) => tokens,
-                    Err(_) => continue, // Skip documents we can't read
-                }
-            } else {
-                // Memory-based: get from doc_tokens_memory
-                match self.doc_tokens_memory.get(doc_id) {
-                    Some(tokens) => tokens.clone(),
-                    None => continue, // Skip documents not in memory
-                }
-            };
-
-            let mut doc_score = 0.0;
-            for token in &query_tokens {
-                if let Some(doc_ids) = self.inverted_index.get(token) {
-                    // Smoothed IDF = log(1 + total_docs / docs_with_token)
-                    let idf = (1.0 + total_docs / doc_ids.len() as f64).ln();
-
-                    // TF = token count in doc
-                    let tf = doc_tokens.get(token).copied().unwrap_or(0) as f64;
-
-                    doc_score += tf * idf;
-                }
-            }
-
-            if doc_score > 0.0 {
-                scores.insert(doc_id.clone(), doc_score);
-            }
-        }
+        // Old Phase 2 code removed - TF now comes from inverted index entries!
+        // This eliminates the 7GB disk I/O for doc_tokens during search.
+        let scores = doc_scores;
 
         // Apply min_score filter
         let min = min_score.unwrap_or(0.0);
@@ -866,9 +1141,12 @@ impl FulltextIndex {
             .collect();
 
         results.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            // Primary: score descending
+            // Secondary: doc_id ascending (for deterministic ordering when scores are equal)
+            match b.score.partial_cmp(&a.score) {
+                Some(std::cmp::Ordering::Equal) | None => a.doc_id.cmp(&b.doc_id),
+                Some(ord) => ord,
+            }
         });
 
         // Apply skip and limit
@@ -912,30 +1190,99 @@ impl FulltextIndex {
         }
     }
 
-    /// Flush and finalize the index file
-    /// Writes the offset table, inverted index, and metadata to disk
+    /// Flush and finalize the index file (V3 format with TF embedded)
+    ///
+    /// V3 format writes token entries with TF embedded: token -> Vec<(DocumentId, u32)>
+    /// After flush, inverted_index is cleared and token_offsets is populated.
     pub fn flush(&mut self) -> Result<()> {
-        if self.storage_path.is_none() || self.file_handle.is_none() {
+        if self.storage_path.is_none() {
             return Ok(());
         }
 
+        // Open file handle if not already open (e.g., index was loaded from disk)
+        if self.file_handle.is_none() {
+            self.open_storage_file_rw()?;
+        }
+
+        // Step 1: Collect all token data BEFORE we start writing
+        // This avoids borrow checker issues with read_token_entry during file writes
+        let mut all_tokens: HashMap<String, Vec<TokenEntry>> = HashMap::new();
+
+        // IMPORTANT: Memory entries (new) take priority over disk entries (old)
+        // Add memory entries FIRST (they have accurate/updated TF values)
+        for (token, entries) in &self.inverted_index {
+            all_tokens.insert(token.clone(), entries.clone());
+        }
+
+        // Add tokens from disk (if in lazy mode with existing token_offsets)
+        // Only add doc_ids that are NOT already in memory (to preserve updated TF)
+        if self.lazy_mode {
+            for (token, (offset, _count)) in &self.token_offsets {
+                // Read using appropriate format based on file_version
+                let disk_entries = if self.file_version >= FTIDX_VERSION_V3 {
+                    self.read_token_entry_v3(*offset).ok()
+                } else {
+                    // V2 format: convert HashSet to Vec<TokenEntry> with TF=1
+                    self.read_token_entry(*offset)
+                        .ok()
+                        .map(|doc_ids| doc_ids.into_iter().map(|id| (id, 1u32)).collect())
+                };
+                if let Some(disk_entries) = disk_entries {
+                    let merged = all_tokens.entry(token.clone()).or_default();
+                    // Only add disk entries for doc_ids NOT already in memory AND not deleted
+                    let existing_doc_ids: std::collections::HashSet<_> =
+                        merged.iter().map(|(id, _)| id.clone()).collect();
+                    for (doc_id, tf) in disk_entries {
+                        if !existing_doc_ids.contains(&doc_id)
+                            && !self.deleted_doc_ids.contains(&doc_id)
+                        {
+                            merged.push((doc_id, tf));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 2: Now start writing - get file handle
         let file = self.file_handle.as_mut().unwrap();
         file.flush()?;
 
-        // Write offset table (as Vec to preserve DocumentId type)
+        // Write doc_tokens offset table (as Vec to preserve DocumentId type)
         let offsets_offset = self.write_offset;
         let offsets_vec: Vec<(&DocumentId, &u64)> = self.doc_tokens_offsets.iter().collect();
         let offsets_bytes = serde_json::to_vec(&offsets_vec)?;
         file.seek(SeekFrom::Start(offsets_offset))?;
         file.write_all(&offsets_bytes)?;
 
-        // Write inverted index
-        let inverted_offset = offsets_offset + offsets_bytes.len() as u64;
-        let inverted_bytes = serde_json::to_vec(&self.inverted_index)?;
-        file.write_all(&inverted_bytes)?;
+        // V3: Write each token entry with TF embedded and build token_offsets table
+        let token_entries_offset = offsets_offset + offsets_bytes.len() as u64;
+        let mut current_offset = token_entries_offset;
+        let mut new_token_offsets: HashMap<String, (u64, u32)> = HashMap::new();
+
+        for (token, entries) in &all_tokens {
+            // Write token entry with TF (V3 format)
+            let token_bytes = token.as_bytes();
+            let entries_bytes = serde_json::to_vec(entries)?;
+
+            file.seek(SeekFrom::Start(current_offset))?;
+            file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
+            file.write_all(token_bytes)?;
+            file.write_all(&(entries_bytes.len() as u32).to_le_bytes())?;
+            file.write_all(&entries_bytes)?;
+
+            new_token_offsets.insert(token.clone(), (current_offset, entries.len() as u32));
+            current_offset += 4 + token_bytes.len() as u64 + 4 + entries_bytes.len() as u64;
+        }
+
+        // Write token_offsets table
+        let token_offsets_offset = current_offset;
+        let token_offsets_vec: Vec<(&String, &(u64, u32))> = new_token_offsets.iter().collect();
+        let token_offsets_bytes = serde_json::to_vec(&token_offsets_vec)?;
+        file.seek(SeekFrom::Start(token_offsets_offset))?;
+        file.write_all(&token_offsets_bytes)?;
 
         // Write metadata (name, field, options)
-        let metadata_offset = inverted_offset + inverted_bytes.len() as u64;
+        let metadata_offset = token_offsets_offset + token_offsets_bytes.len() as u64;
         let metadata = FulltextIndexMetadataForSave {
             name: self.name.clone(),
             field: self.field.clone(),
@@ -944,16 +1291,25 @@ impl FulltextIndex {
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         file.write_all(&metadata_bytes)?;
 
-        // Update header with final offsets
+        // Update V3 header with final offsets
         file.seek(SeekFrom::Start(8))?; // After magic
-        file.write_all(&FTIDX_VERSION.to_le_bytes())?;
+        file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
         file.write_all(&(self.doc_tokens_offsets.len() as u64).to_le_bytes())?;
         file.write_all(&offsets_offset.to_le_bytes())?;
-        file.write_all(&inverted_offset.to_le_bytes())?;
+        file.write_all(&token_entries_offset.to_le_bytes())?;
+        file.write_all(&token_offsets_offset.to_le_bytes())?;
         file.write_all(&metadata_offset.to_le_bytes())?;
 
         file.flush()?;
         file.sync_all()?;
+
+        // Step 3: Switch to lazy mode with V3 format
+        self.write_offset = metadata_offset + metadata_bytes.len() as u64;
+        self.token_offsets = new_token_offsets;
+        self.inverted_index.clear();
+        self.lazy_mode = true;
+        self.file_version = FTIDX_VERSION_V3; // Upgraded to V3
+        self.deleted_doc_ids.clear(); // Deleted docs are now permanently removed from disk
 
         Ok(())
     }
@@ -963,7 +1319,10 @@ impl FulltextIndex {
         self.flush()
     }
 
-    /// Load index from file
+    /// Load index from file (supports both V1 and V2 formats)
+    ///
+    /// V1: Loads entire inverted_index into memory (backward compatible)
+    /// V2: Loads only token_offsets table, lazy loads tokens on demand
     pub fn load_from_file(path: PathBuf) -> Result<Self> {
         let mut file = File::open(&path)?;
 
@@ -981,9 +1340,11 @@ impl FulltextIndex {
 
         file.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
-        if version != FTIDX_VERSION {
+
+        if version != FTIDX_VERSION_V1 && version != FTIDX_VERSION_V2 && version != FTIDX_VERSION_V3
+        {
             return Err(IronBaseError::IndexError(format!(
-                "Unsupported .ftidx version: {}",
+                "Unsupported .ftidx version: {} (supported: 1, 2, 3)",
                 version
             )));
         }
@@ -994,49 +1355,143 @@ impl FulltextIndex {
         file.read_exact(&mut buf8)?;
         let offsets_offset = u64::from_le_bytes(buf8);
 
-        file.read_exact(&mut buf8)?;
-        let inverted_offset = u64::from_le_bytes(buf8);
+        if version == FTIDX_VERSION_V1 {
+            // V1 format: inverted_offset, metadata_offset
+            file.read_exact(&mut buf8)?;
+            let inverted_offset = u64::from_le_bytes(buf8);
 
-        file.read_exact(&mut buf8)?;
-        let metadata_offset = u64::from_le_bytes(buf8);
+            file.read_exact(&mut buf8)?;
+            let metadata_offset = u64::from_le_bytes(buf8);
 
-        // Read offset table (stored as Vec to preserve DocumentId type)
-        file.seek(SeekFrom::Start(offsets_offset))?;
-        let offsets_size = (inverted_offset - offsets_offset) as usize;
-        let mut offsets_buf = vec![0u8; offsets_size];
-        file.read_exact(&mut offsets_buf)?;
-        let offsets_vec: Vec<(DocumentId, u64)> = serde_json::from_slice(&offsets_buf)?;
-        let doc_tokens_offsets: HashMap<DocumentId, u64> = offsets_vec.into_iter().collect();
+            // Read offset table
+            file.seek(SeekFrom::Start(offsets_offset))?;
+            let offsets_size = (inverted_offset - offsets_offset) as usize;
+            let mut offsets_buf = vec![0u8; offsets_size];
+            file.read_exact(&mut offsets_buf)?;
+            let offsets_vec: Vec<(DocumentId, u64)> = serde_json::from_slice(&offsets_buf)?;
+            let doc_tokens_offsets: HashMap<DocumentId, u64> = offsets_vec.into_iter().collect();
 
-        // Read inverted index
-        file.seek(SeekFrom::Start(inverted_offset))?;
-        let inverted_size = (metadata_offset - inverted_offset) as usize;
-        let mut inverted_buf = vec![0u8; inverted_size];
-        file.read_exact(&mut inverted_buf)?;
-        let inverted_index: HashMap<String, HashSet<DocumentId>> =
-            serde_json::from_slice(&inverted_buf)?;
+            // Read inverted index (entire blob - V1 behavior)
+            file.seek(SeekFrom::Start(inverted_offset))?;
+            let inverted_size = (metadata_offset - inverted_offset) as usize;
+            let mut inverted_buf = vec![0u8; inverted_size];
+            file.read_exact(&mut inverted_buf)?;
+            // V1 format stored HashSet<DocumentId>, convert to V3 Vec<TokenEntry> with TF=1
+            let v1_index: HashMap<String, HashSet<DocumentId>> =
+                serde_json::from_slice(&inverted_buf)?;
+            let inverted_index: HashMap<String, Vec<TokenEntry>> = v1_index
+                .into_iter()
+                .map(|(token, doc_ids)| (token, doc_ids.into_iter().map(|id| (id, 1)).collect()))
+                .collect();
 
-        // Read metadata
-        file.seek(SeekFrom::Start(metadata_offset))?;
-        let metadata_reader = BufReader::new(&file);
-        let metadata: FulltextIndexMetadataForSave = serde_json::from_reader(metadata_reader)?;
+            // Read metadata
+            file.seek(SeekFrom::Start(metadata_offset))?;
+            let metadata_reader = BufReader::new(&file);
+            let metadata: FulltextIndexMetadataForSave = serde_json::from_reader(metadata_reader)?;
 
-        Ok(FulltextIndex {
-            name: metadata.name,
-            field: metadata.field,
-            options: metadata.options,
-            inverted_index,
-            storage_path: Some(path),
-            doc_tokens_offsets,
-            write_offset: offsets_offset, // New data would go before offset table
-            file_handle: None,            // Opened read-only, need to reopen for writes
-            doc_tokens_memory: HashMap::new(), // Disk-based, not used
-        })
+            Ok(FulltextIndex {
+                name: metadata.name,
+                field: metadata.field,
+                options: metadata.options,
+                inverted_index,
+                storage_path: Some(path),
+                doc_tokens_offsets,
+                write_offset: offsets_offset,
+                file_handle: None,
+                doc_tokens_memory: HashMap::new(),
+                token_offsets: HashMap::new(),
+                lazy_mode: false,               // V1: full in-memory mode
+                file_version: FTIDX_VERSION_V1, // Will upgrade to V3 on next flush
+                deleted_doc_ids: HashSet::new(),
+            })
+        } else {
+            // V2/V3 format: token_entries_offset, token_offsets_offset, metadata_offset
+            file.read_exact(&mut buf8)?;
+            let token_entries_offset = u64::from_le_bytes(buf8);
+
+            file.read_exact(&mut buf8)?;
+            let token_offsets_offset = u64::from_le_bytes(buf8);
+
+            file.read_exact(&mut buf8)?;
+            let metadata_offset = u64::from_le_bytes(buf8);
+
+            // Read doc_tokens offset table
+            file.seek(SeekFrom::Start(offsets_offset))?;
+            let offsets_size = (token_entries_offset - offsets_offset) as usize;
+            let mut offsets_buf = vec![0u8; offsets_size];
+            file.read_exact(&mut offsets_buf)?;
+            let offsets_vec: Vec<(DocumentId, u64)> = serde_json::from_slice(&offsets_buf)?;
+            let doc_tokens_offsets: HashMap<DocumentId, u64> = offsets_vec.into_iter().collect();
+
+            // Read token_offsets table (small, stays in memory)
+            file.seek(SeekFrom::Start(token_offsets_offset))?;
+            let token_offsets_size = (metadata_offset - token_offsets_offset) as usize;
+            let mut token_offsets_buf = vec![0u8; token_offsets_size];
+            file.read_exact(&mut token_offsets_buf)?;
+            let token_offsets_vec: Vec<(String, (u64, u32))> =
+                serde_json::from_slice(&token_offsets_buf)?;
+            let token_offsets: HashMap<String, (u64, u32)> =
+                token_offsets_vec.into_iter().collect();
+
+            // Read metadata
+            file.seek(SeekFrom::Start(metadata_offset))?;
+            let metadata_reader = BufReader::new(&file);
+            let metadata: FulltextIndexMetadataForSave = serde_json::from_reader(metadata_reader)?;
+
+            Ok(FulltextIndex {
+                name: metadata.name,
+                field: metadata.field,
+                options: metadata.options,
+                inverted_index: HashMap::new(), // V2/V3: empty, use lazy loading
+                storage_path: Some(path),
+                doc_tokens_offsets,
+                write_offset: offsets_offset,
+                file_handle: None,
+                doc_tokens_memory: HashMap::new(),
+                token_offsets,
+                lazy_mode: true,       // V2/V3: lazy loading mode
+                file_version: version, // V2 will upgrade to V3 on next flush, V3 stays V3
+                deleted_doc_ids: HashSet::new(),
+            })
+        }
     }
 
     /// Get storage path
     pub fn storage_path(&self) -> Option<&PathBuf> {
         self.storage_path.as_ref()
+    }
+
+    /// Check if lazy loading mode is active
+    ///
+    /// Returns true if the index was loaded from a V2 file and is using
+    /// on-demand token loading from disk.
+    pub fn is_lazy_mode(&self) -> bool {
+        self.lazy_mode
+    }
+
+    /// Get the number of unique tokens in the index
+    ///
+    /// This returns the total count from both in-memory and lazy-loaded sources.
+    pub fn unique_token_count(&self) -> usize {
+        if self.lazy_mode {
+            self.token_offsets.len() + self.inverted_index.len()
+        } else {
+            self.inverted_index.len()
+        }
+    }
+
+    /// Get memory usage estimate in bytes (for monitoring)
+    pub fn memory_usage_bytes(&self) -> usize {
+        // inverted_index: each entry is ~100 bytes on average (token + HashSet overhead)
+        let inverted_mem = self.inverted_index.len() * 100;
+        // token_offsets: each entry is ~32 bytes (String + (u64, u32))
+        let offsets_mem = self.token_offsets.len() * 32;
+        // doc_tokens_offsets: each entry is ~24 bytes
+        let doc_offsets_mem = self.doc_tokens_offsets.len() * 24;
+        // doc_tokens_memory: variable, estimate ~200 bytes per doc
+        let doc_tokens_mem = self.doc_tokens_memory.len() * 200;
+
+        inverted_mem + offsets_mem + doc_offsets_mem + doc_tokens_mem
     }
 }
 
@@ -1351,5 +1806,208 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_dir);
+    }
+
+    // =========================================================================
+    // Lazy Loading Tests (V2 format)
+    // =========================================================================
+
+    #[test]
+    fn test_lazy_mode_after_save_load() {
+        let options = FtsOptions::new(FtsLanguage::English);
+        let temp_path = std::env::temp_dir().join("fts_test_lazy_mode.ftidx");
+
+        // Create, populate, and save
+        {
+            let mut index = FulltextIndex::new_with_storage(
+                "test_idx",
+                "content",
+                options.clone(),
+                temp_path.clone(),
+            )
+            .unwrap();
+
+            index
+                .insert(&DocumentId::Int(1), "The quick brown fox")
+                .unwrap();
+            index
+                .insert(&DocumentId::Int(2), "The lazy brown dog")
+                .unwrap();
+            index.insert(&DocumentId::Int(3), "A fast red cat").unwrap();
+
+            // Before save: not in lazy mode
+            assert!(!index.is_lazy_mode());
+            assert!(index.unique_token_count() > 0);
+
+            index.save_to_file().unwrap();
+
+            // After save: switched to lazy mode
+            assert!(index.is_lazy_mode());
+        }
+
+        // Load and verify lazy mode is active
+        {
+            let loaded = FulltextIndex::load_from_file(temp_path.clone()).unwrap();
+
+            // V2 format: lazy mode should be active
+            assert!(loaded.is_lazy_mode());
+            assert_eq!(loaded.len(), 3);
+
+            // Token count should be from token_offsets (lazy source)
+            assert!(loaded.unique_token_count() > 0);
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_lazy_mode_search_works() {
+        let options = FtsOptions::new(FtsLanguage::English);
+        let temp_path = std::env::temp_dir().join("fts_test_lazy_search.ftidx");
+
+        // Create and save
+        {
+            let mut index = FulltextIndex::new_with_storage(
+                "test_idx",
+                "content",
+                options.clone(),
+                temp_path.clone(),
+            )
+            .unwrap();
+
+            index
+                .insert(&DocumentId::Int(1), "The quick brown fox jumps")
+                .unwrap();
+            index
+                .insert(&DocumentId::Int(2), "The lazy brown dog sleeps")
+                .unwrap();
+            index
+                .insert(&DocumentId::Int(3), "A quick red fox runs")
+                .unwrap();
+
+            index.save_to_file().unwrap();
+        }
+
+        // Load in lazy mode and search
+        {
+            let loaded = FulltextIndex::load_from_file(temp_path.clone()).unwrap();
+            assert!(loaded.is_lazy_mode());
+
+            // Single term search
+            let results = loaded.search("fox", 10, 0, None);
+            assert_eq!(results.len(), 2);
+            let doc_ids: Vec<_> = results.iter().map(|r| &r.doc_id).collect();
+            assert!(doc_ids.contains(&&DocumentId::Int(1)));
+            assert!(doc_ids.contains(&&DocumentId::Int(3)));
+
+            // Multi-term search
+            let results = loaded.search("brown dog", 10, 0, None);
+            assert_eq!(results.len(), 2); // Both docs have "brown"
+
+            // Term only in one doc
+            let results = loaded.search("sleeps", 10, 0, None);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].doc_id, DocumentId::Int(2));
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_lazy_mode_insert_after_load() {
+        let options = FtsOptions::new(FtsLanguage::English);
+        let temp_path = std::env::temp_dir().join("fts_test_lazy_insert.ftidx");
+
+        // Create initial index
+        {
+            let mut index = FulltextIndex::new_with_storage(
+                "test_idx",
+                "content",
+                options.clone(),
+                temp_path.clone(),
+            )
+            .unwrap();
+
+            index
+                .insert(&DocumentId::Int(1), "The original document")
+                .unwrap();
+            index.save_to_file().unwrap();
+        }
+
+        // Load, insert new doc, search should find both
+        {
+            let mut loaded = FulltextIndex::load_from_file(temp_path.clone()).unwrap();
+            assert!(loaded.is_lazy_mode());
+
+            // Insert new document (goes to in-memory inverted_index)
+            loaded
+                .insert(&DocumentId::Int(2), "A new document added")
+                .unwrap();
+
+            // Search for "document" should find both (disk + memory merged)
+            let results = loaded.search("document", 10, 0, None);
+            assert_eq!(results.len(), 2);
+
+            // Search for "original" (disk only)
+            let results = loaded.search("original", 10, 0, None);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].doc_id, DocumentId::Int(1));
+
+            // Search for "new" (memory only)
+            let results = loaded.search("new", 10, 0, None);
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].doc_id, DocumentId::Int(2));
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_lazy_mode_memory_reduction() {
+        let options = FtsOptions::new(FtsLanguage::English);
+        let temp_path = std::env::temp_dir().join("fts_test_lazy_memory.ftidx");
+
+        // Create index with many tokens
+        {
+            let mut index = FulltextIndex::new_with_storage(
+                "test_idx",
+                "content",
+                options.clone(),
+                temp_path.clone(),
+            )
+            .unwrap();
+
+            // Insert documents with varied vocabulary
+            for i in 0..100 {
+                let content = format!(
+                    "Document {} contains word{} and term{} with unique{} vocabulary{}",
+                    i, i, i, i, i
+                );
+                index.insert(&DocumentId::Int(i), &content).unwrap();
+            }
+
+            let initial_token_count = index.token_count();
+            assert!(initial_token_count > 400); // Should have many unique tokens
+
+            index.save_to_file().unwrap();
+        }
+
+        // Load in lazy mode - inverted_index should be empty
+        {
+            let loaded = FulltextIndex::load_from_file(temp_path.clone()).unwrap();
+            assert!(loaded.is_lazy_mode());
+
+            // inverted_index is empty (accessed via token_count which uses inverted_index)
+            assert_eq!(loaded.token_count(), 0);
+
+            // But unique_token_count includes lazy tokens
+            assert!(loaded.unique_token_count() > 0);
+
+            // Search still works
+            let results = loaded.search("document", 10, 0, None);
+            assert!(!results.is_empty());
+        }
+
+        let _ = std::fs::remove_file(&temp_path);
     }
 }
