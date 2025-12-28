@@ -60,3 +60,4 @@ mcp-server/config.toml
 *.dll
 *.pdb
 *.exe
+*.ftidx
