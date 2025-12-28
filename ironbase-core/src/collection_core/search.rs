@@ -190,9 +190,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 lang,
                 min_word_length,
                 accent_folding,
-                storage_path,
+                storage_path.clone(),
             )?;
         }
+
+        // Helper closure for cleanup on failure
+        let cleanup = |index_name: &str, storage_path: &Option<std::path::PathBuf>| {
+            // Remove index from IndexManager
+            let mut indexes = self.indexes.write();
+            let _ = indexes.drop_fulltext_index(index_name);
+            // Delete partial .ftidx file if it exists
+            if let Some(path) = storage_path {
+                let _ = std::fs::remove_file(path);
+            }
+        };
 
         // Step 2 & 3: Scan documents IN BATCHES and populate index
         // This is memory-efficient for large collections (e.g., 10GB+ email databases)
@@ -203,33 +214,55 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let index_name_clone = index_name.clone();
         let indexes_ref = self.indexes.clone();
 
-        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
-            let mut indexes = indexes_ref.write();
-            if let Some(index) = indexes.get_fulltext_index_mut(&index_name_clone) {
-                for (doc_id, doc) in &batch_docs {
-                    if let Some(value) = get_nested_value(doc, &field_clone) {
-                        if let Some(s) = value.as_str() {
-                            let _ = index.insert(doc_id, s);
+        if let Err(e) =
+            self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+                let mut indexes = indexes_ref.write();
+                if let Some(index) = indexes.get_fulltext_index_mut(&index_name_clone) {
+                    for (doc_id, doc) in &batch_docs {
+                        if let Some(value) = get_nested_value(doc, &field_clone) {
+                            if let Some(s) = value.as_str() {
+                                let _ = index.insert(doc_id, s);
+                            }
                         }
                     }
                 }
-            }
-            Ok(())
-        })?;
+                Ok(())
+            })
+        {
+            cleanup(&index_name, &storage_path);
+            return Err(e);
+        }
 
         // Step 4: Flush fulltext index to disk and get metadata
         let metadata = {
             let mut indexes = self.indexes.write();
             if let Some(index) = indexes.get_fulltext_index_mut(&index_name) {
                 // Flush the fulltext index to persist inverted index data to .ftidx file
-                index.save_to_file()?;
+                if let Err(e) = index.save_to_file() {
+                    drop(indexes); // Release lock before cleanup
+                    cleanup(&index_name, &storage_path);
+                    return Err(e);
+                }
             }
             indexes
                 .get_fulltext_index(&index_name)
                 .map(|i| i.metadata())
         };
 
-        // Step 5: Store fulltext index metadata in storage
+        // Step 5: Validate index has content before saving metadata
+        // This prevents ghost indexes from being registered
+        if let Some(ref meta) = metadata {
+            if meta.num_documents == 0 {
+                // Empty index - likely a failed creation, clean up
+                cleanup(&index_name, &storage_path);
+                return Err(crate::error::IronBaseError::IndexError(format!(
+                    "Fulltext index '{}' has no documents - field '{}' may not exist or contain text",
+                    index_name, field
+                )));
+            }
+        }
+
+        // Step 6: Store fulltext index metadata in storage
         if let Some(meta) = metadata {
             let mut storage = self.storage.write();
             if let Some(coll_meta) = storage.get_collection_meta_mut(&self.name) {

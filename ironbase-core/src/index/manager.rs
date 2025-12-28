@@ -397,6 +397,22 @@ impl IndexManager {
         self.fulltext_indexes.values().collect()
     }
 
+    /// Drop a fulltext index by name
+    ///
+    /// Returns Ok(()) if the index was removed, Err if not found.
+    /// Used for cleanup on failed index creation.
+    pub fn drop_fulltext_index(&mut self, name: &str) -> Result<()> {
+        if self.fulltext_indexes.remove(name).is_some() {
+            self.index_file_paths.remove(name);
+            Ok(())
+        } else {
+            Err(IronBaseError::IndexError(format!(
+                "Fulltext index not found: {}",
+                name
+            )))
+        }
+    }
+
     /// Check if any index in this manager has unique constraint
     ///
     /// Used for hybrid locking: collections with unique indexes use collection-level lock,
