@@ -936,7 +936,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             return Ok(Vec::new());
         }
 
-        // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
+        // INDEX-BASED OPTIMIZATION: If query is empty {} and there's an index on the field,
+        // use the index to get distinct values without loading any documents.
+        // This is O(index_size) instead of O(all_documents) - huge speedup for large collections.
+        if query_json == &serde_json::json!({}) {
+            if let Some(distinct_values) = self.try_index_based_distinct(field)? {
+                log_debug!(
+                    "distinct: used index for field '{}', found {} unique values",
+                    field,
+                    distinct_values.len()
+                );
+                return Ok(distinct_values);
+            }
+        }
+
+        // STREAMING FALLBACK: When no index is available or query has filters
+        // Collect only document IDs first (small: ~8-32 bytes each)
         // Then stream-load documents one by one - never bulk load all docs into memory
         let (doc_ids, _) =
             self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
@@ -966,6 +981,50 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         Ok(distinct_values)
+    }
+
+    /// Try to get distinct values using an index on the field
+    ///
+    /// Returns Some(values) if an index was found and used, None otherwise.
+    /// This is O(index_entries) which is much faster than loading all documents.
+    fn try_index_based_distinct(&self, field: &str) -> Result<Option<Vec<Value>>> {
+        let indexes = self.indexes.read();
+
+        // Find an index that covers this field (single-field index, not compound)
+        // For compound indexes, we'd need more complex logic
+        let index_info = indexes.list_indexes_with_compound_info();
+
+        for info in &index_info {
+            // Only use single-field indexes for now
+            // The field in index name format is: "{collection}_{field}" or just the field directly
+            if !info.is_compound && info.prefix_field == field {
+                // Found a matching index!
+                if let Some(btree) = indexes.get_btree_index(&info.index_name) {
+                    // Get all entries from the index
+                    let entries = btree.get_all_entries();
+
+                    // Extract unique keys (the B+ tree already has them in order)
+                    // But we need to deduplicate because non-unique indexes have duplicates
+                    let mut seen: HashSet<IndexKey> = HashSet::new();
+                    let mut distinct_values = Vec::new();
+
+                    for (key, _doc_id) in entries {
+                        // Skip Null keys (documents without this field)
+                        if matches!(key, IndexKey::Null) {
+                            continue;
+                        }
+                        if seen.insert(key.clone()) {
+                            distinct_values.push(key.to_value());
+                        }
+                    }
+
+                    return Ok(Some(distinct_values));
+                }
+            }
+        }
+
+        // No suitable index found
+        Ok(None)
     }
 
     // ========== PRIVATE HELPER METHODS ==========

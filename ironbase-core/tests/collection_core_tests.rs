@@ -2512,3 +2512,152 @@ fn test_wildcard_operator_with_comparison() {
     let results = coll.find(&json!({"$**.score": {"$gte": 60}})).unwrap();
     assert_eq!(results.len(), 2, "Should find 2 documents with score >= 60");
 }
+
+// ========== INDEX-BASED DISTINCT TESTS ==========
+
+#[test]
+fn test_distinct_uses_index_when_available() {
+    // Test that distinct() uses the B+ tree index when available for empty query
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    // Insert many documents with the same "category" values
+    for i in 0..1000 {
+        let category = match i % 5 {
+            0 => "electronics",
+            1 => "clothing",
+            2 => "food",
+            3 => "books",
+            _ => "other",
+        };
+        let doc = HashMap::from([
+            ("category".to_string(), json!(category)),
+            ("value".to_string(), json!(i)),
+        ]);
+        db.insert_one(&coll_name, doc).unwrap();
+    }
+
+    // Create index on category field
+    let index_name = collection
+        .create_index("category".to_string(), false)
+        .unwrap();
+    assert!(index_name.contains("category"));
+
+    // Call distinct with empty query - should use the index
+    let distinct = collection.distinct("category", &json!({})).unwrap();
+
+    // Should find exactly 5 distinct categories
+    assert_eq!(
+        distinct.len(),
+        5,
+        "Expected 5 distinct categories, got {:?}",
+        distinct
+    );
+
+    // Verify all expected values are present
+    let values: Vec<&str> = distinct.iter().filter_map(|v| v.as_str()).collect();
+    assert!(values.contains(&"electronics"));
+    assert!(values.contains(&"clothing"));
+    assert!(values.contains(&"food"));
+    assert!(values.contains(&"books"));
+    assert!(values.contains(&"other"));
+}
+
+#[test]
+fn test_distinct_with_index_handles_missing_field() {
+    // Documents without the indexed field should not appear in distinct results
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    // Insert some documents with "status" field and some without
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("status".to_string(), json!("active"))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("status".to_string(), json!("inactive"))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("other".to_string(), json!("value"))]),
+    )
+    .unwrap(); // No status
+
+    // Create index on status
+    collection
+        .create_index("status".to_string(), false)
+        .unwrap();
+
+    // Distinct should only return "active" and "inactive", not null
+    let distinct = collection.distinct("status", &json!({})).unwrap();
+    assert_eq!(
+        distinct.len(),
+        2,
+        "Expected 2 distinct status values, got {:?}",
+        distinct
+    );
+
+    // No null values should be included
+    assert!(!distinct.iter().any(|v| v.is_null()));
+}
+
+#[test]
+fn test_distinct_fallback_without_index() {
+    // When no index exists, distinct should still work (using streaming)
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    for i in 0..100 {
+        let doc = HashMap::from([(
+            "type".to_string(),
+            json!(if i % 3 == 0 {
+                "A"
+            } else if i % 3 == 1 {
+                "B"
+            } else {
+                "C"
+            }),
+        )]);
+        db.insert_one(&coll_name, doc).unwrap();
+    }
+
+    // No index created on "type" field
+    // distinct should work via streaming fallback
+    let distinct = collection.distinct("type", &json!({})).unwrap();
+    assert_eq!(distinct.len(), 3, "Expected 3 distinct types: A, B, C");
+}
+
+#[test]
+fn test_distinct_with_query_uses_streaming() {
+    // When query is not empty, distinct should use streaming (not index)
+    let (db, coll_name) = create_test_db("test");
+    let collection = db.collection(&coll_name).unwrap();
+
+    for i in 0..100 {
+        let doc = HashMap::from([
+            (
+                "group".to_string(),
+                json!(if i < 50 { "first" } else { "second" }),
+            ),
+            ("value".to_string(), json!(i % 10)),
+        ]);
+        db.insert_one(&coll_name, doc).unwrap();
+    }
+
+    // Create index on value
+    collection.create_index("value".to_string(), false).unwrap();
+
+    // Distinct with non-empty query - uses streaming fallback
+    let distinct = collection
+        .distinct("value", &json!({"group": "first"}))
+        .unwrap();
+
+    // First group has values 0-49, so values 0-9 repeat
+    assert!(
+        distinct.len() <= 10,
+        "Expected at most 10 distinct values in first group"
+    );
+}
