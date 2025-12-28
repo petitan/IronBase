@@ -890,6 +890,11 @@ impl FulltextIndex {
         self.doc_tokens_offsets.is_empty()
     }
 
+    /// Get number of indexed documents
+    pub fn doc_count(&self) -> usize {
+        self.doc_tokens_offsets.len()
+    }
+
     /// Get number of unique tokens
     pub fn token_count(&self) -> usize {
         self.inverted_index.len()

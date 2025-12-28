@@ -193,9 +193,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             .collect();
 
         // Pre-collect fulltext index info to avoid repeated lookups in the loop
+        // SKIP indexes that already have data (loaded from .ftidx file)
         let fulltext_info: Vec<_> = index_manager
             .list_fulltext_indexes()
             .iter()
+            .filter(|idx| idx.doc_count() == 0) // Only rebuild empty indexes
             .map(|idx| (idx.name.clone(), idx.field.clone()))
             .collect();
 
@@ -385,20 +387,39 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Create fulltext indexes from persisted metadata (data will be rebuilt from documents)
+        // Load or create fulltext indexes from persisted metadata
         for fts_meta in &persisted_fulltext_indexes {
-            if let Err(e) = index_manager.create_fulltext_index(
-                fts_meta.name.clone(),
-                fts_meta.field.clone(),
-                fts_meta.language,
-                Some(fts_meta.min_word_length),
-                Some(fts_meta.accent_folding),
-            ) {
+            // Try to load from .ftidx file first
+            if let Some(loaded_index) =
+                crate::collection_core::try_load_fulltext_index_from_file(&db_path, fts_meta)
+            {
                 log_debug!(
-                    "Warning: Failed to recreate fulltext index '{}': {}",
+                    "Loaded fulltext index '{}' from .ftidx file ({} docs, {} tokens)",
                     fts_meta.name,
-                    e
+                    loaded_index.doc_count(),
+                    loaded_index.token_count()
                 );
+                index_manager.add_loaded_fulltext_index(loaded_index);
+            } else {
+                // Create new index with disk storage (will be rebuilt from documents)
+                let storage_path = crate::collection_core::build_fulltext_index_file_path(
+                    &db_path,
+                    &fts_meta.name,
+                );
+                if let Err(e) = index_manager.create_fulltext_index_with_storage(
+                    fts_meta.name.clone(),
+                    fts_meta.field.clone(),
+                    fts_meta.language,
+                    Some(fts_meta.min_word_length),
+                    Some(fts_meta.accent_folding),
+                    storage_path,
+                ) {
+                    log_debug!(
+                        "Warning: Failed to recreate fulltext index '{}': {}",
+                        fts_meta.name,
+                        e
+                    );
+                }
             }
         }
 

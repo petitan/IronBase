@@ -27,6 +27,9 @@ mod update_operators;
 pub(crate) use self::constraints::BatchConstraintValidator;
 use self::index_persistence::persist_index_to_disk;
 pub(crate) use self::index_persistence::try_load_index_from_file;
+pub(crate) use self::index_persistence::{
+    build_fulltext_index_file_path, try_load_fulltext_index_from_file,
+};
 use self::schema::CompiledSchema;
 
 // Re-export the sealed RawOperations trait for crate-internal use
@@ -274,20 +277,34 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 )?;
             }
 
-            // PERSISTENCE FIX: Load persisted fulltext indexes
+            // PERSISTENCE FIX: Load persisted fulltext indexes from .ftidx files
             for ft_meta in &persisted_fulltext_indexes {
-                log_debug!(
-                    "Loading fulltext index '{}' on field '{}' (will rebuild from documents)",
-                    ft_meta.name,
-                    ft_meta.field
-                );
-                index_manager.create_fulltext_index(
-                    ft_meta.name.clone(),
-                    ft_meta.field.clone(),
-                    ft_meta.language,
-                    Some(ft_meta.min_word_length),
-                    Some(ft_meta.accent_folding),
-                )?;
+                // Try to load from .ftidx file first
+                if let Some(loaded_index) = try_load_fulltext_index_from_file(&db_path, ft_meta) {
+                    log_debug!(
+                        "Loaded fulltext index '{}' from .ftidx file ({} docs, {} tokens)",
+                        ft_meta.name,
+                        loaded_index.doc_count(),
+                        loaded_index.token_count()
+                    );
+                    index_manager.add_loaded_fulltext_index(loaded_index);
+                } else {
+                    // Create new index with disk storage (will be rebuilt from documents)
+                    log_debug!(
+                        "Creating fulltext index '{}' on field '{}' (will rebuild from documents)",
+                        ft_meta.name,
+                        ft_meta.field
+                    );
+                    let storage_path = build_fulltext_index_file_path(&db_path, &ft_meta.name);
+                    index_manager.create_fulltext_index_with_storage(
+                        ft_meta.name.clone(),
+                        ft_meta.field.clone(),
+                        ft_meta.language,
+                        Some(ft_meta.min_word_length),
+                        Some(ft_meta.accent_folding),
+                        storage_path,
+                    )?;
+                }
             }
 
             // Rebuild all indexes from document catalog (always rebuild to ensure consistency)
@@ -384,10 +401,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         }
 
                                         // PERSISTENCE FIX: Rebuild fulltext indexes from documents
+                                        // SKIP indexes that already have data (loaded from .ftidx file)
                                         for ft_meta in &persisted_fulltext_indexes {
                                             if let Some(ft_index) =
                                                 index_manager.get_fulltext_index_mut(&ft_meta.name)
                                             {
+                                                // Skip if index was loaded from file (has data)
+                                                if ft_index.doc_count() > 0 {
+                                                    continue;
+                                                }
                                                 // Extract field value using dot notation
                                                 if let Some(value) =
                                                     crate::value_utils::get_nested_value(
@@ -1883,15 +1905,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let index_name = format!("{}_{}_fts", self.name, field);
         let lang = FtsLanguage::from_str(language);
 
-        // Step 1: Create the fulltext index in IndexManager
+        // Get db_path for .ftidx file storage
+        let storage_path = {
+            let storage = self.storage.read();
+            let db_path = storage.get_file_path().to_string();
+            build_fulltext_index_file_path(&db_path, &index_name)
+        };
+
+        // Step 1: Create the fulltext index with disk storage
         {
             let mut indexes = self.indexes.write();
-            indexes.create_fulltext_index(
+            indexes.create_fulltext_index_with_storage(
                 index_name.clone(),
                 field.clone(),
                 lang,
                 min_word_length,
                 accent_folding,
+                storage_path,
             )?;
         }
 
@@ -1918,15 +1948,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             Ok(())
         })?;
 
-        // Step 4: Get metadata for persistence
+        // Step 4: Flush fulltext index to disk and get metadata
         let metadata = {
-            let indexes = self.indexes.read();
+            let mut indexes = self.indexes.write();
+            if let Some(index) = indexes.get_fulltext_index_mut(&index_name) {
+                // Flush the fulltext index to persist inverted index data to .ftidx file
+                index.save_to_file()?;
+            }
             indexes
                 .get_fulltext_index(&index_name)
                 .map(|i| i.metadata())
         };
 
-        // Step 4: Store fulltext index metadata in storage
+        // Step 5: Store fulltext index metadata in storage
         if let Some(meta) = metadata {
             let mut storage = self.storage.write();
             if let Some(coll_meta) = storage.get_collection_meta_mut(&self.name) {

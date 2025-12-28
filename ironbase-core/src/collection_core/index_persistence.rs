@@ -4,6 +4,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
+use crate::fulltext::{FulltextIndex, FulltextIndexMetadata};
 use crate::index::{BPlusTree, IndexMetadata};
 
 fn sanitize_component(name: &str) -> String {
@@ -78,4 +79,49 @@ pub fn try_load_index_from_file(
 
     let mut file = File::open(&idx_path).ok()?;
     BPlusTree::load_from_file(&mut file, index_meta.clone()).ok()
+}
+
+// ============================================================================
+// Fulltext Index Persistence
+// ============================================================================
+
+/// Build the .ftidx file path for a fulltext index
+pub fn build_fulltext_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf> {
+    if db_file_path.is_empty() {
+        return None;
+    }
+
+    let base_path = Path::new(db_file_path);
+    let stem = base_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("database");
+
+    let safe_component = sanitize_component(index_name);
+    let mut hasher = DefaultHasher::new();
+    index_name.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let file_name = format!("{}_{}_{:08x}.ftidx", stem, safe_component, hash as u32);
+    let parent = base_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    Some(parent.join(file_name))
+}
+
+/// Try to load a fulltext index from .ftidx file (graceful degradation)
+/// Returns None if file doesn't exist or is corrupted (fallback to rebuild)
+pub fn try_load_fulltext_index_from_file(
+    db_file_path: &str,
+    fts_meta: &FulltextIndexMetadata,
+) -> Option<FulltextIndex> {
+    let ftidx_path = build_fulltext_index_file_path(db_file_path, &fts_meta.name)?;
+
+    if !ftidx_path.exists() {
+        return None;
+    }
+
+    FulltextIndex::load_from_file(ftidx_path).ok()
 }

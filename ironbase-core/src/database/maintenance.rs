@@ -51,12 +51,39 @@ impl DatabaseCore<StorageEngine> {
         // Mark as closed FIRST to prevent new operations
         self.is_closed.store(true, Ordering::SeqCst);
 
+        // Flush all fulltext indexes to disk before closing
+        self.flush_fulltext_indexes()?;
+
         // Flush all pending changes to disk
         self.flush()?;
 
         // Release the exclusive file lock so other processes can open the database
         let storage = self.storage.read();
         storage.release_lock()
+    }
+
+    /// Flush all fulltext indexes to disk
+    fn flush_fulltext_indexes(&self) -> Result<()> {
+        let index_managers = self.index_managers.read();
+        for index_manager in index_managers.values() {
+            let mut manager = index_manager.write();
+            manager.flush_fulltext_indexes()?;
+        }
+        Ok(())
+    }
+}
+
+impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
+    fn drop(&mut self) {
+        // Flush fulltext indexes to disk on drop
+        // This ensures data is persisted even if close() is not called explicitly
+        let index_managers = self.index_managers.read();
+        for index_manager in index_managers.values() {
+            let mut manager = index_manager.write();
+            if let Err(e) = manager.flush_fulltext_indexes() {
+                eprintln!("Warning: Failed to flush fulltext indexes on drop: {}", e);
+            }
+        }
     }
 }
 

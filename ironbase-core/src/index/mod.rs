@@ -1678,6 +1678,34 @@ impl IndexManager {
         min_word_length: Option<usize>,
         accent_folding: Option<bool>,
     ) -> Result<()> {
+        self.create_fulltext_index_with_storage(
+            name,
+            field,
+            language,
+            min_word_length,
+            accent_folding,
+            None,
+        )
+    }
+
+    /// Create full-text search index with disk-based storage
+    ///
+    /// # Arguments
+    /// * `name` - Unique index name
+    /// * `field` - Field to index (supports dot notation)
+    /// * `language` - Language for stemming and stop words
+    /// * `min_word_length` - Minimum word length to index (default: 2)
+    /// * `accent_folding` - Whether to apply accent folding (default: true)
+    /// * `storage_path` - Path to store the .ftidx file (None = memory-only)
+    pub fn create_fulltext_index_with_storage(
+        &mut self,
+        name: String,
+        field: String,
+        language: FtsLanguage,
+        min_word_length: Option<usize>,
+        accent_folding: Option<bool>,
+        storage_path: Option<PathBuf>,
+    ) -> Result<()> {
         // Check if any index with this name already exists
         if self.btree_indexes.contains_key(&name)
             || self.legacy_indexes.contains_key(&name)
@@ -1696,7 +1724,12 @@ impl IndexManager {
             accent_folding.unwrap_or(true),
         );
 
-        let index = FulltextIndex::new(&name, &field, options);
+        let index = if let Some(path) = storage_path {
+            self.index_file_paths.insert(name.clone(), path.clone());
+            FulltextIndex::new_with_storage(&name, &field, options, path)?
+        } else {
+            FulltextIndex::new(&name, &field, options)
+        };
         self.fulltext_indexes.insert(name, index);
         Ok(())
     }
@@ -1735,6 +1768,17 @@ impl IndexManager {
     pub fn add_loaded_fulltext_index(&mut self, index: FulltextIndex) {
         let name = index.name.clone();
         self.fulltext_indexes.insert(name, index);
+    }
+
+    /// Flush all fulltext indexes to disk
+    ///
+    /// This should be called before database close or during checkpoint
+    /// to persist fulltext index changes to .ftidx files.
+    pub fn flush_fulltext_indexes(&mut self) -> Result<()> {
+        for index in self.fulltext_indexes.values_mut() {
+            index.save_to_file()?;
+        }
+        Ok(())
     }
 
     // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========
