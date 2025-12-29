@@ -1132,6 +1132,158 @@ fn test_find_with_sort() {
     assert_eq!(results[results.len() - 1]["value"], 9);
 }
 
+/// FIX #22: Test index-based sort for empty queries
+/// When query is {} but has sort+index, should use B+ tree for ordered iteration
+/// instead of loading all documents and sorting in-memory.
+#[test]
+fn test_index_based_sort_for_empty_query() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+
+    // Create index BEFORE inserting (index is built incrementally)
+    coll.create_index("timestamp".to_string(), false).unwrap();
+
+    // Insert 1000 documents in random order
+    for i in 0..1000i64 {
+        // Zigzag pattern to ensure data is not naturally sorted
+        let ts = if i % 2 == 0 { i } else { 1000 - i };
+        let mut doc = HashMap::new();
+        doc.insert("timestamp".to_string(), json!(ts));
+        doc.insert("data".to_string(), json!(format!("doc_{}", i)));
+        db.insert_one("test", doc).unwrap();
+    }
+
+    // Test ascending sort with limit (should use index)
+    // Zigzag pattern covers all values 0-999, so sorted ascending: 0, 1, 2, 3, 4, ...
+    let options = ironbase_core::FindOptions::new()
+        .with_sort(vec![("timestamp".to_string(), 1)])
+        .with_limit(5);
+    let results = coll.find_with_options(&json!({}), options).unwrap();
+
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0]["timestamp"], 0);
+    assert_eq!(results[1]["timestamp"], 1);
+    assert_eq!(results[2]["timestamp"], 2);
+    assert_eq!(results[3]["timestamp"], 3);
+    assert_eq!(results[4]["timestamp"], 4);
+
+    // Test descending sort with limit (should use index + reverse)
+    // Sorted descending: 999, 998, 997, ...
+    let options = ironbase_core::FindOptions::new()
+        .with_sort(vec![("timestamp".to_string(), -1)])
+        .with_limit(5);
+    let results = coll.find_with_options(&json!({}), options).unwrap();
+
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0]["timestamp"], 999);
+    assert_eq!(results[1]["timestamp"], 998);
+    assert_eq!(results[2]["timestamp"], 997);
+    assert_eq!(results[3]["timestamp"], 996);
+    assert_eq!(results[4]["timestamp"], 995);
+
+    // Test with skip + limit
+    // Skip first 10 (0,1,2,3,4,5,6,7,8,9) -> start at 10
+    let options = ironbase_core::FindOptions::new()
+        .with_sort(vec![("timestamp".to_string(), 1)])
+        .with_skip(10)
+        .with_limit(5);
+    let results = coll.find_with_options(&json!({}), options).unwrap();
+
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0]["timestamp"], 10);
+    assert_eq!(results[1]["timestamp"], 11);
+    assert_eq!(results[2]["timestamp"], 12);
+}
+
+/// FIX #23: Performance test for DESC sort with early termination
+/// This should be O(limit) not O(N) when using index-based sorting
+#[test]
+#[ignore] // Run with --ignored for performance tests
+fn perf_test_desc_sort_with_limit_early_termination() {
+    use std::time::Instant;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+
+    // Create index BEFORE inserting
+    coll.create_index("date".to_string(), false).unwrap();
+
+    // Insert 50K documents (simulating large emails collection)
+    let doc_count = 50_000;
+    println!("Inserting {} documents...", doc_count);
+    let start = Instant::now();
+    for i in 0..doc_count as i64 {
+        let mut doc = HashMap::new();
+        doc.insert("date".to_string(), json!(i));
+        doc.insert("subject".to_string(), json!(format!("Email {}", i)));
+        db.insert_one("test", doc).unwrap();
+    }
+    println!("Insert time: {:?}", start.elapsed());
+
+    // Test: DESC sort with limit 5 should be nearly instant (early termination)
+    let options = ironbase_core::FindOptions::new()
+        .with_sort(vec![("date".to_string(), -1)])
+        .with_limit(5);
+
+    let start = Instant::now();
+    let results = coll.find_with_options(&json!({}), options).unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(results.len(), 5);
+    assert_eq!(results[0]["date"], doc_count - 1);
+    assert_eq!(results[4]["date"], doc_count - 5);
+
+    println!(
+        "DESC sort + limit 5 on {} docs: {:?} (should be < 10ms with early termination)",
+        doc_count, elapsed
+    );
+
+    // Early termination should make this very fast (< 10ms)
+    // Without early termination, this would load all 50K doc IDs first
+    assert!(
+        elapsed.as_millis() < 100,
+        "DESC sort with limit should be < 100ms (was {:?}) due to early termination",
+        elapsed
+    );
+}
+
+/// FIX #22: Verify that filter queries still work correctly (no index optimization)
+#[test]
+fn test_sort_with_filter_uses_collection_scan() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let coll = db.collection("test").unwrap();
+
+    // Create index on timestamp only
+    coll.create_index("timestamp".to_string(), false).unwrap();
+
+    // Insert documents
+    for i in 0..100i64 {
+        let mut doc = HashMap::new();
+        doc.insert("timestamp".to_string(), json!(i));
+        doc.insert(
+            "category".to_string(),
+            json!(if i % 3 == 0 { "A" } else { "B" }),
+        );
+        db.insert_one("test", doc).unwrap();
+    }
+
+    // Filter + sort: should NOT use index for sort (must scan & filter first)
+    let options = ironbase_core::FindOptions::new()
+        .with_sort(vec![("timestamp".to_string(), -1)])
+        .with_limit(5);
+    let results = coll
+        .find_with_options(&json!({"category": "A"}), options)
+        .unwrap();
+
+    assert_eq!(results.len(), 5);
+    // Category A documents: 0, 3, 6, 9, ... 99
+    // Descending: 99, 96, 93, 90, 87
+    assert_eq!(results[0]["timestamp"], 99);
+    assert_eq!(results[1]["timestamp"], 96);
+    assert_eq!(results[2]["timestamp"], 93);
+    assert_eq!(results[0]["category"], "A");
+}
+
 #[test]
 fn test_find_with_limit_skip() {
     let (db, coll_name) = create_test_db("test");

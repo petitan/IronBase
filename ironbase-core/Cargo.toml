@@ -33,6 +33,7 @@ fs2 = "0.4"        # Cross-platform file locking
 rust-stemmers = "1.2"           # For full-text search stemming (15+ languages)
 unicode-normalization = "0.1"   # For accent folding in full-text search
 rayon = { version = "1.10", optional = true }  # For parallel iteration (default: enabled)
+tracing = "0.1"    # For progress logging during long operations
 
 [dev-dependencies]
 tempfile = { workspace = true }

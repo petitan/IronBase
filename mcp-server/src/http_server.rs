@@ -10,6 +10,9 @@ use std::sync::Arc;
 /// Default max body size: 1 GB
 const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024 * 1024;
 
+/// Default tool timeout: 5 minutes (300 seconds)
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 300;
+
 /// Configuration for HTTP server
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -27,6 +30,8 @@ pub struct Config {
     pub tls_cert_file: Option<String>,
     /// Path to TLS key file
     pub tls_key_file: Option<String>,
+    /// Timeout for long-running tool operations in seconds (default: 300)
+    pub tool_timeout_secs: u64,
 }
 
 /// Parse human-readable size strings like "1GB", "500MB", "10KB"
@@ -189,6 +194,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_enabled: toml_config.tls.enabled,
             tls_cert_file: toml_config.tls.cert_file,
             tls_key_file: toml_config.tls.key_file,
+            tool_timeout_secs: toml_config.server.tool_timeout_secs,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -204,6 +210,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_enabled: false,
             tls_cert_file: None,
             tls_key_file: None,
+            tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
         }
     };
 
@@ -240,6 +247,13 @@ struct ServerConfig {
     /// Max body size in human-readable format: "1GB", "500MB", "10KB"
     #[serde(default)]
     max_body_size: Option<String>,
+    /// Timeout for long-running tool operations in seconds (default: 300)
+    #[serde(default = "default_tool_timeout")]
+    tool_timeout_secs: u64,
+}
+
+fn default_tool_timeout() -> u64 {
+    DEFAULT_TOOL_TIMEOUT_SECS
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -377,6 +391,7 @@ async fn run_http_server_internal(
     let app_state = Arc::new(HttpAppState {
         service,
         initialized: std::sync::atomic::AtomicBool::new(false),
+        tool_timeout: std::time::Duration::from_secs(config.tool_timeout_secs),
     });
 
     // HTTP request handler
@@ -403,24 +418,59 @@ async fn run_http_server_internal(
         // Extract API key from Authorization header or JSON params
         let api_key = extract_api_key(&headers, &request.params);
 
-        match handle_request(
-            &request,
-            &state.service,
-            &state.initialized,
-            api_key.as_deref(),
-            Some(remote_addr),
-        ) {
-            Some(response) => {
-                // RAW response logging
+        // Clone state for spawn_blocking closure
+        let state_clone = state.clone();
+        let tool_timeout = state.tool_timeout;
+        let request_id = request.id.clone();
+        let request_method = request.method.clone();
+
+        // Run potentially blocking operations in spawn_blocking with timeout
+        // This prevents long-running operations (like index creation) from blocking the async runtime
+        let result = tokio::time::timeout(tool_timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                handle_request(
+                    &request,
+                    &state_clone.service,
+                    &state_clone.initialized,
+                    api_key.as_deref(),
+                    Some(remote_addr),
+                )
+            })
+            .await
+        })
+        .await;
+
+        match result {
+            Ok(Ok(Some(response))) => {
+                // Success - normal response
                 if let Ok(json) = serde_json::to_string(&response) {
                     tracing::debug!("<<< MCP RESPONSE: {}", json);
                 }
                 (StatusCode::OK, Json(response)).into_response()
             }
-            None => {
+            Ok(Ok(None)) => {
                 // Notification - no response body per JSON-RPC spec
                 tracing::debug!("<<< MCP RESPONSE: (204 No Content - notification)");
                 StatusCode::NO_CONTENT.into_response()
+            }
+            Ok(Err(join_error)) => {
+                // spawn_blocking task panicked
+                let error_msg = format!("Internal error: task panicked: {}", join_error);
+                tracing::error!("<<< MCP ERROR: {}", error_msg);
+                let error_response = create_error_response(-32603, &error_msg, request_id);
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
+            }
+            Err(_timeout_elapsed) => {
+                // Timeout - operation took too long
+                let timeout_secs = tool_timeout.as_secs();
+                let error_msg = format!(
+                    "Operation timed out after {} seconds. Method: '{}'. \
+                    Consider increasing tool_timeout_secs in config.toml or breaking the operation into smaller chunks.",
+                    timeout_secs, request_method
+                );
+                tracing::error!("<<< MCP TIMEOUT: {}", error_msg);
+                let error_response = create_error_response(-32001, &error_msg, request_id);
+                (StatusCode::GATEWAY_TIMEOUT, Json(error_response)).into_response()
             }
         }
     }
@@ -595,6 +645,8 @@ struct HttpAppState {
     /// MCP lifecycle state: track if initialize has been called
     /// Per spec: "The initialization phase MUST be the first interaction"
     initialized: std::sync::atomic::AtomicBool,
+    /// Timeout for long-running tool operations
+    tool_timeout: std::time::Duration,
 }
 
 // MCP Request/Response types (duplicated from main.rs for lib independence)

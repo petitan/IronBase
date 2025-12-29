@@ -85,14 +85,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Create index name from all fields: users_country_city
         let index_name = format!("{}_{}", self.name, fields.join("_"));
 
+        tracing::info!(
+            collection = %self.name,
+            fields = ?fields,
+            index_name = %index_name,
+            unique = unique,
+            "Starting compound index creation"
+        );
+
         let mut indexes = self.indexes.write();
         indexes.create_compound_index(index_name.clone(), fields.clone(), unique)?;
         drop(indexes); // Release index lock before batch scanning
 
         // Collect (compound_key, doc_id) pairs in batches - full documents are NOT kept in memory
-        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        const INDEX_BUILD_BATCH_SIZE: usize = 1000; // Increased for better throughput
+        const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
         let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let mut total_scanned: usize = 0;
         let fields_clone = fields.clone();
+        let collection_name = self.name.clone();
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
             for (doc_id, doc) in batch_docs {
                 // Replicate extract_key logic inline to avoid holding index lock
@@ -105,12 +116,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     })
                     .collect();
                 entries.push((IndexKey::Compound(keys), doc_id));
+                total_scanned += 1;
+            }
+            // Log progress every PROGRESS_LOG_INTERVAL documents
+            if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
+                tracing::info!(
+                    collection = %collection_name,
+                    scanned = total_scanned,
+                    "Compound index build progress: scanning documents"
+                );
             }
             Ok(())
         })?;
 
+        tracing::info!(
+            collection = %self.name,
+            total_scanned = total_scanned,
+            "Document scan complete, starting sort"
+        );
+
         // Sort by key - O(n log n)
         entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        tracing::info!(
+            collection = %self.name,
+            entries = entries.len(),
+            "Sort complete, building B+ tree"
+        );
 
         // Build index from sorted entries - O(n)
         let mut indexes = self.indexes.write();
@@ -118,6 +150,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             index.build_from_sorted(entries, unique)?;
         }
         drop(indexes); // Release index lock
+
+        tracing::info!(
+            collection = %self.name,
+            "B+ tree built, persisting to disk"
+        );
 
         // PERSIST index data to .idx file FIRST (to get correct root_offset)
         let root_offset = {
@@ -160,6 +197,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
+        tracing::info!(
+            collection = %self.name,
+            index_name = %index_name,
+            "Compound index creation complete"
+        );
+
         Ok(index_name)
     }
 
@@ -167,6 +210,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     pub fn create_index(&self, field: String, unique: bool) -> Result<String> {
         self.check_not_closed()?;
         let index_name = format!("{}_{}", self.name, field);
+
+        tracing::info!(
+            collection = %self.name,
+            field = %field,
+            index_name = %index_name,
+            unique = unique,
+            "Starting index creation"
+        );
 
         let mut indexes = self.indexes.write();
         indexes.create_btree_index(index_name.clone(), field.clone(), unique)?;
@@ -176,20 +227,46 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Collect (key, doc_id) pairs in batches - full documents are NOT kept in memory
         // Only the small pairs accumulate, reducing memory from O(total_doc_size) to O(num_docs * pair_size)
-        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        const INDEX_BUILD_BATCH_SIZE: usize = 1000; // Increased for better throughput
+        const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
         let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let mut total_scanned: usize = 0;
         let field_clone = field.clone();
+        let collection_name = self.name.clone();
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
             for (doc_id, doc) in batch_docs {
                 if let Some(field_value) = get_nested_value(&doc, &field_clone) {
                     entries.push((IndexKey::from(field_value), doc_id));
                 }
+                total_scanned += 1;
+            }
+            // Log progress every PROGRESS_LOG_INTERVAL documents
+            if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
+                tracing::info!(
+                    collection = %collection_name,
+                    scanned = total_scanned,
+                    indexed = entries.len(),
+                    "Index build progress: scanning documents"
+                );
             }
             Ok(())
         })?;
 
+        tracing::info!(
+            collection = %self.name,
+            total_scanned = total_scanned,
+            entries_to_index = entries.len(),
+            "Document scan complete, starting sort"
+        );
+
         // Sort by key - O(n log n)
         entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        tracing::info!(
+            collection = %self.name,
+            entries = entries.len(),
+            "Sort complete, building B+ tree"
+        );
 
         // Re-acquire write lock and build index from sorted entries - O(n)
         let mut indexes = self.indexes.write();
@@ -197,6 +274,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             index.build_from_sorted(entries, unique)?;
         }
         drop(indexes); // Release index lock
+
+        tracing::info!(
+            collection = %self.name,
+            "B+ tree built, persisting to disk"
+        );
 
         // PERSIST index data to .idx file FIRST (to get correct root_offset)
         let root_offset = {
@@ -238,6 +320,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 storage.flush()?;
             }
         }
+
+        tracing::info!(
+            collection = %self.name,
+            index_name = %index_name,
+            "Index creation complete"
+        );
 
         Ok(index_name)
     }

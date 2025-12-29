@@ -2215,6 +2215,34 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let (doc_ids_vec, used_sort) = if let Some(plan) = plan {
             self.collect_doc_ids_from_plan(&parsed_query, plan, sort_field, sort_desc, skip, limit)?
+        } else if let Some(sf) = sort_field {
+            // 🚀 FIX #22: Use index for sort-only queries (no filter)
+            // When query is empty but we have a sort field with an index,
+            // use the B+ tree for ordered iteration instead of in-memory sort.
+            // This is critical for large collections (e.g., 49,200 emails sorted by date).
+            //
+            // IMPORTANT: Only use this optimization when query is empty!
+            // If there's a filter but no index for it, we must still scan and filter.
+            let query_is_empty = Self::query_matches_all(query_json);
+
+            if query_is_empty {
+                if let Some((_index_name, doc_ids)) =
+                    self.try_index_sorted_scan(sf, sort_desc, skip, limit)?
+                {
+                    // Index-based sort optimization active
+                    (doc_ids, true)
+                } else {
+                    // No suitable index found, fall back to collection scan
+                    let doc_ids =
+                        self.scan_documents_with_early_termination(&parsed_query, skip, limit)?;
+                    (doc_ids, false)
+                }
+            } else {
+                // Query has filter but no index plan - must scan all documents
+                let doc_ids =
+                    self.scan_documents_with_early_termination(&parsed_query, skip, limit)?;
+                (doc_ids, false)
+            }
         } else {
             // 🚀 FIX: Use early termination scan instead of loading all documents
             // This is critical for performance on large collections with pagination.
@@ -2341,5 +2369,76 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
         None
+    }
+
+    /// Try to use an index for sorted iteration (for sort-only queries without filter)
+    ///
+    /// When a query is empty but has a sort field with an index, this method uses
+    /// the B+ tree for ordered iteration instead of loading all documents and
+    /// sorting in-memory.
+    ///
+    /// Returns `Some((index_name, doc_ids))` if an index was used, `None` otherwise.
+    fn try_index_sorted_scan(
+        &self,
+        sort_field: &str,
+        sort_desc: bool,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Result<Option<(String, Vec<DocumentId>)>> {
+        // Find an index for the sort field
+        let indexes = self.indexes.read();
+        let index_infos = indexes.list_indexes_with_compound_info();
+
+        // Look for a single-field index on the sort field
+        let matching_index = index_infos
+            .iter()
+            .find(|info| !info.is_compound && info.prefix_field == sort_field);
+
+        let index_name = match matching_index {
+            Some(info) => info.index_name.clone(),
+            None => {
+                drop(indexes);
+                return Ok(None);
+            }
+        };
+
+        // Get the B+ tree index
+        let btree = match indexes.get_btree_index(&index_name) {
+            Some(tree) => tree,
+            None => {
+                drop(indexes);
+                return Ok(None);
+            }
+        };
+
+        // 🚀 FIX #23: Use optimized reverse scan for DESC sort
+        // Previously: range_scan() loaded ALL 49,200 doc IDs, then reversed in memory
+        // Now: range_scan_reversed_with_limit() traverses from right-to-left with early termination
+        let result = if sort_desc {
+            // DESC sort: use optimized reverse scan with early termination
+            btree.range_scan_reversed_with_limit(
+                &crate::index::IndexKey::Null,
+                &crate::index::IndexKey::MaxKey,
+                skip,
+                limit,
+            )
+        } else {
+            // ASC sort: use standard range scan (TODO: add early termination for ASC too)
+            let all_doc_ids = btree.range_scan(
+                &crate::index::IndexKey::Null,
+                &crate::index::IndexKey::MaxKey,
+                true,
+                true,
+            );
+
+            // Apply skip and limit
+            match limit {
+                Some(lim) if lim > 0 => all_doc_ids.into_iter().skip(skip).take(lim).collect(),
+                _ => all_doc_ids.into_iter().skip(skip).collect(),
+            }
+        };
+        drop(indexes);
+
+        Ok(Some((index_name, result)))
     }
 }

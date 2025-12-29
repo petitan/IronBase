@@ -713,6 +713,81 @@ impl BPlusTree {
         results
     }
 
+    /// Reverse range scan with skip and limit (for DESC sort optimization)
+    ///
+    /// Traverses the B+ tree from largest to smallest values, supporting early termination.
+    /// This is critical for queries like: `find({}).sort({date: -1}).limit(5)` on large collections.
+    ///
+    /// Instead of collecting all 49,200 IDs and reversing, this traverses from right-to-left
+    /// and stops as soon as we have enough results.
+    ///
+    /// # Arguments
+    /// * `start` - Minimum key value (inclusive)
+    /// * `end` - Maximum key value (inclusive)
+    /// * `skip` - Number of results to skip from the END (largest values first)
+    /// * `limit` - Maximum number of results to return (None = unlimited)
+    ///
+    /// # Returns
+    /// Document IDs in descending key order, respecting skip and limit.
+    pub fn range_scan_reversed_with_limit(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Vec<DocumentId> {
+        // First, collect all leaf nodes (we need to traverse them in reverse)
+        // This is O(log n) to find leaves, then we iterate backwards
+        let mut all_leaves: Vec<&LeafNode> = Vec::new();
+        fn collect_leaves<'a>(node: &'a BTreeNode, leaves: &mut Vec<&'a LeafNode>) {
+            match node {
+                BTreeNode::Leaf(leaf) => leaves.push(leaf),
+                BTreeNode::Internal(internal) => {
+                    for child in &internal.children {
+                        collect_leaves(child, leaves);
+                    }
+                }
+            }
+        }
+        collect_leaves(&self.root, &mut all_leaves);
+
+        // Traverse leaves in reverse order (rightmost leaf first = largest values)
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+        let limit_count = limit.unwrap_or(usize::MAX);
+
+        // Iterate leaves from right to left
+        for leaf in all_leaves.into_iter().rev() {
+            // Within each leaf, iterate keys from right to left (largest first)
+            for idx in (0..leaf.keys.len()).rev() {
+                let key = &leaf.keys[idx];
+
+                // Check if key is in range [start, end]
+                if key < start || key > end {
+                    continue;
+                }
+
+                // Apply skip
+                if skipped < skip {
+                    skipped += 1;
+                    continue;
+                }
+
+                // Collect result
+                if idx < leaf.document_ids.len() {
+                    results.push(leaf.document_ids[idx].clone());
+                }
+
+                // Check limit (early termination!)
+                if results.len() >= limit_count {
+                    return results;
+                }
+            }
+        }
+
+        results
+    }
+
     /// Build range bounds for compound index prefix query
     ///
     /// For a compound index on (country, city) with query `{"country": "US"}`:
