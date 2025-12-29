@@ -6,6 +6,9 @@ port = 8080
 # Max request body size (supports: B, KB, MB, GB)
 # Default: 1GB - suitable for batch operations with large attachments
 max_body_size = "1GB"
+# Tool execution timeout in seconds
+# Default: 60 - increase for long-running operations like db_compact
+tool_timeout_secs = 3600
 
 [database]
 # Path to IronBase database file
