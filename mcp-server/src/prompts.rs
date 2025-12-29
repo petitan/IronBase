@@ -662,13 +662,30 @@ fn get_query_examples_prompt(arguments: &Value) -> Value {
 {"collection": "users", "fields": ["city", "age"]}
 ```
 
+## Create sparse index (for optional fields)
+```json
+// Only indexes documents where 'attachments' exists
+{"collection": "emails", "field": "attachments", "sparse": true}
+
+// Query using sparse index - O(k) instead of O(n)!
+{"collection": "emails", "query": {"attachments": {"$exists": true}}}
+```
+
+Sparse indexes are perfect for:
+- Optional fields (attachments, metadata, premium_features)
+- Soft-delete patterns (deletedAt field)
+- Partial data (verifiedAt, completedAt)
+
 ## List indexes
 ```json
 {"collection": "users"}
 ```
 
 ## Use explain to check index usage
-Use the find tool with explain to see if indexes are being used."#
+```json
+// explain tool - shows SparseIndexScan for $exists queries
+{"collection": "emails", "query": {"attachments": {"$exists": true}}}
+```"#
         }
         _ => {
             r#"# IronBase Query Examples
@@ -1012,6 +1029,10 @@ fn get_index_optimization_prompt(arguments: &Value) -> Value {
 
 3. **Selectivity matters**: More selective fields first
    - `user_id` (unique) before `status` (few values)
+
+4. **Sparse indexes for optional fields**: Use `sparse: true` for fields that don't exist in all documents
+   - Optimizes `$exists: true` queries from O(n) to O(k)
+   - Only indexes documents where the field exists
 
 ## Checking Index Usage
 

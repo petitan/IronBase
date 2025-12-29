@@ -564,14 +564,15 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "index_create",
                 "title": "Create Index",
-                "description": "Create an index on a collection field(s)",
+                "description": "Create an index on a collection field(s). Use sparse=true for optional fields to optimize $exists queries.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
                         "field": { "type": "string", "description": "Field name to index (for single-field index)" },
                         "fields": { "type": "array", "items": { "type": "string" }, "description": "Field names for compound index" },
-                        "unique": { "type": "boolean", "description": "Whether the index should enforce uniqueness", "default": false }
+                        "unique": { "type": "boolean", "description": "Whether the index should enforce uniqueness", "default": false },
+                        "sparse": { "type": "boolean", "description": "If true, only index documents where the field exists (skip null/missing). Enables O(k) $exists:true queries instead of O(n) collection scan.", "default": false }
                     },
                     "required": ["collection"]
                 }
