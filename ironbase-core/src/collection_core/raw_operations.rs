@@ -794,8 +794,17 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // STREAMING FIX: Collect only document IDs first (with limit=1 for efficiency)
         // This avoids bulk-loading all documents into memory
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, Some(1), true)?;
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json,
+            None,
+            None,
+            false,
+            0,
+            Some(1),
+            true,
+            0,
+            None,
+        )?;
 
         // Find first matching and delete
         let mut deleted = 0u64;
@@ -874,8 +883,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
         // This avoids bulk-loading all documents into memory
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (doc_ids, _) = self
+            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
 
         let mut deleted = 0u64;
         // BUG #2 FIX: Track actual deleted documents for WAL
@@ -1072,8 +1081,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
         // This avoids bulk-loading all documents into memory
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (doc_ids, _) = self
+            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
 
         let mut deleted = 0u64;
         let mut wal_entries: Vec<(DocumentId, Value)> = Vec::new();
@@ -1590,8 +1599,17 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // STREAMING FIX: Collect only document IDs first (with limit=1 for efficiency)
         // This avoids bulk-loading all documents into memory
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, Some(1), true)?;
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json,
+            None,
+            None,
+            false,
+            0,
+            Some(1),
+            true,
+            0,
+            None,
+        )?;
 
         for doc_id in doc_ids {
             // Stream-load document one at a time

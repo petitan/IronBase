@@ -10,8 +10,10 @@ use std::sync::Arc;
 /// Default max body size: 1 GB
 const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024 * 1024;
 
-/// Default tool timeout: 5 minutes (300 seconds)
-const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 300;
+///// Default tool timeout: 60 seconds
+/// SAFETY: Reduced from 300s to prevent WSL freezes on runaway queries
+/// If a query takes longer than 60s, it should be optimized with indexes/limits
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 60;
 
 /// Configuration for HTTP server
 #[derive(Debug, Clone)]

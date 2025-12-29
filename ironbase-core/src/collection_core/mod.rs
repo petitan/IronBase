@@ -49,6 +49,11 @@ pub use self::cursor::FindCursor;
 /// Default capacity for the LRU query cache
 const QUERY_CACHE_CAPACITY: usize = 1000;
 
+// OOM protection: try_reserve() dynamically checks available memory (jemalloc-aware)
+
+/// Threshold for logging a warning about large document loads
+const LARGE_QUERY_WARNING_THRESHOLD: usize = 10_000;
+
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
 pub struct InsertManyResult {
@@ -97,6 +102,9 @@ impl QueryExecutionContext {
             .unwrap_or((None, false));
 
         // Determine fetch strategy: sort present → load all, then paginate
+        // NOTE: We defer limit when sorting because we don't know at this point
+        // if the index will be used for sorting. The actual optimization happens
+        // in collect_doc_ids_with_options -> try_index_sorted_scan.
         let apply_limit_after_sort = options.sort.is_some();
         let (fetch_skip, fetch_limit) = if apply_limit_after_sort {
             (0, None)
@@ -663,7 +671,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // STREAMING: Collect IDs first (small), then load docs one by one
         // This avoids bulk-loading all documents into memory at once
         let doc_ids = self.collect_doc_ids(query_json)?;
-        let mut results = Vec::with_capacity(doc_ids.len());
+        let mut results = Vec::new();
+        results.try_reserve(doc_ids.len()).map_err(|e| {
+            IronBaseError::InvalidQuery(format!(
+                "Cannot allocate memory for {} documents: {}",
+                doc_ids.len(),
+                e
+            ))
+        })?;
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 results.push(doc);
@@ -686,6 +701,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let ctx = QueryExecutionContext::from_options(&options);
 
         // Phase 2: Collect document IDs (may use index for sorting)
+        // Pass original skip/limit for index-based sort optimization (early termination)
         let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
             query_json,
             None,
@@ -694,13 +710,45 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             ctx.fetch_skip,
             ctx.fetch_limit,
             ctx.sort_field.is_none(),
+            ctx.original_skip,  // For index-based sort: skip
+            ctx.original_limit, // For index-based sort: enables early termination
         )?;
 
-        // Phase 3: Load documents
-        let mut docs = Vec::with_capacity(doc_ids.len());
+        // Phase 3: Document loading with OOM protection
+        let doc_count = doc_ids.len();
+
+        // Warning for large queries
+        if doc_count > LARGE_QUERY_WARNING_THRESHOLD {
+            log_warn!(
+                "find on '{}': loading {} documents - this may take a while",
+                self.name,
+                doc_count
+            );
+        }
+
+        // Load documents with progress logging for very large sets
+        // Use try_reserve to detect OOM before it happens (especially important with jemalloc)
+        let mut docs = Vec::new();
+        docs.try_reserve(doc_count).map_err(|e| {
+            IronBaseError::InvalidQuery(format!(
+                "Cannot allocate memory for {} documents: {}. Add a limit to your query.",
+                doc_count, e
+            ))
+        })?;
+        let mut loaded = 0;
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 docs.push(doc);
+                loaded += 1;
+                // Progress logging every 10,000 documents
+                if loaded % 10_000 == 0 && doc_count > LARGE_QUERY_WARNING_THRESHOLD {
+                    log_debug!(
+                        "find on '{}': loaded {}/{} documents",
+                        self.name,
+                        loaded,
+                        doc_count
+                    );
+                }
             }
         }
 
@@ -713,7 +761,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // 4b. Apply pagination after sorting
-        let docs = ctx.apply_post_sort_pagination(docs);
+        // SKIP if index already applied skip/limit (index_sorted + empty query)
+        let docs = if index_sorted && Self::query_matches_all(query_json) {
+            // Index-based sort already applied skip/limit - don't apply again
+            docs
+        } else {
+            ctx.apply_post_sort_pagination(docs)
+        };
 
         // 4c. Apply projection
         let docs = ctx.apply_projection_to_docs(docs)?;
@@ -782,8 +836,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// ```
     pub fn find_streaming(&self, query_json: &Value) -> Result<FindCursor<'_, S>> {
         self.check_not_closed()?;
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (doc_ids, _) = self
+            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
         Ok(FindCursor::new(self, doc_ids))
     }
 
@@ -818,8 +872,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Use QueryPlanner with limit=1 - enables index usage for indexed fields
         // This was previously a full collection scan (issue #19)
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, Some(1), true)?;
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json,
+            None,
+            None,
+            false,
+            0,
+            Some(1),
+            true,
+            0,
+            None,
+        )?;
 
         if let Some(doc_id) = doc_ids.first() {
             self.read_document_by_id(doc_id)
@@ -850,8 +913,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Use QueryPlanner - enables index usage for indexed fields
         // This was previously a full collection scan (issue #19)
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (doc_ids, _) = self
+            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
 
         Ok(doc_ids.len() as u64)
     }
@@ -953,8 +1016,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // STREAMING FALLBACK: When no index is available or query has filters
         // Collect only document IDs first (small: ~8-32 bytes each)
         // Then stream-load documents one by one - never bulk load all docs into memory
-        let (doc_ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (doc_ids, _) = self
+            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
 
         // Collect distinct values - stream documents one by one
         let mut seen_values: HashSet<String> = HashSet::new();
@@ -2161,8 +2224,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     fn collect_doc_ids(&self, query_json: &Value) -> Result<Vec<DocumentId>> {
-        let (ids, _) =
-            self.collect_doc_ids_with_options(query_json, None, None, false, 0, None, true)?;
+        let (ids, _) = self
+            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
         Ok(ids)
     }
 
@@ -2175,6 +2238,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         skip: usize,
         limit: Option<usize>,
         use_cache: bool,
+        original_skip: usize,          // For index-based sort: skip count
+        original_limit: Option<usize>, // For index-based sort: enables early termination
     ) -> Result<(Vec<DocumentId>, bool)> {
         let cache_hash = if use_cache
             && hint.is_none()
@@ -2226,10 +2291,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let query_is_empty = Self::query_matches_all(query_json);
 
             if query_is_empty {
+                // FIX: For index-based sorting, use original skip/limit for early termination.
+                // This is critical for performance: when user specifies skip=10, limit=5 + sort,
+                // the index can return only the correct 5 documents instead of loading all.
+                // No artificial limit - try_reserve will catch OOM if needed.
                 if let Some((_index_name, doc_ids)) =
-                    self.try_index_sorted_scan(sf, sort_desc, skip, limit)?
+                    self.try_index_sorted_scan(sf, sort_desc, original_skip, original_limit)?
                 {
-                    // Index-based sort optimization active
+                    // Index-based sort optimization active - skip/limit already applied
                     (doc_ids, true)
                 } else {
                     // No suitable index found, fall back to collection scan
