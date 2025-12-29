@@ -378,6 +378,10 @@ async fn run_http_server_internal(
         }
     };
 
+    // Warm up collections (initialize index managers)
+    // This moves the index rebuild cost from first query to startup
+    adapter.warm_up();
+
     // Create API key cache
     let api_key_cache = ApiKeyCache::new(config.api_key_cache_ttl, config.require_api_key);
 

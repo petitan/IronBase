@@ -311,6 +311,11 @@ fn run_stdio_server(cli: &Cli) {
         }
     };
 
+    // Warm up collections (initialize index managers)
+    eprintln!("Warming up collections...");
+    let (count, elapsed) = adapter.warm_up();
+    eprintln!("Warmed up {} collections in {:.2}s", count, elapsed.as_secs_f64());
+
     eprintln!("Ready for requests...");
 
     // Read from stdin line by line

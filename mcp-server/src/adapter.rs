@@ -330,6 +330,79 @@ impl IronBaseAdapter {
     }
 
     // ============================================================
+    // Warm-up
+    // ============================================================
+
+    /// Warm up all collections by initializing their index managers
+    ///
+    /// This should be called after server startup to avoid slow first queries.
+    /// Index managers are initialized lazily, so the first access to a collection
+    /// triggers a full index rebuild from disk. Calling this method proactively
+    /// moves that cost to startup time.
+    ///
+    /// Returns the number of collections warmed up and total time taken.
+    pub fn warm_up(&self) -> (usize, std::time::Duration) {
+        let start = std::time::Instant::now();
+        let db = self.db.read();
+        let collections: Vec<String> = db
+            .list_collections()
+            .into_iter()
+            .filter(|name| !name.starts_with("_system."))
+            .collect();
+        drop(db);
+
+        let total = collections.len();
+        tracing::info!(
+            "Starting warm-up for {} collections...",
+            total
+        );
+
+        for (i, name) in collections.iter().enumerate() {
+            let coll_start = std::time::Instant::now();
+            let db = self.db.read();
+            match db.collection(name) {
+                Ok(_) => {
+                    let elapsed = coll_start.elapsed();
+                    if elapsed.as_millis() > 100 {
+                        // Only log slow collections
+                        tracing::info!(
+                            "Warmed up [{}/{}] '{}' in {:.2}s",
+                            i + 1,
+                            total,
+                            name,
+                            elapsed.as_secs_f64()
+                        );
+                    } else {
+                        tracing::debug!(
+                            "Warmed up [{}/{}] '{}' in {}ms",
+                            i + 1,
+                            total,
+                            name,
+                            elapsed.as_millis()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to warm up collection '{}': {}",
+                        name,
+                        e
+                    );
+                }
+            }
+        }
+
+        let elapsed = start.elapsed();
+        tracing::info!(
+            "Warm-up complete: {} collections in {:.2}s",
+            total,
+            elapsed.as_secs_f64()
+        );
+
+        (total, elapsed)
+    }
+
+    // ============================================================
     // Database Management
     // ============================================================
 
