@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.83"
+version = "1.0.84"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
@@ -35,6 +35,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Error handling
 thiserror = "1.0"
@@ -62,6 +63,7 @@ windows-service = "0.7"
 daemonize = "0.5"
 libc = "0.2"
 tikv-jemallocator = { version = "0.6", features = ["background_threads_runtime_support"] }
+tikv-jemalloc-ctl = { version = "0.6", features = ["stats"] }
 
 [dev-dependencies]
 tempfile = "3.8"

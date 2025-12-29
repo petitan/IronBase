@@ -311,16 +311,51 @@ async fn run_http_server_internal(
     };
     use tokio::net::TcpListener;
     use tracing::info;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
-    // Initialize tracing (ignore if already initialized)
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    // Initialize tracing with dual output (stderr + file)
+    // File logs go to ./logs/mcp-server.YYYY-MM-DD.log with daily rotation
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // Create logs directory if it doesn't exist
+    let log_dir = std::path::Path::new("./logs");
+    if !log_dir.exists() {
+        if let Err(e) = std::fs::create_dir_all(log_dir) {
+            eprintln!("Warning: Failed to create log directory: {}", e);
+        }
+    }
+
+    // File appender with daily rotation
+    let file_appender = tracing_appender::rolling::daily("./logs", "mcp-server.log");
+    let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+
+    // Dual output: stderr (with colors) + file (without colors)
+    let _ = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(std::io::stderr)
+                .with_ansi(true),
+        )
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(non_blocking_file)
+                .with_ansi(false),
         )
         .try_init();
 
+    // Keep the guard alive for the duration of the server
+    // (moved to static to prevent dropping)
+    static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
+        std::sync::OnceLock::new();
+    let _ = LOG_GUARD.set(_guard);
+
     info!("Starting MCP IronBase Server v{} (HTTP mode)", VERSION);
+
+    // Log initial memory stats
+    crate::monitoring::log_memory_stats();
 
     // Load configuration
     let config = match load_config() {
@@ -401,16 +436,21 @@ async fn run_http_server_internal(
         headers: axum::http::HeaderMap,
         body: axum::body::Bytes,
     ) -> Response {
-        // RAW request logging
+        // Generate unique request ID for tracing (first 8 chars of UUID)
+        let trace_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
+        let request_start = std::time::Instant::now();
+
+        // RAW request logging with trace ID
         let body_str = String::from_utf8_lossy(&body);
-        tracing::debug!(">>> MCP REQUEST from {}: {}", remote_addr, body_str);
+        tracing::debug!(trace_id = %trace_id, remote = %remote_addr, ">>> MCP REQUEST: {}", body_str);
 
         // Parse JSON
         let request: McpRequest = match serde_json::from_slice(&body) {
             Ok(req) => req,
             Err(e) => {
+                let elapsed = request_start.elapsed();
                 let error_response = format!("Failed to parse the request body as JSON: {}", e);
-                tracing::error!("<<< MCP PARSE ERROR: {}", error_response);
+                tracing::error!(trace_id = %trace_id, elapsed_ms = elapsed.as_millis(), "<<< MCP PARSE ERROR: {}", error_response);
                 return (StatusCode::BAD_REQUEST, error_response).into_response();
             }
         };
@@ -423,6 +463,10 @@ async fn run_http_server_internal(
         let tool_timeout = state.tool_timeout;
         let request_id = request.id.clone();
         let request_method = request.method.clone();
+        let trace_id_clone = trace_id.clone();
+
+        // Log incoming request with method
+        tracing::info!(trace_id = %trace_id, method = %request_method, remote = %remote_addr, "Request started");
 
         // Run potentially blocking operations in spawn_blocking with timeout
         // This prevents long-running operations (like index creation) from blocking the async runtime
@@ -440,23 +484,44 @@ async fn run_http_server_internal(
         })
         .await;
 
+        let elapsed = request_start.elapsed();
+
         match result {
             Ok(Ok(Some(response))) => {
                 // Success - normal response
+                tracing::info!(
+                    trace_id = %trace_id_clone,
+                    method = %request_method,
+                    elapsed_ms = elapsed.as_millis(),
+                    status = "success",
+                    "Request completed"
+                );
                 if let Ok(json) = serde_json::to_string(&response) {
-                    tracing::debug!("<<< MCP RESPONSE: {}", json);
+                    tracing::debug!(trace_id = %trace_id_clone, "<<< MCP RESPONSE: {}", json);
                 }
                 (StatusCode::OK, Json(response)).into_response()
             }
             Ok(Ok(None)) => {
                 // Notification - no response body per JSON-RPC spec
-                tracing::debug!("<<< MCP RESPONSE: (204 No Content - notification)");
+                tracing::info!(
+                    trace_id = %trace_id_clone,
+                    method = %request_method,
+                    elapsed_ms = elapsed.as_millis(),
+                    status = "notification",
+                    "Request completed (no response)"
+                );
                 StatusCode::NO_CONTENT.into_response()
             }
             Ok(Err(join_error)) => {
                 // spawn_blocking task panicked
                 let error_msg = format!("Internal error: task panicked: {}", join_error);
-                tracing::error!("<<< MCP ERROR: {}", error_msg);
+                tracing::error!(
+                    trace_id = %trace_id_clone,
+                    method = %request_method,
+                    elapsed_ms = elapsed.as_millis(),
+                    status = "panic",
+                    "<<< MCP ERROR: {}", error_msg
+                );
                 let error_response = create_error_response(-32603, &error_msg, request_id);
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
             }
@@ -468,7 +533,13 @@ async fn run_http_server_internal(
                     Consider increasing tool_timeout_secs in config.toml or breaking the operation into smaller chunks.",
                     timeout_secs, request_method
                 );
-                tracing::error!("<<< MCP TIMEOUT: {}", error_msg);
+                tracing::error!(
+                    trace_id = %trace_id_clone,
+                    method = %request_method,
+                    elapsed_ms = elapsed.as_millis(),
+                    status = "timeout",
+                    "<<< MCP TIMEOUT: {}", error_msg
+                );
                 let error_response = create_error_response(-32001, &error_msg, request_id);
                 (StatusCode::GATEWAY_TIMEOUT, Json(error_response)).into_response()
             }
@@ -514,13 +585,8 @@ async fn run_http_server_internal(
     }
 
     async fn health_check() -> impl IntoResponse {
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "version": VERSION
-            })),
-        )
+        let health = crate::monitoring::health_check();
+        (StatusCode::OK, Json(health))
     }
 
     let app = Router::new()

@@ -26,6 +26,7 @@ use crate::api_keys::ApiKeyCache;
 use crate::error::{McpError, Result};
 use crate::ServerInfo;
 use serde_json::{json, Value};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;
 
 /// Get the list of all available tools for MCP tools/list
@@ -62,8 +63,178 @@ pub fn get_tools_list_filtered(is_localhost: bool) -> Value {
     }
 }
 
+/// Maximum number of documents for in-memory sort without index
+/// Operations exceeding this will return an error instead of crashing
+const MAX_UNINDEXED_SORT_DOCS: usize = 100_000;
+
 /// Dispatch a tool call to the appropriate handler
+///
+/// SAFETY: All tool handlers are wrapped in catch_unwind to prevent panics
+/// from crashing the server. Panics are converted to McpError::Panic.
 pub fn dispatch_tool(
+    name: &str,
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    api_key_cache: Option<&ApiKeyCache>,
+    server_info: Option<&ServerInfo>,
+) -> Result<Value> {
+    let tool_start = std::time::Instant::now();
+
+    // Log the tool call for debugging
+    tracing::debug!(tool = %name, "dispatch_tool started");
+
+    // Pre-flight check for potentially dangerous operations
+    if let Err(e) = preflight_check(name, &params, adapter) {
+        let elapsed = tool_start.elapsed();
+        tracing::warn!(
+            tool = %name,
+            elapsed_ms = elapsed.as_millis(),
+            "Preflight check failed: {}", e
+        );
+        return Err(e);
+    }
+
+    // Wrap the actual dispatch in catch_unwind
+    // Note: We use AssertUnwindSafe because our handlers should not panic,
+    // but if they do, we want to catch it gracefully
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        dispatch_tool_inner(name, params, adapter, api_key_cache, server_info)
+    }));
+
+    let elapsed = tool_start.elapsed();
+
+    match result {
+        Ok(inner_result) => {
+            // Log tool completion with timing
+            match &inner_result {
+                Ok(_) => {
+                    tracing::info!(
+                        tool = %name,
+                        elapsed_ms = elapsed.as_millis(),
+                        status = "success",
+                        "Tool completed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tool = %name,
+                        elapsed_ms = elapsed.as_millis(),
+                        status = "error",
+                        error = %e,
+                        "Tool failed"
+                    );
+                }
+            }
+            inner_result
+        }
+        Err(panic_info) => {
+            // Extract panic message
+            let panic_msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+
+            tracing::error!(
+                tool = %name,
+                elapsed_ms = elapsed.as_millis(),
+                status = "panic",
+                "PANIC in tool: {} - Server continues running", panic_msg
+            );
+
+            Err(McpError::Panic(format!(
+                "Tool '{}' panicked: {}. The server is still running. Please report this issue.",
+                name, panic_msg
+            )))
+        }
+    }
+}
+
+/// Pre-flight check for potentially dangerous operations
+/// Returns error if the operation would likely cause OOM or take too long
+fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -> Result<()> {
+    // Only check find/aggregate with sort but no limit
+    match name {
+        "find" => {
+            let has_sort = params.get("sort").is_some();
+            let has_limit = params.get("limit").is_some();
+
+            if has_sort && !has_limit {
+                // Check collection size
+                if let Some(collection) = params.get("collection").and_then(|c| c.as_str()) {
+                    if let Ok(count) = adapter.count_documents(collection, json!({})) {
+                        if count as usize > MAX_UNINDEXED_SORT_DOCS {
+                            // Extract sort field name from sort parameter
+                            // Format: [["field", 1]] or [["field", -1]]
+                            let sort_field = params.get("sort")
+                                .and_then(|s| s.as_array())
+                                .and_then(|arr| arr.first())
+                                .and_then(|pair| {
+                                    if let Some(arr) = pair.as_array() {
+                                        arr.first().and_then(|f| f.as_str())
+                                    } else {
+                                        pair.as_str()
+                                    }
+                                });
+
+                            if let Some(field) = sort_field {
+                                // Check if field is indexed
+                                // list_indexes returns Vec<String> of index names like "field_1" or "field_-1"
+                                let has_index = adapter.list_indexes(collection)
+                                    .map(|indexes| {
+                                        indexes.iter().any(|idx_name| {
+                                            // Index names are like "field_1" or "compound_field1_field2_1"
+                                            idx_name.starts_with(&format!("{}_", field)) ||
+                                            idx_name == &format!("idx_{}", field)
+                                        })
+                                    })
+                                    .unwrap_or(false);
+
+                                if !has_index {
+                                    return Err(McpError::OperationTooLarge(format!(
+                                        "Sorting {} documents by '{}' without an index would require loading all documents into memory. \
+                                        Either: (1) Create an index with index_create, (2) Add a 'limit' parameter, \
+                                        or (3) Use skip/limit pagination. Max unindexed sort: {} documents.",
+                                        count, field, MAX_UNINDEXED_SORT_DOCS
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        "aggregate" => {
+            // Check for $sort without $limit in pipeline
+            if let Some(pipeline) = params.get("pipeline").and_then(|p| p.as_array()) {
+                let has_sort = pipeline.iter().any(|stage| stage.get("$sort").is_some());
+                let has_limit = pipeline.iter().any(|stage| stage.get("$limit").is_some());
+
+                if has_sort && !has_limit {
+                    if let Some(collection) = params.get("collection").and_then(|c| c.as_str()) {
+                        if let Ok(count) = adapter.count_documents(collection, json!({})) {
+                            if count as usize > MAX_UNINDEXED_SORT_DOCS {
+                                return Err(McpError::OperationTooLarge(format!(
+                                    "Aggregation with $sort on {} documents without $limit could cause memory issues. \
+                                    Add a $limit stage to the pipeline. Max: {} documents.",
+                                    count, MAX_UNINDEXED_SORT_DOCS
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Inner dispatch function (called inside catch_unwind)
+fn dispatch_tool_inner(
     name: &str,
     params: Value,
     adapter: &Arc<IronBaseAdapter>,

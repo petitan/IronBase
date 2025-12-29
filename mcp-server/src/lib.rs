@@ -9,6 +9,7 @@ pub mod engine;
 pub mod error;
 pub mod http_server;
 pub mod listener;
+pub mod monitoring;
 pub mod prompts;
 pub mod resources;
 pub mod scripting;
@@ -21,12 +22,13 @@ pub use acl::{AclConfig, AclManager, CallerContext, InterfaceType, RequiredPermi
 pub use adapter::{FindOptions, IronBaseAdapter, UpdateResult};
 pub use api_keys::ApiKeyCache;
 pub use engine::{IronBaseService, ServiceContext, ToolRequest, ToolResult};
-pub use error::{McpError, Result};
+pub use error::{McpError, OperationContext, Result};
 pub use listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTION};
 pub use prompts::{get_prompt_content, get_prompts_list};
 pub use resources::{get_resources_list, read_resource};
 pub use scripting::{RhaiEngine, ScriptManager, ScriptResult};
 pub use tools::{dispatch_tool, get_tools_list, get_tools_list_filtered};
+pub use monitoring::{get_memory_stats, health_check, log_memory_stats, HealthCheck, MemoryStats};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
