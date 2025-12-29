@@ -861,7 +861,9 @@ fn handle_request(
         "tools/list" => {
             // SECURITY FIX #14: Filter admin tools for non-localhost callers
             let is_localhost = remote_addr
-                .map(|addr| crate::InterfaceType::from_socket_addr(addr) == crate::InterfaceType::Localhost)
+                .map(|addr| {
+                    crate::InterfaceType::from_socket_addr(addr) == crate::InterfaceType::Localhost
+                })
                 .unwrap_or(false);
             Some(create_success_response(
                 get_tools_list_filtered(is_localhost),

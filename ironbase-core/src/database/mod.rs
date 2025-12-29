@@ -470,7 +470,9 @@ mod tests {
 
         // Create collection and index
         let collection = db.collection("users").unwrap();
-        collection.create_index("age".to_string(), false).unwrap();
+        collection
+            .create_index("age".to_string(), false, false)
+            .unwrap();
 
         // Begin transaction
         let tx_id = db.begin_transaction();
@@ -689,7 +691,7 @@ mod tests {
         let coll = db.collection("users").unwrap();
 
         // Create index
-        let index_name = coll.create_index("age".to_string(), false).unwrap();
+        let index_name = coll.create_index("age".to_string(), false, false).unwrap();
         assert!(index_name.contains("age"));
 
         // Insert with index

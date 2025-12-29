@@ -166,6 +166,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     index_meta.name.clone(),
                     index_meta.field.clone(),
                     index_meta.unique,
+                    index_meta.sparse,
                 )?;
             }
         }
@@ -328,7 +329,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Create automatic _id index (unique)
         let id_index_name = format!("{}_id", name);
-        index_manager.create_btree_index(id_index_name.clone(), "_id".to_string(), true)?;
+        index_manager.create_btree_index(id_index_name.clone(), "_id".to_string(), true, false)?;
 
         // Ensure collection exists before loading metadata
         {

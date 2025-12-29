@@ -46,7 +46,19 @@ impl IndexManager {
     }
 
     /// Create B+ tree index (single field)
-    pub fn create_btree_index(&mut self, name: String, field: String, unique: bool) -> Result<()> {
+    ///
+    /// # Arguments
+    /// * `name` - Index name
+    /// * `field` - Field to index
+    /// * `unique` - Whether values must be unique
+    /// * `sparse` - If true, documents missing the field are not indexed
+    pub fn create_btree_index(
+        &mut self,
+        name: String,
+        field: String,
+        unique: bool,
+        sparse: bool,
+    ) -> Result<()> {
         if self.btree_indexes.contains_key(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
@@ -54,7 +66,7 @@ impl IndexManager {
             )));
         }
 
-        let tree = BPlusTree::new(name.clone(), field, unique);
+        let tree = BPlusTree::new(name.clone(), field, unique, sparse);
         self.btree_indexes.insert(name, tree);
         Ok(())
     }
@@ -65,12 +77,14 @@ impl IndexManager {
     /// * `name` - Index name
     /// * `fields` - Ordered list of fields (e.g., ["country", "city"])
     /// * `unique` - Whether the compound key must be unique
+    /// * `sparse` - If true, documents missing any field are not indexed
     ///
     /// # Example
     /// ```rust,ignore
     /// manager.create_compound_index(
     ///     "users_location".to_string(),
     ///     vec!["country".to_string(), "city".to_string()],
+    ///     false,
     ///     false
     /// )?;
     /// ```
@@ -79,6 +93,7 @@ impl IndexManager {
         name: String,
         fields: Vec<String>,
         unique: bool,
+        sparse: bool,
     ) -> Result<()> {
         if self.btree_indexes.contains_key(&name) {
             return Err(IronBaseError::IndexError(format!(
@@ -93,7 +108,7 @@ impl IndexManager {
             ));
         }
 
-        let tree = BPlusTree::new_compound(name.clone(), fields, unique);
+        let tree = BPlusTree::new_compound(name.clone(), fields, unique, sparse);
         self.btree_indexes.insert(name, tree);
         Ok(())
     }
@@ -471,9 +486,11 @@ impl IndexManager {
                 let index_key = index.extract_key(doc);
                 let is_null = Self::is_key_all_null(&index_key);
 
-                // For unique indexes: include null keys (null is a value, enforce uniqueness)
-                // For non-unique indexes: skip null keys (no query benefit)
-                if !is_null || index.metadata.unique {
+                // Sparse indexes: NEVER include null keys (that's the whole point)
+                // Non-sparse unique indexes: include null keys (null is a value, enforce uniqueness)
+                // Non-sparse non-unique indexes: skip null keys (no query benefit)
+                let should_index = !is_null || (index.metadata.unique && !index.metadata.sparse);
+                if should_index {
                     index.insert(index_key, doc_id.clone())?;
                 }
             }
@@ -553,9 +570,12 @@ impl IndexManager {
                 let index_key = index.extract_key(doc);
                 let is_null = Self::is_key_all_null(&index_key);
 
-                // For unique indexes: remove null keys (they were inserted)
-                // For non-unique indexes: skip null keys (they weren't inserted)
-                if !is_null || index.metadata.unique {
+                // Mirror the insert logic: only delete what was inserted
+                // Sparse indexes: null keys were never inserted
+                // Non-sparse unique indexes: null keys were inserted
+                // Non-sparse non-unique indexes: null keys were not inserted
+                let was_indexed = !is_null || (index.metadata.unique && !index.metadata.sparse);
+                if was_indexed {
                     index.delete(&index_key, doc_id)?;
                 }
             }

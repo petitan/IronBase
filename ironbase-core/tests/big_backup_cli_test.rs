@@ -90,7 +90,7 @@ fn big_backup_cli_test() {
         for (coll_name, index_fields) in &collections {
             let coll = db.collection(coll_name).unwrap();
             for field in index_fields {
-                coll.create_index(field.to_string(), false).unwrap();
+                coll.create_index(field.to_string(), false, false).unwrap();
             }
             println!("      {}: indexes on {:?}", coll_name, index_fields);
         }

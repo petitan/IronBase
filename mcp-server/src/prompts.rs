@@ -2322,8 +2322,8 @@ Returns masked keys:
 Via HTTP Header (recommended):
 ```bash
 curl -X POST https://server:8080/mcp \
-  -H "Authorization: Bearer sk-your-api-key" \
-  -H "Content-Type: application/json" \
+    -H "Authorization: Bearer sk-your-api-key" \
+    -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",...}'
 ```
 
@@ -2660,8 +2660,8 @@ Listeners determine the interface type for ACL:
 ### Self-Signed (Development)
 ```bash
 openssl req -x509 -newkey rsa:4096 \
-  -keyout key.pem -out cert.pem \
-  -days 365 -nodes \
+    -keyout key.pem -out cert.pem \
+    -days 365 -nodes \
   -subj "/CN=localhost"
 ```
 

@@ -198,12 +198,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Initialize index manager with automatic _id index
         let mut index_manager = IndexManager::new();
 
-        // Create automatic _id index (unique)
+        // Create automatic _id index (unique, non-sparse - every doc has _id)
         let id_index_name = format!("{}_id", name);
         index_manager.create_btree_index(
             id_index_name.clone(),
             "_id".to_string(),
-            true, // unique
+            true,  // unique
+            false, // sparse - _id is always present
         )?;
 
         // PERSISTENCE FIX: Load persisted indexes and rebuild from document catalog
@@ -265,11 +266,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         index_meta.field
                     );
 
-                    // Create index
+                    // Create index with persisted sparse flag
                     index_manager.create_btree_index(
                         index_meta.name.clone(),
                         index_meta.field.clone(),
                         index_meta.unique,
+                        index_meta.sparse,
                     )?;
                 }
             }

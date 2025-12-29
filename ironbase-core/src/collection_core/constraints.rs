@@ -145,7 +145,7 @@ mod tests {
         let mut manager = IndexManager::new();
         let index_name = format!("{}_{}", collection_name, field);
         manager
-            .create_btree_index(index_name, field.to_string(), true)
+            .create_btree_index(index_name, field.to_string(), true, false)
             .unwrap();
         manager
     }
@@ -211,10 +211,15 @@ mod tests {
     fn test_multiple_unique_indexes() {
         let mut manager = IndexManager::new();
         manager
-            .create_btree_index("test_email".to_string(), "email".to_string(), true)
+            .create_btree_index("test_email".to_string(), "email".to_string(), true, false)
             .unwrap();
         manager
-            .create_btree_index("test_username".to_string(), "username".to_string(), true)
+            .create_btree_index(
+                "test_username".to_string(),
+                "username".to_string(),
+                true,
+                false,
+            )
             .unwrap();
 
         let mut validator = BatchConstraintValidator::new(&manager, "test");
@@ -234,10 +239,10 @@ mod tests {
         let mut manager = IndexManager::new();
         // Simulate the _id index that always exists
         manager
-            .create_btree_index("users__id".to_string(), "_id".to_string(), true)
+            .create_btree_index("users__id".to_string(), "_id".to_string(), true, false)
             .unwrap();
         manager
-            .create_btree_index("users_email".to_string(), "email".to_string(), true)
+            .create_btree_index("users_email".to_string(), "email".to_string(), true, false)
             .unwrap();
 
         let validator = BatchConstraintValidator::new(&manager, "users");
@@ -258,6 +263,7 @@ mod tests {
                 "test_profile.code".to_string(),
                 "profile.code".to_string(),
                 true,
+                false,
             )
             .unwrap();
 
@@ -292,6 +298,7 @@ mod tests {
                 "test_user.address.city".to_string(),
                 "user.address.city".to_string(),
                 true,
+                false,
             )
             .unwrap();
 
@@ -318,7 +325,8 @@ mod tests {
             .create_compound_index(
                 "test_location".to_string(),
                 vec!["country".to_string(), "city".to_string()],
-                true, // unique
+                true,  // unique
+                false, // sparse
             )
             .unwrap();
 
@@ -358,6 +366,7 @@ mod tests {
                 "test_name_age".to_string(),
                 vec!["name".to_string(), "age".to_string()],
                 true,
+                false,
             )
             .unwrap();
 

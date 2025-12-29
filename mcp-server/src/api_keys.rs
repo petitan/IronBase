@@ -90,8 +90,8 @@ impl ApiKeyCache {
             tracing::debug!("API key collection init: {}", e);
         }
 
-        // Create index on 'key' field for fast lookup
-        if let Err(e) = adapter.create_index("_system.api_keys", "key", true) {
+        // Create index on 'key' field for fast lookup (unique, non-sparse)
+        if let Err(e) = adapter.create_index("_system.api_keys", "key", true, false) {
             // Index might already exist - log at debug level
             tracing::debug!("API key index init: {}", e);
         }

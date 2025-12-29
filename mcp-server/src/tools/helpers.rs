@@ -282,9 +282,8 @@ pub fn parse_transaction_id(params: &Value) -> Result<u64> {
 
     // Accept both string and number formats
     if let Some(s) = tx_param.as_str() {
-        s.parse::<u64>().map_err(|_| {
-            McpError::InvalidParams(format!("Invalid transaction_id format: '{}'", s))
-        })
+        s.parse::<u64>()
+            .map_err(|_| McpError::InvalidParams(format!("Invalid transaction_id format: '{}'", s)))
     } else if let Some(n) = tx_param.as_u64() {
         Ok(n)
     } else if let Some(n) = tx_param.as_i64() {

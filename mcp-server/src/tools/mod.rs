@@ -168,7 +168,8 @@ fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -
                         if count as usize > MAX_UNINDEXED_SORT_DOCS {
                             // Extract sort field name from sort parameter
                             // Format: [["field", 1]] or [["field", -1]]
-                            let sort_field = params.get("sort")
+                            let sort_field = params
+                                .get("sort")
                                 .and_then(|s| s.as_array())
                                 .and_then(|arr| arr.first())
                                 .and_then(|pair| {
@@ -182,12 +183,13 @@ fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -
                             if let Some(field) = sort_field {
                                 // Check if field is indexed
                                 // list_indexes returns Vec<String> of index names like "field_1" or "field_-1"
-                                let has_index = adapter.list_indexes(collection)
+                                let has_index = adapter
+                                    .list_indexes(collection)
                                     .map(|indexes| {
                                         indexes.iter().any(|idx_name| {
                                             // Index names are like "field_1" or "compound_field1_field2_1"
-                                            idx_name.starts_with(&format!("{}_", field)) ||
-                                            idx_name == &format!("idx_{}", field)
+                                            idx_name.starts_with(&format!("{}_", field))
+                                                || idx_name == &format!("idx_{}", field)
                                         })
                                     })
                                     .unwrap_or(false);
@@ -249,8 +251,15 @@ fn dispatch_tool_inner(
         }
 
         // Index operations
-        "index_create" | "index_list" | "index_create_fuzzy" | "index_create_fulltext"
-        | "index_list_fulltext" | "index_drop" | "fuzzy_search" | "fulltext_search" | "explain"
+        "index_create"
+        | "index_list"
+        | "index_create_fuzzy"
+        | "index_create_fulltext"
+        | "index_list_fulltext"
+        | "index_drop"
+        | "fuzzy_search"
+        | "fulltext_search"
+        | "explain"
         | "find_with_hint" => index::dispatch(name, params, adapter),
 
         // Collection operations
@@ -274,16 +283,27 @@ fn dispatch_tool_inner(
         | "listener_enable" | "listener_disable" => listener::dispatch(name, params, adapter),
 
         // Transaction operations
-        "begin_transaction" | "commit_transaction" | "rollback_transaction" | "insert_one_tx"
-        | "update_one_tx" | "delete_one_tx" | "transaction_status" => {
-            transaction::dispatch(name, params, adapter)
-        }
+        "begin_transaction"
+        | "commit_transaction"
+        | "rollback_transaction"
+        | "insert_one_tx"
+        | "update_one_tx"
+        | "delete_one_tx"
+        | "transaction_status" => transaction::dispatch(name, params, adapter),
 
         // Admin operations (db_*, admin_*)
-        "db_open" | "db_stats" | "db_compact" | "db_checkpoint" | "admin_list_all_collections"
-        | "admin_create_system_collection" | "admin_set_collection_flags"
-        | "admin_drop_protected" | "admin_apikey_create" | "admin_apikey_list"
-        | "admin_apikey_revoke" | "admin_apikey_delete" => {
+        "db_open"
+        | "db_stats"
+        | "db_compact"
+        | "db_checkpoint"
+        | "admin_list_all_collections"
+        | "admin_create_system_collection"
+        | "admin_set_collection_flags"
+        | "admin_drop_protected"
+        | "admin_apikey_create"
+        | "admin_apikey_list"
+        | "admin_apikey_revoke"
+        | "admin_apikey_delete" => {
             admin::dispatch(name, params, adapter, api_key_cache, server_info)
         }
 

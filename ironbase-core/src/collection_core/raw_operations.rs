@@ -1860,7 +1860,7 @@ mod tests {
         let coll = db.collection("test").unwrap();
 
         // Create unique index on "email"
-        coll.create_index("email".to_string(), true).unwrap();
+        coll.create_index("email".to_string(), true, false).unwrap();
 
         // Try to insert two documents with same email in one batch
         let docs = vec![
@@ -1908,7 +1908,7 @@ mod tests {
         let coll = db.collection("test").unwrap();
 
         // Create unique index on "email"
-        coll.create_index("email".to_string(), true).unwrap();
+        coll.create_index("email".to_string(), true, false).unwrap();
 
         // Insert one document first (via raw to skip WAL for test simplicity)
         let existing = HashMap::from([
@@ -2092,7 +2092,8 @@ mod tests {
         let coll = Arc::new(db.collection("test").unwrap());
 
         // Create an index
-        coll.create_index("value".to_string(), false).unwrap();
+        coll.create_index("value".to_string(), false, false)
+            .unwrap();
 
         let coll1 = Arc::clone(&coll);
         let coll2 = Arc::clone(&coll);
@@ -2117,7 +2118,7 @@ mod tests {
         let index_handle = thread::spawn(move || {
             for _ in 0..20 {
                 // Recreate index (may fail if it exists)
-                let _ = coll2.create_index("other_field".to_string(), false);
+                let _ = coll2.create_index("other_field".to_string(), false, false);
                 thread::sleep(Duration::from_micros(100));
                 // Drop it
                 let _ = coll2.drop_index("other_field");
@@ -2142,7 +2143,8 @@ mod tests {
         let coll = Arc::new(db.collection("test").unwrap());
 
         // Create unique index
-        coll.create_index("unique_key".to_string(), true).unwrap();
+        coll.create_index("unique_key".to_string(), true, false)
+            .unwrap();
 
         let success_count = Arc::new(AtomicUsize::new(0));
         let error_count = Arc::new(AtomicUsize::new(0));
@@ -2185,7 +2187,7 @@ mod tests {
         let coll = Arc::new(db.collection("test").unwrap());
 
         // Create unique index
-        coll.create_index("email".to_string(), true).unwrap();
+        coll.create_index("email".to_string(), true, false).unwrap();
 
         let success_count = Arc::new(AtomicUsize::new(0));
         let error_count = Arc::new(AtomicUsize::new(0));
@@ -2413,7 +2415,7 @@ mod tests {
         let coll = db.collection("test").unwrap();
 
         // Create index
-        coll.create_index("name".to_string(), false).unwrap();
+        coll.create_index("name".to_string(), false, false).unwrap();
 
         // Insert documents
         coll.insert_one_raw(HashMap::from([("name".to_string(), json!("Alice"))]))

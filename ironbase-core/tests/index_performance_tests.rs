@@ -14,7 +14,9 @@ fn test_index_equality_query() {
     let collection = db.collection("users").unwrap();
 
     // Create index on age field
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Insert test documents
     for i in 0..100 {
@@ -43,7 +45,9 @@ fn test_index_range_query() {
     let collection = db.collection("products").unwrap();
 
     // Create index on price field
-    collection.create_index("price".to_string(), false).unwrap();
+    collection
+        .create_index("price".to_string(), false, false)
+        .unwrap();
 
     // Insert test products
     for i in 0..100 {
@@ -84,7 +88,9 @@ fn test_query_without_index_fallback() {
     let collection = db.collection("users").unwrap();
 
     // Create index on age, but query on name (should fall back to collection scan)
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Insert test documents
     for i in 0..50 {
@@ -111,7 +117,7 @@ fn test_index_with_multiple_queries() {
 
     // Create index on salary
     collection
-        .create_index("salary".to_string(), false)
+        .create_index("salary".to_string(), false, false)
         .unwrap();
 
     // Insert employees
@@ -164,7 +170,7 @@ fn test_index_performance_comparison() {
     // Collection WITH index
     let indexed_collection = db.collection("indexed_users").unwrap();
     indexed_collection
-        .create_index("age".to_string(), false)
+        .create_index("age".to_string(), false, false)
         .unwrap();
 
     // Collection WITHOUT index
@@ -269,7 +275,9 @@ fn test_unique_index_prevents_duplicates() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert first user
     let mut fields1 = std::collections::HashMap::new();

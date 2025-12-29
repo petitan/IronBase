@@ -94,7 +94,10 @@ pub fn get_resources_list(adapter: &IronBaseAdapter) -> Value {
 pub fn read_resource(adapter: &IronBaseAdapter, uri: &str) -> Result<Value, String> {
     // Parse the URI
     if !uri.starts_with("ironbase://") {
-        return Err(format!("Invalid resource URI: {}. Must start with ironbase://", uri));
+        return Err(format!(
+            "Invalid resource URI: {}. Must start with ironbase://",
+            uri
+        ));
     }
 
     let path = &uri["ironbase://".len()..];

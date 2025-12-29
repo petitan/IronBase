@@ -60,8 +60,8 @@ fn main() -> anyhow::Result<()> {
 
     // Create indexes on nested fields
     println!("Creating nested indexes…");
-    collection.create_index("profile.location.city".to_string(), false)?;
-    collection.create_index("metrics.login.count".to_string(), false)?;
+    collection.create_index("profile.location.city".to_string(), false, false)?;
+    collection.create_index("metrics.login.count".to_string(), false, false)?;
     report_memory("After nested indexes")?;
 
     // Run a few direct queries to ensure data access works

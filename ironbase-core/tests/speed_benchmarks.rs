@@ -199,13 +199,15 @@ fn speed_benchmark_full_suite() {
 
     // 3a. Create index on 'score'
     let start = Instant::now();
-    coll.create_index("score".to_string(), false).unwrap();
+    coll.create_index("score".to_string(), false, false)
+        .unwrap();
     let idx_score_time = start.elapsed();
     println!("  create_index(score): {}", format_duration(idx_score_time));
 
     // 3b. Create index on 'category'
     let start = Instant::now();
-    coll.create_index("category".to_string(), false).unwrap();
+    coll.create_index("category".to_string(), false, false)
+        .unwrap();
     let idx_cat_time = start.elapsed();
     println!(
         "  create_index(category): {}",
@@ -214,7 +216,7 @@ fn speed_benchmark_full_suite() {
 
     // 3c. Create index on nested field
     let start = Instant::now();
-    coll.create_index("profile.level".to_string(), false)
+    coll.create_index("profile.level".to_string(), false, false)
         .unwrap();
     let idx_nested_time = start.elapsed();
     println!(
@@ -224,8 +226,12 @@ fn speed_benchmark_full_suite() {
 
     // 3d. Create compound index
     let start = Instant::now();
-    coll.create_compound_index(vec!["category".to_string(), "score".to_string()], false)
-        .unwrap();
+    coll.create_compound_index(
+        vec!["category".to_string(), "score".to_string()],
+        false,
+        false,
+    )
+    .unwrap();
     let idx_compound_time = start.elapsed();
     println!(
         "  create_compound_index(category, score): {}",
@@ -538,7 +544,8 @@ fn speed_benchmark_query_selectivity() {
     }
 
     // Create index
-    coll.create_index("score".to_string(), false).unwrap();
+    coll.create_index("score".to_string(), false, false)
+        .unwrap();
 
     println!(
         "  Testing query selectivity (score >= X) on {} docs:",

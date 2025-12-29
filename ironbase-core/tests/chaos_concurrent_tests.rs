@@ -281,7 +281,7 @@ fn test_concurrent_index_creation() {
             thread::spawn(move || {
                 barrier.wait();
                 let coll = db.collection("idx_test").unwrap();
-                coll.create_index(field_name, false)
+                coll.create_index(field_name, false, false)
             })
         })
         .collect();
@@ -313,7 +313,7 @@ fn test_insert_during_index_build() {
     let indexer = thread::spawn(move || {
         barrier1.wait();
         let coll = db1.collection("idx_insert").unwrap();
-        coll.create_index("value".to_string(), false)
+        coll.create_index("value".to_string(), false, false)
     });
 
     // Thread 2: Insert documents
@@ -759,7 +759,7 @@ fn test_concurrent_unique_constraint_race_bug4() {
 
     // Create unique index on email field
     collection
-        .create_index("email".to_string(), true)
+        .create_index("email".to_string(), true, false)
         .expect("Index creation should succeed");
 
     let barrier = Arc::new(Barrier::new(NUM_THREADS));
@@ -852,7 +852,7 @@ fn test_concurrent_unique_different_values() {
 
     // Create unique index on email field
     collection
-        .create_index("email".to_string(), true)
+        .create_index("email".to_string(), true, false)
         .expect("Index creation should succeed");
 
     let barrier = Arc::new(Barrier::new(NUM_THREADS));

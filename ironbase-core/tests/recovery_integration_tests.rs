@@ -812,7 +812,7 @@ fn test_database_index_persists_after_reopen() {
 
         // Create index
         let coll = db.collection("indexed").unwrap();
-        coll.create_index("age".to_string(), false).unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
 
         db.close().unwrap();
     }

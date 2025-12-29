@@ -12,11 +12,7 @@ use super::helpers::{
 };
 
 /// Dispatch CRUD tool calls
-pub fn dispatch(
-    name: &str,
-    params: Value,
-    adapter: &Arc<IronBaseAdapter>,
-) -> Result<Value> {
+pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     match name {
         "insert_one" => handle_insert_one(params, adapter),
         "insert_many" => handle_insert_many(params, adapter),
@@ -29,7 +25,10 @@ pub fn dispatch(
         "count_documents" => handle_count_documents(params, adapter),
         "distinct" => handle_distinct(params, adapter),
         "aggregate" => handle_aggregate(params, adapter),
-        _ => Err(McpError::InvalidParams(format!("Unknown CRUD tool: {}", name))),
+        _ => Err(McpError::InvalidParams(format!(
+            "Unknown CRUD tool: {}",
+            name
+        ))),
     }
 }
 
@@ -81,9 +80,9 @@ fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
 
     // Apply projection if specified
     let result = match (document, projection) {
-        (Some(doc), Some(proj)) => {
-            Some(apply_projection(&doc, &proj).map_err(|e| McpError::InvalidParams(e.to_string()))?)
-        }
+        (Some(doc), Some(proj)) => Some(
+            apply_projection(&doc, &proj).map_err(|e| McpError::InvalidParams(e.to_string()))?,
+        ),
         (doc, _) => doc,
     };
     Ok(json!({"document": result}))

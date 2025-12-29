@@ -12,7 +12,9 @@ fn test_explain_with_index() {
     let collection = db.collection("users").unwrap();
 
     // Create index on age
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Explain equality query - should use index
     let plan = collection.explain(&json!({"age": 25})).unwrap();
@@ -32,7 +34,9 @@ fn test_explain_range_query() {
     let collection = db.collection("products").unwrap();
 
     // Create index on price
-    collection.create_index("price".to_string(), false).unwrap();
+    collection
+        .create_index("price".to_string(), false, false)
+        .unwrap();
 
     // Explain range query - should use IndexRangeScan
     let plan = collection
@@ -82,7 +86,9 @@ fn test_hint_forces_index_usage() {
     let collection = db.collection("users").unwrap();
 
     // Create index on age
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Insert test data
     for i in 0..50 {
@@ -112,7 +118,9 @@ fn test_hint_with_range_query() {
     let collection = db.collection("products").unwrap();
 
     // Create index on price
-    collection.create_index("price".to_string(), false).unwrap();
+    collection
+        .create_index("price".to_string(), false, false)
+        .unwrap();
 
     // Insert test products
     for i in 0..20 {
@@ -165,7 +173,9 @@ fn test_hint_wrong_field() {
     let collection = db.collection("users").unwrap();
 
     // Create index on age
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Try to use age index for name query
     let result = collection.find_with_hint(&json!({"name": "Alice"}), "users_age");
@@ -183,7 +193,9 @@ fn test_explain_and_hint_consistency() {
     let collection = db.collection("users").unwrap();
 
     // Create index
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Insert data
     for i in 0..10 {

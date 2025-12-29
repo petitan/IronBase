@@ -45,7 +45,8 @@ pub extern "C" fn ironbase_create_index(
         }
     };
 
-    match coll.inner.create_index(field_str, unique != 0) {
+    // sparse=false for backwards compatibility
+    match coll.inner.create_index(field_str, unique != 0, false) {
         Ok(name) => {
             if !out_name.is_null() {
                 unsafe {
@@ -107,7 +108,8 @@ pub extern "C" fn ironbase_create_compound_index(
         return IronBaseErrorCode::InvalidQuery as i32;
     }
 
-    match coll.inner.create_compound_index(fields, unique != 0) {
+    // sparse=false for backwards compatibility
+    match coll.inner.create_compound_index(fields, unique != 0, false) {
         Ok(name) => {
             if !out_name.is_null() {
                 unsafe {

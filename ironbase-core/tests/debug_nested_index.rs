@@ -14,7 +14,7 @@ fn debug_nested_index_persistence() {
         let coll = db.collection("users").unwrap();
 
         // Create index on nested field
-        coll.create_index("profile.score".to_string(), false)
+        coll.create_index("profile.score".to_string(), false, false)
             .unwrap();
         println!("Index created on profile.score");
 

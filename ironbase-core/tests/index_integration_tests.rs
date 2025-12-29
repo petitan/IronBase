@@ -26,7 +26,9 @@ fn test_create_custom_index() {
     let collection = db.collection("users").unwrap();
 
     // Create an index on email field
-    let index_name = collection.create_index("email".to_string(), true).unwrap();
+    let index_name = collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
     assert_eq!(index_name, "users_email");
 
     // Verify index exists
@@ -44,7 +46,9 @@ fn test_insert_with_index_maintenance() {
     let collection = db.collection("users").unwrap();
 
     // Create an index on age field
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Insert documents
     let mut fields1 = std::collections::HashMap::new();
@@ -89,7 +93,9 @@ fn test_unique_index_constraint() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert first document
     let mut fields1 = std::collections::HashMap::new();
@@ -113,7 +119,9 @@ fn test_drop_index() {
     let collection = db.collection("users").unwrap();
 
     // Create an index
-    let index_name = collection.create_index("age".to_string(), false).unwrap();
+    let index_name = collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     // Verify it exists
     let indexes = collection.list_indexes().unwrap();
@@ -138,7 +146,9 @@ fn test_update_one_unique_constraint_violation() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert two documents with different emails
     let mut fields1 = std::collections::HashMap::new();
@@ -189,7 +199,9 @@ fn test_update_one_same_value_allowed() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert document
     let mut fields = std::collections::HashMap::new();
@@ -223,7 +235,9 @@ fn test_update_many_unique_constraint_violation() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert documents
     let mut fields1 = std::collections::HashMap::new();
@@ -263,7 +277,9 @@ fn test_update_many_creates_duplicates_in_unique_index_bug() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on code field
-    collection.create_index("code".to_string(), true).unwrap();
+    collection
+        .create_index("code".to_string(), true, false)
+        .unwrap();
 
     // Insert documents with DIFFERENT unique codes
     let mut fields1 = std::collections::HashMap::new();
@@ -328,7 +344,9 @@ fn test_delete_removes_from_index() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert document
     let mut fields = std::collections::HashMap::new();
@@ -363,7 +381,9 @@ fn test_delete_many_removes_from_index() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert multiple documents
     let mut fields1 = std::collections::HashMap::new();
@@ -411,7 +431,9 @@ fn test_update_one_changes_indexed_value() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert document
     let mut fields = std::collections::HashMap::new();
@@ -452,7 +474,9 @@ fn test_insert_many_duplicates_within_batch_bug() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on code field
-    collection.create_index("code".to_string(), true).unwrap();
+    collection
+        .create_index("code".to_string(), true, false)
+        .unwrap();
 
     // Try to insert multiple documents with THE SAME unique code value
     // This should FAIL because they violate the unique constraint within the batch
@@ -497,7 +521,9 @@ fn test_insert_many_atomic_failure_against_existing_documents() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on code field
-    collection.create_index("code".to_string(), true).unwrap();
+    collection
+        .create_index("code".to_string(), true, false)
+        .unwrap();
 
     // Insert an EXISTING document with a unique code
     let mut existing = std::collections::HashMap::new();
@@ -565,7 +591,7 @@ fn test_update_many_nested_field_creates_duplicates_in_unique_index_bug() {
 
     // Create unique index on nested field profile.code
     collection
-        .create_index("profile.code".to_string(), true)
+        .create_index("profile.code".to_string(), true, false)
         .unwrap();
 
     // Insert documents with DIFFERENT nested unique codes
@@ -640,7 +666,7 @@ fn test_update_many_with_compound_unique_index_bug4() {
 
     // Create compound unique index on (country, city)
     let index_name = collection
-        .create_compound_index(vec!["country".to_string(), "city".to_string()], true)
+        .create_compound_index(vec!["country".to_string(), "city".to_string()], true, false)
         .unwrap();
     println!("Created compound index: {}", index_name);
 
@@ -723,7 +749,7 @@ fn test_insert_many_compound_unique_index_bug4() {
 
     // Create compound unique index on (category, sku)
     collection
-        .create_compound_index(vec!["category".to_string(), "sku".to_string()], true)
+        .create_compound_index(vec!["category".to_string(), "sku".to_string()], true, false)
         .unwrap();
 
     // Helper to create HashMap from JSON-like structure
@@ -783,7 +809,9 @@ fn test_unique_index_null_values_bug5() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Test 1: First document with explicit null - should succeed
     let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
@@ -822,7 +850,9 @@ fn test_unique_index_missing_field_bug5() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Test 1: First document with MISSING email field - should succeed
     let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
@@ -859,7 +889,9 @@ fn test_unique_index_null_equals_missing_bug5() {
     let collection = db.collection("users").unwrap();
 
     // Create unique index on email
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     // Insert document with explicit null
     let mut doc1: HashMap<String, serde_json::Value> = HashMap::new();
@@ -928,7 +960,11 @@ fn test_compound_index_prefix_query() {
 
     // Create compound index on (country, city)
     let index_name = collection
-        .create_compound_index(vec!["country".to_string(), "city".to_string()], false)
+        .create_compound_index(
+            vec!["country".to_string(), "city".to_string()],
+            false,
+            false,
+        )
         .unwrap();
     assert_eq!(index_name, "users_country_city");
 
@@ -985,7 +1021,11 @@ fn test_compound_index_prefix_query_explain() {
 
     // Create compound index
     collection
-        .create_compound_index(vec!["country".to_string(), "city".to_string()], false)
+        .create_compound_index(
+            vec!["country".to_string(), "city".to_string()],
+            false,
+            false,
+        )
         .unwrap();
 
     // Check explain output - should show IndexScan, not CollectionScan

@@ -1250,11 +1250,12 @@ impl RhaiEngine {
         // ============================================================
 
         // db_create_index(collection, field, unique) -> index_name
+        // Note: sparse defaults to false for backwards compatibility
         let adapter_idx = adapter.clone();
         engine.register_fn(
             "db_create_index",
             move |collection: &str, field: &str, unique: bool| -> Dynamic {
-                match adapter_idx.create_index(collection, field, unique) {
+                match adapter_idx.create_index(collection, field, unique, false) {
                     Ok(name) => Dynamic::from(name),
                     Err(e) => Dynamic::from(format!("Error: {}", e)),
                 }
@@ -1262,6 +1263,7 @@ impl RhaiEngine {
         );
 
         // db_create_compound_index(collection, fields_array, unique) -> index_name
+        // Note: sparse defaults to false for backwards compatibility
         let adapter_cidx = adapter.clone();
         engine.register_fn(
             "db_create_compound_index",
@@ -1270,7 +1272,7 @@ impl RhaiEngine {
                     .iter()
                     .filter_map(|f| f.clone().try_cast::<String>())
                     .collect();
-                match adapter_cidx.create_compound_index(collection, &field_vec, unique) {
+                match adapter_cidx.create_compound_index(collection, &field_vec, unique, false) {
                     Ok(name) => Dynamic::from(name),
                     Err(e) => Dynamic::from(format!("Error: {}", e)),
                 }
@@ -1532,9 +1534,7 @@ impl RhaiEngine {
         });
 
         // now_iso() -> current time as ISO 8601 string
-        engine.register_fn("now_iso", || -> String {
-            chrono::Utc::now().to_rfc3339()
-        });
+        engine.register_fn("now_iso", || -> String { chrono::Utc::now().to_rfc3339() });
     }
 }
 

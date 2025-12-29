@@ -59,12 +59,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// # Arguments
     /// * `fields` - Ordered list of fields (e.g., ["country", "city"])
     /// * `unique` - Whether the compound key must be unique
+    /// * `sparse` - If true, documents missing any field are not indexed
     ///
     /// # Example
     /// ```rust,ignore
     /// // Create compound index on (country, city)
     /// collection.create_compound_index(
     ///     vec!["country".to_string(), "city".to_string()],
+    ///     false,
     ///     false
     /// )?;
     ///
@@ -75,7 +77,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// // This query CANNOT use the index efficiently:
     /// // - {"city": "NYC"}                      (not a prefix)
     /// ```
-    pub fn create_compound_index(&self, fields: Vec<String>, unique: bool) -> Result<String> {
+    pub fn create_compound_index(
+        &self,
+        fields: Vec<String>,
+        unique: bool,
+        sparse: bool,
+    ) -> Result<String> {
         if fields.is_empty() {
             return Err(IronBaseError::IndexError(
                 "Compound index must have at least one field".to_string(),
@@ -94,7 +101,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         );
 
         let mut indexes = self.indexes.write();
-        indexes.create_compound_index(index_name.clone(), fields.clone(), unique)?;
+        indexes.create_compound_index(index_name.clone(), fields.clone(), unique, sparse)?;
         drop(indexes); // Release index lock before batch scanning
 
         // Collect (compound_key, doc_id) pairs in batches - full documents are NOT kept in memory
@@ -207,7 +214,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Create a B+ tree index on a field
-    pub fn create_index(&self, field: String, unique: bool) -> Result<String> {
+    ///
+    /// # Arguments
+    /// * `field` - Field to index
+    /// * `unique` - Whether values must be unique
+    /// * `sparse` - If true, documents missing the field are not indexed
+    pub fn create_index(&self, field: String, unique: bool, sparse: bool) -> Result<String> {
         self.check_not_closed()?;
         let index_name = format!("{}_{}", self.name, field);
 
@@ -216,11 +228,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             field = %field,
             index_name = %index_name,
             unique = unique,
+            sparse = sparse,
             "Starting index creation"
         );
 
         let mut indexes = self.indexes.write();
-        indexes.create_btree_index(index_name.clone(), field.clone(), unique)?;
+        indexes.create_btree_index(index_name.clone(), field.clone(), unique, sparse)?;
 
         // Release index lock before batch scanning
         drop(indexes);

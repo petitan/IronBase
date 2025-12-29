@@ -38,7 +38,7 @@ mod tests {
 
     #[test]
     fn test_btree_insert_search() {
-        let mut tree = BPlusTree::new("test_idx".to_string(), "age".to_string(), false);
+        let mut tree = BPlusTree::new("test_idx".to_string(), "age".to_string(), false, false);
 
         tree.insert(IndexKey::Int(25), DocumentId::Int(1)).unwrap();
         tree.insert(IndexKey::Int(30), DocumentId::Int(2)).unwrap();
@@ -52,7 +52,7 @@ mod tests {
 
     #[test]
     fn test_btree_unique_constraint() {
-        let mut tree = BPlusTree::new("email_idx".to_string(), "email".to_string(), true);
+        let mut tree = BPlusTree::new("email_idx".to_string(), "email".to_string(), true, false);
 
         tree.insert(
             IndexKey::String("test@example.com".to_string()),
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn test_btree_range_scan() {
-        let mut tree = BPlusTree::new("age_idx".to_string(), "age".to_string(), false);
+        let mut tree = BPlusTree::new("age_idx".to_string(), "age".to_string(), false, false);
 
         for i in 0..100 {
             tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
@@ -134,7 +134,7 @@ mod tests {
         let temp_path = "test_tree_persist.tmp";
 
         // Create and populate tree
-        let mut tree = BPlusTree::new("test_idx".to_string(), "age".to_string(), false);
+        let mut tree = BPlusTree::new("test_idx".to_string(), "age".to_string(), false, false);
 
         for i in 0..10 {
             tree.insert(IndexKey::Int(i * 10), DocumentId::Int(i))
@@ -207,6 +207,7 @@ mod tests {
             "users_location".to_string(),
             vec!["country".to_string(), "city".to_string()],
             false,
+            false,
         );
 
         assert_eq!(tree.metadata.name, "users_location");
@@ -223,6 +224,7 @@ mod tests {
         let tree = BPlusTree::new_compound(
             "users_location".to_string(),
             vec!["country".to_string(), "city".to_string()],
+            false,
             false,
         );
 
@@ -246,6 +248,7 @@ mod tests {
         let mut tree = BPlusTree::new_compound(
             "users_location".to_string(),
             vec!["country".to_string(), "city".to_string()],
+            false,
             false,
         );
 
@@ -286,6 +289,7 @@ mod tests {
             "users_location".to_string(),
             vec!["country".to_string(), "city".to_string()],
             false,
+            false,
         );
 
         // Insert several compound keys
@@ -325,7 +329,8 @@ mod tests {
         let mut tree = BPlusTree::new_compound(
             "users_location".to_string(),
             vec!["country".to_string(), "city".to_string()],
-            true, // unique
+            true,  // unique
+            false, // sparse
         );
 
         let key = IndexKey::Compound(vec![
@@ -351,6 +356,7 @@ mod tests {
                 "users_country_city".to_string(),
                 vec!["country".to_string(), "city".to_string()],
                 false,
+                false,
             )
             .unwrap();
 
@@ -364,6 +370,7 @@ mod tests {
             "users_country_city".to_string(),
             vec!["country".to_string(), "city".to_string()],
             false,
+            false,
         );
         assert!(result.is_err());
     }
@@ -373,7 +380,7 @@ mod tests {
     /// Fix: Added clear() call before build_from_sorted in apply_batch_updates.
     #[test]
     fn test_apply_batch_updates_no_duplicates() {
-        let mut tree = BPlusTree::new("test_idx".to_string(), "name".to_string(), false);
+        let mut tree = BPlusTree::new("test_idx".to_string(), "name".to_string(), false, false);
 
         // Insert 3 entries
         tree.insert(
@@ -453,7 +460,7 @@ mod tests {
     /// Regression test for BUG #3: Verify clear() properly resets the tree
     #[test]
     fn test_clear_resets_tree() {
-        let mut tree = BPlusTree::new("test_idx".to_string(), "value".to_string(), false);
+        let mut tree = BPlusTree::new("test_idx".to_string(), "value".to_string(), false, false);
 
         // Insert some entries
         for i in 0..10 {
@@ -506,6 +513,7 @@ mod debug_tests {
                 "loc_idx".to_string(),
                 vec!["country".to_string(), "city".to_string()],
                 true,
+                false,
             )
             .unwrap();
 
@@ -768,7 +776,7 @@ mod split_tests {
     /// and increases tree height
     #[test]
     fn test_btree_insert_triggers_split() {
-        let mut tree = BPlusTree::new("test_idx".to_string(), "field".to_string(), false);
+        let mut tree = BPlusTree::new("test_idx".to_string(), "field".to_string(), false, false);
 
         // Initial height should be 1 (just root leaf)
         assert_eq!(tree.metadata.tree_height, 1);
@@ -799,7 +807,7 @@ mod split_tests {
     /// Test bulk loading a large dataset (10,000 entries)
     #[test]
     fn test_btree_bulk_load_large_dataset() {
-        let mut tree = BPlusTree::new("large_idx".to_string(), "id".to_string(), false);
+        let mut tree = BPlusTree::new("large_idx".to_string(), "id".to_string(), false, false);
 
         let entries: Vec<_> = (0..10000)
             .map(|i| (IndexKey::Int(i), DocumentId::Int(i)))
@@ -841,7 +849,7 @@ mod split_tests {
     /// Test that multiple splits create correct tree structure
     #[test]
     fn test_btree_multiple_splits() {
-        let mut tree = BPlusTree::new("multi_split_idx".to_string(), "x".to_string(), false);
+        let mut tree = BPlusTree::new("multi_split_idx".to_string(), "x".to_string(), false, false);
 
         // Insert enough elements to cause multiple levels of splits
         // With MAX_KEYS_PER_NODE = 128, we need > 128^2 = 16384 for 3 levels
@@ -875,7 +883,7 @@ mod split_tests {
         let temp_path = "test_multilevel_persist.tmp";
 
         // Create and populate multi-level tree
-        let mut tree = BPlusTree::new("persist_idx".to_string(), "id".to_string(), false);
+        let mut tree = BPlusTree::new("persist_idx".to_string(), "id".to_string(), false, false);
 
         for i in 0..500 {
             tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
@@ -953,6 +961,7 @@ mod compound_prefix_tests {
             "users_country_city".to_string(),
             vec!["country".to_string(), "city".to_string()],
             false,
+            false,
         );
 
         // Build prefix range for country = "US"
@@ -984,6 +993,7 @@ mod compound_prefix_tests {
         let mut tree = BPlusTree::new_compound(
             "users_country_city".to_string(),
             vec!["country".to_string(), "city".to_string()],
+            false,
             false,
         );
 
@@ -1038,7 +1048,7 @@ mod compound_prefix_tests {
 
         // Create single-field index
         manager
-            .create_btree_index("users_age".to_string(), "age".to_string(), false)
+            .create_btree_index("users_age".to_string(), "age".to_string(), false, false)
             .unwrap();
 
         // Create compound index
@@ -1046,6 +1056,7 @@ mod compound_prefix_tests {
             .create_compound_index(
                 "users_country_city".to_string(),
                 vec!["country".to_string(), "city".to_string()],
+                false,
                 false,
             )
             .unwrap();

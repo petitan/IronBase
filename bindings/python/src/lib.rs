@@ -281,16 +281,18 @@ impl CollectionWrapper {
         &self,
         field: String,
         unique: bool,
+        sparse: bool,
     ) -> Result<String, ironbase_core::IronBaseError> {
-        coll_dispatch!(self, create_index, field, unique)
+        coll_dispatch!(self, create_index, field, unique, sparse)
     }
 
     fn create_compound_index(
         &self,
         fields: Vec<String>,
         unique: bool,
+        sparse: bool,
     ) -> Result<String, ironbase_core::IronBaseError> {
-        coll_dispatch!(self, create_compound_index, fields, unique)
+        coll_dispatch!(self, create_compound_index, fields, unique, sparse)
     }
 
     fn drop_index(&self, name: &str) -> Result<(), ironbase_core::IronBaseError> {
@@ -1033,16 +1035,31 @@ impl Collection {
     }
 
     /// Create an index
-    #[pyo3(signature = (field, unique=false))]
-    fn create_index(&self, field: String, unique: bool) -> PyResult<String> {
+    ///
+    /// Args:
+    ///     field: Field to index
+    ///     unique: Whether values must be unique (default: False)
+    ///     sparse: If True, documents missing the field are not indexed (default: False)
+    #[pyo3(signature = (field, unique=false, sparse=false))]
+    fn create_index(&self, field: String, unique: bool, sparse: bool) -> PyResult<String> {
         self.core
-            .create_index(field, unique)
+            .create_index(field, unique, sparse)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
     /// Create a compound index
-    #[pyo3(signature = (fields, unique=false))]
-    fn create_compound_index(&self, fields: Vec<String>, unique: bool) -> PyResult<String> {
+    ///
+    /// Args:
+    ///     fields: List of fields to index (in order)
+    ///     unique: Whether compound key must be unique (default: False)
+    ///     sparse: If True, documents missing any field are not indexed (default: False)
+    #[pyo3(signature = (fields, unique=false, sparse=false))]
+    fn create_compound_index(
+        &self,
+        fields: Vec<String>,
+        unique: bool,
+        sparse: bool,
+    ) -> PyResult<String> {
         if fields.is_empty() {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
                 "Compound index must have at least one field",
@@ -1050,7 +1067,7 @@ impl Collection {
         }
 
         self.core
-            .create_compound_index(fields, unique)
+            .create_compound_index(fields, unique, sparse)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 

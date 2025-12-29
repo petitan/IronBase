@@ -40,7 +40,7 @@ fn test_index_persists_after_reopen() {
 
         // Create index on age
         let coll = db.collection("users").unwrap();
-        coll.create_index("age".to_string(), false).unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
 
         db.close().unwrap();
     }
@@ -84,7 +84,7 @@ fn test_index_on_string_field_persists() {
         }
 
         let coll = db.collection("users").unwrap();
-        coll.create_index("city".to_string(), false).unwrap();
+        coll.create_index("city".to_string(), false, false).unwrap();
 
         db.close().unwrap();
     }
@@ -145,9 +145,12 @@ fn test_multiple_indexes_persist() {
         }
 
         let coll = db.collection("products").unwrap();
-        coll.create_index("price".to_string(), false).unwrap();
-        coll.create_index("category".to_string(), false).unwrap();
-        coll.create_index("stock".to_string(), false).unwrap();
+        coll.create_index("price".to_string(), false, false)
+            .unwrap();
+        coll.create_index("category".to_string(), false, false)
+            .unwrap();
+        coll.create_index("stock".to_string(), false, false)
+            .unwrap();
 
         db.close().unwrap();
     }
@@ -192,7 +195,7 @@ fn test_index_updated_after_insert() {
         }
 
         let coll = db.collection("users").unwrap();
-        coll.create_index("age".to_string(), false).unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
         db.close().unwrap();
     }
 
@@ -246,7 +249,7 @@ fn test_index_updated_after_update() {
         }
 
         let coll = db.collection("users").unwrap();
-        coll.create_index("city".to_string(), false).unwrap();
+        coll.create_index("city".to_string(), false, false).unwrap();
         db.close().unwrap();
     }
 
@@ -312,7 +315,7 @@ fn test_index_updated_after_delete() {
         }
 
         let coll = db.collection("users").unwrap();
-        coll.create_index("age".to_string(), false).unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
         db.close().unwrap();
     }
 
@@ -371,7 +374,7 @@ fn test_index_on_nested_field_persists() {
         }
 
         let coll = db.collection("users").unwrap();
-        coll.create_index("address.city".to_string(), false)
+        coll.create_index("address.city".to_string(), false, false)
             .unwrap();
         db.close().unwrap();
     }
@@ -418,7 +421,7 @@ fn test_indexes_on_multiple_collections_persist() {
                 .unwrap();
         }
         let users = db.collection("users").unwrap();
-        users.create_index("age".to_string(), false).unwrap();
+        users.create_index("age".to_string(), false, false).unwrap();
 
         // Products collection
         for i in 1..=30 {
@@ -429,7 +432,9 @@ fn test_indexes_on_multiple_collections_persist() {
             db.insert_one("products", doc).unwrap();
         }
         let products = db.collection("products").unwrap();
-        products.create_index("price".to_string(), false).unwrap();
+        products
+            .create_index("price".to_string(), false, false)
+            .unwrap();
 
         // Orders collection
         for i in 1..=30 {
@@ -439,7 +444,9 @@ fn test_indexes_on_multiple_collections_persist() {
             db.insert_one("orders", doc).unwrap();
         }
         let orders = db.collection("orders").unwrap();
-        orders.create_index("total".to_string(), false).unwrap();
+        orders
+            .create_index("total".to_string(), false, false)
+            .unwrap();
 
         db.close().unwrap();
     }
@@ -486,8 +493,8 @@ fn test_list_indexes_after_reopen() {
         }
 
         let coll = db.collection("test").unwrap();
-        coll.create_index("age".to_string(), false).unwrap();
-        coll.create_index("city".to_string(), false).unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
+        coll.create_index("city".to_string(), false, false).unwrap();
 
         db.close().unwrap();
     }
@@ -524,7 +531,7 @@ fn test_index_multiple_reopen_cycles() {
                 .unwrap();
         }
         let coll = db.collection("data").unwrap();
-        coll.create_index("age".to_string(), false).unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
         db.close().unwrap();
     }
 
@@ -596,7 +603,7 @@ fn test_index_query_performance_after_reopen() {
         }
 
         let coll = db.collection("large").unwrap();
-        coll.create_index("age".to_string(), false).unwrap();
+        coll.create_index("age".to_string(), false, false).unwrap();
 
         db.close().unwrap();
     }

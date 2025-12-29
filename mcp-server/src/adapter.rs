@@ -352,10 +352,7 @@ impl IronBaseAdapter {
         drop(db);
 
         let total = collections.len();
-        tracing::info!(
-            "Starting warm-up for {} collections...",
-            total
-        );
+        tracing::info!("Starting warm-up for {} collections...", total);
 
         for (i, name) in collections.iter().enumerate() {
             let coll_start = std::time::Instant::now();
@@ -383,11 +380,7 @@ impl IronBaseAdapter {
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(
-                        "Failed to warm up collection '{}': {}",
-                        name,
-                        e
-                    );
+                    tracing::warn!("Failed to warm up collection '{}': {}", name, e);
                 }
             }
         }
@@ -757,23 +750,42 @@ impl IronBaseAdapter {
     // ============================================================
 
     /// Create an index
-    pub fn create_index(&self, collection: &str, field: &str, unique: bool) -> Result<String> {
+    ///
+    /// # Arguments
+    /// * `collection` - Collection name
+    /// * `field` - Field to index
+    /// * `unique` - Whether values must be unique
+    /// * `sparse` - If true, documents missing the field are not indexed
+    pub fn create_index(
+        &self,
+        collection: &str,
+        field: &str,
+        unique: bool,
+        sparse: bool,
+    ) -> Result<String> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
-        let name = coll.create_index(field.to_string(), unique)?;
+        let name = coll.create_index(field.to_string(), unique, sparse)?;
         Ok(name)
     }
 
     /// Create a compound index
+    ///
+    /// # Arguments
+    /// * `collection` - Collection name
+    /// * `fields` - Fields to index (in order)
+    /// * `unique` - Whether compound key must be unique
+    /// * `sparse` - If true, documents missing any field are not indexed
     pub fn create_compound_index(
         &self,
         collection: &str,
         fields: &[String],
         unique: bool,
+        sparse: bool,
     ) -> Result<String> {
         let db = self.db.read();
         let coll = db.collection(collection)?;
-        let name = coll.create_compound_index(fields.to_vec(), unique)?;
+        let name = coll.create_compound_index(fields.to_vec(), unique, sparse)?;
         Ok(name)
     }
 

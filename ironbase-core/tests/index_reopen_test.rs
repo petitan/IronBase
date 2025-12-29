@@ -33,7 +33,7 @@ fn test_index_reopen_with_documents() {
         let coll = db.collection("test").unwrap();
 
         println!("Creating index on 'name' field...");
-        coll.create_index("name".to_string(), false).unwrap();
+        coll.create_index("name".to_string(), false, false).unwrap();
 
         println!("Inserting 10 documents...");
         for i in 1..=10 {

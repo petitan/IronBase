@@ -23,9 +23,7 @@ pub fn dispatch(
         "db_compact" => handle_db_compact(adapter),
         "db_checkpoint" => handle_db_checkpoint(adapter),
         "admin_list_all_collections" => handle_admin_list_all_collections(params, adapter),
-        "admin_create_system_collection" => {
-            handle_admin_create_system_collection(params, adapter)
-        }
+        "admin_create_system_collection" => handle_admin_create_system_collection(params, adapter),
         "admin_set_collection_flags" => handle_admin_set_collection_flags(params, adapter),
         "admin_drop_protected" => handle_admin_drop_protected(params, adapter),
         "admin_apikey_create" => handle_admin_apikey_create(params, adapter, api_key_cache),
@@ -55,7 +53,10 @@ fn handle_db_open(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
     }))
 }
 
-fn handle_db_stats(adapter: &Arc<IronBaseAdapter>, server_info: Option<&ServerInfo>) -> Result<Value> {
+fn handle_db_stats(
+    adapter: &Arc<IronBaseAdapter>,
+    server_info: Option<&ServerInfo>,
+) -> Result<Value> {
     let mut stats = adapter.stats();
     // Add server info if available
     if let Some(info) = server_info {

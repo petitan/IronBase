@@ -25,7 +25,7 @@ fn test_index_with_long_string_keys() {
 
     // Create index on message_id field (typically long email message IDs)
     collection
-        .create_index("message_id".to_string(), false)
+        .create_index("message_id".to_string(), false, false)
         .unwrap();
 
     // Insert documents with long message_id values (500+ bytes)
@@ -58,7 +58,7 @@ fn test_many_long_keys_triggers_split() {
 
     // Create index on a field that will have 200-byte keys
     collection
-        .create_index("long_field".to_string(), false)
+        .create_index("long_field".to_string(), false, false)
         .unwrap();
 
     // Insert 100 documents with 200-byte keys - this should trigger multiple splits
@@ -94,7 +94,7 @@ fn test_very_long_keys_1kb() {
 
     // Create index on a field with 1KB keys
     collection
-        .create_index("huge_key".to_string(), false)
+        .create_index("huge_key".to_string(), false, false)
         .unwrap();
 
     // Insert 20 documents with ~1KB keys - this should trigger size-based early split
@@ -124,7 +124,7 @@ fn test_unique_index_with_long_keys() {
 
     // Create UNIQUE index on message_id
     collection
-        .create_index("message_id".to_string(), true)
+        .create_index("message_id".to_string(), true, false)
         .unwrap();
 
     // Insert documents with unique long message_ids
@@ -157,7 +157,7 @@ fn test_index_persistence_with_long_keys() {
         let collection = db.collection("persistent").unwrap();
 
         collection
-            .create_index("long_key".to_string(), false)
+            .create_index("long_key".to_string(), false, false)
             .unwrap();
 
         for i in 0..10 {

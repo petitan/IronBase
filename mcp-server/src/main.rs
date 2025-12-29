@@ -22,8 +22,7 @@ use std::sync::Arc;
 
 use mcp_ironbase::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list, get_tools_list,
-    http_server, read_resource, service,
-    IronBaseAdapter, VERSION,
+    http_server, read_resource, service, IronBaseAdapter, VERSION,
 };
 
 // ============================================================
@@ -48,7 +47,8 @@ fn install_panic_handler() {
 
         // Get panic location
         if let Some(location) = panic_info.location() {
-            eprintln!("Location: {}:{}:{}",
+            eprintln!(
+                "Location: {}:{}:{}",
                 location.file(),
                 location.line(),
                 location.column()
@@ -314,7 +314,11 @@ fn run_stdio_server(cli: &Cli) {
     // Warm up collections (initialize index managers)
     eprintln!("Warming up collections...");
     let (count, elapsed) = adapter.warm_up();
-    eprintln!("Warmed up {} collections in {:.2}s", count, elapsed.as_secs_f64());
+    eprintln!(
+        "Warmed up {} collections in {:.2}s",
+        count,
+        elapsed.as_secs_f64()
+    );
 
     eprintln!("Ready for requests...");
 

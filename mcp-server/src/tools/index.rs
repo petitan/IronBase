@@ -38,6 +38,10 @@ fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
         .get("unique")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let sparse = params
+        .get("sparse")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // Check for compound index
     if let Some(fields) = params.get("fields").and_then(|v| v.as_array()) {
@@ -48,13 +52,13 @@ fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
         if field_names.is_empty() {
             return Err(McpError::InvalidParams("fields array is empty".to_string()));
         }
-        let name = adapter.create_compound_index(&collection, &field_names, unique)?;
-        Ok(json!({"index_name": name, "fields": field_names, "unique": unique}))
+        let name = adapter.create_compound_index(&collection, &field_names, unique, sparse)?;
+        Ok(json!({"index_name": name, "fields": field_names, "unique": unique, "sparse": sparse}))
     } else {
         // Single field index
         let field = get_string(&params, "field")?;
-        let name = adapter.create_index(&collection, &field, unique)?;
-        Ok(json!({"index_name": name, "field": field, "unique": unique}))
+        let name = adapter.create_index(&collection, &field, unique, sparse)?;
+        Ok(json!({"index_name": name, "field": field, "unique": unique, "sparse": sparse}))
     }
 }
 
@@ -173,49 +177,49 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     let min_score = params.get("min_score").and_then(|v| v.as_f64());
 
     // Parse projection with validation
-    let projection: Option<HashMap<String, i32>> = if let Some(proj_value) = params.get("projection")
-    {
-        if proj_value.is_null() {
-            None
-        } else if let Some(obj) = proj_value.as_object() {
-            let mut map = HashMap::new();
-            for (k, v) in obj {
-                let int_val = if let Some(i) = v.as_i64() {
-                    if i != 0 && i != 1 {
-                        return Err(McpError::InvalidParams(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {}",
-                            k, i
-                        )));
-                    }
-                    i as i32
-                } else if let Some(f) = v.as_f64() {
-                    if f == 0.0 {
-                        0
-                    } else if f == 1.0 {
-                        1
+    let projection: Option<HashMap<String, i32>> =
+        if let Some(proj_value) = params.get("projection") {
+            if proj_value.is_null() {
+                None
+            } else if let Some(obj) = proj_value.as_object() {
+                let mut map = HashMap::new();
+                for (k, v) in obj {
+                    let int_val = if let Some(i) = v.as_i64() {
+                        if i != 0 && i != 1 {
+                            return Err(McpError::InvalidParams(format!(
+                                "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                k, i
+                            )));
+                        }
+                        i as i32
+                    } else if let Some(f) = v.as_f64() {
+                        if f == 0.0 {
+                            0
+                        } else if f == 1.0 {
+                            1
+                        } else {
+                            return Err(McpError::InvalidParams(format!(
+                                "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                k, f
+                            )));
+                        }
                     } else {
                         return Err(McpError::InvalidParams(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {}",
-                            k, f
+                            "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                            k, v
                         )));
-                    }
-                } else {
-                    return Err(McpError::InvalidParams(format!(
-                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                        k, v
-                    )));
-                };
-                map.insert(k.clone(), int_val);
+                    };
+                    map.insert(k.clone(), int_val);
+                }
+                Some(map)
+            } else {
+                return Err(McpError::InvalidParams(
+                    "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
+                ));
             }
-            Some(map)
         } else {
-            return Err(McpError::InvalidParams(
-                "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
-            ));
-        }
-    } else {
-        None
-    };
+            None
+        };
 
     let options = FulltextSearchOptions {
         limit,

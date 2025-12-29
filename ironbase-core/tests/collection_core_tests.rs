@@ -766,7 +766,9 @@ fn test_create_index() {
     let (db, coll_name) = create_test_db("test");
     let collection = db.collection(&coll_name).unwrap();
 
-    let index_name = collection.create_index("age".to_string(), false).unwrap();
+    let index_name = collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
     assert!(index_name.contains("age"));
 
     let indexes = collection.list_indexes().unwrap();
@@ -778,7 +780,9 @@ fn test_create_unique_index() {
     let (db, coll_name) = create_test_db("test");
     let collection = db.collection(&coll_name).unwrap();
 
-    collection.create_index("email".to_string(), true).unwrap();
+    collection
+        .create_index("email".to_string(), true, false)
+        .unwrap();
 
     let doc1 = HashMap::from([("email".to_string(), json!("alice@test.com"))]);
     db.insert_one(&coll_name, doc1).unwrap();
@@ -795,7 +799,11 @@ fn test_create_compound_index() {
     let collection = db.collection(&coll_name).unwrap();
 
     let index_name = collection
-        .create_compound_index(vec!["country".to_string(), "city".to_string()], false)
+        .create_compound_index(
+            vec!["country".to_string(), "city".to_string()],
+            false,
+            false,
+        )
         .unwrap();
 
     assert!(index_name.contains("country"));
@@ -819,7 +827,9 @@ fn test_drop_index() {
     let (db, coll_name) = create_test_db("test");
     let collection = db.collection(&coll_name).unwrap();
 
-    let index_name = collection.create_index("temp".to_string(), false).unwrap();
+    let index_name = collection
+        .create_index("temp".to_string(), false, false)
+        .unwrap();
 
     // First drop should succeed
     collection.drop_index(&index_name).unwrap();
@@ -1141,7 +1151,8 @@ fn test_index_based_sort_for_empty_query() {
     let coll = db.collection("test").unwrap();
 
     // Create index BEFORE inserting (index is built incrementally)
-    coll.create_index("timestamp".to_string(), false).unwrap();
+    coll.create_index("timestamp".to_string(), false, false)
+        .unwrap();
 
     // Insert 1000 documents in random order
     for i in 0..1000i64 {
@@ -1206,7 +1217,7 @@ fn perf_test_desc_sort_with_limit_early_termination() {
     let coll = db.collection("test").unwrap();
 
     // Create index BEFORE inserting
-    coll.create_index("date".to_string(), false).unwrap();
+    coll.create_index("date".to_string(), false, false).unwrap();
 
     // Insert 50K documents (simulating large emails collection)
     let doc_count = 50_000;
@@ -1254,7 +1265,8 @@ fn test_sort_with_filter_uses_collection_scan() {
     let coll = db.collection("test").unwrap();
 
     // Create index on timestamp only
-    coll.create_index("timestamp".to_string(), false).unwrap();
+    coll.create_index("timestamp".to_string(), false, false)
+        .unwrap();
 
     // Insert documents
     for i in 0..100i64 {
@@ -1314,7 +1326,9 @@ fn test_explain() {
     let (db, coll_name) = create_test_db("test");
     let collection = db.collection(&coll_name).unwrap();
 
-    collection.create_index("age".to_string(), false).unwrap();
+    collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     let doc = HashMap::from([("age".to_string(), json!(25))]);
     db.insert_one(&coll_name, doc).unwrap();
@@ -1330,7 +1344,9 @@ fn test_find_with_hint() {
     let (db, coll_name) = create_test_db("test");
     let collection = db.collection(&coll_name).unwrap();
 
-    let index_name = collection.create_index("age".to_string(), false).unwrap();
+    let index_name = collection
+        .create_index("age".to_string(), false, false)
+        .unwrap();
 
     for i in 0..10 {
         let doc = HashMap::from([("age".to_string(), json!(i))]);
@@ -1465,7 +1481,9 @@ mod memory_storage_tests {
         let (db, coll_name) = create_memory_db();
         let collection = db.collection(&coll_name).unwrap();
 
-        let index_name = collection.create_index("age".to_string(), false).unwrap();
+        let index_name = collection
+            .create_index("age".to_string(), false, false)
+            .unwrap();
         assert!(index_name.contains("age"));
 
         for i in 0..10 {
@@ -2691,7 +2709,7 @@ fn test_distinct_uses_index_when_available() {
 
     // Create index on category field
     let index_name = collection
-        .create_index("category".to_string(), false)
+        .create_index("category".to_string(), false, false)
         .unwrap();
     assert!(index_name.contains("category"));
 
@@ -2740,7 +2758,7 @@ fn test_distinct_with_index_handles_missing_field() {
 
     // Create index on status
     collection
-        .create_index("status".to_string(), false)
+        .create_index("status".to_string(), false, false)
         .unwrap();
 
     // Distinct should only return "active" and "inactive", not null
@@ -2800,7 +2818,9 @@ fn test_distinct_with_query_uses_streaming() {
     }
 
     // Create index on value
-    collection.create_index("value".to_string(), false).unwrap();
+    collection
+        .create_index("value".to_string(), false, false)
+        .unwrap();
 
     // Distinct with non-empty query - uses streaming fallback
     let distinct = collection

@@ -88,7 +88,13 @@ impl IndexMetadata {
 
 impl BPlusTree {
     /// Create new B+ tree index (single field)
-    pub fn new(name: String, field: String, unique: bool) -> Self {
+    ///
+    /// # Arguments
+    /// * `name` - Index name
+    /// * `field` - Field to index
+    /// * `unique` - Whether values must be unique
+    /// * `sparse` - If true, documents missing the field are not indexed
+    pub fn new(name: String, field: String, unique: bool, sparse: bool) -> Self {
         // Start with empty leaf node as root
         let root = Box::new(BTreeNode::Leaf(LeafNode {
             keys: Vec::new(),
@@ -103,7 +109,7 @@ impl BPlusTree {
                 field: field.clone(),
                 fields: vec![field], // Single-field index
                 unique,
-                sparse: false,
+                sparse,
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
@@ -117,16 +123,18 @@ impl BPlusTree {
     /// * `name` - Index name
     /// * `fields` - List of fields in order (e.g., ["country", "city"])
     /// * `unique` - Whether the compound key must be unique
+    /// * `sparse` - If true, documents missing any field are not indexed
     ///
     /// # Example
     /// ```rust,ignore
     /// let index = BPlusTree::new_compound(
     ///     "users_location".to_string(),
     ///     vec!["country".to_string(), "city".to_string()],
+    ///     false,
     ///     false
     /// );
     /// ```
-    pub fn new_compound(name: String, fields: Vec<String>, unique: bool) -> Self {
+    pub fn new_compound(name: String, fields: Vec<String>, unique: bool, sparse: bool) -> Self {
         assert!(
             !fields.is_empty(),
             "Compound index must have at least one field"
@@ -147,7 +155,7 @@ impl BPlusTree {
                 field: primary_field, // First field for backward compatibility
                 fields,               // All fields for compound key
                 unique,
-                sparse: false,
+                sparse,
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
