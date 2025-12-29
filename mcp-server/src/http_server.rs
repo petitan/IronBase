@@ -536,7 +536,8 @@ async fn run_http_server_internal(
                 let timeout_secs = tool_timeout.as_secs();
                 let error_msg = format!(
                     "Operation timed out after {} seconds. Method: '{}'. \
-                    Consider increasing tool_timeout_secs in config.toml or breaking the operation into smaller chunks.",
+                    Solutions: 1) Add 'limit' to your query, 2) Use an indexed field in your filter, \
+                    3) Increase tool_timeout_secs in config.toml.",
                     timeout_secs, request_method
                 );
                 tracing::error!(

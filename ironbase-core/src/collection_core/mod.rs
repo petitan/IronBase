@@ -674,7 +674,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut results = Vec::new();
         results.try_reserve(doc_ids.len()).map_err(|e| {
             IronBaseError::InvalidQuery(format!(
-                "Cannot allocate memory for {} documents: {}",
+                "Out of memory: cannot allocate space for {} documents ({}). \
+                Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Use find_streaming() for large results.",
                 doc_ids.len(),
                 e
             ))
@@ -731,7 +732,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut docs = Vec::new();
         docs.try_reserve(doc_count).map_err(|e| {
             IronBaseError::InvalidQuery(format!(
-                "Cannot allocate memory for {} documents: {}. Add a limit to your query.",
+                "Out of memory: cannot allocate space for {} documents ({}). \
+                Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Use find_streaming() for large results.",
                 doc_count, e
             ))
         })?;
