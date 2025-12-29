@@ -174,6 +174,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     }
 
     /// Rebuild all indexes from document catalog
+    ///
+    /// OPTIMIZATION: Skips B+ tree indexes that already have data (loaded from .idx files)
+    /// This allows fast startup even when fuzzy indexes need rebuild.
     fn rebuild_indexes_from_catalog<S2: Storage + RawStorage>(
         index_manager: &mut IndexManager,
         storage: &mut S2,
@@ -186,7 +189,27 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         let mut rebuilt_count = 0u64;
 
+        // Check if _id index needs rebuild (empty = not loaded from file)
+        let rebuild_id_index = index_manager
+            .get_btree_index(id_index_name)
+            .map(|idx| idx.size() == 0)
+            .unwrap_or(true);
+
+        // Pre-collect B+ tree indexes that need rebuild (empty = not loaded from file)
+        let btree_indexes_to_rebuild: Vec<_> = persisted_indexes
+            .iter()
+            .filter(|meta| meta.name != id_index_name)
+            .filter(|meta| {
+                index_manager
+                    .get_btree_index(&meta.name)
+                    .map(|idx| idx.size() == 0) // Only rebuild empty indexes
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect();
+
         // Pre-collect fuzzy index info to avoid repeated lookups in the loop
+        // Fuzzy indexes ALWAYS need rebuild (no file persistence yet)
         let fuzzy_info: Vec<_> = index_manager
             .list_fuzzy_indexes()
             .iter()
@@ -244,26 +267,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 continue;
             };
 
-            // Rebuild _id index
-            let index_key = IndexKey::from(id_value);
-            if let Some(id_index) = index_manager.get_btree_index_mut(id_index_name) {
-                // BUG #4 FIX: Log duplicate key errors instead of silently ignoring
-                // This helps diagnose database inconsistencies after crash recovery
-                if let Err(e) = id_index.insert(index_key, doc_id.clone()) {
-                    log_warn!(
-                        "Index rebuild: duplicate _id key ignored for {}: {:?}",
-                        collection_name,
-                        e
-                    );
+            // Rebuild _id index ONLY if needed (not loaded from .idx file)
+            if rebuild_id_index {
+                let index_key = IndexKey::from(id_value);
+                if let Some(id_index) = index_manager.get_btree_index_mut(id_index_name) {
+                    // BUG #4 FIX: Log duplicate key errors instead of silently ignoring
+                    // This helps diagnose database inconsistencies after crash recovery
+                    if let Err(e) = id_index.insert(index_key, doc_id.clone()) {
+                        log_warn!(
+                            "Index rebuild: duplicate _id key ignored for {}: {:?}",
+                            collection_name,
+                            e
+                        );
+                    }
                 }
             }
 
-            // Rebuild custom indexes
-            for index_meta in persisted_indexes {
-                if index_meta.name == id_index_name {
-                    continue;
-                }
-
+            // Rebuild custom B+ tree indexes ONLY if needed (not loaded from .idx file)
+            for index_meta in &btree_indexes_to_rebuild {
                 let Some(index) = index_manager.get_btree_index_mut(&index_meta.name) else {
                     continue;
                 };
@@ -465,10 +486,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Determine what needs rebuilding
         // (was_clean is already known from earlier)
         let has_fuzzy_indexes = !persisted_fuzzy_indexes.is_empty();
-        let has_fulltext_without_file = index_manager
-            .list_fulltext_indexes()
-            .iter()
-            .any(|idx| idx.doc_count() == 0);
+        let fulltext_indexes = index_manager.list_fulltext_indexes();
+        let has_fulltext_without_file = fulltext_indexes.iter().any(|idx| idx.doc_count() == 0);
 
         // FAST PATH: If clean shutdown AND no fuzzy/empty-fulltext indexes, skip rebuild
         // Fuzzy indexes don't have persistence yet, so they always need rebuild

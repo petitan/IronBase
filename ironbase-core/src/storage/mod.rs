@@ -669,6 +669,10 @@ impl StorageEngine {
     /// After this call, the next open() will see was_clean_shutdown() = true,
     /// allowing indexes to be loaded from .idx files without rebuild.
     pub fn mark_clean_shutdown(&mut self) -> Result<()> {
+        // Upgrade to version 4 (clean_shutdown support)
+        if self.header.version < 4 {
+            self.header.version = 4;
+        }
         self.header.clean_shutdown = true;
         self.flush_metadata()?;
         self.file.sync_all()?;

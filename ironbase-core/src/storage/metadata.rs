@@ -35,6 +35,12 @@ impl StorageEngine {
             return Err(IronBaseError::Corruption("Invalid magic number".into()));
         }
 
+        // MIGRATION (v3 → v4): For headers without clean_shutdown field
+        // Version 3 headers don't have clean_shutdown, so treat them as dirty
+        if header.version < 4 {
+            header.clean_shutdown = false;
+        }
+
         // Load collections based on version
         let collections = if header.version >= 2 && header.metadata_offset > 0 {
             // Version 2+: Dynamic metadata at end of file
