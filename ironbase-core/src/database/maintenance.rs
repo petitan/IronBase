@@ -23,10 +23,10 @@ impl DatabaseCore<StorageEngine> {
 
     /// Storage compaction - removes tombstones and old document versions (StorageEngine-specific)
     ///
-    /// Also flushes fulltext indexes to disk (converting V1 to V2 format for lazy loading).
+    /// Also flushes all indexes to disk (B+ tree and fulltext).
     pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
-        // Flush fulltext indexes first (converts V1 to V2 lazy loading format)
-        self.flush_fulltext_indexes()?;
+        // Flush all indexes first
+        self.flush_all_indexes()?;
 
         let mut storage = self.storage.write();
         storage.compact()
@@ -56,23 +56,37 @@ impl DatabaseCore<StorageEngine> {
         // Mark as closed FIRST to prevent new operations
         self.is_closed.store(true, Ordering::SeqCst);
 
-        // Flush all fulltext indexes to disk before closing
-        self.flush_fulltext_indexes()?;
+        // Flush all indexes to disk before closing
+        // This enables fast restart (clean shutdown optimization)
+        self.flush_all_indexes()?;
 
         // Flush all pending changes to disk
         self.flush()?;
+
+        // Mark as clean shutdown BEFORE releasing lock
+        // This enables fast startup next time (indexes can be trusted)
+        {
+            let mut storage = self.storage.write();
+            storage.mark_clean_shutdown()?;
+        }
 
         // Release the exclusive file lock so other processes can open the database
         let storage = self.storage.read();
         storage.release_lock()
     }
 
-    /// Flush all fulltext indexes to disk
-    fn flush_fulltext_indexes(&self) -> Result<()> {
+    /// Flush all indexes (B+ tree and fulltext) to disk
+    fn flush_all_indexes(&self) -> Result<()> {
+        let db_path = {
+            let storage = self.storage.read();
+            storage.get_file_path().to_string()
+        };
+
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
             manager.flush_fulltext_indexes()?;
+            manager.flush_btree_indexes(&db_path)?;
         }
         Ok(())
     }
@@ -85,23 +99,41 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
             return;
         }
 
-        // 1. Flush fulltext indexes to disk
+        // 1. Get db_path for index persistence
+        let db_path = {
+            if let Some(storage) = self.storage.try_read() {
+                storage.get_file_path().to_string()
+            } else {
+                String::new()
+            }
+        };
+
+        // 2. Flush all indexes to disk (B+ tree + fulltext)
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
             if let Err(e) = manager.flush_fulltext_indexes() {
                 eprintln!("Warning: Failed to flush fulltext indexes on drop: {}", e);
             }
+            if !db_path.is_empty() {
+                if let Err(e) = manager.flush_btree_indexes(&db_path) {
+                    eprintln!("Warning: Failed to flush btree indexes on drop: {}", e);
+                }
+            }
         }
         drop(index_managers); // Release lock before storage flush
 
-        // 2. Flush storage (metadata + sync)
+        // 3. Flush storage (metadata + sync)
         // Note: Batch mode pending operations are NOT flushed here because
         // flush_batch() requires StorageEngine-specific methods.
         // For full safety in Batch mode, always call close() explicitly.
         if let Some(mut storage) = self.storage.try_write() {
             if let Err(e) = storage.flush() {
                 eprintln!("Warning: Failed to flush storage on drop: {}", e);
+            }
+            // 4. Mark as clean shutdown for fast restart
+            if let Err(e) = storage.mark_clean_shutdown() {
+                eprintln!("Warning: Failed to mark clean shutdown on drop: {}", e);
             }
         } else {
             eprintln!("Warning: Could not acquire storage lock on drop");

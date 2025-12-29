@@ -596,6 +596,18 @@ impl IronBaseAdapter {
         }))
     }
 
+    /// Graceful shutdown - flush indexes and mark clean shutdown
+    ///
+    /// This enables fast restart by allowing the next startup to trust
+    /// persisted .idx files without rebuilding indexes from documents.
+    ///
+    /// Call this before dropping the adapter for graceful shutdown.
+    pub fn close(&self) -> Result<()> {
+        let db = self.db.write();
+        db.close().map_err(|e| crate::error::McpError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     // ============================================================
     // Document CRUD
     // ============================================================

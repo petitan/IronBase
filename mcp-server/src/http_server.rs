@@ -704,10 +704,12 @@ async fn run_http_server_internal(
         }
     }
 
-    // Graceful shutdown: checkpoint database
+    // Graceful shutdown: close database (flush indexes + mark clean shutdown)
     info!("Shutting down gracefully...");
-    if let Err(e) = adapter.checkpoint() {
-        tracing::error!("Error checkpointing database: {}", e);
+    if let Err(e) = adapter.close() {
+        tracing::error!("Error closing database: {}", e);
+    } else {
+        info!("Database closed cleanly - fast restart enabled");
     }
     info!("Server stopped");
 }

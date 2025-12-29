@@ -326,10 +326,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         use crate::log_debug;
 
         let mut index_manager = IndexManager::new();
-
-        // Create automatic _id index (unique)
         let id_index_name = format!("{}_id", name);
-        index_manager.create_btree_index(id_index_name.clone(), "_id".to_string(), true, false)?;
 
         // Ensure collection exists before loading metadata
         {
@@ -361,8 +358,49 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Get db_path for .idx file loading
         let db_path = storage_guard.get_file_path().to_string();
+        let was_clean = storage_guard.was_clean_shutdown();
 
         drop(storage_guard); // Release write lock before rebuilding
+
+        // Try to load _id index from .idx file if clean shutdown
+        let id_index_loaded = if was_clean && !catalog.is_empty() {
+            // Create a fake metadata for _id index loading
+            let id_meta = crate::index::IndexMetadata {
+                name: id_index_name.clone(),
+                field: "_id".to_string(),
+                fields: vec!["_id".to_string()],
+                unique: true,
+                sparse: false,
+                num_keys: 0, // Will be synced on load
+                tree_height: 1,
+                root_offset: 0,
+            };
+            if let Some(loaded_tree) =
+                crate::collection_core::try_load_index_from_file(&db_path, &id_meta)
+            {
+                log_debug!(
+                    "Loaded _id index '{}' from .idx file ({} keys)",
+                    id_index_name,
+                    loaded_tree.size()
+                );
+                index_manager.add_loaded_index(loaded_tree);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Create empty _id index if not loaded from file
+        if !id_index_loaded {
+            index_manager.create_btree_index(
+                id_index_name.clone(),
+                "_id".to_string(),
+                true,
+                false,
+            )?;
+        }
 
         // Load persisted custom indexes (delegated to helper)
         Self::load_persisted_indexes(
@@ -424,25 +462,54 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Rebuild all indexes from document catalog (delegated to helper)
-        log_debug!(
-            "Starting index rebuild from {} catalog entries",
-            catalog.len()
-        );
-        let mut storage_guard = self.storage.write();
-        let rebuilt_count = Self::rebuild_indexes_from_catalog(
-            &mut index_manager,
-            &mut *storage_guard,
-            name,
-            &catalog,
-            &persisted_indexes,
-            &id_index_name,
-        )?;
+        // Determine what needs rebuilding
+        // (was_clean is already known from earlier)
+        let has_fuzzy_indexes = !persisted_fuzzy_indexes.is_empty();
+        let has_fulltext_without_file = index_manager
+            .list_fulltext_indexes()
+            .iter()
+            .any(|idx| idx.doc_count() == 0);
 
-        log_debug!(
-            "Index rebuild completed - {} index entries rebuilt",
-            rebuilt_count
-        );
+        // FAST PATH: If clean shutdown AND no fuzzy/empty-fulltext indexes, skip rebuild
+        // Fuzzy indexes don't have persistence yet, so they always need rebuild
+        if was_clean && !catalog.is_empty() && !has_fuzzy_indexes && !has_fulltext_without_file {
+            log_debug!(
+                "Clean shutdown detected - trusting {} indexes from .idx files (skipping rebuild of {} docs)",
+                persisted_indexes.len(),
+                catalog.len()
+            );
+        } else {
+            // SLOW PATH: Rebuild indexes from document catalog
+            let reason = if !was_clean {
+                "dirty shutdown/crash"
+            } else if has_fuzzy_indexes {
+                "fuzzy indexes need rebuild (no persistence)"
+            } else if has_fulltext_without_file {
+                "fulltext indexes missing .ftidx file"
+            } else {
+                "empty catalog"
+            };
+            log_debug!(
+                "Rebuilding indexes due to {} - {} catalog entries",
+                reason,
+                catalog.len()
+            );
+
+            let mut storage_guard = self.storage.write();
+            let rebuilt_count = Self::rebuild_indexes_from_catalog(
+                &mut index_manager,
+                &mut *storage_guard,
+                name,
+                &catalog,
+                &persisted_indexes,
+                &id_index_name,
+            )?;
+
+            log_debug!(
+                "Index rebuild completed - {} index entries rebuilt",
+                rebuilt_count
+            );
+        }
 
         Ok(index_manager)
     }

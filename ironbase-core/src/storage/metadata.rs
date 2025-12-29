@@ -398,7 +398,7 @@ mod tests {
     fn create_test_header() -> Header {
         Header {
             magic: *b"MONGOLTE",
-            version: 3,
+            version: 4,
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
@@ -406,6 +406,7 @@ mod tests {
             metadata_offset: 0,
             metadata_size: 0,
             data_end_offset: HEADER_SIZE,
+            clean_shutdown: false,
         }
     }
 

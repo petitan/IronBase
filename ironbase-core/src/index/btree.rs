@@ -840,6 +840,30 @@ impl BPlusTree {
         self.metadata.num_keys
     }
 
+    /// Count actual keys in the tree by traversing all leaf nodes
+    /// Used after loading from file to fix potentially stale metadata
+    fn count_actual_keys(&self) -> u64 {
+        Self::count_keys_in_node(&self.root)
+    }
+
+    /// Recursively count keys in a node
+    fn count_keys_in_node(node: &BTreeNode) -> u64 {
+        match node {
+            BTreeNode::Leaf(leaf) => leaf.keys.len() as u64,
+            BTreeNode::Internal(internal) => internal
+                .children
+                .iter()
+                .map(|c| Self::count_keys_in_node(c))
+                .sum(),
+        }
+    }
+
+    /// Sync metadata.num_keys with actual tree content
+    /// Call this after loading from file to ensure consistency
+    pub fn sync_num_keys(&mut self) {
+        self.metadata.num_keys = self.count_actual_keys();
+    }
+
     // ===== FILE-BASED PERSISTENCE =====
 
     /// Save a single node to file and return its offset
@@ -924,11 +948,26 @@ impl BPlusTree {
     }
 
     /// Save entire tree to file (recursive)
+    ///
+    /// File format:
+    /// - First 8 bytes: root_offset (u64 little-endian)
+    /// - Remaining bytes: serialized nodes
     pub fn save_to_file(&mut self, file: &mut File) -> Result<u64> {
+        use std::io::{Seek, SeekFrom, Write};
+
+        // Reserve first 8 bytes for root offset (will be written at the end)
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&[0u8; 8])?;
+
         // Clone root to avoid borrowing issues
         let root_clone = self.root.clone();
         let root_offset = self.save_node_recursive(file, &root_clone)?;
         self.metadata.root_offset = root_offset;
+
+        // Write root offset at the beginning of the file
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&root_offset.to_le_bytes())?;
+
         Ok(root_offset)
     }
 
@@ -968,16 +1007,31 @@ impl BPlusTree {
         }
     }
 
-    /// Load tree from file given root offset
+    /// Load tree from file
+    ///
+    /// File format:
+    /// - First 8 bytes: root_offset (u64 little-endian)
+    /// - Remaining bytes: serialized nodes
+    ///
     /// Recursively loads all children into memory for full tree traversal support
-    pub fn load_from_file(file: &mut File, metadata: IndexMetadata) -> Result<Self> {
-        // Note: offset 0 is valid (start of file), so we don't check for it
-        // An empty file would fail on load_node instead
+    pub fn load_from_file(file: &mut File, mut metadata: IndexMetadata) -> Result<Self> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        // Read root offset from the file header (first 8 bytes)
+        file.seek(SeekFrom::Start(0))?;
+        let mut offset_bytes = [0u8; 8];
+        file.read_exact(&mut offset_bytes)?;
+        let root_offset = u64::from_le_bytes(offset_bytes);
+        metadata.root_offset = root_offset;
 
         // Load root node recursively (includes all children)
-        let root = Box::new(Self::load_node_recursive(file, metadata.root_offset)?);
+        let root = Box::new(Self::load_node_recursive(file, root_offset)?);
 
-        Ok(BPlusTree { root, metadata })
+        let mut tree = BPlusTree { root, metadata };
+        // Sync num_keys with actual tree content
+        // (metadata from CollectionData may be stale if not synced on every insert/delete)
+        tree.sync_num_keys();
+        Ok(tree)
     }
 
     /// Load a node and all its children recursively

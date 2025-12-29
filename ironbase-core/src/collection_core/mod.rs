@@ -29,7 +29,7 @@ mod update_operators;
 pub(crate) use self::constraints::BatchConstraintValidator;
 pub(crate) use self::index_persistence::try_load_index_from_file;
 pub(crate) use self::index_persistence::{
-    build_fulltext_index_file_path, try_load_fulltext_index_from_file,
+    build_fulltext_index_file_path, persist_index_to_disk, try_load_fulltext_index_from_file,
 };
 use self::schema::CompiledSchema;
 

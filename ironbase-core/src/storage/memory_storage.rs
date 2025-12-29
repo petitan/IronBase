@@ -276,6 +276,16 @@ impl Storage for MemoryStorage {
     fn get_file_path(&self) -> &str {
         ""
     }
+
+    fn was_clean_shutdown(&self) -> bool {
+        // In-memory storage always needs rebuild (no persistence)
+        false
+    }
+
+    fn mark_clean_shutdown(&mut self) -> Result<()> {
+        // No-op for in-memory storage
+        Ok(())
+    }
 }
 
 // ============================================================================

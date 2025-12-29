@@ -138,6 +138,18 @@ pub trait Storage: Send + Sync {
     /// Get the database file path (for index file naming)
     /// Returns empty string for in-memory storage
     fn get_file_path(&self) -> &str;
+
+    /// Check if the database was cleanly shut down last time
+    ///
+    /// Returns true if indexes can be trusted from .idx files.
+    /// Returns false (or always false for in-memory) if indexes must be rebuilt.
+    fn was_clean_shutdown(&self) -> bool;
+
+    /// Mark the database as cleanly shutting down
+    ///
+    /// Called during graceful shutdown to enable fast restart.
+    /// No-op for in-memory storage.
+    fn mark_clean_shutdown(&mut self) -> Result<()>;
 }
 
 // ============================================================================

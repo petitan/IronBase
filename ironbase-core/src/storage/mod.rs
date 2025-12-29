@@ -62,13 +62,18 @@ pub struct Header {
     // This prevents SeekFrom::End(0) corruption when metadata is at file end
     #[serde(default)]
     pub data_end_offset: u64, // End of document data section (where next document should be written)
+
+    // Clean shutdown flag (version 4+)
+    // If true, indexes can be trusted from .idx files without rebuild
+    #[serde(default)]
+    pub clean_shutdown: bool,
 }
 
 impl Default for Header {
     fn default() -> Self {
         Header {
             magic: *b"MONGOLTE",
-            version: 3, // Version 3: data_end tracking
+            version: 4, // Version 4: clean shutdown tracking
             page_size: 4096,
             collection_count: 0,
             free_list_head: 0,
@@ -76,6 +81,7 @@ impl Default for Header {
             metadata_offset: 0, // Will be set on first write
             metadata_size: 0,
             data_end_offset: HEADER_SIZE, // Documents start right after header
+            clean_shutdown: false,        // Will be set to true on graceful shutdown
         }
     }
 }
@@ -165,6 +171,9 @@ pub struct StorageEngine {
     lock_file: File,
     /// Counter for WAL operations since last clear (optimization to reduce fsync)
     wal_ops_since_clear: u32,
+    /// Indicates whether the database was cleanly shut down last time
+    /// If true, indexes can be trusted from .idx files without rebuild
+    was_clean_shutdown: bool,
 }
 
 impl StorageEngine {
@@ -232,6 +241,16 @@ impl StorageEngine {
             (header, collections, false)
         };
 
+        // Save clean_shutdown status BEFORE clearing it
+        // This determines whether we can trust .idx files
+        let was_clean = header.clean_shutdown;
+
+        // CRITICAL: Clear clean_shutdown flag immediately
+        // If we crash before graceful shutdown, the flag stays false
+        // This ensures indexes are rebuilt after crash
+        let mut header = header;
+        header.clean_shutdown = false;
+
         let mut storage = StorageEngine {
             file,
             header,
@@ -241,10 +260,13 @@ impl StorageEngine {
             metadata_dirty: false,
             lock_file,
             wal_ops_since_clear: 0,
+            was_clean_shutdown: was_clean,
         };
 
-        // If metadata was corrupted, attempt recovery
+        // If metadata was corrupted, attempt recovery (crash scenario)
         if needs_rebuild {
+            // Mark as dirty start - don't trust indexes
+            storage.was_clean_shutdown = false;
             // First try WAL recovery (has most recent metadata snapshot)
             if storage.recover_metadata_from_wal()? {
                 eprintln!("[INFO] Successfully recovered metadata from WAL");
@@ -625,6 +647,32 @@ impl StorageEngine {
                 })
             }).collect::<Vec<_>>(),
         })
+    }
+
+    // =========================================================================
+    // CLEAN SHUTDOWN MANAGEMENT
+    // =========================================================================
+
+    /// Check if the database was cleanly shut down last time
+    ///
+    /// If true, indexes can be trusted from .idx files without rebuild.
+    /// If false (crash or first run), indexes must be rebuilt from documents.
+    pub fn was_clean_shutdown(&self) -> bool {
+        self.was_clean_shutdown
+    }
+
+    /// Mark the database as cleanly shutting down
+    ///
+    /// MUST be called during graceful shutdown, before dropping the storage.
+    /// This sets the clean_shutdown flag in the header and flushes to disk.
+    ///
+    /// After this call, the next open() will see was_clean_shutdown() = true,
+    /// allowing indexes to be loaded from .idx files without rebuild.
+    pub fn mark_clean_shutdown(&mut self) -> Result<()> {
+        self.header.clean_shutdown = true;
+        self.flush_metadata()?;
+        self.file.sync_all()?;
+        Ok(())
     }
 
     /// Commit a transaction (9-step atomic operation) - internal implementation
@@ -1403,6 +1451,14 @@ impl Storage for StorageEngine {
     fn get_file_path(&self) -> &str {
         &self.file_path
     }
+
+    fn was_clean_shutdown(&self) -> bool {
+        self.was_clean_shutdown
+    }
+
+    fn mark_clean_shutdown(&mut self) -> Result<()> {
+        StorageEngine::mark_clean_shutdown(self)
+    }
 }
 
 // ============================================================================
@@ -1458,7 +1514,7 @@ mod tests {
         let (_temp, storage) = setup_test_db();
 
         assert_eq!(storage.header.magic, *b"MONGOLTE");
-        assert_eq!(storage.header.version, 3); // Version 3: data_end tracking
+        assert_eq!(storage.header.version, 4); // Version 4: clean shutdown tracking
         assert_eq!(storage.header.page_size, 4096);
         assert_eq!(storage.header.collection_count, 0);
         assert_eq!(storage.collections.len(), 0);
@@ -1802,11 +1858,53 @@ mod tests {
         let header = Header::default();
 
         assert_eq!(header.magic, *b"MONGOLTE");
-        assert_eq!(header.version, 3); // Version 3: data_end tracking
+        assert_eq!(header.version, 4); // Version 4: clean shutdown tracking
         assert_eq!(header.page_size, 4096);
         assert_eq!(header.collection_count, 0);
         assert_eq!(header.free_list_head, 0);
         assert_eq!(header.data_end_offset, HEADER_SIZE); // Documents start after header
+        assert!(!header.clean_shutdown); // Default: not clean shutdown
+    }
+
+    #[test]
+    fn test_clean_shutdown_flag() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+
+        // Create new database - should NOT be clean shutdown
+        {
+            let storage = StorageEngine::open(&db_path).unwrap();
+            assert!(!storage.was_clean_shutdown()); // New database
+                                                    // Drop without mark_clean_shutdown - simulates crash
+        }
+
+        // Reopen after dirty shutdown (no mark_clean_shutdown called)
+        {
+            let storage = StorageEngine::open(&db_path).unwrap();
+            assert!(!storage.was_clean_shutdown()); // Dirty shutdown
+        }
+
+        // Now do explicit mark_clean_shutdown
+        {
+            let mut storage = StorageEngine::open(&db_path).unwrap();
+            assert!(!storage.was_clean_shutdown()); // Still dirty
+            storage.mark_clean_shutdown().unwrap();
+            // Flag is now TRUE in file
+        }
+
+        // Verify clean shutdown flag persists after proper shutdown
+        {
+            let storage = StorageEngine::open(&db_path).unwrap();
+            assert!(storage.was_clean_shutdown()); // Now clean!
+                                                   // Note: header.clean_shutdown is now false in memory
+                                                   // If we don't call mark_clean_shutdown, next open sees dirty
+        }
+
+        // Reopen again - should be DIRTY because previous scope didn't call mark_clean_shutdown
+        {
+            let storage = StorageEngine::open(&db_path).unwrap();
+            assert!(!storage.was_clean_shutdown()); // Dirty - no mark_clean in previous scope
+        }
     }
 
     // ========== ACD Transaction Tests ==========

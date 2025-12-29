@@ -457,6 +457,19 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Flush all B+ tree indexes to .idx files
+    ///
+    /// This should be called before database close to enable fast restart
+    /// (clean shutdown optimization - skip index rebuild on next open).
+    pub fn flush_btree_indexes(&mut self, db_path: &str) -> Result<()> {
+        use crate::collection_core::persist_index_to_disk;
+
+        for (name, tree) in self.btree_indexes.iter_mut() {
+            persist_index_to_disk(db_path, name, |file| tree.save_to_file(file))?;
+        }
+        Ok(())
+    }
+
     // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========
 
     /// Add a document to all indexes (B+ tree and fuzzy)
