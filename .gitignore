@@ -54,6 +54,10 @@ mcp-server/cert.pem
 mcp-server/key.pem
 mcp-server/config.toml
 
+# Log files
+**/logs/
+*.log
+
 # .NET build outputs
 **/bin/
 **/obj/
