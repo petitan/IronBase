@@ -1483,7 +1483,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         use crate::aggregation::Pipeline;
 
         // Parse pipeline
-        let pipeline = Pipeline::from_json(pipeline_json)?;
+        let mut pipeline = Pipeline::from_json(pipeline_json)?;
+
+        // INDEX OPTIMIZATION (2024-12):
+        // If the first stage is $match, extract it and use indexed find_streaming()
+        // instead of scanning all documents.
+        //
+        // Benefit: 10-1000x speedup for selective aggregations
+        // Example: $match on indexed field reduces 49K docs to 1K before $group
+        let match_query = pipeline
+            .extract_leading_match()
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        log_debug!(
+            "aggregate: using query {:?} for initial document selection",
+            match_query
+        );
 
         // STREAMING OPTIMIZATION (2024-12):
         // Use cursor-based document loading to avoid loading all docs into memory.
@@ -1493,13 +1508,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // - NEW (streaming): ~0MB for docs (processed one at a time) + ~640KB for groups
         //
         // The streaming pipeline:
-        // 1. Uses find_streaming() to get a cursor (only doc IDs loaded)
-        // 2. Applies $match filters inline (no intermediate collection)
-        // 3. Streams docs through $group (accumulator states only)
-        // 4. Materializes for remaining stages ($sort, $limit, etc.)
+        // 1. Uses find_streaming() with $match query (uses index if available!)
+        // 2. Streams docs through remaining stages ($group, etc.)
+        // 3. Materializes for final stages ($sort, $limit, etc.)
 
-        // Get streaming cursor for all documents
-        let mut cursor = self.find_streaming(&serde_json::json!({}))?;
+        // Get streaming cursor - uses index if match_query has indexed field
+        let mut cursor = self.find_streaming(&match_query)?;
 
         // Create iterator that yields Result<Value> from cursor
         let doc_iter = std::iter::from_fn(move || match cursor.next() {
@@ -1508,19 +1522,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             Err(e) => Some(Err(e)),
         });
 
-        // Execute pipeline with streaming
+        // Execute remaining pipeline stages with streaming
         pipeline.execute_streaming(doc_iter)
-
-        // FUTURE OPTIMIZATION: Use index if $match is first stage
-        //
-        // Index-based optimization:
-        // 1. Check if pipeline[0] is $match stage
-        // 2. Extract query from $match (e.g., {"age": {"$gt": 25}})
-        // 3. Use query optimizer to select best index
-        // 4. Use index.search() to get filtered doc IDs
-        // 5. Create cursor from filtered IDs only
-        //
-        // Benefit: 10-1000x speedup for selective aggregations
     }
 
     // ========== TRANSACTION OPERATIONS ==========

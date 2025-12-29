@@ -11,6 +11,24 @@ pub struct Pipeline {
     pub(crate) stages: Vec<Stage>,
 }
 
+impl Pipeline {
+    /// Extract the leading $match stage query for index optimization
+    ///
+    /// If the first stage is $match, returns its query as JSON and removes it from the pipeline.
+    /// This allows the caller to use an indexed find() instead of a full collection scan.
+    ///
+    /// Returns None if the first stage is not $match.
+    pub fn extract_leading_match(&mut self) -> Option<Value> {
+        if let Some(Stage::Match(_)) = self.stages.first() {
+            // Remove and take ownership of the first stage
+            if let Stage::Match(match_stage) = self.stages.remove(0) {
+                return Some(match_stage.query.into_json());
+            }
+        }
+        None
+    }
+}
+
 /// Pipeline stage
 #[derive(Debug, Clone)]
 pub enum Stage {
