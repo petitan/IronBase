@@ -4,6 +4,16 @@
 // Supports both stdio (for Claude Desktop) and HTTP modes.
 // Can be installed as a system service on Windows (Service), Linux (systemd), and macOS (launchd).
 
+// Use jemalloc on Unix for better memory management
+// - Background thread for automatic memory return to OS
+// - Better fragmentation handling for large allocations
+#[cfg(unix)]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(unix)]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};

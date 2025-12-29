@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.81"
+version = "1.0.82"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
@@ -61,6 +61,7 @@ windows-service = "0.7"
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 libc = "0.2"
+tikv-jemallocator = { version = "0.6", features = ["background_threads_runtime_support"] }
 
 [dev-dependencies]
 tempfile = "3.8"
