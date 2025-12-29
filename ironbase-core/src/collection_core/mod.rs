@@ -2382,7 +2382,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     } else {
                         vec![]
                     }
-                } // NOTE: CollectionScan match arm removed - QueryPlan no longer has this variant
+                }
+                QueryPlan::SparseIndexScan { ref index_name, .. } => {
+                    // Sparse index scan: return ALL doc_ids in the index
+                    // Since sparse indexes only contain documents where the field exists,
+                    // this effectively returns all documents matching $exists: true
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        // Full range scan from minimum to maximum key
+                        let start = IndexKey::Null;
+                        let end = IndexKey::MaxKey;
+                        index.range_scan(&start, &end, true, true)
+                    } else {
+                        vec![]
+                    }
+                }
             }
         };
 

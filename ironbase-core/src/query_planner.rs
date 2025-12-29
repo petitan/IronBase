@@ -8,6 +8,7 @@ use serde_json::Value;
 /// NOTE: CollectionScan variant was removed - analyze_query() returns None for full scan,
 /// and explain_query() handles None case by generating "CollectionScan" JSON directly.
 #[derive(Debug, Clone)]
+#[allow(clippy::enum_variant_names)]
 pub enum QueryPlan {
     /// Index scan for equality match
     IndexScan {
@@ -27,6 +28,11 @@ pub enum QueryPlan {
         inclusive_start: bool,
         inclusive_end: bool,
     },
+
+    /// Sparse index scan for $exists: true queries
+    /// Returns all doc_ids in the sparse index (which only contains docs where field exists)
+    #[allow(dead_code)]
+    SparseIndexScan { index_name: String, field: String },
 }
 
 /// Query planner - analyzes queries and selects optimal execution plan
@@ -188,13 +194,20 @@ impl QueryPlanner {
     ///
     /// This version takes IndexPrefixInfo to correctly handle compound indexes
     /// by using them for prefix field queries with range scans.
+    ///
+    /// Also handles sparse index optimization for $exists: true queries.
     pub fn analyze_query_with_fields(
         query_json: &Value,
         index_fields: &[IndexPrefixInfo],
     ) -> Option<(String, QueryPlan)> {
         // Check for simple equality query: { "field": value }
         if let Value::Object(ref map) = query_json {
-            // First try range query analysis
+            // First check for $exists: true with sparse index optimization
+            if let Some((field, plan)) = Self::analyze_exists_query(query_json, index_fields) {
+                return Some((field, plan));
+            }
+
+            // Then try range query analysis
             if let Some((field, plan)) = Self::analyze_range_query_v2(query_json, index_fields) {
                 return Some((field, plan));
             }
@@ -226,6 +239,44 @@ impl QueryPlanner {
                         is_compound,
                     },
                 ));
+            }
+        }
+
+        None
+    }
+
+    /// Analyze query for $exists: true with sparse index optimization
+    ///
+    /// For sparse indexes, all doc_ids in the index are documents where the field exists.
+    /// This enables efficient $exists: true queries without full collection scan.
+    fn analyze_exists_query(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+    ) -> Option<(String, QueryPlan)> {
+        if let Value::Object(ref map) = query_json {
+            for (field, conditions) in map {
+                if field.starts_with('$') {
+                    continue; // Skip logical operators at root level
+                }
+
+                if let Value::Object(ref cond_map) = conditions {
+                    // Check for $exists: true
+                    if let Some(Value::Bool(true)) = cond_map.get("$exists") {
+                        // Look for a sparse index on this field
+                        if let Some(info) = index_fields
+                            .iter()
+                            .find(|info| info.prefix_field == *field && info.sparse)
+                        {
+                            return Some((
+                                field.clone(),
+                                QueryPlan::SparseIndexScan {
+                                    index_name: info.index_name.clone(),
+                                    field: field.clone(),
+                                },
+                            ));
+                        }
+                    }
+                }
             }
         }
 
@@ -345,7 +396,19 @@ impl QueryPlanner {
                         },
                         "estimatedCost": "O(log n + k)",
                     })
-                } // NOTE: CollectionScan match arm removed - unreachable since analyze_query returns None for full scan
+                }
+                // SparseIndexScan is unreachable in deprecated analyze_query
+                // (it only uses the old method that doesn't support sparse)
+                QueryPlan::SparseIndexScan { ref index_name, .. } => {
+                    json!({
+                        "queryPlan": "SparseIndexScan",
+                        "indexUsed": index_name,
+                        "field": field,
+                        "stage": "FETCH_WITH_SPARSE_INDEX",
+                        "indexType": "sparse_exists",
+                        "estimatedCost": "O(k)",
+                    })
+                }
             }
         } else {
             // No index available
@@ -409,6 +472,17 @@ impl QueryPlanner {
                             "inclusiveEnd": inclusive_end,
                         },
                         "estimatedCost": "O(log n + k)",
+                    })
+                }
+                QueryPlan::SparseIndexScan { ref index_name, .. } => {
+                    json!({
+                        "queryPlan": "SparseIndexScan",
+                        "indexUsed": index_name,
+                        "field": field,
+                        "stage": "FETCH_WITH_SPARSE_INDEX",
+                        "indexType": "sparse_exists",
+                        "description": "Returns all doc_ids from sparse index (field exists)",
+                        "estimatedCost": "O(k)",
                     })
                 }
             }

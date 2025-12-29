@@ -174,4 +174,6 @@ pub struct IndexPrefixInfo {
     pub is_compound: bool,
     /// Total number of fields in the index
     pub num_fields: usize,
+    /// Whether this is a sparse index (only indexes documents where the field exists)
+    pub sparse: bool,
 }

@@ -205,8 +205,10 @@ impl IndexManager {
     /// Returns `IndexPrefixInfo` for each index, including:
     /// - Single-field indexes: `is_compound = false`, `num_fields = 1`
     /// - Compound indexes: `is_compound = true`, `num_fields > 1`
+    /// - Sparse indexes: `sparse = true` (only index documents where field exists)
     ///
     /// Compound indexes can be used for prefix queries via range scans.
+    /// Sparse indexes can be used for $exists: true queries.
     pub fn list_indexes_with_compound_info(&self) -> Vec<IndexPrefixInfo> {
         let mut result: Vec<IndexPrefixInfo> = Vec::new();
 
@@ -228,16 +230,18 @@ impl IndexManager {
                 prefix_field,
                 is_compound,
                 num_fields,
+                sparse: index.metadata.sparse,
             });
         }
 
-        // Legacy indexes are single-field only
+        // Legacy indexes are single-field only (never sparse)
         for (name, index) in &self.legacy_indexes {
             result.push(IndexPrefixInfo {
                 index_name: name.clone(),
                 prefix_field: index.definition.field.clone(),
                 is_compound: false,
                 num_fields: 1,
+                sparse: false,
             });
         }
 
