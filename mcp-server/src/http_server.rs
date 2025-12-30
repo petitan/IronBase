@@ -15,6 +15,50 @@ const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024 * 1024;
 /// If a query takes longer than 60s, it should be optimized with indexes/limits
 const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 60;
 
+/// A file writer that calls fsync() after every write.
+/// Use for crash debugging when you need guaranteed log persistence.
+/// WARNING: Significantly slower than buffered logging.
+#[derive(Clone)]
+pub struct SyncFileWriter {
+    file: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+}
+
+impl SyncFileWriter {
+    pub fn new(path: impl AsRef<std::path::Path>) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        Ok(Self {
+            file: std::sync::Arc::new(std::sync::Mutex::new(file)),
+        })
+    }
+}
+
+impl std::io::Write for SyncFileWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut file = self.file.lock().unwrap();
+        let n = file.write(buf)?;
+        file.sync_all()?; // fsync after every write
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut file = self.file.lock().unwrap();
+        file.flush()?;
+        file.sync_all()
+    }
+}
+
+// tracing_subscriber MakeWriter implementation
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SyncFileWriter {
+    type Writer = SyncFileWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
 /// Configuration for HTTP server
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -34,6 +78,8 @@ pub struct Config {
     pub tls_key_file: Option<String>,
     /// Timeout for long-running tool operations in seconds (default: 300)
     pub tool_timeout_secs: u64,
+    /// If true, use synchronous (fsync) logging for crash debugging
+    pub sync_logging: bool,
 }
 
 /// Parse human-readable size strings like "1GB", "500MB", "10KB"
@@ -197,6 +243,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_cert_file: toml_config.tls.cert_file,
             tls_key_file: toml_config.tls.key_file,
             tool_timeout_secs: toml_config.server.tool_timeout_secs,
+            sync_logging: toml_config.logging.sync,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -213,6 +260,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_cert_file: None,
             tls_key_file: None,
             tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
+            sync_logging: false,
         }
     };
 
@@ -240,6 +288,8 @@ struct TomlConfig {
     security: SecurityConfig,
     #[serde(default)]
     tls: TlsConfig,
+    #[serde(default)]
+    logging: LoggingConfig,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -290,6 +340,14 @@ struct TlsConfig {
     key_file: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, Default)]
+struct LoggingConfig {
+    /// If true, use synchronous (fsync) logging for crash debugging
+    /// WARNING: This significantly impacts performance but guarantees log writes before crash
+    #[serde(default)]
+    sync: bool,
+}
+
 /// Run HTTP server with default signal-based shutdown
 pub async fn run_http_server() {
     run_http_server_internal(None).await;
@@ -329,30 +387,64 @@ async fn run_http_server_internal(
         }
     }
 
-    // File appender with daily rotation
-    let file_appender = tracing_appender::rolling::daily("./logs", "mcp-server.log");
-    let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+    // Check for sync logging mode (for crash debugging)
+    // Set IRONBASE_SYNC_LOG=1 to enable fsync after every log write
+    let sync_logging = std::env::var("IRONBASE_SYNC_LOG")
+        .map(|v| v == "1" || v.to_lowercase() == "true")
+        .unwrap_or(false);
 
-    // Dual output: stderr (with colors) + file (without colors)
-    let _ = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(std::io::stderr)
-                .with_ansi(true),
-        )
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(non_blocking_file)
-                .with_ansi(false),
-        )
-        .try_init();
+    if sync_logging {
+        // Sync logging: fsync after every write (slow but crash-safe)
+        let today = chrono::Local::now().format("%Y-%m-%d");
+        let log_path = format!("./logs/mcp-server.{}.log", today);
 
-    // Keep the guard alive for the duration of the server
-    // (moved to static to prevent dropping)
-    static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
-        std::sync::OnceLock::new();
-    let _ = LOG_GUARD.set(_guard);
+        let sync_writer = match SyncFileWriter::new(&log_path) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Failed to create sync log file: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let _ = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(true),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(sync_writer)
+                    .with_ansi(false),
+            )
+            .try_init();
+
+        eprintln!("⚠️  SYNC LOGGING ENABLED - fsync after every log write (slow but crash-safe)");
+    } else {
+        // Normal async logging (fast but may lose last logs on crash)
+        let file_appender = tracing_appender::rolling::daily("./logs", "mcp-server.log");
+        let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+
+        let _ = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(std::io::stderr)
+                    .with_ansi(true),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(non_blocking_file)
+                    .with_ansi(false),
+            )
+            .try_init();
+
+        // Keep the guard alive for the duration of the server
+        static LOG_GUARD: std::sync::OnceLock<tracing_appender::non_blocking::WorkerGuard> =
+            std::sync::OnceLock::new();
+        let _ = LOG_GUARD.set(_guard);
+    }
 
     info!("Starting MCP IronBase Server v{} (HTTP mode)", VERSION);
 
