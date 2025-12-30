@@ -1136,3 +1136,87 @@ mod compound_prefix_tests {
         assert_eq!(compound_info.num_fields, 2);
     }
 }
+
+#[cfg(test)]
+mod non_unique_delete_tests {
+    use super::*;
+    use crate::document::DocumentId;
+
+    /// Test that delete works correctly for non-unique indexes with duplicate keys.
+    ///
+    /// BUG FIX TEST: Previously, delete used binary_search which only returns
+    /// ONE position for a given key. In non-unique indexes, multiple documents
+    /// can share the same key, so we must scan all matching entries to find
+    /// the correct doc_id to delete.
+    #[test]
+    fn test_non_unique_index_delete_with_duplicates() {
+        let mut tree = BPlusTree::new("email_idx".to_string(), "email".to_string(), false, false);
+
+        // Insert 5 documents with the SAME email (non-unique index allows this)
+        let email_key = IndexKey::String("alice@test.com".to_string());
+        tree.insert(email_key.clone(), DocumentId::Int(100))
+            .unwrap();
+        tree.insert(email_key.clone(), DocumentId::Int(200))
+            .unwrap();
+        tree.insert(email_key.clone(), DocumentId::Int(300))
+            .unwrap();
+        tree.insert(email_key.clone(), DocumentId::Int(400))
+            .unwrap();
+        tree.insert(email_key.clone(), DocumentId::Int(500))
+            .unwrap();
+
+        assert_eq!(tree.metadata.num_keys, 5);
+
+        // Delete doc 300 (middle document) - this was the bug case
+        tree.delete(&email_key, &DocumentId::Int(300)).unwrap();
+        assert_eq!(tree.metadata.num_keys, 4);
+
+        // Delete doc 100 (first document)
+        tree.delete(&email_key, &DocumentId::Int(100)).unwrap();
+        assert_eq!(tree.metadata.num_keys, 3);
+
+        // Delete doc 500 (last document)
+        tree.delete(&email_key, &DocumentId::Int(500)).unwrap();
+        assert_eq!(tree.metadata.num_keys, 2);
+
+        // Verify remaining documents are still in the index via range_scan
+        let remaining = tree.range_scan(&email_key, &email_key, true, true);
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.contains(&DocumentId::Int(200)));
+        assert!(remaining.contains(&DocumentId::Int(400)));
+    }
+
+    /// Test that range_scan returns all documents with the same key (no duplicates issue)
+    #[test]
+    fn test_non_unique_range_scan_no_duplicates() {
+        let mut tree = BPlusTree::new("status_idx".to_string(), "status".to_string(), false, false);
+
+        let active_key = IndexKey::String("active".to_string());
+        let inactive_key = IndexKey::String("inactive".to_string());
+
+        // Insert 3 active documents
+        tree.insert(active_key.clone(), DocumentId::Int(1)).unwrap();
+        tree.insert(active_key.clone(), DocumentId::Int(2)).unwrap();
+        tree.insert(active_key.clone(), DocumentId::Int(3)).unwrap();
+
+        // Insert 2 inactive documents
+        tree.insert(inactive_key.clone(), DocumentId::Int(10))
+            .unwrap();
+        tree.insert(inactive_key.clone(), DocumentId::Int(20))
+            .unwrap();
+
+        // Range scan for "active" should return exactly 3 unique doc_ids
+        let active_results = tree.range_scan(&active_key, &active_key, true, true);
+        assert_eq!(active_results.len(), 3);
+
+        // Verify NO duplicates in results
+        let mut seen = std::collections::HashSet::new();
+        for doc_id in &active_results {
+            assert!(
+                seen.insert(doc_id.clone()),
+                "Duplicate doc_id found: {:?}",
+                doc_id
+            );
+        }
+    }
+}

@@ -902,9 +902,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Count documents matching query
     ///
     /// Uses QueryPlanner for index optimization when available.
+    /// Performance optimized: Uses streaming count without Vec allocation for scans.
     pub fn count_documents(&self, query_json: &Value) -> Result<u64> {
         self.check_not_closed()?;
-        // Fast path: empty query = count all
+
+        // Fast path: empty query = count all (O(1))
         if Self::query_matches_all(query_json) {
             let storage = self.storage.read();
             return Ok(storage.get_live_count(&self.name).unwrap_or(0));
@@ -919,12 +921,173 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             });
         }
 
-        // Use QueryPlanner - enables index usage for indexed fields
-        // This was previously a full collection scan (issue #19)
-        let (doc_ids, _) = self
-            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
+        // Index-aware count with Vec-less fallback
+        self.count_with_plan(query_json)
+    }
 
-        Ok(doc_ids.len() as u64)
+    /// Count using QueryPlanner for index optimization
+    ///
+    /// Tries to use available indexes for faster counting.
+    /// For simple equality queries, trusts the index count directly.
+    /// Falls back to streaming scan if no suitable index exists.
+    fn count_with_plan(&self, query_json: &Value) -> Result<u64> {
+        // Try index-based counting
+        let indexes = self.indexes.read();
+        let index_fields = indexes.list_indexes_with_compound_info();
+
+        if let Some((_, plan)) = QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
+        {
+            // For simple equality IndexScan, trust the index count directly
+            // This avoids reading each document just to verify
+            match &plan {
+                QueryPlan::IndexScan {
+                    ref index_name,
+                    ref key,
+                    is_compound,
+                    ..
+                } => {
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let doc_ids = if *is_compound {
+                            let (start, end) = index.build_prefix_range(key.clone());
+                            index.range_scan(&start, &end, true, true)
+                        } else {
+                            index.range_scan(key, key, true, true)
+                        };
+                        drop(indexes);
+                        // Count live documents (exclude tombstones)
+                        return self.count_live_docs_from_ids(&doc_ids);
+                    }
+                }
+                QueryPlan::IndexRangeScan {
+                    ref index_name,
+                    ref start,
+                    ref end,
+                    inclusive_start,
+                    inclusive_end,
+                    ..
+                } => {
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let default_start = IndexKey::Null;
+                        let default_end = IndexKey::String("\u{10ffff}".repeat(100));
+                        let start_key = start.as_ref().unwrap_or(&default_start);
+                        let end_key = end.as_ref().unwrap_or(&default_end);
+                        let doc_ids =
+                            index.range_scan(start_key, end_key, *inclusive_start, *inclusive_end);
+                        drop(indexes);
+                        return self.count_live_docs_from_ids(&doc_ids);
+                    }
+                }
+                _ => {}
+            }
+
+            drop(indexes);
+        } else {
+            drop(indexes);
+        }
+
+        // Fallback: streaming count without Vec allocation
+        self.count_with_scan(query_json)
+    }
+
+    /// Count live documents from a list of doc IDs (skip tombstones)
+    ///
+    /// Optimized: checks tombstone by pattern matching raw bytes instead of parsing JSON.
+    fn count_live_docs_from_ids(&self, doc_ids: &[DocumentId]) -> Result<u64> {
+        let storage = self.storage.read();
+        let meta = storage
+            .get_collection_meta(&self.name)
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+
+        // Fast path: if no tombstones exist, return index count directly
+        let live_count = storage.get_live_count(&self.name).unwrap_or(0) as usize;
+        let catalog_len = meta.document_catalog.len();
+        if live_count == catalog_len {
+            // No tombstones - trust index count
+            // But still filter to docs that exist in catalog (handles stale index entries)
+            let count = doc_ids
+                .iter()
+                .filter(|id| meta.document_catalog.contains_key(*id))
+                .count();
+            return Ok(count as u64);
+        }
+
+        // Tombstones exist - check each document
+        // Optimized: check for tombstone pattern without full JSON parse
+        const TOMBSTONE_PATTERN: &[u8] = b"\"_tombstone\":true";
+
+        let mut count = 0u64;
+        for doc_id in doc_ids {
+            if let Some(&offset) = meta.document_catalog.get(doc_id) {
+                if let Ok(doc_bytes) = storage.read_data_at(offset) {
+                    // Fast check: tombstones are small and contain the pattern
+                    // Skip if it looks like a tombstone
+                    if doc_bytes.len() < 100
+                        && doc_bytes
+                            .windows(TOMBSTONE_PATTERN.len())
+                            .any(|w| w == TOMBSTONE_PATTERN)
+                    {
+                        continue; // Skip tombstone
+                    }
+                    count += 1;
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
+    /// Count by scanning without building Vec (memory efficient)
+    ///
+    /// This is the fallback when no index is available.
+    /// Unlike collect_doc_ids, this doesn't allocate a Vec of all matching IDs.
+    /// Uses read lock only for better concurrency.
+    fn count_with_scan(&self, query_json: &Value) -> Result<u64> {
+        let parsed_query = Query::from_json(query_json)?;
+        let storage = self.storage.read(); // Read lock - better concurrency
+
+        // Get catalog entries
+        let catalog_entries: Vec<(DocumentId, u64)> = {
+            let meta = storage
+                .get_collection_meta(&self.name)
+                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+            meta.document_catalog
+                .iter()
+                .map(|(id, &offset)| (id.clone(), offset))
+                .collect()
+        };
+
+        let mut count = 0u64;
+
+        for (_doc_id, offset) in catalog_entries {
+            // Read document from storage (immutable read)
+            let doc_bytes = match storage.read_data_at(offset) {
+                Ok(bytes) => bytes,
+                Err(_) => continue, // Skip corrupted entries
+            };
+
+            // Parse document
+            let doc: Value = match serde_json::from_slice(&doc_bytes) {
+                Ok(d) => d,
+                Err(_) => continue, // Skip corrupted JSON
+            };
+
+            // Skip tombstones
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            // Apply query filter
+            let document = Document::from_value_owned(doc)?;
+            if parsed_query.matches(&document)? {
+                count += 1;
+            }
+        }
+
+        Ok(count)
     }
 
     // =========================================================================

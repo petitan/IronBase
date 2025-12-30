@@ -533,12 +533,26 @@ impl BPlusTree {
     }
 
     /// Recursively delete from a node, returns true if deletion occurred
+    ///
+    /// BUG FIX: For non-unique indexes, multiple documents can have the same key.
+    /// binary_search only returns ONE position, so we must scan ALL entries with
+    /// the same key to find the correct doc_id.
     fn delete_from_node(node: &mut Box<BTreeNode>, key: &IndexKey, doc_id: &DocumentId) -> bool {
         match **node {
             BTreeNode::Leaf(ref mut leaf) => {
-                // Find the key position in leaf
-                if let Ok(pos) = leaf.keys.binary_search(key) {
-                    // Verify this is the correct document ID
+                // For non-unique indexes, multiple entries can have the same key.
+                // binary_search returns ANY matching position, not necessarily the one
+                // with our doc_id. We must scan all entries with this key.
+
+                // Find the FIRST position where key could be (lower bound)
+                let start_pos = leaf.keys.partition_point(|k| k < key);
+
+                // Scan all entries with this key to find our doc_id
+                for pos in start_pos..leaf.keys.len() {
+                    if &leaf.keys[pos] != key {
+                        // Past the matching keys, not found
+                        break;
+                    }
                     if &leaf.document_ids[pos] == doc_id {
                         leaf.keys.remove(pos);
                         leaf.document_ids.remove(pos);
