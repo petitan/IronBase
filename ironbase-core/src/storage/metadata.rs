@@ -1,5 +1,49 @@
-// storage/metadata.rs
-// Metadata management for storage engine
+//! Metadata Management and Version Migration
+//!
+//! This module handles reading, writing, and migrating metadata in the .mlite file.
+//! Metadata includes collection catalogs, indexes, schemas, and system state.
+//!
+//! # Metadata Location
+//!
+//! ```text
+//! Version 1 (legacy):  [HEADER][METADATA][DOCUMENTS...]
+//! Version 2+ (dynamic): [HEADER][DOCUMENTS...][METADATA @ EOF]
+//! ```
+//!
+//! Dynamic metadata at EOF allows documents to grow without metadata relocation.
+//!
+//! # Version Migration
+//!
+//! The module automatically handles upgrades between versions:
+//!
+//! | From | To | Migration Steps |
+//! |------|-----|-----------------|
+//! | v1 | v2 | Move metadata to EOF, set `metadata_offset` |
+//! | v2 | v3 | Calculate `data_end_offset` from catalog |
+//! | v3 | v4 | Add `clean_shutdown` flag (defaults to false) |
+//!
+//! Migrations are **lazy**: the header is only rewritten on next flush.
+//!
+//! # Metadata Structure
+//!
+//! ```text
+//! [collection_count: u32]
+//! [collection_1_len: u32][collection_1_json: bytes]
+//! [collection_2_len: u32][collection_2_json: bytes]
+//! ...
+//! ```
+//!
+//! Each collection JSON contains:
+//! - `document_catalog`: HashMap<DocumentId, offset>
+//! - `indexes`: Vec<IndexMetadata>
+//! - `fuzzy_indexes`, `fulltext_indexes`
+//! - `schema`: Optional JSON schema
+//! - `flags`: System/protected/hidden flags
+//!
+//! # DoS Protection
+//!
+//! Maximum metadata size per collection: 64 MB (allows ~2-4M documents).
+//! Protects against malicious files with corrupted length fields.
 
 use super::{CollectionMeta, Header, StorageEngine};
 use crate::error::{IronBaseError, Result};

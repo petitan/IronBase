@@ -6,6 +6,7 @@
 //! - Permission checking for all operations
 
 use crate::adapter::{FindOptions, IronBaseAdapter};
+use crate::api_keys::constant_time_compare;
 use crate::error::{McpError, Result};
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -247,7 +248,12 @@ impl Principal {
     pub fn matches(&self, caller: &CallerContext) -> bool {
         match self {
             Self::Interface(iface) => caller.interface == *iface,
-            Self::ApiKey(key) => caller.api_key.as_ref() == Some(key),
+            // SECURITY FIX: Use constant-time comparison to prevent timing attacks
+            Self::ApiKey(key) => caller
+                .api_key
+                .as_ref()
+                .map(|k| constant_time_compare(k.as_bytes(), key.as_bytes()))
+                .unwrap_or(false),
             Self::Ip(ip) => caller.remote_addr.map(|a| a.ip() == *ip).unwrap_or(false),
             Self::IpRange(net) => caller
                 .remote_addr

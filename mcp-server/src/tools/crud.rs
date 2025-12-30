@@ -34,6 +34,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 
 fn handle_insert_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let document = get_object(&params, "document")?;
     let id = adapter.insert_one(&collection, document)?;
     Ok(json!({"inserted_id": id}))
@@ -41,6 +42,7 @@ fn handle_insert_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 
 fn handle_insert_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let documents = get_array(&params, "documents")?;
     let ids = adapter.insert_many(&collection, documents)?;
     Ok(json!({"inserted_ids": ids, "inserted_count": ids.len()}))
@@ -74,6 +76,7 @@ fn handle_find(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 
 fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let query = params.get("query").cloned().unwrap_or(json!({}));
     let projection = parse_projection(&params)?;
     let document = adapter.find_one(&collection, query)?;
@@ -90,6 +93,7 @@ fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
 
 fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let filter = get_object(&params, "filter")?;
     let update = get_object(&params, "update")?;
     let result = adapter.update_one(&collection, filter, update)?;
@@ -101,6 +105,7 @@ fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 
 fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let filter = get_object(&params, "filter")?;
     let update = get_object(&params, "update")?;
     let result = adapter.update_many(&collection, filter, update)?;
@@ -112,6 +117,7 @@ fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
 
 fn handle_delete_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let filter = get_object(&params, "filter")?;
     let count = adapter.delete_one(&collection, filter)?;
     Ok(json!({"deleted_count": count}))
@@ -119,6 +125,7 @@ fn handle_delete_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 
 fn handle_delete_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let filter = get_object(&params, "filter")?;
     let count = adapter.delete_many(&collection, filter)?;
     Ok(json!({"deleted_count": count}))
@@ -126,6 +133,7 @@ fn handle_delete_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
 
 fn handle_count_documents(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let query = params.get("query").cloned().unwrap_or(json!({}));
     let count = adapter.count_documents(&collection, query)?;
     Ok(json!({"count": count}))
@@ -133,6 +141,7 @@ fn handle_count_documents(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
 fn handle_distinct(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let field = get_string(&params, "field")?;
     let query = params.get("query").cloned().unwrap_or(json!({}));
     let values = adapter.distinct(&collection, &field, query)?;
@@ -141,6 +150,7 @@ fn handle_distinct(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
 
 fn handle_aggregate(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let pipeline = get_array(&params, "pipeline")?;
     let results = adapter.aggregate(&collection, pipeline)?;
     Ok(json!({"results": results, "count": results.len()}))

@@ -1,5 +1,54 @@
-// src/database/collections.rs
-// Collection, index, and schema management
+//! Collection, Index, and Schema Management
+//!
+//! This module handles the lifecycle of collections and their associated resources:
+//! IndexManagers, schemas, and the warm-up process on database open.
+//!
+//! # Responsibilities
+//!
+//! - **Collection Access**: `collection()`, `get_collection()`, `collection_exists()`
+//! - **IndexManager Lifecycle**: Per-collection shared IndexManager with double-checked locking
+//! - **Schema Management**: Per-collection compiled schema with shared Arc
+//! - **Warm-up**: Loading indexes from `.idx`/`.ftidx`/`.fzidx` files on startup
+//! - **Index Rebuild**: Rebuilding indexes from document catalog when needed
+//!
+//! # Startup Flow (Warm-up)
+//!
+//! ```text
+//! DatabaseCore::open()
+//!     │
+//!     ▼
+//! collection() called
+//!     │
+//!     ▼
+//! get_or_create_index_manager()
+//!     │
+//!     ▼
+//! initialize_index_manager()
+//!     ├── Load collection metadata from storage
+//!     ├── Create _id index (always)
+//!     ├── Load B+ tree indexes from .idx files
+//!     ├── Load fulltext indexes from .ftidx files
+//!     ├── Load fuzzy indexes from .fzidx files
+//!     │
+//!     ▼
+//! Check: was_clean && all indexes loaded from files?
+//!     ├── YES → Skip rebuild (FAST PATH: <1s)
+//!     └── NO  → rebuild_indexes_from_catalog() (SLOW PATH: ~100s for 70K docs)
+//! ```
+//!
+//! # Thread Safety
+//!
+//! - **IndexManager**: Shared via `Arc<RwLock<IndexManager>>` per collection
+//! - **Schema**: Shared via `Arc<RwLock<Option<CompiledSchema>>>` per collection
+//! - **Collection Write Lock**: `Arc<Mutex<()>>` for Safe mode atomicity
+//!
+//! # Double-Checked Locking Pattern
+//!
+//! Used for lazy initialization of per-collection resources:
+//! 1. Fast path: Read lock to check if exists → return if found
+//! 2. Slow path: Write lock, check again, create if needed
+//!
+//! This minimizes lock contention while ensuring thread-safe creation.
 
 use parking_lot::{Mutex, RwLock};
 use std::sync::Arc;
@@ -431,19 +480,35 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             &db_path,
         )?;
 
-        // Create fuzzy indexes from persisted metadata (data will be rebuilt from documents)
+        // Load or create fuzzy indexes from persisted metadata
         for fuzzy_meta in &persisted_fuzzy_indexes {
-            if let Err(e) = index_manager.create_fuzzy_index(
-                fuzzy_meta.name.clone(),
-                fuzzy_meta.field.clone(),
-                fuzzy_meta.algorithm,
-                fuzzy_meta.threshold,
-            ) {
+            // Try to load from .fzidx file first
+            if let Some(loaded_index) =
+                crate::collection_core::try_load_fuzzy_index_from_file(&db_path, fuzzy_meta)
+            {
                 log_debug!(
-                    "Warning: Failed to recreate fuzzy index '{}': {}",
+                    "Loaded fuzzy index '{}' from .fzidx file ({} entries)",
                     fuzzy_meta.name,
-                    e
+                    loaded_index.entry_count()
                 );
+                index_manager.add_loaded_fuzzy_index(loaded_index);
+            } else {
+                // Create new index with disk storage (will be rebuilt from documents)
+                let storage_path =
+                    crate::collection_core::build_fuzzy_index_file_path(&db_path, &fuzzy_meta.name);
+                if let Err(e) = index_manager.create_fuzzy_index_with_storage(
+                    fuzzy_meta.name.clone(),
+                    fuzzy_meta.field.clone(),
+                    fuzzy_meta.algorithm,
+                    fuzzy_meta.threshold,
+                    storage_path,
+                ) {
+                    log_debug!(
+                        "Warning: Failed to recreate fuzzy index '{}': {}",
+                        fuzzy_meta.name,
+                        e
+                    );
+                }
             }
         }
 
@@ -485,13 +550,14 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Determine what needs rebuilding
         // (was_clean is already known from earlier)
-        let has_fuzzy_indexes = !persisted_fuzzy_indexes.is_empty();
+        let fuzzy_indexes = index_manager.list_fuzzy_indexes();
+        let has_fuzzy_without_file = fuzzy_indexes.iter().any(|idx| idx.entry_count() == 0);
         let fulltext_indexes = index_manager.list_fulltext_indexes();
         let has_fulltext_without_file = fulltext_indexes.iter().any(|idx| idx.doc_count() == 0);
 
-        // FAST PATH: If clean shutdown AND no fuzzy/empty-fulltext indexes, skip rebuild
-        // Fuzzy indexes don't have persistence yet, so they always need rebuild
-        if was_clean && !catalog.is_empty() && !has_fuzzy_indexes && !has_fulltext_without_file {
+        // FAST PATH: If clean shutdown AND no empty fuzzy/fulltext indexes, skip rebuild
+        if was_clean && !catalog.is_empty() && !has_fuzzy_without_file && !has_fulltext_without_file
+        {
             log_debug!(
                 "Clean shutdown detected - trusting {} indexes from .idx files (skipping rebuild of {} docs)",
                 persisted_indexes.len(),
@@ -501,8 +567,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             // SLOW PATH: Rebuild indexes from document catalog
             let reason = if !was_clean {
                 "dirty shutdown/crash"
-            } else if has_fuzzy_indexes {
-                "fuzzy indexes need rebuild (no persistence)"
+            } else if has_fuzzy_without_file {
+                "fuzzy indexes missing .fzidx file"
             } else if has_fulltext_without_file {
                 "fulltext indexes missing .ftidx file"
             } else {

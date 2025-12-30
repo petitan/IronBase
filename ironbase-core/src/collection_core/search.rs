@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use crate::error::{IronBaseError, Result};
 use crate::fulltext::FulltextIndexMetadata;
 use crate::index::FuzzyAlgorithm;
+use crate::log_error;
 use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
 
@@ -221,7 +222,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     for (doc_id, doc) in &batch_docs {
                         if let Some(value) = get_nested_value(doc, &field_clone) {
                             if let Some(s) = value.as_str() {
-                                let _ = index.insert(doc_id, s);
+                                // Log error but continue indexing other documents
+                                if let Err(e) = index.insert(doc_id, s) {
+                                    log_error!(
+                                        "Failed to index doc {:?} in fulltext index '{}': {:?}",
+                                        doc_id,
+                                        index_name_clone,
+                                        e
+                                    );
+                                }
                             }
                         }
                     }

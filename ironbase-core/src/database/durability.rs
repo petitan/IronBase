@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::collection_core::RawOperations;
 use crate::document::DocumentId;
 use crate::durability::DurabilityMode;
-use crate::error::Result;
+use crate::error::{IronBaseError, Result};
 use crate::storage::{MemoryStorage, StorageEngine};
 use crate::transaction::{Operation, Transaction};
 
@@ -144,9 +144,9 @@ impl DatabaseCore<StorageEngine> {
         // This writes BEGIN + OPERATIONS + COMMIT to WAL and fsyncs
         self.commit_auto_transaction_batch(auto_tx)?;
 
-        // 3. PERSIST all buffered documents to storage
+        // 3. PERSIST all buffered operations to storage
         // At this point, if we crash, recovery will replay from WAL
-        if let Err(e) = self.persist_buffered_inserts(&mut doc_buffer) {
+        if let Err(e) = self.persist_buffered_operations(&mut doc_buffer) {
             // Persist failed → write ABORT to WAL
             // This ensures recovery will skip this transaction
             let _ = self.abort_committed_transaction(tx_id);
@@ -165,18 +165,34 @@ impl DatabaseCore<StorageEngine> {
         Ok(())
     }
 
-    /// Persist all buffered insert documents to storage
+    /// Persist all buffered operations to storage (WAL ORDERING FIX)
     ///
-    /// Called after WAL commit in flush_batch() to actually write documents.
-    fn persist_buffered_inserts(&self, doc_buffer: &mut super::BatchDocBuffer) -> Result<()> {
-        // Iterate over all collections with buffered inserts
+    /// Called after WAL commit in flush_batch() to actually write:
+    /// - Inserts: new documents
+    /// - Updates: modified documents
+    /// - Deletes: tombstones
+    fn persist_buffered_operations(&self, doc_buffer: &mut super::BatchDocBuffer) -> Result<()> {
+        // 1. Persist inserts
         for (collection_name, prepared_docs) in doc_buffer.inserts.drain() {
             let collection = self.collection(&collection_name)?;
-
-            // Persist each prepared document
             for prepared in prepared_docs {
-                // insert_one_persist writes to storage + updates indexes + invalidates cache
                 collection.insert_one_persist(prepared)?;
+            }
+        }
+
+        // 2. Persist updates (WAL ORDERING FIX)
+        for (collection_name, prepared_updates) in doc_buffer.updates.drain() {
+            let collection = self.collection(&collection_name)?;
+            for prepared in prepared_updates {
+                collection.update_one_persist_batch(prepared)?;
+            }
+        }
+
+        // 3. Persist deletes (WAL ORDERING FIX)
+        for (collection_name, prepared_deletes) in doc_buffer.deletes.drain() {
+            let collection = self.collection(&collection_name)?;
+            for prepared in prepared_deletes {
+                collection.delete_one_persist_batch(prepared)?;
             }
         }
 
@@ -382,8 +398,12 @@ impl DatabaseCore<StorageEngine> {
                 if prepared.modified > 0 {
                     let mut auto_tx = self.begin_auto_transaction();
 
-                    // Extract doc_id - prepared.doc_id is always Some when matched > 0
-                    let doc_id = prepared.doc_id.clone().unwrap();
+                    // Extract doc_id - invariant: doc_id is always Some when modified > 0
+                    let doc_id = prepared.doc_id.clone().ok_or_else(|| {
+                        IronBaseError::Corruption(
+                            "update_one_prepare: modified > 0 but doc_id is None".into(),
+                        )
+                    })?;
 
                     auto_tx.add_operation(Operation::Update {
                         collection: collection_name.to_string(),
@@ -405,42 +425,44 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                // TODO: WAL ordering bug - update_one_raw writes to storage before WAL commit.
-                // This is harder to fix than INSERT because update_one_prepare already writes
-                // to storage (for atomic read-modify-write). Need update_one_prepare_batch()
-                // that buffers the operation instead of persisting immediately.
-                // For now, recovery via WAL replay still works (albeit with potential orphaned docs).
-
-                // Use get_collection - no implicit creation for update operations
+                // WAL ORDERING FIX: Use prepare_batch pattern (NO storage write in prepare)
+                // 1. PREPARE: Find doc, compute update, NO storage write
                 let collection = self.get_collection(collection_name)?;
-                let old_doc = collection.find_one(query)?;
-                if old_doc.is_none() {
-                    return Ok((0, 0));
-                }
-                let old_doc = old_doc.unwrap();
+                let prepared = match collection.update_one_prepare_batch(query, update)? {
+                    Some(p) => p,
+                    None => return Ok((0, 0)), // No match
+                };
 
-                let doc_id = DocumentId::extract_from_value(&old_doc)?;
+                // 2. BUFFER: Store prepared data for later persist
+                let doc_id = prepared.doc_id.clone();
+                let old_doc = prepared.old_doc.clone();
+                let new_doc = prepared.new_doc.clone();
 
-                let (matched, modified) = collection.update_one_raw(query, update)?;
-
-                if modified > 0 {
-                    let new_doc = collection
-                        .find_one(&serde_json::json!({"_id": &doc_id}))?
-                        .unwrap_or(old_doc.clone());
-
-                    let should_flush = self.add_to_batch(Operation::Update {
-                        collection: collection_name.to_string(),
-                        doc_id,
-                        old_doc,
-                        new_doc,
-                    })?;
-
-                    if should_flush {
-                        self.flush_batch()?;
-                    }
+                {
+                    let mut doc_buffer = self.batch_doc_buffer.write();
+                    doc_buffer.add_update(collection_name.to_string(), prepared);
                 }
 
-                Ok((matched, modified))
+                // 3. Add operation to WAL batch buffer
+                let should_flush = self.add_to_batch(Operation::Update {
+                    collection: collection_name.to_string(),
+                    doc_id,
+                    old_doc,
+                    new_doc,
+                })?;
+
+                // 4. Check if memory limit exceeded (early flush trigger)
+                let memory_exceeded = {
+                    let doc_buffer = self.batch_doc_buffer.read();
+                    doc_buffer.memory_limit_exceeded()
+                };
+
+                // 5. Flush if batch is full OR memory limit exceeded
+                if should_flush || memory_exceeded {
+                    self.flush_batch()?;
+                }
+
+                Ok((1, 1))
             }
 
             DurabilityMode::Unsafe {
@@ -493,8 +515,12 @@ impl DatabaseCore<StorageEngine> {
                 // If deleted, add to WAL
                 let mut auto_tx = self.begin_auto_transaction();
 
-                // Extract doc_id - prepared.doc_id is always Some when deleted > 0
-                let doc_id = prepared.doc_id.clone().unwrap();
+                // Extract doc_id - invariant: doc_id is always Some when deleted > 0
+                let doc_id = prepared.doc_id.clone().ok_or_else(|| {
+                    IronBaseError::Corruption(
+                        "delete_one_prepare: deleted > 0 but doc_id is None".into(),
+                    )
+                })?;
 
                 auto_tx.add_operation(Operation::Delete {
                     collection: collection_name.to_string(),
@@ -514,35 +540,42 @@ impl DatabaseCore<StorageEngine> {
                 // Wait for active write transaction to complete (Read Committed isolation)
                 self.wait_for_write_lock_release()?;
 
-                // TODO: WAL ordering bug - delete_one_raw writes tombstone before WAL commit.
-                // Same issue as update_one. Need delete_one_prepare_batch() that buffers.
-                // For now, recovery via WAL replay still works.
-
-                // Use get_collection - no implicit creation for delete operations
+                // WAL ORDERING FIX: Use prepare_batch pattern (NO tombstone write in prepare)
+                // 1. PREPARE: Find doc, NO tombstone write
                 let collection = self.get_collection(collection_name)?;
-                let old_doc = collection.find_one(query)?;
-                if old_doc.is_none() {
-                    return Ok(0);
-                }
-                let old_doc = old_doc.unwrap();
+                let prepared = match collection.delete_one_prepare_batch(query)? {
+                    Some(p) => p,
+                    None => return Ok(0), // No match
+                };
 
-                let doc_id = DocumentId::extract_from_value(&old_doc)?;
+                // 2. BUFFER: Store prepared data for later persist
+                let doc_id = prepared.doc_id.clone();
+                let old_doc = prepared.old_doc.clone();
 
-                let deleted = collection.delete_one_raw(query)?;
-
-                if deleted > 0 {
-                    let should_flush = self.add_to_batch(Operation::Delete {
-                        collection: collection_name.to_string(),
-                        doc_id,
-                        old_doc,
-                    })?;
-
-                    if should_flush {
-                        self.flush_batch()?;
-                    }
+                {
+                    let mut doc_buffer = self.batch_doc_buffer.write();
+                    doc_buffer.add_delete(collection_name.to_string(), prepared);
                 }
 
-                Ok(deleted)
+                // 3. Add operation to WAL batch buffer
+                let should_flush = self.add_to_batch(Operation::Delete {
+                    collection: collection_name.to_string(),
+                    doc_id,
+                    old_doc,
+                })?;
+
+                // 4. Check if memory limit exceeded (early flush trigger)
+                let memory_exceeded = {
+                    let doc_buffer = self.batch_doc_buffer.read();
+                    doc_buffer.memory_limit_exceeded()
+                };
+
+                // 5. Flush if batch is full OR memory limit exceeded
+                if should_flush || memory_exceeded {
+                    self.flush_batch()?;
+                }
+
+                Ok(1)
             }
 
             DurabilityMode::Unsafe {

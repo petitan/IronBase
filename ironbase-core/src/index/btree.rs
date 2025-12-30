@@ -1,4 +1,70 @@
-// B+ Tree Index Implementation
+//! B+ Tree Index Implementation
+//!
+//! This module provides the core B+ tree data structure used for database indexing.
+//! B+ trees are self-balancing, ordered search structures optimized for disk-based
+//! storage and range queries.
+//!
+//! # B+ Tree Properties
+//!
+//! - **All data in leaves**: Internal nodes only contain routing keys
+//! - **Balanced**: All leaf nodes are at the same depth
+//! - **Linked leaves**: Leaf nodes form a linked list for range scans
+//! - **High fanout**: Each node holds up to 128 keys (16KB pages)
+//!
+//! # Node Structure
+//!
+//! ```text
+//! Internal Node:                    Leaf Node:
+//! ┌─────────────────────────┐       ┌─────────────────────────┐
+//! │ keys: [K1, K2, K3, ...] │       │ keys: [K1, K2, K3, ...] │
+//! │ children: [C0, C1, C2]  │       │ doc_ids: [D1, D2, D3]   │
+//! │ children_offsets: [...]  │       │ next_leaf_offset: u64   │
+//! └─────────────────────────┘       └─────────────────────────┘
+//! ```
+//!
+//! # Key Types
+//!
+//! The [`IndexKey`] enum supports multiple data types:
+//! - `Null` - Missing or null fields
+//! - `Int(i64)` - Integer values
+//! - `Float(f64)` - Floating point values
+//! - `String(String)` - String values
+//! - `Bool(bool)` - Boolean values
+//! - `Compound(Vec<IndexKey>)` - Multi-field compound keys
+//!
+//! # File Format (.idx)
+//!
+//! ```text
+//! ┌────────────────────────────────────────┐
+//! │ Root Offset (8 bytes)                  │
+//! ├────────────────────────────────────────┤
+//! │ Node 1 (variable size, JSON)           │
+//! │ [node_type: u8][data_len: u32][json]   │
+//! ├────────────────────────────────────────┤
+//! │ Node 2...                              │
+//! └────────────────────────────────────────┘
+//! ```
+//!
+//! # Split Algorithm
+//!
+//! When a node exceeds [`MAX_KEYS_PER_NODE`] (128 keys):
+//!
+//! 1. **Leaf split**: Divide keys at midpoint, promote middle key to parent
+//! 2. **Internal split**: Similar, but child pointers are redistributed
+//! 3. **Root split**: Create new root with single key pointing to two children
+//!
+//! # Unique Index Enforcement
+//!
+//! For unique indexes, `insert()` returns `DuplicateKey` error if:
+//! - Key already exists AND
+//! - Key is not `IndexKey::Null` (null values can be duplicated)
+//!
+//! This matches MongoDB's behavior where null/missing fields don't violate uniqueness.
+//!
+//! # Thread Safety
+//!
+//! BPlusTree is NOT thread-safe internally. Concurrency is managed by
+//! `IndexManager` which is wrapped in `Arc<RwLock<>>`.
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};

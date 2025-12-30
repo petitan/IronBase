@@ -149,6 +149,52 @@ pub struct DeleteOnePrepared {
     pub(crate) collection_name: String,
 }
 
+// ============================================================================
+// BATCH MODE PREPARED STRUCTURES (WAL ORDERING FIX)
+// ============================================================================
+
+/// Prepared data for update_one in BATCH mode.
+/// Unlike UpdateOnePrepared, this does NOT write to storage in prepare phase.
+///
+/// WAL ORDERING FIX: In Batch mode, we need true write-ahead logging:
+/// - PREPARE phase: Find doc, compute new value, NO storage writes
+/// - BUFFER phase: Store prepared data until batch flush
+/// - WAL phase: Write all operations to WAL and fsync
+/// - PERSIST phase: Apply all storage writes (safe now, WAL committed)
+#[derive(Debug)]
+pub struct UpdateOnePreparedBatch {
+    /// The document ID to update
+    pub doc_id: DocumentId,
+    /// The document BEFORE update (for WAL recovery/undo)
+    pub old_doc: Value,
+    /// The document AFTER update (for WAL recovery/redo)
+    pub new_doc: Value,
+    /// The update operators to apply
+    pub(crate) update_ops: Value,
+    /// Collection name for context (kept for debugging/logging)
+    #[allow(dead_code)]
+    pub(crate) collection_name: String,
+}
+
+/// Prepared data for delete_one in BATCH mode.
+/// Unlike DeleteOnePrepared, this does NOT write tombstone in prepare phase.
+///
+/// WAL ORDERING FIX: In Batch mode, we need true write-ahead logging:
+/// - PREPARE phase: Find doc, NO tombstone write
+/// - BUFFER phase: Store prepared data until batch flush
+/// - WAL phase: Write all operations to WAL and fsync
+/// - PERSIST phase: Write tombstones (safe now, WAL committed)
+#[derive(Debug)]
+pub struct DeleteOnePreparedBatch {
+    /// The document ID to delete
+    pub doc_id: DocumentId,
+    /// The document to be deleted (for WAL recovery/undo)
+    pub old_doc: Value,
+    /// Collection name for context (kept for debugging/logging)
+    #[allow(dead_code)]
+    pub(crate) collection_name: String,
+}
+
 /// Helper: Check if document is a tombstone
 #[inline]
 fn is_tombstone(doc: &Value) -> bool {
@@ -358,6 +404,50 @@ pub(crate) trait RawOperations: sealed::Sealed {
     ///
     /// WAL REFACTOR: Only call this after WAL is committed!
     fn insert_many_persist(&self, prepared: InsertManyPrepared) -> Result<Vec<DocumentId>>;
+
+    // ========================================================================
+    // BATCH MODE PREPARE/PERSIST METHODS (WAL ORDERING FIX)
+    // ========================================================================
+
+    /// PREPARE phase for update_one in BATCH mode: find doc, compute update, NO storage write.
+    ///
+    /// WAL ORDERING FIX: Unlike Safe mode's update_one_prepare, this does NOT write to storage.
+    /// The storage write happens in update_one_persist_batch() AFTER WAL commit.
+    ///
+    /// Usage in Batch mode:
+    /// 1. Call update_one_prepare_batch() - finds doc, computes new value
+    /// 2. Buffer the prepared data in BatchDocBuffer
+    /// 3. Add Operation::Update to WAL batch
+    /// 4. On flush: WAL commit first, then persist_batch
+    fn update_one_prepare_batch(
+        &self,
+        query: &Value,
+        update: &Value,
+    ) -> Result<Option<UpdateOnePreparedBatch>>;
+
+    /// PERSIST phase for update_one in BATCH mode: write to storage AFTER WAL commit.
+    ///
+    /// WAL ORDERING FIX: Only call this after WAL is committed!
+    /// This performs the actual storage write that was deferred in prepare_batch.
+    fn update_one_persist_batch(&self, prepared: UpdateOnePreparedBatch) -> Result<(u64, u64)>;
+
+    /// PREPARE phase for delete_one in BATCH mode: find doc, NO tombstone write.
+    ///
+    /// WAL ORDERING FIX: Unlike Safe mode's delete_one_prepare, this does NOT write tombstone.
+    /// The tombstone write happens in delete_one_persist_batch() AFTER WAL commit.
+    ///
+    /// Usage in Batch mode:
+    /// 1. Call delete_one_prepare_batch() - finds document to delete
+    /// 2. Buffer the prepared data in BatchDocBuffer
+    /// 3. Add Operation::Delete to WAL batch
+    /// 4. On flush: WAL commit first, then persist_batch
+    fn delete_one_prepare_batch(&self, query: &Value) -> Result<Option<DeleteOnePreparedBatch>>;
+
+    /// PERSIST phase for delete_one in BATCH mode: write tombstone AFTER WAL commit.
+    ///
+    /// WAL ORDERING FIX: Only call this after WAL is committed!
+    /// This performs the actual tombstone write that was deferred in prepare_batch.
+    fn delete_one_persist_batch(&self, prepared: DeleteOnePreparedBatch) -> Result<u64>;
 }
 
 // ============================================================================
@@ -1666,6 +1756,136 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 .invalidate_collection(&prepared.collection_name);
         }
         Ok(prepared.deleted)
+    }
+
+    // ========================================================================
+    // BATCH MODE IMPLEMENTATIONS (WAL ORDERING FIX)
+    // ========================================================================
+
+    /// PREPARE phase for update_one in BATCH mode.
+    /// Finds the document and computes the update WITHOUT writing to storage.
+    fn update_one_prepare_batch(
+        &self,
+        query: &Value,
+        update: &Value,
+    ) -> Result<Option<UpdateOnePreparedBatch>> {
+        self.check_not_closed()?;
+
+        // Find the document to update (read-only)
+        let old_doc = match self.find_one(query)? {
+            Some(doc) => doc,
+            None => return Ok(None), // No match
+        };
+
+        let doc_id = DocumentId::extract_from_value(&old_doc)?;
+
+        // Compute the updated document WITHOUT writing to storage
+        let doc_json_str = serde_json::to_string(&old_doc)?;
+        let mut document = Document::from_json(&doc_json_str)?;
+
+        // Apply update operators in memory
+        super::update_operators::apply_update_operators(&mut document, update)?;
+
+        // Re-validate after update
+        self.validate_document(&document)?;
+
+        // Convert to Value for WAL
+        let new_doc = serde_json::to_value(&document)?;
+
+        Ok(Some(UpdateOnePreparedBatch {
+            doc_id,
+            old_doc,
+            new_doc,
+            update_ops: update.clone(),
+            collection_name: self.name.clone(),
+        }))
+    }
+
+    /// PERSIST phase for update_one in BATCH mode.
+    /// Performs the actual storage write AFTER WAL commit.
+    fn update_one_persist_batch(&self, prepared: UpdateOnePreparedBatch) -> Result<(u64, u64)> {
+        // Re-read the document to get current state (it may have been modified by other batch ops)
+        let current_doc = self.find_one(&serde_json::json!({"_id": &prepared.doc_id}))?;
+
+        let Some(current_doc) = current_doc else {
+            // Document was deleted between prepare and persist - this shouldn't happen in Batch mode
+            // but handle gracefully
+            return Ok((0, 0));
+        };
+
+        // Apply update operators to current state
+        let doc_json_str = serde_json::to_string(&current_doc)?;
+        let mut document = Document::from_json(&doc_json_str)?;
+        let old_doc_for_index = document.clone();
+
+        super::update_operators::apply_update_operators(&mut document, &prepared.update_ops)?;
+
+        // Validate the updated document
+        self.validate_document(&document)?;
+
+        // Remove old from indexes, add new
+        self.remove_from_indexes(&old_doc_for_index)?;
+        self.add_to_indexes(&document)?;
+
+        // Write to storage
+        let doc_json = serde_json::to_string(&document)?;
+        {
+            let mut storage = self.storage.write();
+            storage.write_document_raw(&self.name, &prepared.doc_id, doc_json.as_bytes())?;
+        }
+
+        // Invalidate cache
+        self.query_cache.invalidate_collection(&self.name);
+
+        Ok((1, 1))
+    }
+
+    /// PREPARE phase for delete_one in BATCH mode.
+    /// Finds the document to delete WITHOUT writing tombstone.
+    fn delete_one_prepare_batch(&self, query: &Value) -> Result<Option<DeleteOnePreparedBatch>> {
+        self.check_not_closed()?;
+
+        // Find the document to delete (read-only)
+        let old_doc = match self.find_one(query)? {
+            Some(doc) => doc,
+            None => return Ok(None), // No match
+        };
+
+        let doc_id = DocumentId::extract_from_value(&old_doc)?;
+
+        Ok(Some(DeleteOnePreparedBatch {
+            doc_id,
+            old_doc,
+            collection_name: self.name.clone(),
+        }))
+    }
+
+    /// PERSIST phase for delete_one in BATCH mode.
+    /// Writes tombstone AFTER WAL commit.
+    fn delete_one_persist_batch(&self, prepared: DeleteOnePreparedBatch) -> Result<u64> {
+        // Remove from indexes
+        let doc_json_str = serde_json::to_string(&prepared.old_doc)?;
+        let document = Document::from_json(&doc_json_str)?;
+        self.remove_from_indexes(&document)?;
+
+        // Write tombstone
+        let mut tombstone = prepared.old_doc.clone();
+        if let Value::Object(ref mut map) = tombstone {
+            map.insert("_tombstone".to_string(), Value::Bool(true));
+            map.insert("_collection".to_string(), Value::String(self.name.clone()));
+        }
+        let tombstone_json = serde_json::to_string(&tombstone)?;
+
+        {
+            let mut storage = self.storage.write();
+            storage.write_document_raw(&self.name, &prepared.doc_id, tombstone_json.as_bytes())?;
+            storage.adjust_live_count(&self.name, -1);
+        }
+
+        // Invalidate cache
+        self.query_cache.invalidate_collection(&self.name);
+
+        Ok(1)
     }
 }
 

@@ -1,8 +1,58 @@
-// Index Manager - manages all indexes for a collection
+//! Index Manager - Unified Index Lifecycle Management
+//!
+//! This module provides `IndexManager`, the central coordinator for all index types
+//! within a single collection. It handles creation, lookup, updates, and persistence.
+//!
+//! # Index Types
+//!
+//! | Type | Use Case | File Extension |
+//! |------|----------|----------------|
+//! | B+ Tree | Equality/range queries | `.idx` |
+//! | Fuzzy | Similarity search (Jaro-Winkler, Levenshtein) | `.fzidx` |
+//! | Full-text | TF-IDF text search with stemming | `.ftidx` |
+//! | Legacy | HashMap-based (deprecated) | N/A |
+//!
+//! # Per-Collection Instance
+//!
+//! Each collection has its own `IndexManager` instance, managed by `DatabaseCore`:
+//!
+//! ```text
+//! DatabaseCore
+//!   └── index_managers: HashMap<String, Arc<RwLock<IndexManager>>>
+//!         ├── "users" → IndexManager { btree: [_id, email], fuzzy: [name] }
+//!         ├── "posts" → IndexManager { btree: [_id], fulltext: [content] }
+//!         └── "logs"  → IndexManager { btree: [_id, timestamp] }
+//! ```
+//!
+//! # Index Selection for Queries
+//!
+//! The `select_best_index()` method implements query optimization:
+//!
+//! 1. **Exact match**: Find index on queried field
+//! 2. **Compound prefix**: Use compound index if query matches prefix
+//! 3. **Range optimization**: Prefer indexes for $gt, $lt, $gte, $lte
+//!
+//! # Persistence
+//!
+//! Indexes are persisted to separate files alongside the main `.mlite` database:
+//!
+//! ```text
+//! database.mlite      # Main database file
+//! database_users_id.idx       # B+ tree index
+//! database_users_email.idx    # B+ tree index
+//! database_posts_content.ftidx  # Full-text index
+//! database_users_name.fzidx   # Fuzzy index
+//! ```
+//!
+//! # Thread Safety
+//!
+//! `IndexManager` itself is NOT thread-safe. Concurrency is managed by
+//! `DatabaseCore` which wraps each instance in `Arc<RwLock<IndexManager>>`.
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
 use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
+use crate::log_error;
 use crate::value_utils::get_nested_value;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -275,6 +325,25 @@ impl IndexManager {
         algorithm: FuzzyAlgorithm,
         threshold: f64,
     ) -> Result<()> {
+        self.create_fuzzy_index_with_storage(name, field, algorithm, threshold, None)
+    }
+
+    /// Create fuzzy index with disk-based storage
+    ///
+    /// # Arguments
+    /// * `name` - Unique index name
+    /// * `field` - Field to index
+    /// * `algorithm` - Fuzzy matching algorithm
+    /// * `threshold` - Minimum similarity threshold
+    /// * `storage_path` - Path to store the .fzidx file (None = memory-only)
+    pub fn create_fuzzy_index_with_storage(
+        &mut self,
+        name: String,
+        field: String,
+        algorithm: FuzzyAlgorithm,
+        threshold: f64,
+        storage_path: Option<PathBuf>,
+    ) -> Result<()> {
         // Check if any index with this name already exists
         if self.btree_indexes.contains_key(&name)
             || self.legacy_indexes.contains_key(&name)
@@ -287,7 +356,13 @@ impl IndexManager {
             )));
         }
 
-        let index = FuzzyIndex::new(&name, &field, algorithm, threshold);
+        let index = if let Some(path) = storage_path {
+            self.index_file_paths.insert(name.clone(), path.clone());
+            FuzzyIndex::new_with_storage(&name, &field, algorithm, threshold, path)
+        } else {
+            FuzzyIndex::new(&name, &field, algorithm, threshold)
+        };
+
         self.fuzzy_indexes.insert(name, index);
         Ok(())
     }
@@ -457,6 +532,19 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Flush all fuzzy indexes to .fzidx files
+    ///
+    /// This should be called before database close to enable fast restart
+    /// (clean shutdown optimization - skip fuzzy index rebuild on next open).
+    pub fn flush_fuzzy_indexes(&self) -> Result<()> {
+        for index in self.fuzzy_indexes.values() {
+            if index.storage_path().is_some() {
+                index.save_to_file()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Flush all B+ tree indexes to .idx files
     ///
     /// This should be called before database close to enable fast restart
@@ -547,7 +635,14 @@ impl IndexManager {
                 // Get field value - only index string values
                 if let Some(value) = get_nested_value(doc, &index.field) {
                     if let Some(s) = value.as_str() {
-                        let _ = index.insert(doc_id, s);
+                        // Log error but continue - document already persisted
+                        if let Err(e) = index.insert(doc_id, s) {
+                            log_error!(
+                                "Failed to insert into fulltext index '{}': {:?}",
+                                index_name,
+                                e
+                            );
+                        }
                     }
                 }
             }
@@ -624,7 +719,14 @@ impl IndexManager {
             }
 
             if let Some(index) = self.fulltext_indexes.get_mut(&index_name) {
-                let _ = index.remove(doc_id);
+                // Log error but continue - document already deleted
+                if let Err(e) = index.remove(doc_id) {
+                    log_error!(
+                        "Failed to remove from fulltext index '{}': {:?}",
+                        index_name,
+                        e
+                    );
+                }
             }
         }
 

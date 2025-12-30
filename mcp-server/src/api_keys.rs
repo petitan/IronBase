@@ -144,7 +144,7 @@ impl ApiKeyCache {
 /// Constant-time string comparison to prevent timing attacks
 /// SECURITY FIX: Length comparison is now also constant-time to prevent
 /// attackers from determining the key length via timing analysis.
-fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
+pub fn constant_time_compare(a: &[u8], b: &[u8]) -> bool {
     // Use the longer length to prevent length-based timing leak
     let max_len = a.len().max(b.len());
 

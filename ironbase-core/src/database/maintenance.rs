@@ -1,5 +1,46 @@
-// src/database/maintenance.rs
-// Database maintenance operations: flush, checkpoint, stats, compact
+//! Database Maintenance Operations
+//!
+//! This module provides database lifecycle and maintenance operations:
+//! flush, checkpoint, compact, close, and graceful shutdown.
+//!
+//! # Operations Overview
+//!
+//! | Operation | Effect | When to Use |
+//! |-----------|--------|-------------|
+//! | `flush()` | Persist all pending changes + metadata | After critical writes |
+//! | `checkpoint()` | Clear WAL without full metadata sync | Long-running processes |
+//! | `compact()` | Remove tombstones, reclaim space | Periodic maintenance |
+//! | `close()` | Full flush + release file lock | Before reopening in another process |
+//!
+//! # Shutdown Sequence
+//!
+//! ```text
+//! close() or Drop::drop()
+//!     │
+//!     ├── 1. Mark is_closed = true (prevent new ops)
+//!     ├── 2. Flush indexes to .idx/.ftidx/.fzidx files
+//!     ├── 3. Flush storage (metadata + fsync)
+//!     ├── 4. Mark clean_shutdown flag in header
+//!     └── 5. Release file lock
+//! ```
+//!
+//! # Clean Shutdown Optimization
+//!
+//! When `clean_shutdown` flag is set in the file header:
+//! - Next startup trusts persisted indexes (no rebuild needed)
+//! - Warm-up time: <1s instead of ~100s for 70K documents
+//!
+//! # Drop Trait Behavior
+//!
+//! The `Drop` implementation performs the same shutdown sequence as `close()`,
+//! but with error handling that logs warnings instead of returning errors.
+//! For language bindings (Python, C#) where GC timing is unpredictable,
+//! always call `close()` explicitly to ensure deterministic cleanup.
+//!
+//! # Batch Mode Warning
+//!
+//! In `DurabilityMode::Batch`, uncommitted operations are NOT automatically
+//! persisted on `Drop`. Always call `close()` to flush pending batch operations.
 
 use std::sync::atomic::Ordering;
 
@@ -75,7 +116,7 @@ impl DatabaseCore<StorageEngine> {
         storage.release_lock()
     }
 
-    /// Flush all indexes (B+ tree and fulltext) to disk
+    /// Flush all indexes (B+ tree, fulltext, and fuzzy) to disk
     fn flush_all_indexes(&self) -> Result<()> {
         let db_path = {
             let storage = self.storage.read();
@@ -86,6 +127,7 @@ impl DatabaseCore<StorageEngine> {
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
             manager.flush_fulltext_indexes()?;
+            manager.flush_fuzzy_indexes()?;
             manager.flush_btree_indexes(&db_path)?;
         }
         Ok(())
@@ -108,12 +150,15 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
             }
         };
 
-        // 2. Flush all indexes to disk (B+ tree + fulltext)
+        // 2. Flush all indexes to disk (B+ tree + fulltext + fuzzy)
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
             if let Err(e) = manager.flush_fulltext_indexes() {
                 eprintln!("Warning: Failed to flush fulltext indexes on drop: {}", e);
+            }
+            if let Err(e) = manager.flush_fuzzy_indexes() {
+                eprintln!("Warning: Failed to flush fuzzy indexes on drop: {}", e);
             }
             if !db_path.is_empty() {
                 if let Err(e) = manager.flush_btree_indexes(&db_path) {

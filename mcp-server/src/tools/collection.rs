@@ -6,7 +6,7 @@ use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::get_string;
+use super::helpers::{get_string, validate_collection_name};
 
 /// Dispatch collection tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -53,6 +53,7 @@ fn handle_collection_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
 fn handle_schema_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let schema = params.get("schema").cloned().filter(|v| !v.is_null());
     adapter.set_schema(&collection, schema.clone())?;
     Ok(json!({"success": true, "schema_set": schema.is_some()}))
@@ -60,6 +61,7 @@ fn handle_schema_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 
 fn handle_schema_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let schema = adapter.get_schema(&collection)?;
     Ok(json!({"schema": schema}))
 }

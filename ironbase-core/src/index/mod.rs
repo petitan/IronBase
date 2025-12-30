@@ -1,4 +1,61 @@
-// Index module - B+ Tree, Fuzzy, and Full-Text Search Index Implementation
+//! Index Module - B+ Tree, Fuzzy, and Full-Text Search Indexes
+//!
+//! This module provides all indexing functionality for IronBase, enabling
+//! fast lookups, range queries, similarity search, and full-text search.
+//!
+//! # Index Types
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │                        IndexManager                                  │
+//! │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │
+//! │  │  BPlusTree  │  │ FuzzyIndex  │  │FulltextIdx │  │  Legacy   │  │
+//! │  │  (.idx)     │  │  (.fzidx)   │  │  (.ftidx)  │  │ (HashMap) │  │
+//! │  └─────────────┘  └─────────────┘  └─────────────┘  └───────────┘  │
+//! └─────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! | Type | Query Support | File | Use Case |
+//! |------|---------------|------|----------|
+//! | [`BPlusTree`] | $eq, $gt, $lt, $gte, $lte, $in | `.idx` | Primary/foreign keys, sorted fields |
+//! | [`FuzzyIndex`] | $fuzzy (similarity) | `.fzidx` | Name matching, typo tolerance |
+//! | `FulltextIndex` | TF-IDF text search | `.ftidx` | Document content, articles |
+//! | [`Index`] | $eq only | N/A | Legacy, deprecated |
+//!
+//! # Key Ordering
+//!
+//! [`IndexKey`] implements a total ordering compatible with MongoDB:
+//!
+//! ```text
+//! Null < Bool(false) < Bool(true) < Int < Float < String
+//! ```
+//!
+//! This enables correct range scans across mixed types.
+//!
+//! # Compound Indexes
+//!
+//! B+ trees support multi-field compound indexes:
+//!
+//! ```rust,ignore
+//! // Index on (country, city, zipcode)
+//! collection.create_compound_index(
+//!     vec!["country".to_string(), "city".to_string(), "zipcode".to_string()],
+//!     false
+//! )?;
+//!
+//! // Query uses index prefix: {country: "US", city: "NYC"}
+//! // Query uses full index: {country: "US", city: "NYC", zipcode: "10001"}
+//! // Query CANNOT use index: {city: "NYC"} (missing prefix)
+//! ```
+//!
+//! # Submodules
+//!
+//! - [`btree`] - B+ tree implementation with persistence
+//! - [`fuzzy`] - Jaro-Winkler, Levenshtein, Damerau-Levenshtein similarity
+//! - [`key`] - IndexKey type with ordering and serialization
+//! - [`manager`] - Per-collection index lifecycle management
+//! - [`legacy`] - Deprecated HashMap-based indexes
+//! - [`traits`] - Common index traits (IndexTrait, LazyLoadable)
 
 pub mod btree;
 pub mod fuzzy;

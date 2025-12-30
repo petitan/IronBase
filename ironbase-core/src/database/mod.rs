@@ -1,5 +1,45 @@
-// ironbase-core/src/database/mod.rs
-// Pure Rust database API - NO PyO3 dependencies
+//! Database Core Module
+//!
+//! This module provides the central database management API for IronBase.
+//! It is language-independent (no PyO3 dependencies) and generic over storage backends.
+//!
+//! # Architecture
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                     DatabaseCore<S>                              │
+//! │  ┌─────────────┐  ┌──────────────┐  ┌───────────────────────┐  │
+//! │  │   Storage   │  │  Index       │  │  Transaction          │  │
+//! │  │   (Arc)     │  │  Managers    │  │  Coordination         │  │
+//! │  │             │  │  (per-coll)  │  │  (write locks)        │  │
+//! │  └─────────────┘  └──────────────┘  └───────────────────────┘  │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Storage Backends
+//!
+//! - [`DatabaseCore<StorageEngine>`] - Production file-based storage with WAL
+//! - [`DatabaseCore<MemoryStorage>`] - Fast in-memory storage for testing (10-100x faster)
+//!
+//! # Durability Modes
+//!
+//! - **Safe** (default): Every operation is immediately persisted (like SQL databases)
+//! - **Batch**: Operations buffered until batch_size reached or explicit flush
+//! - **Unsafe**: No auto-commit, manual checkpoint required
+//!
+//! # Thread Safety
+//!
+//! - Storage access: `Arc<RwLock<S>>` - shared read, exclusive write
+//! - IndexManagers: Per-collection `Arc<RwLock<IndexManager>>` - prevents stale index state
+//! - Write transactions: SQLite-style exclusive lock (one writer at a time)
+//! - Collection writes: Fine-grained `Mutex` per collection for Safe mode atomicity
+//!
+//! # Submodules
+//!
+//! - [`collections`] - Collection creation, IndexManager lifecycle, warm-up
+//! - [`durability`] - Durability mode implementation, batch flush
+//! - [`maintenance`] - Flush, compact, close, checkpoint operations
+//! - [`transactions`] - Transaction begin/commit/rollback, write lock management
 
 mod collections;
 mod durability;
@@ -15,7 +55,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::collection_core::schema::CompiledSchema;
-use crate::collection_core::InsertOnePrepared;
+use crate::collection_core::{DeleteOnePreparedBatch, InsertOnePrepared, UpdateOnePreparedBatch};
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
@@ -28,13 +68,19 @@ pub const MAX_BATCH_MEMORY_BYTES: usize = 10 * 1024 * 1024;
 
 /// Buffer for documents prepared but not yet persisted in Batch mode
 ///
-/// In Batch mode, documents are buffered here after insert_one_prepare()
+/// In Batch mode, operations are buffered here after prepare()
 /// but BEFORE storage write. The actual persist happens in flush_batch()
 /// AFTER WAL commit (fsync), ensuring proper WAL-first ordering.
+///
+/// WAL ORDERING FIX: Now includes updates and deletes, not just inserts.
 #[derive(Debug, Default)]
 pub struct BatchDocBuffer {
     /// Buffered insert operations by collection name
     pub(crate) inserts: HashMap<String, Vec<InsertOnePrepared>>,
+    /// Buffered update operations by collection name (WAL ORDERING FIX)
+    pub(crate) updates: HashMap<String, Vec<UpdateOnePreparedBatch>>,
+    /// Buffered delete operations by collection name (WAL ORDERING FIX)
+    pub(crate) deletes: HashMap<String, Vec<DeleteOnePreparedBatch>>,
     /// Approximate memory usage in bytes
     pub(crate) memory_bytes: usize,
 }
@@ -44,18 +90,22 @@ impl BatchDocBuffer {
     pub fn new() -> Self {
         Self {
             inserts: HashMap::new(),
+            updates: HashMap::new(),
+            deletes: HashMap::new(),
             memory_bytes: 0,
         }
     }
 
     /// Check if the buffer is empty
     pub fn is_empty(&self) -> bool {
-        self.inserts.is_empty()
+        self.inserts.is_empty() && self.updates.is_empty() && self.deletes.is_empty()
     }
 
     /// Clear all buffered documents
     pub fn clear(&mut self) {
         self.inserts.clear();
+        self.updates.clear();
+        self.deletes.clear();
         self.memory_bytes = 0;
     }
 
@@ -68,6 +118,28 @@ impl BatchDocBuffer {
         self.memory_bytes += doc_size;
 
         self.inserts.entry(collection).or_default().push(prepared);
+    }
+
+    /// Add a prepared update to the buffer (WAL ORDERING FIX)
+    pub fn add_update(&mut self, collection: String, prepared: UpdateOnePreparedBatch) {
+        // Estimate memory usage
+        let doc_size = serde_json::to_string(&prepared.new_doc)
+            .map(|s| s.len())
+            .unwrap_or(100);
+        self.memory_bytes += doc_size;
+
+        self.updates.entry(collection).or_default().push(prepared);
+    }
+
+    /// Add a prepared delete to the buffer (WAL ORDERING FIX)
+    pub fn add_delete(&mut self, collection: String, prepared: DeleteOnePreparedBatch) {
+        // Estimate memory usage
+        let doc_size = serde_json::to_string(&prepared.old_doc)
+            .map(|s| s.len())
+            .unwrap_or(100);
+        self.memory_bytes += doc_size;
+
+        self.deletes.entry(collection).or_default().push(prepared);
     }
 
     /// Check if memory limit exceeded
@@ -94,9 +166,60 @@ fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::Ind
 
 /// Pure Rust IronBase Database - language-independent
 ///
-/// Generic over Storage backend:
-/// - `DatabaseCore<StorageEngine>` - Production file-based storage (default)
-/// - `DatabaseCore<MemoryStorage>` - Fast in-memory storage for testing
+/// The central database struct that coordinates all operations: storage, indexing,
+/// transactions, and durability. Generic over storage backend for flexibility.
+///
+/// # Type Parameters
+///
+/// * `S` - Storage backend implementing [`Storage`] + [`RawStorage`] traits
+///   - [`StorageEngine`] - Production file-based storage with WAL and crash recovery
+///   - [`MemoryStorage`] - Fast in-memory storage for testing (no persistence)
+///
+/// # Thread Safety Model
+///
+/// ```text
+/// DatabaseCore fields and their locking:
+/// ┌─────────────────────────┬─────────────────────────────────────────┐
+/// │ Field                   │ Locking Strategy                        │
+/// ├─────────────────────────┼─────────────────────────────────────────┤
+/// │ storage                 │ Arc<RwLock> - read for queries, write   │
+/// │                         │ for mutations                           │
+/// ├─────────────────────────┼─────────────────────────────────────────┤
+/// │ index_managers          │ Arc<RwLock<HashMap>> - per-collection   │
+/// │                         │ IndexManager shared across instances    │
+/// ├─────────────────────────┼─────────────────────────────────────────┤
+/// │ write_transaction_lock  │ SQLite-style: only one write tx at a    │
+/// │                         │ time, 5s timeout, 10ms polling          │
+/// ├─────────────────────────┼─────────────────────────────────────────┤
+/// │ collection_write_locks  │ Fine-grained Mutex per collection for   │
+/// │                         │ Safe mode prepare-WAL-persist atomicity │
+/// └─────────────────────────┴─────────────────────────────────────────┘
+/// ```
+///
+/// # Durability Modes
+///
+/// | Mode   | Commit        | Performance   | Data Loss Risk |
+/// |--------|---------------|---------------|----------------|
+/// | Safe   | Every op      | ~1-5K ops/s   | None           |
+/// | Batch  | Every N ops   | ~20-50K ops/s | Up to N ops    |
+/// | Unsafe | Manual only   | ~50-100K ops/s| All uncommitted|
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use ironbase_core::{DatabaseCore, DurabilityMode};
+/// use ironbase_core::storage::StorageEngine;
+///
+/// // Open with Safe mode (default)
+/// let db = DatabaseCore::<StorageEngine>::open("app.mlite")?;
+///
+/// // Create/access collections
+/// let users = db.collection("users")?;
+///
+/// // CRUD operations (auto-committed in Safe mode)
+/// db.insert_one("users", [("name".to_string(), serde_json::json!("Alice"))].into())?;
+/// # Ok::<(), ironbase_core::IronBaseError>(())
+/// ```
 #[allow(clippy::type_complexity)]
 pub struct DatabaseCore<S: Storage + RawStorage> {
     pub(crate) storage: Arc<RwLock<S>>,

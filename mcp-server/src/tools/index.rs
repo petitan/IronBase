@@ -34,6 +34,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 
 fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let unique = params
         .get("unique")
         .and_then(|v| v.as_bool())
@@ -64,12 +65,14 @@ fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
 
 fn handle_index_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let indexes = adapter.list_indexes(&collection)?;
     Ok(json!({"indexes": indexes}))
 }
 
 fn handle_index_create_fuzzy(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let field = get_string(&params, "field")?;
     let algorithm = params
         .get("algorithm")
@@ -90,6 +93,7 @@ fn handle_index_create_fuzzy(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
 
 fn handle_index_create_fulltext(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let field = get_string(&params, "field")?;
     let language = params
         .get("language")
@@ -125,6 +129,7 @@ fn handle_index_list_fulltext(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
 
 fn handle_index_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let index_name = get_string(&params, "index_name")?;
     adapter.drop_index(&collection, &index_name)?;
     Ok(json!({"success": true, "dropped": index_name}))
@@ -246,6 +251,7 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
 fn handle_explain(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let query = params.get("query").cloned().unwrap_or(json!({}));
     let plan = adapter.explain(&collection, query)?;
     Ok(json!({"plan": plan}))
@@ -253,6 +259,7 @@ fn handle_explain(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
 
 fn handle_find_with_hint(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
+    validate_collection_name(&collection)?;
     let query = params.get("query").cloned().unwrap_or(json!({}));
     let hint = get_string(&params, "hint")?;
     let projection = parse_projection(&params)?;

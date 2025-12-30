@@ -15,7 +15,7 @@ use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
 use crate::query_planner::{QueryPlan, QueryPlanner};
 use crate::storage::{RawStorage, Storage};
-use crate::{log_debug, log_trace, log_warn};
+use crate::{log_debug, log_error, log_trace, log_warn};
 
 mod constraints;
 mod cursor;
@@ -29,7 +29,8 @@ mod update_operators;
 pub(crate) use self::constraints::BatchConstraintValidator;
 pub(crate) use self::index_persistence::try_load_index_from_file;
 pub(crate) use self::index_persistence::{
-    build_fulltext_index_file_path, persist_index_to_disk, try_load_fulltext_index_from_file,
+    build_fulltext_index_file_path, build_fuzzy_index_file_path, persist_index_to_disk,
+    try_load_fulltext_index_from_file, try_load_fuzzy_index_from_file,
 };
 use self::schema::CompiledSchema;
 
@@ -38,6 +39,9 @@ pub(crate) use self::raw_operations::RawOperations;
 
 // Re-export prepared operation structs for WAL-first batch mode
 pub(crate) use self::raw_operations::InsertOnePrepared;
+
+// Re-export batch-mode prepared structs (WAL ORDERING FIX)
+pub(crate) use self::raw_operations::{DeleteOnePreparedBatch, UpdateOnePreparedBatch};
 
 // Re-export FindCursor for streaming queries
 pub use self::cursor::FindCursor;
@@ -1388,9 +1392,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 if !field_updates.is_empty() {
                     index.apply_batch_updates(field_updates)?;
                 }
-                // Apply removals
+                // Apply removals (log warning if delete fails unexpectedly)
                 for (key, doc_id) in removals {
-                    let _ = index.delete(&key, &doc_id); // Ignore errors for missing entries
+                    if let Err(e) = index.delete(&key, &doc_id) {
+                        log_warn!(
+                            "B+tree index '{}' delete failed for doc {:?}: {:?}",
+                            index_name,
+                            doc_id,
+                            e
+                        );
+                    }
                 }
                 // Apply additions
                 for (key, doc_id) in additions {
@@ -1425,7 +1436,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         // Then add new entry if it's a string
                         if let Some(new_val) = new_value {
                             if let Some(text) = new_val.as_str() {
-                                let _ = fts_index.update(&updated_doc.id, text);
+                                // Log error but continue - document already persisted
+                                if let Err(e) = fts_index.update(&updated_doc.id, text) {
+                                    log_error!(
+                                        "Failed to update fulltext index '{}' for doc {:?}: {:?}",
+                                        fts_name,
+                                        updated_doc.id,
+                                        e
+                                    );
+                                }
                             }
                             // If new value is not a string, entry already removed above
                         }

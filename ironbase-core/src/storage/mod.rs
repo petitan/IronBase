@@ -1,5 +1,72 @@
-// storage/mod.rs
-// Storage engine module
+//! Append-Only Storage Engine
+//!
+//! This module implements IronBase's persistent storage layer using an
+//! append-only file format with WAL (Write-Ahead Log) for crash safety.
+//!
+//! # File Format (.mlite)
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │ Header (256 bytes)                                              │
+//! │ ┌─────────────┬─────────────┬───────────────┬─────────────────┐ │
+//! │ │ magic (8B)  │ version (4) │ page_size (4) │ metadata_offset │ │
+//! │ │ "MONGOLTE"  │      4      │     4096      │     (u64)       │ │
+//! │ └─────────────┴─────────────┴───────────────┴─────────────────┘ │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │ Document Data (append-only)                                     │
+//! │ ┌────────────┬──────────────────────────────────────────────┐   │
+//! │ │ len (4B)   │ JSON document bytes                          │   │
+//! │ ├────────────┼──────────────────────────────────────────────┤   │
+//! │ │ len (4B)   │ JSON document bytes                          │   │
+//! │ └────────────┴──────────────────────────────────────────────┘   │
+//! │                        ...                                      │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │ Collection Metadata (JSON)      ← at metadata_offset (EOF)     │
+//! │ - document_catalog: HashMap<DocumentId, offset>                 │
+//! │ - indexes: Vec<IndexMetadata>                                   │
+//! │ - fulltext_indexes, fuzzy_indexes, schema                       │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! # Version History
+//!
+//! | Version | Feature |
+//! |---------|---------|
+//! | 1 | Initial format with fixed metadata location |
+//! | 2 | Dynamic metadata at EOF (no file truncation) |
+//! | 3 | Explicit `data_end_offset` tracking |
+//! | 4 | `clean_shutdown` flag for fast restart |
+//!
+//! # Append-Only Design
+//!
+//! Documents are NEVER modified in-place:
+//! - **Insert**: Append new document, add to catalog
+//! - **Update**: Append new version, update catalog offset
+//! - **Delete**: Append tombstone marker, remove from catalog
+//!
+//! Benefits:
+//! - **Lock-free backup**: Backup tools can read while database writes
+//! - **Crash safety**: Partial writes don't corrupt existing data
+//! - **Simple recovery**: Scan from start to rebuild state
+//!
+//! # Storage Backends
+//!
+//! Two implementations of the [`Storage`] trait:
+//! - [`StorageEngine`] - Production file-based storage with WAL
+//! - [`MemoryStorage`] - Fast in-memory storage for testing (10-100x faster)
+//!
+//! # Thread Safety
+//!
+//! StorageEngine is NOT thread-safe internally. Thread safety is provided
+//! by `DatabaseCore` wrapping it in `Arc<RwLock<StorageEngine>>`.
+//!
+//! # Submodules
+//!
+//! - [`compaction`] - Garbage collection for tombstones
+//! - [`metadata`] - Metadata serialization and version migration
+//! - [`memory_storage`] - In-memory storage backend
+//! - [`traits`] - Storage trait definitions
+//! - [`io`] - Low-level I/O operations
 
 mod compaction;
 mod io;
