@@ -4,17 +4,17 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-A modul array-specifikus query operátorokat implementál:
-- `AllOperator` - minden megadott érték jelenlétét ellenőrzi a dokumentum tömbben
-- `ElemMatchOperator` - legalább egy tömb elem illeszkedését vizsgálja az összes filter feltételre
-- `InOperator` - érték jelenlétét ellenőrzi megadott értékek között
-- `NinOperator` - érték hiányát ellenőrzi megadott értékek között  
-- `SizeOperator` - tömb méret ellenőrzésére szolgál
-
-Mindegyik implementálja az `OperatorMatcher` trait-et.
+A modul array műveletek operátorait implementálja:
+- `InOperator` - értékek meglétének ellenőrzése tömbben
+- `NinOperator` - értékek hiányának ellenőrzése tömbben  
+- `AllOperator` - minden szükséges érték meglétének ellenőrzése dokumentum tömbben
+- `ElemMatchOperator` - legalább egy tömb elem illeszkedésének ellenőrzése összes feltételre
+- `SizeOperator` - tömb méret ellenőrzése
 
 ## Tervezési döntések és invariánsok
-Az operátorok ciklomatikus komplexitása 4-8 között mozog, ami közepes összetettségű logikára utal. Az `AllOperator` és `ElemMatchOperator` rendelkeznek a legmagasabb komplexitással (8 és 6-8), míg a többi operátor egyszerűbb (4-6).
+- `AllOperator`: minden szükséges értéknek jelen kell lennie a dokumentum tömbben
+- `ElemMatchOperator`: legalább egy tömb elemnek illeszkednie kell a filter_value összes feltételére
+- Ciklomatikus komplexitás értékek: InOperator/NinOperator/SizeOperator (CC=4), AllOperator (CC=6-8), ElemMatchOperator (CC=8)
 
 ## Használati minták
 Nincs dokumentált információ.

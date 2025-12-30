@@ -9,7 +9,7 @@ A modul ACID (Atomicity, Consistency, Isolation, Durability) tulajdonságokkal r
 - **OrderedFloat**: Index változtatások atomikus alkalmazásához használt típus
 
 ## Tervezési döntések és invariánsok
-Az atomicitás központi szerepet játszik - mind a tranzakciók, mind az index változtatások atomikus végrehajtásra vannak tervezve.
+Az index változtatások atomikus alkalmazása központi követelmény - mind az `IndexChange` struktúra, mind az `OrderedFloat` típus ezt a célt szolgálja.
 
 ## Használati minták
 Nincs dokumentált információ.

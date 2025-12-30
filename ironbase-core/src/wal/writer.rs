@@ -1,5 +1,26 @@
-// wal/writer.rs
-// Write-Ahead Log file manager
+//! # WAL Writer - Write-Ahead Log Fájl Kezelő
+//!
+//! Felelős a WAL fájl írásáért és életciklus kezeléséért.
+//!
+//! ## Műveletek
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────┐
+//! │  WriteAheadLog                                          │
+//! ├─────────────────────────────────────────────────────────┤
+//! │  open(path)    → Megnyitás/létrehozás                   │
+//! │  append(entry) → Bejegyzés hozzáadása (seek end + write)│
+//! │  flush()       → fsync() - adatok lemezre írása         │
+//! │  recover()     → Committed TX-ek visszaolvasása         │
+//! │  clear()       → WAL törlése (recovery után)            │
+//! │  checkpoint()  → Committed TX-ek eltávolítása           │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Windows Kompatibilitás
+//!
+//! `clear()` workaround: Windows-on append mode-ban `set_len(0)` "Access Denied".
+//! Megoldás: close → truncate mode open → reopen append mode.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};

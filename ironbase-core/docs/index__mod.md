@@ -7,7 +7,8 @@ Nincs dokumentált információ.
 Nincs dokumentált információ.
 
 ## Tervezési döntések és invariánsok
-- A `build_from_sorted` függvény helyettesítő (replacement) szemantikával működik, nem hozzáadó (additive) módon a meglévő fához
+- A `build_from_sorted` függvény korábban a meglévő fához adta hozzá az elemeket ahelyett, hogy lecserélte volna azt
+- Non-unique indexekben több bejegyzés oszthatja meg ugyanazt a kulcsot, ezért az összes egyező bejegyzést végig kell szkennelni a keresés során
 - Eltávolított dokumentumok nem találhatók meg keresés során
 
 ## Használati minták

@@ -4,20 +4,19 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-- `Document`: Dokumentum reprezentáció, amely `_id` mezővel rendelkezik
-- `DocumentId`: Dokumentum azonosító típus, amely hiányzó vagy érvénytelen típusú `_id` esetén None értéket ad vissza
+- `Document`: Dokumentum reprezentáció, amely `Value` típusú adatot kezel
+- `DocumentId`: Dokumentum azonosító enum típus, amely `_id` mezőből származtatható
 
 ## Tervezési döntések és invariánsok
-- A `_id` mező speciális kezelést igényel a query engine-ben, mivel nem lehet rá referenciát visszaadni
-- A `#[serde(rename = "_id")]` annotáció az id mezőt "elfogyasztja" a szerializáció során
-- Tulajdonjog-alapú API tervezés: a `from_value_owned` függvény átveszi a `Value` tulajdonjogát, elkerülve a klónozást amikor a hívó már rendelkezik tulajdonjoggal
+- A `_id` mező speciális kezelést igényel a lekérdező motorban, mivel nem lehet rá referenciát visszaadni
+- A `DocumentId` létrehozása sikertelen, ha az `_id` mező hiányzik vagy érvénytelen típusú
+- A serde `#[serde(rename = "_id")]` annotáció az `id` mezőn elfogyasztja azt
 
 ## Használati minták
-Nincs dokumentált információ.
+- Tulajdonjog-alapú API használata ajánlott a klónozás elkerülése érdekében, amikor a hívó rendelkezik saját `Value` példánnyal
 
 ## Korlátok
-- A `_id` mező hiánya vagy érvénytelen típusa esetén a műveletek None értéket adnak vissza
-- HashMap használat miatt a nevek sorrendje változhat wildcard keresések során
+Nincs dokumentált információ.
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/document.rs*

@@ -1,5 +1,36 @@
-// wal/recovery.rs
-// Transaction grouper for streaming WAL recovery
+//! # WAL Recovery - Streaming Tranzakció Csoportosító
+//!
+//! Csoportosítja a WAL bejegyzéseket tranzakciók szerint, és csak a
+//! COMMIT-olt tranzakciókat adja vissza recovery-hoz.
+//!
+//! ## Működés
+//!
+//! ```text
+//! TransactionGrouper<I: Iterator<Item = Result<WALEntry>>>
+//! ┌─────────────────────────────────────────────────────────┐
+//! │                                                         │
+//! │  WAL entries:   BEGIN(1) OP(1) BEGIN(2) OP(2) COMMIT(1) │
+//! │                    │       │      │       │       │     │
+//! │                    ▼       ▼      ▼       ▼       ▼     │
+//! │  Active TXs:    {1:[]}  {1:[OP]} {1,2}  {1,2}   yield   │
+//! │                                                   │     │
+//! │                                                   ▼     │
+//! │                                    CommittedTransaction │
+//! │                                    { id: 1, ops: [OP] } │
+//! │                                                         │
+//! │  Memória: O(active transactions) - NEM O(all entries)   │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Tranzakció Állapotok
+//!
+//! | Entry Type | Hatás                                    |
+//! |------------|------------------------------------------|
+//! | BEGIN      | Új TX tracking indítása                  |
+//! | OPERATION  | Op hozzáadása aktív TX-hez               |
+//! | COMMIT     | TX yield (visszaadás recovery-hoz)       |
+//! | ABORT      | TX eldobása (nem yield)                  |
+//! | (EOF)      | Uncommitted TX-ek eldobása               |
 
 use std::collections::HashMap;
 

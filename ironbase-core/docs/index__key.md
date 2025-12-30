@@ -7,9 +7,8 @@ Nincs dokumentált információ.
 - `IndexKey` típus, amely `serde_json::Value` értékekből konvertálható
 
 ## Tervezési döntések és invariánsok
-- A `serde_json::Value` referenciából való konverzió során a stringeket klónozni kell
-- A tulajdonolt `serde_json::Value`-ból való konverzió zero-copy módon történik stringek esetében
-- Az `IndexKey` típus összehasonlítható (`PartialOrd` implementáció)
+- A `serde_json::Value` referenciából történő konverzió során a stringeket klónozni kell
+- Az owned `serde_json::Value` konverzió zero-copy módon kezeli a stringeket, tulajdonjogot átvéve
 
 ## Használati minták
 Nincs dokumentált információ.

@@ -1,25 +1,23 @@
 # Modul: `storage::compaction`
 
-```markdown
 ## Cél
-A modul célja a storage compaction végrehajtása, amely eltávolítja a tombstone-okat és a dokumentumok régi verzióit.
+A storage compaction célja a tombstone-ok és régi dokumentum verziók eltávolítása az adatbázisból.
 
 ## Fő absztrakciók
-- `CompactionConfig`: Konfiguráció a compaction folyamathoz
-- `CompactionStats`: Statisztikák a compaction műveletről
-- Chunked processing: A compaction darabolva történő feldolgozást használ
+- `CompactionConfig`: Konfigurációs típus a compaction folyamat beállításaihoz
+- `CompactionStats`: Statisztikák gyűjtése a compaction művelet eredményeiről
+- Chunked processing: A compaction darabolva dolgozza fel az adatokat
 
 ## Tervezési döntések és invariánsok
-- Catalog-alapú iteráció használata szekvenciális fájl scan helyett
-- Atomi fájlcsere és adatbázis állapot újratöltés a finalizálás során
-- Az atomi fájlcsere a legtöbb fájlrendszeren atomi művelet
+- Katalógus-alapú iteráció használata szekvenciális fájl szkennelés helyett
+- Atomi fájlcsere biztosítása (a legtöbb fájlrendszeren atomi művelet)
+- A compaction végén az adatbázis állapot újratöltése szükséges
 
 ## Használati minták
 Nincs dokumentált információ.
 
 ## Korlátok
 Nincs dokumentált információ.
-```
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/storage/compaction.rs*

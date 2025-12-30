@@ -1,5 +1,167 @@
-// src/database/durability.rs
-// Auto-commit CRUD operations with durability mode handling
+//! # Durability Modul - Auto-Commit CRUD és Tartósság Kezelés
+//!
+//! ## Cél
+//!
+//! Ez a modul felelős az írási műveletek tartósságának (durability) biztosításáért.
+//! Implementálja a 3 durability módot és a WAL-first commit stratégiát.
+//!
+//! ## Durability Módok
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────────────────────┐
+//! │                     DURABILITY MODE ÖSSZEHASONLÍTÁS                      │
+//! ├──────────────────────────────────────────────────────────────────────────┤
+//! │                                                                          │
+//! │   SAFE MODE (default)                                                    │
+//! │   ┌────────────────────────────────────────────────────────────────┐    │
+//! │   │  insert_one()                                                  │    │
+//! │   │      │                                                         │    │
+//! │   │      ▼                                                         │    │
+//! │   │  prepare() → WAL write → WAL fsync → persist() → OK           │    │
+//! │   │              ▲                                                 │    │
+//! │   │              │                                                 │    │
+//! │   │         ATOMIC POINT                                           │    │
+//! │   │         (crash után recovery újrajátssza)                      │    │
+//! │   │                                                                │    │
+//! │   │  Sebesség: ~1,000-5,000 ops/sec                                │    │
+//! │   │  Adatvesztés crash-nél: 0 (garantált)                          │    │
+//! │   └────────────────────────────────────────────────────────────────┘    │
+//! │                                                                          │
+//! │   BATCH MODE                                                             │
+//! │   ┌────────────────────────────────────────────────────────────────┐    │
+//! │   │  insert_one() → buffer ops (N darab)                           │    │
+//! │   │      │                                                         │    │
+//! │   │      ▼ (buffer full VAGY memory limit)                         │    │
+//! │   │  flush_batch():                                                │    │
+//! │   │      │                                                         │    │
+//! │   │      ├─▶ WAL write ALL ops                                     │    │
+//! │   │      ├─▶ WAL fsync ← ATOMIC POINT                              │    │
+//! │   │      ├─▶ persist ALL docs                                      │    │
+//! │   │      └─▶ sync storage                                          │    │
+//! │   │                                                                │    │
+//! │   │  Sebesség: ~20,000-50,000 ops/sec                              │    │
+//! │   │  Adatvesztés crash-nél: max batch_size ops                     │    │
+//! │   └────────────────────────────────────────────────────────────────┘    │
+//! │                                                                          │
+//! │   UNSAFE MODE                                                            │
+//! │   ┌────────────────────────────────────────────────────────────────┐    │
+//! │   │  insert_one() → storage write (NO WAL!)                        │    │
+//! │   │      │                                                         │    │
+//! │   │      ▼ (opcionális auto_checkpoint)                            │    │
+//! │   │  checkpoint() → metadata flush                                 │    │
+//! │   │                                                                │    │
+//! │   │  Sebesség: ~50,000-100,000 ops/sec                             │    │
+//! │   │  Adatvesztés crash-nél: minden uncommitted (!)                 │    │
+//! │   └────────────────────────────────────────────────────────────────┘    │
+//! │                                                                          │
+//! └──────────────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## WAL-First Commit Stratégia (Safe Mode)
+//!
+//! ```text
+//! ┌───────────────────────────────────────────────────────────────┐
+//! │              SAFE MODE: 4-PHASE COMMIT PROTOCOL               │
+//! ├───────────────────────────────────────────────────────────────┤
+//! │                                                               │
+//! │   Phase 1: PREPARE                                            │
+//! │   ┌─────────────────────────────────────────────────────┐    │
+//! │   │  - Validáció (schema, unique constraint)            │    │
+//! │   │  - _id generálás                                    │    │
+//! │   │  - WAL doc előkészítés                              │    │
+//! │   │  - NEM ír storage-ba!                               │    │
+//! │   └─────────────────────────────────────────────────────┘    │
+//! │                         │                                     │
+//! │                         ▼                                     │
+//! │   Phase 2: WAL COMMIT                                         │
+//! │   ┌─────────────────────────────────────────────────────┐    │
+//! │   │  - BEGIN entry → WAL                                │    │
+//! │   │  - OPERATION entry → WAL                            │    │
+//! │   │  - COMMIT entry → WAL                               │    │
+//! │   │  - fsync() ← ATOMIC POINT (crash-safe innen)        │    │
+//! │   └─────────────────────────────────────────────────────┘    │
+//! │                         │                                     │
+//! │                         ▼                                     │
+//! │   Phase 3: PERSIST                                            │
+//! │   ┌─────────────────────────────────────────────────────┐    │
+//! │   │  - Storage write (append doc)                       │    │
+//! │   │  - Index update                                     │    │
+//! │   │  - Cache invalidation                               │    │
+//! │   └─────────────────────────────────────────────────────┘    │
+//! │                         │                                     │
+//! │                         ▼                                     │
+//! │   Phase 4: CLEANUP                                            │
+//! │   ┌─────────────────────────────────────────────────────┐    │
+//! │   │  - Metadata flush                                   │    │
+//! │   │  - WAL clear                                        │    │
+//! │   └─────────────────────────────────────────────────────┘    │
+//! │                                                               │
+//! └───────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Batch Mode WAL Ordering (Bug Fix)
+//!
+//! ```text
+//! HIBÁS IMPLEMENTÁCIÓ (korábban):
+//! ┌───────────────────────────────────────────┐
+//! │  1. insert_one_persist() → storage write  │
+//! │  2. add_to_batch() → buffer op            │
+//! │  3. flush_batch() → WAL write + fsync     │
+//! │                                           │
+//! │  CRASH WINDOW: 1 és 3 között!             │
+//! │  → Doc storage-ban, de NINCS WAL-ban      │
+//! │  → Recovery után doc "eltűnik"            │
+//! └───────────────────────────────────────────┘
+//!
+//! HELYES IMPLEMENTÁCIÓ (mostani):
+//! ┌───────────────────────────────────────────┐
+//! │  1. insert_one_prepare() → validate, ID   │
+//! │  2. buffer prepared doc                   │
+//! │  3. add_to_batch() → buffer WAL op        │
+//! │  4. flush_batch():                        │
+//! │     a) WAL write ALL                      │
+//! │     b) WAL fsync ← ATOMIC                 │
+//! │     c) persist ALL docs                   │
+//! │     d) sync storage                       │
+//! │                                           │
+//! │  NINCS CRASH WINDOW                       │
+//! │  → WAL MINDIG előbb, storage utána        │
+//! └───────────────────────────────────────────┘
+//! ```
+//!
+//! ## Persist Failure Kezelés (ABORT Entry)
+//!
+//! Ha a WAL commit után a persist phase sikertelen:
+//!
+//! ```text
+//! 1. WAL commit OK
+//! 2. persist() → ERROR
+//! 3. abort_committed_transaction(tx_id) → ABORT entry WAL-ba
+//! 4. Recovery: látja COMMIT-ot, DE utána ABORT-ot → skip TX
+//! ```
+//!
+//! ## Invariánsok
+//!
+//! 1. **WAL-First**: Storage write SOHA nem előzi meg a WAL commit-ot (Safe mode)
+//! 2. **Atomic Point**: WAL fsync után az adat crash-safe
+//! 3. **Read Committed**: Aktív write TX blokkolja az új write-okat
+//! 4. **Hybrid Locking**: Collection lock CSAK unique index esetén kell
+//! 5. **Memory Limit**: Batch mode automatikusan flush-ol ha túl sok memória
+//!
+//! ## Teljesítmény Trade-off-ok
+//!
+//! | Mód    | fsync/op | Sebesség | Crash garancia |
+//! |--------|----------|----------|----------------|
+//! | Safe   | 1        | Lassú    | 100%           |
+//! | Batch  | 1/N      | Gyors    | batch_size ops |
+//! | Unsafe | 0        | Leggyorsabb | Nincs       |
+//!
+//! ## Kapcsolódó Modulok
+//!
+//! - [`crate::wal`] - Write-Ahead Log implementáció
+//! - [`crate::transaction`] - Transaction állapotgép
+//! - [`crate::storage`] - Storage engine (append, flush)
+//! - [`crate::durability::DurabilityMode`] - Mód enum definíció
 
 use std::collections::HashMap;
 use std::sync::atomic::Ordering;

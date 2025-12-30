@@ -5,12 +5,12 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-A modul két operátor típust tartalmaz:
-- `FuzzyOperator` - fuzzy szöveges keresési műveletek végrehajtására
-- `RegexOperator` - reguláris kifejezés alapú szöveges keresési műveletek végrehajtására
+A modul két operátor struktúrát tartalmaz:
+- `RegexOperator` - reguláris kifejezés alapú szövegkeresés (komplexitás: CC = 5)
+- `FuzzyOperator` - fuzzy szövegkeresés (komplexitás: CC = 6)
 
 ## Tervezési döntések és invariánsok
-A `FuzzyOperator` implementációja közepes komplexitású (CC = 6), míg a `RegexOperator` valamivel egyszerűbb (CC = 5), ami eltérő algoritmusok használatára utal a két keresési típus között.
+Nincs dokumentált információ.
 
 ## Használati minták
 Nincs dokumentált információ.

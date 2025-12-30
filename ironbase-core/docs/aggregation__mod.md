@@ -4,20 +4,17 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-Nincs dokumentált információ.
+- `$push` operátor: összes érték tömbben való tárolására szolgál
 
 ## Tervezési döntések és invariánsok
-Nincs dokumentált információ.
+- A `$push` operátor O(N) komplexitású és nem optimalizált
+- Teljes szkennelés helyett indexelt find() használata javasolt
 
 ## Használati minták
 Nincs dokumentált információ.
 
 ## Korlátok
 Nincs dokumentált információ.
-
----
-*Megjegyzés: A `aggregation::mod` modul nem tartalmazott értékelhető kommenteket.*
-
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/aggregation/mod.rs*

@@ -2,15 +2,17 @@
 
 ```markdown
 ## Cél
-Nincs dokumentált információ.
+A modul célja a storage kompaktálás megvalósítása, amely eltávolítja a tombstone-okat és régi dokumentum verziókat. A warm-up idő optimalizálása 70K dokumentum esetén ~100 másodpercről 1 másodperc alá.
 
 ## Fő absztrakciók
 - `DatabaseCore<S>`: Generikus adatbázis mag implementáció
-- `compact` funkció: Storage-specifikus tömörítési művelet tombstone-ok és régi dokumentum verziók eltávolítására
+- `compact` funkció: StorageEngine-specifikus kompaktálási művelet
+- Batch mode műveletek kezelése
 
 ## Tervezési döntések és invariánsok
-- Batch módban függőben lévő műveletek NEM kerülnek flush-elésre a `DatabaseCore<S>` Drop implementációjában
-- A tömörítési művelet StorageEngine-specifikus implementációt igényel
+- A batch mode-ban függőben lévő műveletek NEM kerülnek flush-elésre a `DatabaseCore<S>` Drop implementációjában
+- A kompaktálás StorageEngine-specifikus implementációt igényel
+- Hibakezelés figyelmeztetések naplózásával történik, hibák visszaadása helyett
 
 ## Használati minták
 Nincs dokumentált információ.

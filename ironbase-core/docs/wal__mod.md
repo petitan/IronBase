@@ -1,5 +1,6 @@
 # Modul: `wal::mod`
 
+```markdown
 ## Cél
 Nincs dokumentált információ.
 
@@ -7,17 +8,14 @@ Nincs dokumentált információ.
 Nincs dokumentált információ.
 
 ## Tervezési döntések és invariánsok
-Nincs dokumentált információ.
+**Atomicity**: Egy tranzakció vagy teljes egészében látható, vagy egyáltalán nem.
 
 ## Használati minták
 Nincs dokumentált információ.
 
 ## Korlátok
 Nincs dokumentált információ.
-
----
-*Megjegyzés: A `wal::mod` modul nem tartalmazott értékelhető kommenteket.*
-
+```
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/wal/mod.rs*

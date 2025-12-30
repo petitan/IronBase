@@ -1,29 +1,29 @@
 # Modul: `collection_core::raw_operations`
 
 ## Cél
-Nincs dokumentált információ.
+A modul nyers adatbázis műveleteket implementál atomicitás és memóriahatékonyság biztosításával. A fő cél a versenyhelyzetek (race condition) eliminálása és a batch műveletek optimalizálása.
 
 ## Fő absztrakciók
-- `UpdateOnePrepared` - Atomi read-modify-write műveletek előkészített állapota
-- `DeleteOnePrepared` - Atomi find-and-delete műveletek előkészített állapota
-- Kétfázisú műveletek: prepare fázis (I/O write lock alatt) és persist fázis
+- `UpdateOnePrepared`: Atomi read-modify-write műveletek támogatására
+- `DeleteOnePrepared`: Atomi find-and-delete műveletek támogatására
+- `try_direct_id_lookup`: O(1) _id alapú keresés optimalizáció
+- Streaming document loading: Memóriahatékony dokumentum betöltés
 
 ## Tervezési döntések és invariánsok
-- **Atomi műveletek**: Write lock tartása a teljes read-modify-write ciklus alatt a lost update-ek elkerülésére, kritikus $inc műveleteknél
+- **Atomicitás biztosítása**: Write lock tartása a teljes read-modify-write ciklus alatt, kritikus $inc műveleteknél
 - **Lock sorrend**: Insert műveletek storage→index sorrendet használnak, drop_index műveletek index→storage sorrendet
-- **Index-first stratégia**: Batch műveleteknél az indexek frissítése történik először (atomi szinten), majd a storage írás
-- **Race condition elkerülés**: Write lock megszerzése a dokumentumok olvasása előtt megelőzi a konkurens hozzáférési problémákat
-- **Streaming document loading**: Memória optimalizáció a teljes dokumentum betöltés helyett
+- **Batch műveletek**: Index-first megközelítés biztonságosabb storage-first helyett
+- **Metadata flush elkerülése**: Insert műveletek nem flush-elik a metadatát teljesítmény okokból
+- **Constraint ellenőrzés**: Batch műveleteknél minden constraint ellenőrzés először történik, majd az írások
 
 ## Használati minták
-- **O(1) _id lookup optimalizáció**: Közvetlen _id alapú keresés teljes scan helyett
-- **Batch optimalizáció**: Egyetlen lock megszerzéssel több dokumentum olvasása N darab lock helyett
-- **HashMap pre-allokáció**: Ismert kapacitással történő memória optimalizáció
-- **Metadata flush elkerülés**: Teljesítmény optimalizáció érdekében nincs metadata flush minden insert után
+- Write lock megszerzése kötelező az I/O műveletek előtt (PHASE 6)
+- Batch műveleteknél egyetlen lock megszerzés N dokumentumhoz N lock helyett
+- Index műveletek batch-ben történnek (all-or-nothing)
+- Streaming document loading használata scan_documents_via_catalog() helyett memóriaproblémák elkerülésére
 
 ## Korlátok
-- Zárt kollekciókban az insert műveletek sikertelenek
-- Konkurens műveletek esetén az eredmények változhatnak, de a teljes konzisztencia megmarad
+Nincs dokumentált információ.
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/collection_core/raw_operations.rs*

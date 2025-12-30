@@ -4,19 +4,20 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-- **IndexManager**: Index kezelő komponens
-- **Compound index**: Összetett kulcsú indexek
-- **B-tree index**: B-fa alapú indexek  
-- **Fulltext index**: Teljes szöveges indexek
-- **Fuzzy index**: Fuzzy keresési indexek
+- `IndexManager` - központi típus az indexek kezelésére
+- B-tree indexek egyedi értékek támogatásával
+- Compound (összetett) indexek egyedi kulcs támogatással
+- Fulltext indexek
+- Fuzzy indexek dokumentum ID alapú kezeléssel
 
 ## Tervezési döntések és invariánsok
-- **Unique indexek**: Null kulcsok beszúrásra kerülnek és explicit eltávolítást igényelnek
-- **Fuzzy indexek**: Dokumentum ID alapú eltávolítást használnak
-- **Index típusok**: Különböző index típusok eltérő eltávolítási stratégiákat alkalmaznak
+- Egyedi indexeknél null kulcsok beszúrásra kerülnek és eltávolításkor külön kezelendők
+- Fuzzy indexeknél a dokumentumok ID alapján kerülnek eltávolításra
+- Query optimalizáció a `select_best_index()` metódussal implementált
 
 ## Használati minták
-Nincs dokumentált információ.
+- `IndexManager` maga NEM thread-safe - a konkurencia kezelés külső mechanizmusokkal történik
+- Fulltext index törlése Ok(()) értéket ad vissza sikeres eltávolítás esetén, Err-t ha nem található
 
 ## Korlátok
 Nincs dokumentált információ.

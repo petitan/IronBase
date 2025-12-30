@@ -1,5 +1,26 @@
-// wal/entry.rs
-// WAL entry types and serialization
+//! # WAL Entry - Bejegyzés Típusok és Serializáció
+//!
+//! Ez a modul definiálja a WAL bejegyzések struktúráját és bináris formátumát.
+//!
+//! ## Bináris Formátum
+//!
+//! ```text
+//! ┌────────────────────────────────────────────────────────┐
+//! │              WAL ENTRY STRUCTURE                       │
+//! ├────────────────────────────────────────────────────────┤
+//! │  transaction_id: 8 byte (u64 LE)                       │
+//! │  entry_type:     1 byte (WALEntryType)                 │
+//! │  data_len:       4 byte (u32 LE)                       │
+//! │  data:           N byte (JSON payload)                 │
+//! │  checksum:       4 byte (CRC32)                        │
+//! └────────────────────────────────────────────────────────┘
+//! Header size: 13 byte | Max entry size: 64MB (security limit)
+//! ```
+//!
+//! ## Invariánsok
+//!
+//! - CRC32 checksum minden entry-re → corruption detection
+//! - MAX_WAL_ENTRY_SIZE (64MB) → OOM protection
 
 use crate::error::{IronBaseError, Result};
 use crate::transaction::TransactionId;

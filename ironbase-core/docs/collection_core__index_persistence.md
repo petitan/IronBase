@@ -8,7 +8,7 @@ Nincs dokumentált információ.
 Nincs dokumentált információ.
 
 ## Tervezési döntések és invariánsok
-Az index betöltési műveletek hibatűrő megközelítést alkalmaznak - nem létező vagy sérült fájlok esetén None értékkel térnek vissza, lehetővé téve a fallback újraépítési mechanizmust.
+Az index betöltési függvények hibatűrő megközelítést alkalmaznak - nem létező vagy sérült fájlok esetén None értékkel térnek vissza, lehetővé téve az index újraépítését fallback mechanizmusként.
 
 ## Használati minták
 Nincs dokumentált információ.
