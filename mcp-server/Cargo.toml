@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.102"
+version = "1.0.103"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
@@ -51,6 +51,9 @@ rhai = { version = "1.19", features = ["sync"] }
 
 # Base64 encoding for scripts
 base64 = "0.22"
+
+# System information (memory stats)
+sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 # IronBase integration
 ironbase-core = { path = "../ironbase-core" }

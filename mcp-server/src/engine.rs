@@ -13,6 +13,7 @@ use crate::acl::{
 };
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
+use crate::scripting::LimitsManager;
 use crate::tools::dispatch_tool;
 use crate::ServerInfo;
 use serde_json::Value;
@@ -104,6 +105,7 @@ impl ToolResult {
 /// - API key validation
 /// - ACL permission checks
 /// - Tool dispatch
+/// - Dynamic resource limits (memory-based)
 ///
 /// It is protocol-independent and can be used from HTTP, stdio, or other transports.
 pub struct IronBaseService {
@@ -112,6 +114,7 @@ pub struct IronBaseService {
     api_key_cache: ApiKeyCache,
     server_info: ServerInfo,
     require_api_key: bool,
+    limits_manager: Arc<LimitsManager>,
 }
 
 impl IronBaseService {
@@ -122,6 +125,7 @@ impl IronBaseService {
         api_key_cache: ApiKeyCache,
         server_info: ServerInfo,
         require_api_key: bool,
+        limits_manager: Arc<LimitsManager>,
     ) -> Self {
         Self {
             adapter,
@@ -129,7 +133,13 @@ impl IronBaseService {
             api_key_cache,
             server_info,
             require_api_key,
+            limits_manager,
         }
+    }
+
+    /// Get the limits manager
+    pub fn limits_manager(&self) -> &Arc<LimitsManager> {
+        &self.limits_manager
     }
 
     /// Get the adapter for direct access

@@ -399,6 +399,9 @@ async fn run_http_server_internal(
     // Create ACL manager
     let acl_manager = AclManager::new(adapter.clone());
 
+    // Create dynamic limits manager (calculates limits based on available memory)
+    let limits_manager = crate::LimitsManager::new();
+
     // Initialize listener configuration in database
     {
         use crate::listener::ListenerManager;
@@ -427,7 +430,18 @@ async fn run_http_server_internal(
         api_key_cache,
         server_info,
         config.require_api_key,
+        limits_manager.clone(),
     ));
+
+    // Spawn periodic limits refresh task (every 5 minutes)
+    let limits_for_refresh = limits_manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        loop {
+            interval.tick().await;
+            limits_for_refresh.refresh_if_needed();
+        }
+    });
 
     let app_state = Arc::new(HttpAppState {
         service,
