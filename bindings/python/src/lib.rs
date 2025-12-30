@@ -508,7 +508,8 @@ impl IronBase {
 
     /// Get database statistics
     fn stats(&self) -> PyResult<String> {
-        Ok(serde_json::to_string_pretty(&self.db.stats()).unwrap())
+        serde_json::to_string_pretty(&self.db.stats())
+            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
     /// Check if database is in-memory
