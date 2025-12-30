@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.105"
+version = "1.0.106"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
