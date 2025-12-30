@@ -727,6 +727,8 @@ pub fn requires_localhost(tool_name: &str) -> bool {
             | "script_rollback"
             | "script_tags_add"
             | "script_tags_remove"
+            // Database management (localhost only)
+            | "db_open"
             // Admin tools (all require localhost)
             | "admin_list_all_collections"
             | "admin_create_system_collection"
