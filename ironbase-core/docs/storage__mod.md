@@ -4,28 +4,30 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-- **StorageEngine**: Deadlock-free implementáció try_lock mechanizmussal
-- **WAL (Write-Ahead Log)**: JSON formátumot használ bincode helyett kompatibilitási okokból
-- **Transaction commit**: 9 lépéses atomi művelet
-- **Document catalog**: Kollekciókat és tombstone-okat kezel
+- **StorageEngine**: A fő tárolási absztrakció
+- **WAL (Write-Ahead Log)**: Helyreállíthatóságot biztosító napló
+- **RawStorage**: Belső implementációs réteg (sealed trait pattern)
+- **document_catalog**: Kollekciónkénti dokumentum katalógus
 
 ## Tervezési döntések és invariánsok
-- **Atomi commit stratégia**: POSIX rename() garantálja az atomicitást temp → final fájlok átnevezésénél
-- **Index atomicitás gyengesége**: Index fájlok NEM kerülnek atomikusan commit-olásra (weak atomicity)
-- **WAL és metadata sorrend**: `log_metadata_to_wal()` MINDIG `flush_metadata()` előtt hívandó a helyreállíthatóság érdekében
-- **Checkpoint kritikus sorrend**: `flush_metadata()` KÖTELEZŐEN `WAL` törlése előtt hívandó
-- **Collection injection centralizáció**: PHASE 5-ben történik a hívók helyett
-- **Sealed trait pattern**: RawStorage szándékosan nem publikus
+- **Atomicitási garancia**: A tranzakció commit 9-lépéses atomi művelet
+- **WAL-metadata sorrend**: `log_metadata_to_wal()` hívása kötelező a `flush_metadata()` előtt a helyreállíthatóság érdekében
+- **Checkpoint kritikus szabály**: `flush_metadata()` hívása kötelező a WAL törlése előtt
+- **Index atomicitás gyengesége**: Az index fájlok nem atomikusan kerülnek commitálásra (weak atomicity)
+- **POSIX rename garancia**: A temp → final átnevezés atomicitását a POSIX rename() biztosítja
+- **WAL kompatibilitás**: JSON formátum használata bincode helyett a kompatibilitás érdekében
+- **Deadlock-mentes design**: `try_lock` azonnal hibával tér vissza, ha zárolva van
 
 ## Használati minták
-- **Graceful shutdown**: `mark_clean_shutdown()` KÖTELEZŐEN hívandó a storage eldobása előtt
-- **Crash detection**: `was_clean_shutdown()` false értéke esetén indexek újraépítése szükséges dokumentumokból
-- **WAL recovery**: DatabaseCore::open() kezeli az index atomicitás miatt
-- **Collection létrehozás**: Crash esetén elveszhet, ha nem megfelelően kezelve (2024-12-26-os bug)
+- **Graceful shutdown**: `mark_clean_shutdown()` kötelező hívása a storage eldobása előtt
+- **Crash recovery**: `was_clean_shutdown()` false értéke esetén az indexeket újra kell építeni a dokumentumokból
+- **WAL recovery**: A `DatabaseCore::open()` kezeli az index atomicitás érdekében
+- **Thread safety**: A StorageEngine belső szinten nem thread-safe, a thread safety külső rétegben biztosított
+- **Kollekció létrehozás**: Kötelező a crash-biztos tárolás érdekében
 
 ## Korlátok
-- Document hossz validáció: nem lépheti túl a document region határait
-- Tombstone-ok eltávolítása után a számlálók nem csökkennek automatikusan
+- **Gyenge index atomicitás**: Az index fájlok nem rendelkeznek teljes atomi commit garanciával
+- **Belső API korlátozás**: A RawStorage szándékosan nem publikus (sealed trait pattern)
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/storage/mod.rs*

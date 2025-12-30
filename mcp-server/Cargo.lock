@@ -723,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "ironbase-core"
-version = "0.3.35"
+version = "0.3.36"
 dependencies = [
  "anyhow",
  "bincode",
@@ -826,7 +826,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp-ironbase-server"
-version = "1.0.103"
+version = "1.0.104"
 dependencies = [
  "axum",
  "axum-server",

@@ -1845,4 +1845,113 @@ mod tests {
         let filter = json!({"$expr": {"$gt": [{"$divide": ["$a", "$b"]}, 0]}});
         assert!(!matches_filter(&doc, &filter).unwrap());
     }
+
+    // ========================================================================
+    // HASHSET OPTIMIZATION TESTS FOR $in/$nin/$all
+    // ========================================================================
+
+    #[test]
+    fn test_in_operator_large_array_performance() {
+        // Test that $in with large array works correctly
+        // This verifies the HashSet optimization doesn't break functionality
+        let op = InOperator;
+
+        // Create a large filter array with 1000 IDs
+        let filter_array: Vec<serde_json::Value> =
+            (0..1000).map(|i| json!(format!("id_{}", i))).collect();
+        let filter = serde_json::Value::Array(filter_array);
+
+        // Test matching value (id_500 is in the array)
+        assert!(op.matches(Some(&json!("id_500")), &filter, None).unwrap());
+
+        // Test non-matching value
+        assert!(!op.matches(Some(&json!("id_9999")), &filter, None).unwrap());
+
+        // Test with array document value
+        let doc_array = json!(["id_999", "other_value"]);
+        assert!(op.matches(Some(&doc_array), &filter, None).unwrap());
+
+        // Test with array document value that doesn't match
+        let doc_array_no_match = json!(["not_in_list", "also_not"]);
+        assert!(!op
+            .matches(Some(&doc_array_no_match), &filter, None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_nin_operator_large_array_performance() {
+        // Test that $nin with large array works correctly
+        let op = NinOperator;
+
+        let filter_array: Vec<serde_json::Value> =
+            (0..1000).map(|i| json!(format!("id_{}", i))).collect();
+        let filter = serde_json::Value::Array(filter_array);
+
+        // Test value NOT in array (should return true for $nin)
+        assert!(op.matches(Some(&json!("id_9999")), &filter, None).unwrap());
+
+        // Test value IN array (should return false for $nin)
+        assert!(!op.matches(Some(&json!("id_500")), &filter, None).unwrap());
+    }
+
+    #[test]
+    fn test_all_operator_large_array_performance() {
+        // Test that $all with large document array works correctly
+        let op = AllOperator;
+
+        // Document with 1000 elements
+        let doc_array: Vec<serde_json::Value> =
+            (0..1000).map(|i| json!(format!("val_{}", i))).collect();
+        let doc = serde_json::Value::Array(doc_array);
+
+        // Required values that are all in document
+        let required_present = json!(["val_0", "val_500", "val_999"]);
+        assert!(op.matches(Some(&doc), &required_present, None).unwrap());
+
+        // Required values where one is NOT in document
+        let required_missing = json!(["val_0", "val_9999"]);
+        assert!(!op.matches(Some(&doc), &required_missing, None).unwrap());
+    }
+
+    #[test]
+    fn test_in_operator_with_numeric_ids() {
+        // Test $in with numeric IDs (common for _id fields)
+        let op = InOperator;
+
+        let filter_array: Vec<serde_json::Value> = (0..100).map(|i| json!(i)).collect();
+        let filter = serde_json::Value::Array(filter_array);
+
+        // Test matching numeric value
+        assert!(op.matches(Some(&json!(50)), &filter, None).unwrap());
+        assert!(op.matches(Some(&json!(0)), &filter, None).unwrap());
+        assert!(op.matches(Some(&json!(99)), &filter, None).unwrap());
+
+        // Test non-matching numeric value
+        assert!(!op.matches(Some(&json!(100)), &filter, None).unwrap());
+        assert!(!op.matches(Some(&json!(-1)), &filter, None).unwrap());
+    }
+
+    #[test]
+    fn test_in_operator_with_mixed_types() {
+        // Test $in with mixed types in filter array
+        let op = InOperator;
+
+        let filter = json!([1, "two", 3.0, true, null, {"nested": "object"}, [1, 2, 3]]);
+
+        // Test hashable types
+        assert!(op.matches(Some(&json!(1)), &filter, None).unwrap());
+        assert!(op.matches(Some(&json!("two")), &filter, None).unwrap());
+        assert!(op.matches(Some(&json!(true)), &filter, None).unwrap());
+        assert!(op.matches(Some(&json!(null)), &filter, None).unwrap());
+
+        // Test non-hashable types (objects/arrays) - should fall back to linear search
+        assert!(op
+            .matches(Some(&json!({"nested": "object"})), &filter, None)
+            .unwrap());
+        assert!(op.matches(Some(&json!([1, 2, 3])), &filter, None).unwrap());
+
+        // Test non-matching
+        assert!(!op.matches(Some(&json!("three")), &filter, None).unwrap());
+        assert!(!op.matches(Some(&json!(false)), &filter, None).unwrap());
+    }
 }

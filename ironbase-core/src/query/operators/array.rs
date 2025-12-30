@@ -5,9 +5,76 @@ use crate::document::Document;
 use crate::error::{IronBaseError, Result};
 use crate::query::operators::text_search::regex_match_with_options;
 use serde_json::Value;
+use std::collections::HashSet;
 
 use super::traits::OperatorMatcher;
 use super::OPERATOR_REGISTRY;
+
+// ============================================================================
+// HashableValue - O(1) lookup support for $in/$nin/$all operators
+// ============================================================================
+
+/// Wrapper for JSON values that can be hashed for O(1) HashSet lookup.
+/// Only primitive types are supported (null, bool, number, string).
+/// Arrays and objects fall back to O(n) linear search.
+#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+enum HashableValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(u64), // f64.to_bits() for hashable float representation
+    String(String),
+}
+
+/// Convert a JSON Value to a HashableValue for O(1) lookup.
+/// Returns None for arrays and objects (not hashable).
+fn value_to_hashable(v: &Value) -> Option<HashableValue> {
+    match v {
+        Value::Null => Some(HashableValue::Null),
+        Value::Bool(b) => Some(HashableValue::Bool(*b)),
+        Value::Number(n) => {
+            // Prefer integer representation for whole numbers
+            if let Some(i) = n.as_i64() {
+                Some(HashableValue::Int(i))
+            } else {
+                // Use bit representation for floats (handles NaN, Inf correctly)
+                n.as_f64().map(|f| HashableValue::Float(f.to_bits()))
+            }
+        }
+        Value::String(s) => Some(HashableValue::String(s.clone())),
+        Value::Array(_) | Value::Object(_) => None, // Not hashable
+    }
+}
+
+/// Build a HashSet from a JSON array for O(1) lookups.
+/// Non-hashable values (arrays, objects) are skipped.
+fn build_hash_set(arr: &[Value]) -> HashSet<HashableValue> {
+    arr.iter().filter_map(value_to_hashable).collect()
+}
+
+/// Check if a value exists in the hash set.
+/// Returns false for non-hashable values.
+fn hash_set_contains(set: &HashSet<HashableValue>, v: &Value) -> bool {
+    value_to_hashable(v)
+        .map(|hv| set.contains(&hv))
+        .unwrap_or(false)
+}
+
+/// Check if a value exists in the filter array.
+/// Uses HashSet for O(1) lookup on hashable values,
+/// falls back to O(n) linear search for arrays/objects.
+fn value_in_array(v: &Value, filter_arr: &[Value], hash_set: &HashSet<HashableValue>) -> bool {
+    // Try O(1) HashSet lookup first
+    if hash_set_contains(hash_set, v) {
+        return true;
+    }
+    // Fallback to O(n) for non-hashable types (arrays, objects)
+    if matches!(v, Value::Array(_) | Value::Object(_)) {
+        filter_arr.contains(v)
+    } else {
+        false
+    }
+}
 
 /// $in operator: Matches any of the values specified in an array
 ///
@@ -35,14 +102,19 @@ impl OperatorMatcher for InOperator {
             None => Ok(false),
             Some(v) => {
                 if let Value::Array(filter_arr) = filter_value {
-                    // Direct check: is doc_value in the filter array?
-                    if filter_arr.contains(v) {
+                    // Build HashSet once for O(1) lookups
+                    let hash_set = build_hash_set(filter_arr);
+
+                    // Direct check: is doc_value in the filter array? O(1)
+                    if value_in_array(v, filter_arr, &hash_set) {
                         return Ok(true);
                     }
                     // MongoDB array element matching: if doc_value is an array,
                     // check if ANY element of doc_value matches ANY value in filter_arr
                     if let Value::Array(doc_arr) = v {
-                        Ok(doc_arr.iter().any(|elem| filter_arr.contains(elem)))
+                        Ok(doc_arr
+                            .iter()
+                            .any(|elem| value_in_array(elem, filter_arr, &hash_set)))
                     } else {
                         Ok(false)
                     }
@@ -81,17 +153,22 @@ impl OperatorMatcher for NinOperator {
         _document: Option<&Document>,
     ) -> Result<bool> {
         if let Value::Array(filter_arr) = filter_value {
+            // Build HashSet once for O(1) lookups
+            let hash_set = build_hash_set(filter_arr);
+
             match doc_value {
                 None => Ok(true), // Field doesn't exist - not in
                 Some(v) => {
-                    // Direct check: is doc_value in the filter array?
-                    if filter_arr.contains(v) {
+                    // Direct check: is doc_value in the filter array? O(1)
+                    if value_in_array(v, filter_arr, &hash_set) {
                         return Ok(false);
                     }
                     // MongoDB array element matching: if doc_value is an array,
                     // return false if ANY element of doc_value matches ANY value in filter_arr
                     if let Value::Array(doc_arr) = v {
-                        Ok(!doc_arr.iter().any(|elem| filter_arr.contains(elem)))
+                        Ok(!doc_arr
+                            .iter()
+                            .any(|elem| value_in_array(elem, filter_arr, &hash_set)))
                     } else {
                         Ok(true)
                     }
@@ -131,8 +208,13 @@ impl OperatorMatcher for AllOperator {
             None => Ok(false),
             Some(Value::Array(doc_arr)) => {
                 if let Value::Array(required) = filter_value {
+                    // Build HashSet from document array for O(1) lookups
+                    let doc_hash_set = build_hash_set(doc_arr);
+
                     // All required values must be in the document array
-                    Ok(required.iter().all(|req| doc_arr.contains(req)))
+                    Ok(required
+                        .iter()
+                        .all(|req| value_in_array(req, doc_arr, &doc_hash_set)))
                 } else {
                     Err(IronBaseError::InvalidQuery(
                         "$all operator requires an array".to_string(),

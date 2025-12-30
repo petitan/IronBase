@@ -4,26 +4,25 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-- Collection-level write lock mechanizmus Safe mode atomicitáshoz
-- Index manager thread-safe létrehozással
-- Collection flags perzisztálás
+- **Collection Write Lock**: `Arc<Mutex<()>>` Safe mode atomicitáshoz
+- Index manager thread-safe létrehozáshoz és kezeléshez
+- Collection flags perzisztens tároláshoz
 
 ## Tervezési döntések és invariánsok
 - Double-checked locking pattern biztosítja a thread-safe létrehozást
-- Hybrid locking optimalizáció unique indexek esetén
-- READ műveletek optimalizálva - csak READ lockokat használ a hot path-on
-- Prepare-WAL-persist szekvencia atomicitása biztosított collection-level write lock-kal
-- Race condition-ök megelőzése unique constraint ellenőrzésekben
-- Collection flags crash esetén elveszhetnek megfelelő kezelés nélkül
-- Védett collection-ök nem törölhetők
+- Safe mode-ban a prepare-WAL-persist szekvencia atomikus, megelőzve race condition-öket unique constraint ellenőrzésekben
+- Collection flags crash esetén elveszhetnek, ha nem megfelelően kezelve (2024-12-26-án felfedezett bug)
+- B+ tree indexek optimalizálása: átugorja azokat, amelyek már rendelkeznek adatokkal (.idx fájlokból betöltve)
+- Duplicate key hibák naplózása a csendes figyelmen kívül hagyás helyett (BUG #4 javítás)
 
 ## Használati minták
-- `get_collection` READ műveletekre optimalizált, implicit létrehozás nélkül
-- Collection-level write lock használata Safe mode atomicitáshoz
-- Duplicate key hibák logolása silent ignorálás helyett (BUG #4 javítás)
+- READ műveletek optimalizálva: csak READ lock-okat használ a hot path-on
+- Hybrid locking optimalizáció unique index-szel rendelkező collection-ök esetén
+- Lock contention minimalizálása thread-safe létrehozás biztosítása mellett
+- Collection lekérése implicit létrehozás nélkül - hibát ad vissza, ha nem létezik
 
 ## Korlátok
-Nincs dokumentált információ.
+- Protected collection-ök nem törölhetők
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/database/collections.rs*

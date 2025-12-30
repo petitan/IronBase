@@ -7,13 +7,10 @@ Nincs dokumentált információ.
 Nincs dokumentált információ.
 
 ## Tervezési döntések és invariánsok
-- A modul `header.data_end_offset` értéket használja `SeekFrom::End(0)` helyett a fájlpozicionáláshoz
-- A `flush_metadata()` által okozott fájlcsonkítás és az olvasási műveletek közötti versenyhelyzet megelőzése kritikus követelmény
-- Az olvasási műveletek atomi pozicionált olvasást használnak Windows platformon
+A modul `header.data_end_offset` értéket használja a `SeekFrom::End(0)` helyett az írási műveletek során. Ez egy kritikus javítás, amely megakadályozza a race condition-t, ahol a `flush_metadata()` csonkítja a fájlt olvasás közben.
 
 ## Használati minták
-- A `read_data_at` függvény támogatja a párhuzamos olvasásokat, mivel nem módosítja a fájlleíró pozícióját
-- Az olvasási műveletek nem befolyásolják egymást a fájlleíró pozíciójának változtatása nélkül
+A `read_data_at` függvény támogatja a párhuzamos olvasásokat, mivel nem módosítja a fájl deskriptor pozícióját. A hosszúság header olvasása atomi pozicionált olvasást használ (Windows-on).
 
 ## Korlátok
 Nincs dokumentált információ.

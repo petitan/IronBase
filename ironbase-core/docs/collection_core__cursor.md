@@ -8,7 +8,7 @@ Nincs dokumentált információ.
 - `next` függvény
 
 ## Tervezési döntések és invariánsok
-A modul iteratív megközelítést alkalmaz rekurzió helyett a stack overflow elkerülése érdekében, amikor sok tombstone-nal kell dolgozni.
+A cursor implementáció iteratív ciklusokat használ rekurzió helyett, hogy elkerülje a stack overflow-t nagy mennyiségű tombstone esetén.
 
 ## Használati minták
 Nincs dokumentált információ.

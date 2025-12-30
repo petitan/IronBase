@@ -1,32 +1,31 @@
 # Modul: `collection_core::mod`
 
 ## Cél
-A modul dokumentumok hatékony lekérdezését, módosítását és indexelését biztosítja nagy gyűjtemények esetén, különös tekintettel a teljesítmény-optimalizációra és memóriahasználatra.
+Nincs dokumentált információ.
 
 ## Fő absztrakciók
-- **QueryExecutionContext**: Lekérdezés-végrehajtási konfiguráció (Clean Architecture megközelítés)
-- **DocumentId**: Speciális típus az `_id` index kezelésére
-- **B+ tree indexek**: Rendezett iterációhoz és gyors kereséshez
-- **Document catalog**: O(1) dokumentum lookup-hoz offset alapon
+- **QueryExecutionContext**: Konfigurációs objektum lekérdezés-végrehajtáshoz (Clean Architecture megközelítés)
+- **DocumentId típus**: Speciális típus a `_id` index kezeléshez, külön kezelést igényel a szerialization miatt
+- **Document catalog**: O(1) dokumentum lookup-ot biztosító adatstruktúra
+- **IndexManager**: Megosztott index kezelő, amely megoldja a stale index problémákat
 
 ## Tervezési döntések és invariánsok
-- **Atomi tranzakciók**: Index változások nyomon követése, de még nem atomi alkalmazás
-- **Batch műveletek**: Egyetlen lock megszerzés teljesítmény céljából (pl. insert_many)
-- **Szekvenciális disk olvasás**: Offsetek rendezése az optimális I/O teljesítményért
-- **Early termination**: Nagy gyűjteményeknél pagination esetén kritikus teljesítmény-optimalizáció
-- **O(1) _id lookup**: Közvetlen document_catalog használat szerializáció nélkül
-- **Index-alapú optimalizáció**: B+ tree használata memóriában történő rendezés helyett
+- **Atomi írások**: Batch műveletek egyetlen storage lock megszerzéssel dolgoznak az atomicitás biztosítására
+- **Index változások követése**: Tranzakciós műveleteknél az index változások nyomon követése történik, de atomikusan még nem kerülnek alkalmazásra
+- **Szekvenciális disk olvasás**: Offset-ek rendezése a szekvenciális disk hozzáférés optimalizálása érdekében
+- **Tombstone detektálás**: Raw byte pattern matching használata JSON parsing helyett a teljesítmény optimalizálásáért
+- **HashMap iteráció**: Non-determinisztikus sorrend ASLR hash seed-ek miatt
 
 ## Használati minták
-- **Olvasási műveletek**: `with_shared_indexes_readonly` használata már létező gyűjteményekhez
-- **Batch validáció**: Minden ellenőrzés az írások előtt az atomi hiba biztosításához
-- **Streaming feldolgozás**: Dokumentumok egyenkénti betöltése O(1) memóriahasználatért
-- **Index nélküli szűrés**: Teljes dokumentum scan szükséges, ha nincs megfelelő index
+- **Olvasási műveletek**: `with_shared_indexes_readonly` használata már létező kollekciókhoz
+- **Batch validáció**: Minden ellenőrzés az írások előtt történik az atomi hiba biztosítására
+- **Memory optimization**: Streaming document loading használata bulk load helyett
+- **Lock stratégia**: Egyetlen lock megszerzés N dokumentum helyett batch műveleteknél
 
 ## Korlátok
-- **HashMap iteráció**: Nem-determinisztikus sorrend ASLR hash seed-ek miatt
-- **Vec-alapú indexek**: O(n) költség insert/delete műveleteknél (20K frissítés 100K indexen ~8 milliárd elem mozgatás)
-- **Tombstone dokumentumok**: Nem érhetők el a lookup műveletek során
+- **Index nélküli szűrés**: Ha van szűrő de nincs hozzá index, teljes dokumentum scan szükséges
+- **Limit deferálás**: Rendezésnél a limit nem alkalmazható korán, mert nem ismert a végső sorrend
+- **Non-string értékek**: Speciális kezelés szükséges amikor a mező értéke nem string típusú az indexekben
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/collection_core/mod.rs*

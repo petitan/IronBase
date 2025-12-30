@@ -1,5 +1,29 @@
-// wal/reader.rs
-// Streaming WAL reader with iterator pattern
+//! # WAL Reader - Streaming WAL Olvasó
+//!
+//! Iterator pattern a WAL bejegyzések memória-hatékony olvasásához.
+//!
+//! ## Memória Használat
+//!
+//! ```text
+//! WALEntryIterator<R: Read + Seek>
+//! ┌─────────────────────────────────────────────────────────┐
+//! │  Memória: O(single entry) - NEM O(entire WAL)           │
+//! │  Entry-nként olvas a fájlból                            │
+//! │  EOF → None visszatérés (iterator vége)                 │
+//! │  Checksum hiba → Err(WALCorruption)                     │
+//! └─────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Használat
+//!
+//! ```rust,ignore
+//! let file = File::open("data.wal")?;
+//! let iter = WALEntryIterator::new(BufReader::new(file))?;
+//! for entry_result in iter {
+//!     let entry = entry_result?;
+//!     // Process entry...
+//! }
+//! ```
 
 use std::io::{Read, Seek, SeekFrom};
 

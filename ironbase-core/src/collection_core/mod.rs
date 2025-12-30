@@ -1,5 +1,184 @@
-// ironbase-core/src/collection_core/mod.rs
-// Pure Rust collection logic - NO PyO3 dependencies
+//! # CollectionCore - Dokumentum Gyűjtemény Modul
+//!
+//! ## Cél
+//!
+//! A `CollectionCore` a dokumentum műveletek központi implementációja.
+//! Kezeli a CRUD műveleteket, indexeket, query cache-t, és sémát.
+//! Storage-agnosztikus: működik `StorageEngine` és `MemoryStorage` backend-del is.
+//!
+//! ## Architektúra
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │                    CollectionCore<S: Storage>                   │
+//! ├─────────────────────────────────────────────────────────────────┤
+//! │                                                                 │
+//! │  ┌──────────────────────────────────────────────────────────┐  │
+//! │  │                   PUBLIC API                              │  │
+//! │  │  find() find_one() insert_one() update_one() delete_one()│  │
+//! │  │  aggregate() count() create_index() explain()            │  │
+//! │  └────────────────────────┬─────────────────────────────────┘  │
+//! │                           │                                     │
+//! │                           ▼                                     │
+//! │  ┌──────────────────────────────────────────────────────────┐  │
+//! │  │              INTERNAL COMPONENTS                          │  │
+//! │  ├──────────────────────────────────────────────────────────┤  │
+//! │  │                                                          │  │
+//! │  │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────┐  │  │
+//! │  │  │ IndexManager│  │ QueryCache  │  │ CompiledSchema  │  │  │
+//! │  │  │  (B+ tree)  │  │   (LRU)     │  │   (JSON Schema) │  │  │
+//! │  │  └──────┬──────┘  └──────┬──────┘  └────────┬────────┘  │  │
+//! │  │         │                │                  │            │  │
+//! │  │         ▼                ▼                  ▼            │  │
+//! │  │  Arc<RwLock<...>>  Arc<QueryCache>  Arc<RwLock<...>>    │  │
+//! │  │                                                          │  │
+//! │  └──────────────────────────────────────────────────────────┘  │
+//! │                           │                                     │
+//! │                           ▼                                     │
+//! │  ┌──────────────────────────────────────────────────────────┐  │
+//! │  │                  Arc<RwLock<Storage>>                     │  │
+//! │  │         StorageEngine (file) │ MemoryStorage (RAM)       │  │
+//! │  └──────────────────────────────────────────────────────────┘  │
+//! │                                                                 │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Query Végrehajtás Pipeline
+//!
+//! ```text
+//! find(query, options)
+//!     │
+//!     ▼
+//! ┌─────────────────────────────────────────┐
+//! │ 1. QUERY CACHE CHECK                    │
+//! │    - Hash(query + options)              │
+//! │    - Cache hit → return cached result   │
+//! └────────────────┬────────────────────────┘
+//!                  │ cache miss
+//!                  ▼
+//! ┌─────────────────────────────────────────┐
+//! │ 2. QUERY PLANNING                       │
+//! │    - QueryPlanner::plan()               │
+//! │    - Index selection                    │
+//! │    - QueryPlan: IndexScan | FullScan    │
+//! └────────────────┬────────────────────────┘
+//!                  │
+//!                  ▼
+//! ┌─────────────────────────────────────────┐
+//! │ 3. DOC ID COLLECTION                    │
+//! │    ┌───────────────┬───────────────┐   │
+//! │    │  IndexScan    │   FullScan    │   │
+//! │    │ B+ tree lookup│ catalog scan  │   │
+//! │    └───────┬───────┴───────┬───────┘   │
+//! │            │               │           │
+//! │            ▼               ▼           │
+//! │         doc_ids (filtered)             │
+//! └────────────────┬────────────────────────┘
+//!                  │
+//!                  ▼
+//! ┌─────────────────────────────────────────┐
+//! │ 4. DOCUMENT FETCH                       │
+//! │    - Read docs from storage by offset   │
+//! │    - Apply post-filter (complex queries)│
+//! └────────────────┬────────────────────────┘
+//!                  │
+//!                  ▼
+//! ┌─────────────────────────────────────────┐
+//! │ 5. POST-PROCESSING                      │
+//! │    - Sort (if not index-sorted)         │
+//! │    - Skip/Limit pagination              │
+//! │    - Projection (field selection)       │
+//! └────────────────┬────────────────────────┘
+//!                  │
+//!                  ▼
+//! ┌─────────────────────────────────────────┐
+//! │ 6. CACHE UPDATE                         │
+//! │    - Store result in LRU cache          │
+//! └─────────────────────────────────────────┘
+//! ```
+//!
+//! ## Index Management
+//!
+//! ```text
+//! IndexManager tartalma:
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  btree_indexes: HashMap<String, BPlusTree>                  │
+//! │    - _id index (automatikus, unique)                        │
+//! │    - user-defined indexes                                   │
+//! │                                                             │
+//! │  fuzzy_indexes: HashMap<String, FuzzyIndex>                 │
+//! │    - Jaro-Winkler, Levenshtein, Damerau-Levenshtein        │
+//! │                                                             │
+//! │  fulltext_indexes: HashMap<String, FulltextIndex>           │
+//! │    - TF-IDF scoring, stemming, stop words                   │
+//! └─────────────────────────────────────────────────────────────┘
+//!
+//! Index Persistence:
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │  .mlite file     → B+ tree index metadata (JSON)            │
+//! │  .mlite.idx      → B+ tree binary data                      │
+//! │  .mlite.fzidx    → Fuzzy index data                         │
+//! │  .mlite.ftidx    → Fulltext index data                      │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Locking Stratégia
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │              FINE-GRAINED LOCKING                           │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │                                                             │
+//! │  Storage Lock (RwLock):                                     │
+//! │  ┌─────────────────────────────────────────────────────┐   │
+//! │  │  READ:  find, count, aggregate (concurrent)         │   │
+//! │  │  WRITE: insert, update, delete (exclusive)          │   │
+//! │  └─────────────────────────────────────────────────────┘   │
+//! │                                                             │
+//! │  Index Lock (RwLock):                                       │
+//! │  ┌─────────────────────────────────────────────────────┐   │
+//! │  │  READ:  index lookup (concurrent)                   │   │
+//! │  │  WRITE: index update, create/drop (exclusive)       │   │
+//! │  └─────────────────────────────────────────────────────┘   │
+//! │                                                             │
+//! │  Query Cache (internal RwLock):                             │
+//! │  ┌─────────────────────────────────────────────────────┐   │
+//! │  │  Lock-free read path (DashMap internally)           │   │
+//! │  │  Automatic eviction (LRU, capacity: 1000)           │   │
+//! │  └─────────────────────────────────────────────────────┘   │
+//! │                                                             │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! ## Invariánsok
+//!
+//! 1. **_id Index**: Minden collection-nek van automatikus `_id` index
+//! 2. **Unique Constraint**: Insert előtt unique index ellenőrzés
+//! 3. **Schema Validation**: Ha van schema, insert/update előtt validálás
+//! 4. **Cache Invalidation**: Bármely write művelet törli a query cache-t
+//! 5. **Index Consistency**: Write után MINDIG frissül az index
+//!
+//! ## Submodulok
+//!
+//! | Modul               | Felelősség                                    |
+//! |---------------------|-----------------------------------------------|
+//! | `raw_operations`    | Prepare/Persist pattern, WAL integráció       |
+//! | `cursor`            | FindCursor streaming iterator                 |
+//! | `index_ops`         | create_index, drop_index, explain, hint       |
+//! | `index_persistence` | .idx/.fzidx/.ftidx fájl kezelés               |
+//! | `constraints`       | Batch unique constraint validáció             |
+//! | `schema`            | JSON Schema validáció                         |
+//! | `search`            | fulltext_search, fuzzy_search                 |
+//! | `update_operators`  | $set, $inc, $push, stb. implementáció         |
+//!
+//! ## Kapcsolódó Modulok
+//!
+//! - [`crate::database`] - DatabaseCore, collection létrehozás
+//! - [`crate::index`] - IndexManager, BPlusTree, FuzzyIndex, FulltextIndex
+//! - [`crate::query`] - Query parsing és matching
+//! - [`crate::query_planner`] - Index selection
+//! - [`crate::query_cache`] - LRU query result cache
+//! - [`crate::storage`] - StorageEngine, MemoryStorage
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

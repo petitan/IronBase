@@ -1,20 +1,22 @@
 # Modul: `wal::recovery`
 
+```markdown
 ## Cél
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-- `CommittedTransaction`: Tranzakció reprezentáció memóriaoptimalizált tárolással
-- `TransactionGrouper`: Aktív tranzakciók csoportosítására szolgáló struktúra
+- `TransactionGrouper`: Aktív tranzakciók kezelésére szolgáló struktúra
+- `CommittedTransaction`: Commitált tranzakciókat reprezentáló típus
 
 ## Tervezési döntések és invariánsok
-A modul memóriahasználat-optimalizált architektúrát követ: mind a `CommittedTransaction`, mind a `TransactionGrouper` O(aktív tranzakciók) memóriahasználatot biztosít az O(összes bejegyzés) helyett.
+Mindkét fő komponens (`TransactionGrouper` és `CommittedTransaction`) memóriahasználata O(aktív tranzakciók) helyett O(összes bejegyzés) komplexitással lett optimalizálva.
 
 ## Használati minták
 Nincs dokumentált információ.
 
 ## Korlátok
 Nincs dokumentált információ.
+```
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/wal/recovery.rs*

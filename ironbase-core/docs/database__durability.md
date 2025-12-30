@@ -4,23 +4,24 @@
 Nincs dokumentált információ.
 
 ## Fő absztrakciók
-- **WAL (Write-Ahead Log)**: Tranzakciós naplózási mechanizmus fsync támogatással
-- **Atomic Point**: WAL fsync művelet, amely az atomicitás garantálásának központi eleme
-- **Batch műveletek**: Csoportos adatbázis operációk támogatása
+- **WAL (Write-Ahead Log)**: Központi komponens a tartósság biztosításához
+- **Atomic Point**: WAL fsync művelet, amely után az adatok crash-safe állapotba kerülnek
+- **Batch műveletek**: Több művelet atomikus végrehajtása
 
 ## Tervezési döntések és invariánsok
-- **WAL-first commit stratégia**: A WAL fsync művelet szolgál atomic pointként minden tranzakcióban
-- **Atomi read-modify-write**: Az `update_one` művelet lock alatt atomi módon olvassa, módosítja és írja az adatokat
-- **Késleltetett láthatóság**: Az `insert_one` művelet tudatos kompromisszumot köt a késleltetett láthatóság és a garantált tartósság között
-- **Validáció és constraint ellenőrzés**: Az `insert_many` művelet minden validációt és megszorítás-ellenőrzést atomikusan végez
+- **Atomic Point**: WAL fsync után az adat crash-safe, ez a rendszer atomicitási pontja
+- **Trade-off**: Késleltetett láthatóság a garantált tartósság érdekében
+- **Invariáns**: `doc_id` mindig `Some` értékű, amikor `modified > 0` vagy `deleted > 0`
+- **Háromfázisú commit protokoll**: PREPARE → WAL COMMIT → véglegesítés
+- **Lock-alapú atomicitás**: Dokumentum keresés és módosítás lock alatt történik
 
 ## Használati minták
-- A batch műveletek (`update_many`, `delete_many`) háromfázisú protokollt követnek, ahol a 3. fázis a WAL commit
-- Az egyedi műveletek (`update_one`, `delete_one`) PREPARE fázisban végzik az adatmódosítást lock alatt
-- Minden kritikus művelet a WAL fsync atomic pointra támaszkodik a konzisztencia biztosításához
+- **WAL commit elsőbbsége**: WAL commit mindig megelőzi az egyéb műveleteket
+- **Atomikus validáció**: Minden validáció és constraint ellenőrzés atomikusan történik
+- **Tombstone pattern**: Törlés esetén tombstone írása a tényleges törlés helyett
 
 ## Korlátok
-Az `update_one` implementáció korlátai: a jelenlegi `update_one_prepare` már közvetlenül a storage-ba ír, ami megnehezíti a batch feldolgozást. Batch támogatáshoz `update_one_prepare_batch()` implementáció szükséges, amely puffereli a műveleteket azonnali perzisztálás helyett.
+Nincs dokumentált információ.
 
 ---
 *Forrás: /home/petitan/MongoLite/ironbase-core/src/database/durability.rs*
