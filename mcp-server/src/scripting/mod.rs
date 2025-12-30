@@ -87,16 +87,16 @@ pub use conversion::{dynamic_to_json, json_to_dynamic, map_to_json};
 pub use engine::RhaiEngine;
 pub use error::format_rhai_error;
 pub use limits::{
-    estimate_json_size, LogCollector, ScriptLimits,
-    // Constants
-    ABSOLUTE_MAX_FIND_DOCUMENTS,
-    DEFAULT_MAX_OPERATIONS,
-    DEFAULT_TIMEOUT_MS,
-    MAX_FIND_DOCUMENTS,
-    MAX_LOG_ENTRIES,
-    MAX_RESULT_SIZE_BYTES,
-    MAX_SINGLE_LOG_ENTRY_BYTES,
-    MAX_TOTAL_LOG_BYTES,
+    // Core types
+    estimate_json_size, DynamicLimits, LimitsManager, LogCollector, ScriptLimits,
+    // Operation limits (fixed)
+    DEFAULT_MAX_OPERATIONS, DEFAULT_TIMEOUT_MS,
+    // Memory limits (min/max for dynamic calculation)
+    DEFAULT_RESULT_SIZE_BYTES, DEFAULT_TOTAL_LOG_BYTES,
+    MAX_LOG_ENTRIES, MAX_RESULT_SIZE_BYTES, MAX_SINGLE_LOG_ENTRY_BYTES, MAX_TOTAL_LOG_BYTES,
+    MIN_RESULT_SIZE_BYTES, MIN_TOTAL_LOG_BYTES,
+    // Database query limits
+    ABSOLUTE_MAX_FIND_DOCUMENTS, DYNAMIC_MAX_FIND_DOCUMENTS, MAX_FIND_DOCUMENTS, MIN_FIND_DOCUMENTS,
 };
 pub use manager::ScriptManager;
 pub use tracker::{ActiveScriptTracker, ScriptExecutionGuard};
@@ -266,7 +266,7 @@ mod tests {
         let limits = ScriptLimits::default();
         assert_eq!(limits.max_operations, 1_000_000);
         assert_eq!(limits.timeout_ms, 60_000);
-        assert_eq!(limits.max_result_size, 10 * 1024 * 1024);
+        assert_eq!(limits.max_result_size, DEFAULT_RESULT_SIZE_BYTES);
     }
 
     #[test]

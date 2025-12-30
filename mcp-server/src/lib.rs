@@ -24,12 +24,15 @@ pub use api_keys::ApiKeyCache;
 pub use engine::{IronBaseService, ServiceContext, ToolRequest, ToolResult};
 pub use error::{McpError, OperationContext, Result};
 pub use listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTION};
-pub use monitoring::{get_memory_stats, health_check, log_memory_stats, HealthCheck, MemoryStats};
+pub use monitoring::{
+    get_memory_stats, get_system_memory, health_check, log_memory_stats, HealthCheck, MemoryStats,
+    SystemMemory,
+};
 pub use prompts::{get_prompt_content, get_prompts_list};
 pub use resources::{get_resources_list, read_resource};
 pub use scripting::{
-    ActiveScriptTracker, RhaiEngine, ScriptExecutionGuard, ScriptLimits, ScriptManager,
-    ScriptOptions, ScriptResult,
+    ActiveScriptTracker, DynamicLimits, LimitsManager, RhaiEngine, ScriptExecutionGuard,
+    ScriptLimits, ScriptManager, ScriptOptions, ScriptResult,
 };
 pub use tools::{dispatch_tool, get_tools_list, get_tools_list_filtered};
 

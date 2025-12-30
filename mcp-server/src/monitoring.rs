@@ -1,8 +1,10 @@
 //! Memory monitoring and system health checks for IronBase MCP Server
 //!
-//! Provides jemalloc memory statistics on Unix platforms and system health endpoints.
+//! Provides jemalloc memory statistics on Unix platforms, system memory info,
+//! and system health endpoints.
 
 use serde::Serialize;
+use sysinfo::System;
 
 /// Memory statistics from jemalloc (Unix only)
 #[derive(Debug, Clone, Serialize, Default)]
@@ -64,6 +66,56 @@ pub fn log_memory_stats() {
     }
 }
 
+// ============================================================
+// System Memory Information
+// ============================================================
+
+/// System memory information from the operating system.
+///
+/// Unlike `MemoryStats` which shows jemalloc allocator stats,
+/// this provides total and available RAM from the OS.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SystemMemory {
+    /// Total system RAM in bytes
+    pub total_bytes: u64,
+    /// Available (free + cached) RAM in bytes
+    pub available_bytes: u64,
+    /// Total RAM in MB (for easier reading)
+    pub total_mb: f64,
+    /// Available RAM in MB (for easier reading)
+    pub available_mb: f64,
+}
+
+/// Get system memory information using sysinfo crate.
+///
+/// Returns total and available RAM from the operating system.
+/// Works on all platforms (Linux, macOS, Windows).
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mem = get_system_memory();
+/// println!("Total: {} MB, Available: {} MB", mem.total_mb, mem.available_mb);
+/// ```
+pub fn get_system_memory() -> SystemMemory {
+    let mut sys = System::new();
+    sys.refresh_memory();
+
+    let total = sys.total_memory();
+    let available = sys.available_memory();
+
+    SystemMemory {
+        total_bytes: total,
+        available_bytes: available,
+        total_mb: total as f64 / 1024.0 / 1024.0,
+        available_mb: available as f64 / 1024.0 / 1024.0,
+    }
+}
+
+// ============================================================
+// Memory Pressure Detection
+// ============================================================
+
 /// Check if memory usage is above a warning threshold
 ///
 /// Returns true if allocated memory exceeds the given threshold in MB.
@@ -119,5 +171,17 @@ mod tests {
         let health = health_check();
         assert_eq!(health.status, "ok");
         assert!(!health.version.is_empty());
+    }
+
+    #[test]
+    fn test_system_memory() {
+        let mem = get_system_memory();
+        // Should have positive values on all systems
+        assert!(mem.total_mb > 0.0, "Total memory should be positive");
+        assert!(mem.available_mb > 0.0, "Available memory should be positive");
+        assert!(
+            mem.available_mb <= mem.total_mb,
+            "Available should not exceed total"
+        );
     }
 }
