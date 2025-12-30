@@ -1190,20 +1190,27 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 let document = Document::from_json(&doc_json_str)?;
 
                 if parsed_query.matches(&document)? {
-                    // Collect for WAL
-                    wal_entries.push((document.id.clone(), doc.clone()));
+                    // MEMORY OPT #1: WAL only needs doc_id for delete recovery
+                    // old_doc is NOT used during WAL replay (see operation_replay.rs:82-100)
+                    // Recovery creates minimal tombstone from doc_id alone
+                    let wal_doc_id = doc_id.clone();
 
-                    // Collect for index removal in persist phase
-                    index_removals.push(document.clone());
-
-                    // Prepare tombstone for persist phase
-                    let mut tombstone = doc.clone();
-                    if let Value::Object(ref mut map) = tombstone {
-                        map.insert("_tombstone".to_string(), Value::Bool(true));
-                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
-                    }
+                    // MEMORY OPT #2: Create minimal tombstone without full doc clone
+                    // Only _id, _tombstone, _collection are needed (see operation_replay.rs:89-93)
+                    let tombstone = serde_json::json!({
+                        "_id": serde_json::to_value(&doc_id)?,
+                        "_tombstone": true,
+                        "_collection": &self.name
+                    });
                     let tombstone_json = serde_json::to_string(&tombstone)?;
-                    tombstone_writes.push((document.id.clone(), tombstone_json));
+                    tombstone_writes.push((doc_id, tombstone_json));
+
+                    // WAL entry with null old_doc (saves ~5KB per document)
+                    wal_entries.push((wal_doc_id, Value::Null));
+
+                    // Index removal needs Document for indexed field values
+                    // MEMORY OPT #3: Move instead of clone (document not used after this)
+                    index_removals.push(document);
 
                     deleted += 1;
                 }
