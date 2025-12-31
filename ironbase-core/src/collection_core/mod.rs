@@ -1044,8 +1044,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         if let Some(doc) = self.read_document_by_id(&doc_id)? {
                             // Verify query still matches (for consistency)
                             let parsed_query = Query::from_json(query_json)?;
-                            let doc_json_str = serde_json::to_string(&doc)?;
-                            let document = Document::from_json(&doc_json_str)?;
+                            // PERF: from_value borrows+clones, still faster than to_string+from_json
+                            let document = Document::from_value(&doc)?;
 
                             if parsed_query.matches(&document)? {
                                 return Ok(Some(doc));
@@ -1370,15 +1370,27 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
 
         // Collect distinct values - stream documents one by one
+        // OOM PROTECTION: Use try_reserve for dynamic memory checking (jemalloc-aware)
         let mut seen_values: HashSet<String> = HashSet::new();
         let mut distinct_values = Vec::new();
+
+        // Pre-check: try to reserve for estimated unique values (capped at 100K)
+        let estimated_unique = doc_ids.len().min(100_000);
+        distinct_values.try_reserve(estimated_unique).map_err(|e| {
+            IronBaseError::OutOfMemory(format!(
+                "Cannot allocate for ~{} distinct values ({}). \
+                Solutions: 1) Use indexed distinct, 2) Add a query filter, 3) Increase system memory.",
+                estimated_unique, e
+            ))
+        })?;
 
         for doc_id in doc_ids {
             // Load document one at a time - O(1) memory per iteration
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                // Create Document from Value for proper array handling
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
+                // PERF: Direct Value→Document conversion (no serialization)
+                // Old: serde_json::to_string(&doc) + Document::from_json() = 2x serialization
+                // New: from_value_owned() = 0 serialization, just moves ownership
+                let document = Document::from_value_owned(doc)?;
 
                 // Use Document::get_all() for MongoDB-style implicit array traversal
                 // This properly handles dot notation with arrays like "items.name"
@@ -1387,6 +1399,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let value_key = canonical_json_string(field_value);
 
                     if seen_values.insert(value_key) {
+                        // Dynamic memory check every 1000 new distinct values
+                        if distinct_values.len() % 1000 == 0 && !distinct_values.is_empty() {
+                            distinct_values.try_reserve(1000).map_err(|e| {
+                                IronBaseError::OutOfMemory(format!(
+                                    "Out of memory at {} distinct values ({}). \
+                                    Consider using a more restrictive query filter.",
+                                    distinct_values.len(),
+                                    e
+                                ))
+                            })?;
+                        }
                         distinct_values.push(field_value.clone());
                     }
                 }
@@ -2197,7 +2220,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Read a single document by _id using document_catalog (O(1) lookup)
     /// Returns None if document not found or is tombstone
     fn read_document_by_id(&self, doc_id: &DocumentId) -> Result<Option<Value>> {
-        let mut storage = self.storage.write();
+        // PERF: Use read lock + read_data_at() for concurrent reads (pread-based)
+        // This is ACID-safe because:
+        // 1. We only read catalog and data - no modifications
+        // 2. read_data_at() uses pread() which doesn't change file position
+        // 3. Allows parallel document reads from multiple threads
+        let storage = self.storage.read();
         let meta = storage
             .get_collection_meta(&self.name)
             .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
@@ -2211,7 +2239,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // O(1) lookup in document_catalog (direct DocumentId lookup - no serialization!)
         if let Some(&offset) = meta.document_catalog.get(doc_id) {
             log_trace!("Found doc_id {:?} at offset {}", doc_id, offset);
-            let doc_bytes = storage.read_data(offset)?;
+            // Use read_data_at() - positioned read without changing file position
+            let doc_bytes = storage.read_data_at(offset)?;
             let doc: Value = serde_json::from_slice(&doc_bytes)?;
 
             // Check if document is a tombstone (deleted)
@@ -2491,6 +2520,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // No tombstones - safe to use fast path
             let effective_limit = limit.unwrap_or(usize::MAX);
 
+            // OOM PROTECTION: Check memory before allocating for sorted keys
+            let estimated_size = catalog_len.saturating_sub(skip).min(effective_limit);
+            let mut pre_check = Vec::<DocumentId>::new();
+            pre_check.try_reserve(estimated_size).map_err(|e| {
+                IronBaseError::OutOfMemory(format!(
+                    "Cannot allocate for {} document IDs ({}). \
+                    Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Increase system memory.",
+                    estimated_size, e
+                ))
+            })?;
+            drop(pre_check); // Release the pre-check allocation
+
             // Sort keys for deterministic pagination across process restarts
             // HashMap iteration order is non-deterministic due to ASLR hash seeds
             let mut sorted_keys: Vec<DocumentId> =
@@ -2526,6 +2567,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut doc_ids = Vec::new();
         let mut skipped = 0usize;
+
+        // OOM PROTECTION: Try to reserve for worst case (all docs match)
+        // This catches OOM early before spending time on disk I/O
+        let estimated_matches = limit.unwrap_or(catalog_len);
+        doc_ids.try_reserve(estimated_matches.min(catalog_len)).map_err(|e| {
+            IronBaseError::OutOfMemory(format!(
+                "Cannot allocate for {} document IDs ({}). \
+                Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Increase system memory.",
+                estimated_matches.min(catalog_len), e
+            ))
+        })?;
 
         // BUG #1 FIX: Sort entries for deterministic pagination
         // HashMap iteration order is non-deterministic due to ASLR hash seeds
