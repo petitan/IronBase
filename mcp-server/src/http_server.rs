@@ -374,10 +374,24 @@ async fn run_http_server_internal(
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
+    // Load configuration FIRST (needed for logging config)
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
+
     // Initialize tracing with dual output (stderr + file)
     // File logs go to ./logs/mcp-server.YYYY-MM-DD.log with daily rotation
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    // Check if we're in debug mode (RUST_LOG contains "debug")
+    let is_debug_mode = std::env::var("RUST_LOG")
+        .map(|v| v.to_lowercase().contains("debug"))
+        .unwrap_or(false);
 
     // Create logs directory if it doesn't exist
     let log_dir = std::path::Path::new("./logs");
@@ -387,11 +401,13 @@ async fn run_http_server_internal(
         }
     }
 
-    // Check for sync logging mode (for crash debugging)
-    // Set IRONBASE_SYNC_LOG=1 to enable fsync after every log write
-    let sync_logging = std::env::var("IRONBASE_SYNC_LOG")
+    // Determine sync logging mode:
+    // 1. IRONBASE_SYNC_LOG=1 env var (always respected as override)
+    // 2. config.toml logging.sync=true when running in debug mode
+    let env_sync = std::env::var("IRONBASE_SYNC_LOG")
         .map(|v| v == "1" || v.to_lowercase() == "true")
         .unwrap_or(false);
+    let sync_logging = env_sync || (is_debug_mode && config.sync_logging);
 
     if sync_logging {
         // Sync logging: fsync after every write (slow but crash-safe)
@@ -420,7 +436,10 @@ async fn run_http_server_internal(
             )
             .try_init();
 
-        eprintln!("⚠️  SYNC LOGGING ENABLED - fsync after every log write (slow but crash-safe)");
+        eprintln!(
+            "⚠️  SYNC LOGGING ENABLED - fsync after every log write (source: {})",
+            if env_sync { "IRONBASE_SYNC_LOG env" } else { "config.toml + debug mode" }
+        );
     } else {
         // Normal async logging (fast but may lose last logs on crash)
         let file_appender = tracing_appender::rolling::daily("./logs", "mcp-server.log");
@@ -451,14 +470,6 @@ async fn run_http_server_internal(
     // Log initial memory stats
     crate::monitoring::log_memory_stats();
 
-    // Load configuration
-    let config = match load_config() {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Failed to load configuration: {}", e);
-            std::process::exit(1);
-        }
-    };
     let host = config.host.clone();
     let port = config.port;
     let max_body_size = config.max_body_size;

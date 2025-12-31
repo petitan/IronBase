@@ -244,6 +244,98 @@ pub struct StorageEngine {
 }
 
 impl StorageEngine {
+    /// Acquire lock with stale lock detection
+    ///
+    /// If the lock file exists and contains a PID of a dead process,
+    /// we consider it stale and remove it before retrying.
+    fn acquire_lock_with_stale_detection(lock_path: &Path, db_path: &str) -> Result<File> {
+        use std::io::{Read, Seek, Write};
+
+        let mut lock_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(lock_path)?;
+
+        // Try to acquire the lock
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => {
+                // Lock acquired - write our PID
+                lock_file.set_len(0)?;
+                lock_file.seek(std::io::SeekFrom::Start(0))?;
+                writeln!(lock_file, "{}", std::process::id())?;
+                lock_file.sync_all()?;
+                Ok(lock_file)
+            }
+            Err(_) => {
+                // Lock failed - check if it's stale
+                let mut pid_str = String::new();
+                lock_file.seek(std::io::SeekFrom::Start(0))?;
+                let _ = lock_file.read_to_string(&mut pid_str);
+
+                if let Ok(pid) = pid_str.trim().parse::<u32>() {
+                    if !Self::is_process_alive(pid) {
+                        // Process is dead - lock is stale
+                        eprintln!(
+                            "[WARN] Stale lock detected (PID {} is dead), cleaning up...",
+                            pid
+                        );
+
+                        // Release any existing lock and reopen
+                        drop(lock_file);
+
+                        // Remove and recreate lock file
+                        let _ = std::fs::remove_file(lock_path);
+
+                        let mut lock_file = OpenOptions::new()
+                            .read(true)
+                            .write(true)
+                            .create(true)
+                            .open(lock_path)?;
+
+                        // Try again
+                        lock_file
+                            .try_lock_exclusive()
+                            .map_err(|_| IronBaseError::DatabaseLocked(db_path.to_string()))?;
+
+                        // Write our PID
+                        writeln!(lock_file, "{}", std::process::id())?;
+                        lock_file.sync_all()?;
+
+                        return Ok(lock_file);
+                    }
+                }
+
+                // Lock is held by a live process
+                Err(IronBaseError::DatabaseLocked(db_path.to_string()))
+            }
+        }
+    }
+
+    /// Check if a process with the given PID is still alive
+    #[cfg(unix)]
+    fn is_process_alive(pid: u32) -> bool {
+        // On Unix, kill(pid, 0) checks if process exists without sending signal
+        // Returns 0 if process exists (even if we can't signal it)
+        // Returns -1 with ESRCH if process doesn't exist
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[cfg(windows)]
+    fn is_process_alive(pid: u32) -> bool {
+        // On Windows, try to check via tasklist command
+        // This is slower but doesn't require additional dependencies
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            .output()
+            .map(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // tasklist returns "INFO: No tasks..." if PID not found
+                !stdout.contains("INFO:") && stdout.contains(&pid.to_string())
+            })
+            .unwrap_or(true) // If check fails, assume process is alive (safer)
+    }
+
     /// Open or create database
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
@@ -253,17 +345,7 @@ impl StorageEngine {
         // On Windows, file locks are mandatory and block ALL access including reads
         // By locking a separate .lock file, we allow backup tools to read the DB file
         let lock_path = PathBuf::from(&path_str).with_extension("mlite.lock");
-        let lock_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .open(&lock_path)?;
-
-        // Acquire exclusive lock on the LOCK FILE (not the database file)
-        // This is deadlock-free: try_lock returns immediately with error if locked
-        lock_file
-            .try_lock_exclusive()
-            .map_err(|_| IronBaseError::DatabaseLocked(path_str.clone()))?;
+        let lock_file = Self::acquire_lock_with_stale_detection(&lock_path, &path_str)?;
 
         let mut file = OpenOptions::new()
             .read(true)
@@ -341,6 +423,31 @@ impl StorageEngine {
                 // WAL recovery failed - fall back to document scan
                 eprintln!("[WARN] WAL recovery failed, rebuilding metadata from documents");
                 storage.rebuild_from_documents()?;
+            }
+        }
+
+        // CRITICAL FIX: Validate and recover data_end_offset if corrupted
+        // This prevents sparse hole creation from SeekFrom::End(0) fallback
+        if storage.header.data_end_offset < HEADER_SIZE && !storage.collections.is_empty() {
+            let (max_offset, has_docs) = Self::find_max_document_offset(&storage.collections);
+            if has_docs {
+                match Self::calculate_data_end_from_last_doc(&mut storage.file, max_offset) {
+                    Ok(recovered_offset) => {
+                        eprintln!(
+                            "[WARN] Recovered corrupted data_end_offset: {} -> {}",
+                            storage.header.data_end_offset, recovered_offset
+                        );
+                        storage.header.data_end_offset = recovered_offset;
+                        // Mark metadata dirty so it gets persisted
+                        storage.metadata_dirty = true;
+                    }
+                    Err(e) => {
+                        return Err(IronBaseError::Corruption(format!(
+                            "Cannot recover data_end_offset (catalog max_offset={}): {}. Run compact to fix.",
+                            max_offset, e
+                        )));
+                    }
+                }
             }
         }
 

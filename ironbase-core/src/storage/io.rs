@@ -217,8 +217,8 @@ impl StorageEngine {
             let (max_offset, has_docs) = Self::find_max_document_offset(&self.collections);
             if has_docs {
                 // Calculate end of last document
-                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)
-                    .unwrap_or(self.file.seek(SeekFrom::End(0))?)
+                // CRITICAL: No fallback to SeekFrom::End(0)! That creates sparse holes.
+                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)?
             } else {
                 super::HEADER_SIZE
             }
@@ -285,8 +285,8 @@ impl StorageEngine {
             // Migration from v2: calculate from catalog or use file end
             let (max_offset, has_docs) = Self::find_max_document_offset(&self.collections);
             if has_docs {
-                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)
-                    .unwrap_or(self.file.seek(SeekFrom::End(0))?)
+                // CRITICAL: No fallback to SeekFrom::End(0)! That creates sparse holes.
+                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)?
             } else {
                 super::HEADER_SIZE
             }
