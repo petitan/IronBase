@@ -673,8 +673,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                 break; // Only update first match
             }
 
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let mut document = Document::from_json(&doc_json_str)?;
+            // PERF: Direct Value→Document (no serialization roundtrip)
+            let mut document = Document::from_value(&doc)?;
 
             // Check if matches query
             if parsed_query.matches(&document)? {
@@ -808,9 +808,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             matched += 1;
 
-            // Deserialize with proper _id handling
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let mut document = Document::from_json(&doc_json_str)?;
+            // PERF: Direct Value→Document (no serialization roundtrip)
+            let mut document = Document::from_value(&doc)?;
 
             // Save original document for index removal and WAL
             let original_document = document.clone();
@@ -906,8 +905,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             // Stream-load document one at a time
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
+                // PERF: Direct Value→Document (no serialization roundtrip)
+                let document = Document::from_value(&doc)?;
 
                 // Check if matches query (should always match due to collect_doc_ids)
                 if parsed_query.matches(&document)? {
@@ -983,8 +982,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         for doc_id in doc_ids {
             // Stream-load document one at a time
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
+                // PERF: Direct Value→Document (no serialization roundtrip)
+                let document = Document::from_value(&doc)?;
 
                 // Check if matches query (should always match due to collect_doc_ids)
                 if parsed_query.matches(&document)? {
@@ -1076,8 +1075,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
             matched += 1;
 
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let mut document = Document::from_json(&doc_json_str)?;
+            // PERF: Direct Value→Document (no serialization roundtrip)
+            let mut document = Document::from_value(&doc)?;
             let original_document = document.clone();
             let old_doc_value = doc.clone();
 

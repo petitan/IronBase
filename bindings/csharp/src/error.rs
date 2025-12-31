@@ -68,6 +68,9 @@ pub enum IronBaseErrorCode {
     /// Database is locked by another process
     DatabaseLocked = -17,
 
+    /// Out of memory
+    OutOfMemory = -18,
+
     /// Unknown/internal error
     Unknown = -99,
 }
@@ -92,6 +95,7 @@ impl From<&IronBaseError> for IronBaseErrorCode {
             IronBaseError::DatabaseLocked(_) => IronBaseErrorCode::DatabaseLocked,
             IronBaseError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
             IronBaseError::DatabaseClosed => IronBaseErrorCode::OperationNotAllowed,
+            IronBaseError::OutOfMemory(_) => IronBaseErrorCode::OutOfMemory,
             IronBaseError::Unknown(_) => IronBaseErrorCode::Unknown,
         }
     }

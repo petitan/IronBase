@@ -56,6 +56,9 @@ pub enum IronBaseError {
 
     #[error("Unknown error: {0}")]
     Unknown(String),
+
+    #[error("Out of memory: {0}")]
+    OutOfMemory(String),
 }
 
 pub type Result<T> = std::result::Result<T, IronBaseError>;
