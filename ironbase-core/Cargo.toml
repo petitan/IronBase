@@ -35,6 +35,9 @@ unicode-normalization = "0.1"   # For accent folding in full-text search
 rayon = { version = "1.10", optional = true }  # For parallel iteration (default: enabled)
 tracing = "0.1"    # For progress logging during long operations
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"       # For process existence check (kill(pid, 0))
+
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = "1.4"

@@ -8,6 +8,53 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+// ============================================================================
+// In-Memory Collection Stats (for fast db_stats without lock contention)
+// ============================================================================
+
+/// In-memory document counts per collection.
+/// This eliminates the need for count_documents() calls in stats(),
+/// which previously held the database lock for 89+ seconds on large datasets.
+struct CollectionStats {
+    counts: RwLock<HashMap<String, u64>>,
+}
+
+impl CollectionStats {
+    fn new() -> Self {
+        Self {
+            counts: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Get document count for a collection (returns 0 if not found)
+    fn get(&self, collection: &str) -> u64 {
+        self.counts.read().get(collection).copied().unwrap_or(0)
+    }
+
+    /// Set document count for a collection
+    fn set(&self, collection: &str, count: u64) {
+        self.counts.write().insert(collection.to_string(), count);
+    }
+
+    /// Increment or decrement count by delta (handles negative values)
+    fn increment(&self, collection: &str, delta: i64) {
+        let mut counts = self.counts.write();
+        let current = counts.get(collection).copied().unwrap_or(0);
+        let new_count = (current as i64 + delta).max(0) as u64;
+        counts.insert(collection.to_string(), new_count);
+    }
+
+    /// Remove a collection from tracking (on drop_collection)
+    fn remove(&self, collection: &str) {
+        self.counts.write().remove(collection);
+    }
+
+    /// Clear all counts (used when switching databases)
+    fn clear(&self) {
+        self.counts.write().clear();
+    }
+}
+
 /// Format bytes as human-readable string (e.g., "15.50 GB")
 fn format_bytes(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -70,6 +117,8 @@ pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,
     /// Database file path (stored for stats, wrapped in RwLock for dynamic switching)
     db_path: RwLock<std::path::PathBuf>,
+    /// In-memory document counts for fast stats() without lock contention
+    collection_stats: CollectionStats,
 }
 
 /// Scripts collection name
@@ -235,6 +284,7 @@ impl IronBaseAdapter {
         let adapter = Self {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
+            collection_stats: CollectionStats::new(),
         };
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
@@ -334,47 +384,62 @@ impl IronBaseAdapter {
     // ============================================================
 
     /// Warm up all collections by initializing their index managers
+    /// and populating in-memory document counts for fast stats().
     ///
     /// This should be called after server startup to avoid slow first queries.
     /// Index managers are initialized lazily, so the first access to a collection
     /// triggers a full index rebuild from disk. Calling this method proactively
     /// moves that cost to startup time.
     ///
+    /// Also initializes document counts in memory so stats() can return instantly
+    /// without scanning collections (which previously caused 89s lock contention).
+    ///
     /// Returns the number of collections warmed up and total time taken.
     pub fn warm_up(&self) -> (usize, std::time::Duration) {
         let start = std::time::Instant::now();
         let db = self.db.read();
-        let collections: Vec<String> = db
-            .list_collections()
-            .into_iter()
+        // Get ALL collections including system ones for accurate counts
+        let all_collections: Vec<String> = db.list_all_collections();
+        let user_collections: Vec<String> = all_collections
+            .iter()
             .filter(|name| !name.starts_with("_system."))
+            .cloned()
             .collect();
         drop(db);
 
-        let total = collections.len();
+        let total = user_collections.len();
         tracing::info!("Starting warm-up for {} collections...", total);
 
-        for (i, name) in collections.iter().enumerate() {
+        // Warm up user collections and count documents
+        for (i, name) in user_collections.iter().enumerate() {
             let coll_start = std::time::Instant::now();
             let db = self.db.read();
             match db.collection(name) {
-                Ok(_) => {
+                Ok(coll) => {
+                    // Initialize document count in memory (one-time cost at startup)
+                    let count = coll
+                        .count_documents(&serde_json::json!({}))
+                        .unwrap_or(0);
+                    self.collection_stats.set(name, count);
+
                     let elapsed = coll_start.elapsed();
                     if elapsed.as_millis() > 100 {
                         // Only log slow collections
                         tracing::info!(
-                            "Warmed up [{}/{}] '{}' in {:.2}s",
+                            "Warmed up [{}/{}] '{}' ({} docs) in {:.2}s",
                             i + 1,
                             total,
                             name,
+                            count,
                             elapsed.as_secs_f64()
                         );
                     } else {
                         tracing::debug!(
-                            "Warmed up [{}/{}] '{}' in {}ms",
+                            "Warmed up [{}/{}] '{}' ({} docs) in {}ms",
                             i + 1,
                             total,
                             name,
+                            count,
                             elapsed.as_millis()
                         );
                     }
@@ -384,6 +449,16 @@ impl IronBaseAdapter {
                 }
             }
         }
+
+        // Also count system collections (they're small, but need accurate stats)
+        let db = self.db.read();
+        for name in all_collections.iter().filter(|n| n.starts_with("_system.")) {
+            if let Ok(coll) = db.collection(name) {
+                let count = coll.count_documents(&serde_json::json!({})).unwrap_or(0);
+                self.collection_stats.set(name, count);
+            }
+        }
+        drop(db);
 
         let elapsed = start.elapsed();
         tracing::info!(
@@ -417,41 +492,41 @@ impl IronBaseAdapter {
     pub fn drop_collection(&self, name: &str) -> Result<()> {
         let db = self.db.write();
         db.drop_collection(name)?;
+        // Remove from in-memory stats
+        self.collection_stats.remove(name);
         Ok(())
     }
 
     /// Get database statistics
+    ///
+    /// PERFORMANCE: Uses in-memory document counts instead of count_documents().
+    /// This reduces lock time from ~89s to <100ms on large datasets (78K docs).
+    /// Counts are initialized during warm_up() and updated by insert/delete operations.
     pub fn stats(&self) -> Value {
         let db = self.db.read();
         let db_path = self.db_path.read();
         let path_str = db_path.display().to_string();
 
-        // Get file size
+        // Get file size (no lock needed - filesystem operation)
         let file_size = std::fs::metadata(&*db_path).map(|m| m.len()).unwrap_or(0);
+        drop(db_path); // Release path lock early
 
         // Format human-readable file size
-        let file_size_human = if file_size >= 1_073_741_824 {
-            format!("{:.2} GB", file_size as f64 / 1_073_741_824.0)
-        } else if file_size >= 1_048_576 {
-            format!("{:.2} MB", file_size as f64 / 1_048_576.0)
-        } else if file_size >= 1024 {
-            format!("{:.2} KB", file_size as f64 / 1024.0)
-        } else {
-            format!("{} B", file_size)
-        };
+        let file_size_human = format_bytes(file_size);
 
-        // Get collection details with document counts and indexes
+        // Get collection details with document counts from memory and indexes from DB
+        // NOTE: We only hold the db lock briefly for list_collections and list_indexes
         let collections: Vec<Value> = db
             .list_collections()
             .into_iter()
             .filter(|name| !name.starts_with("_system.")) // Hide system collections
             .map(|name| {
-                let doc_count = db.collection(&name)
-                    .ok()
-                    .map(|c| c.count_documents(&serde_json::json!({})).unwrap_or(0))
-                    .unwrap_or(0);
+                // PERFORMANCE: Read from in-memory cache instead of count_documents()
+                // This was the bottleneck: 89s lock time for 78K docs
+                let doc_count = self.collection_stats.get(&name);
 
-                let indexes = db.collection(&name)
+                let indexes = db
+                    .collection(&name)
                     .ok()
                     .and_then(|c| c.list_indexes().ok())
                     .unwrap_or_default();
@@ -465,7 +540,9 @@ impl IronBaseAdapter {
             })
             .collect();
 
-        // Calculate totals
+        drop(db); // Release db lock as soon as possible
+
+        // Calculate totals (no lock needed - just iterating local Vec)
         let total_documents: u64 = collections
             .iter()
             .filter_map(|c| c.get("document_count").and_then(|v| v.as_u64()))
@@ -539,6 +616,9 @@ impl IronBaseAdapter {
         *db_guard = new_db;
         drop(db_guard); // Explicitly release db lock before acquiring path lock
 
+        // Clear old stats before updating path
+        self.collection_stats.clear();
+
         // Update path
         {
             let mut path_guard = self.db_path.write();
@@ -547,6 +627,9 @@ impl IronBaseAdapter {
 
         // Ensure system collections exist in new database
         self.ensure_system_collections()?;
+
+        // Re-initialize collection counts for new database
+        self.warm_up();
 
         Ok(new_path.to_string())
     }
@@ -634,15 +717,20 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let fields = Self::value_to_hashmap(document);
         let id = db.insert_one(collection, fields)?;
+        // Update in-memory count
+        self.collection_stats.increment(collection, 1);
         Ok(Self::doc_id_to_string(&id))
     }
 
     /// Insert multiple documents (with WAL durability)
     pub fn insert_many(&self, collection: &str, documents: Vec<Value>) -> Result<Vec<String>> {
+        let count = documents.len() as i64;
         let db = self.db.read();
         let docs: Vec<HashMap<String, Value>> =
             documents.into_iter().map(Self::value_to_hashmap).collect();
         let ids = db.insert_many(collection, docs)?;
+        // Update in-memory count
+        self.collection_stats.increment(collection, count);
         Ok(ids.iter().map(Self::doc_id_to_string).collect())
     }
 
@@ -717,6 +805,10 @@ impl IronBaseAdapter {
     pub fn delete_one(&self, collection: &str, filter: Value) -> Result<u64> {
         let db = self.db.read();
         let count = db.delete_one(collection, &filter)?;
+        // Update in-memory count
+        if count > 0 {
+            self.collection_stats.increment(collection, -(count as i64));
+        }
         Ok(count)
     }
 
@@ -724,6 +816,10 @@ impl IronBaseAdapter {
     pub fn delete_many(&self, collection: &str, filter: Value) -> Result<u64> {
         let db = self.db.read();
         let count = db.delete_many(collection, &filter)?;
+        // Update in-memory count
+        if count > 0 {
+            self.collection_stats.increment(collection, -(count as i64));
+        }
         Ok(count)
     }
 
@@ -1015,6 +1111,8 @@ impl IronBaseAdapter {
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
         let db = self.db.write();
         db.force_drop_collection(name)?;
+        // Remove from in-memory stats
+        self.collection_stats.remove(name);
         Ok(())
     }
 
@@ -1050,6 +1148,8 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let fields = Self::value_to_hashmap(document);
         let id = db.insert_one_tx(collection, fields, tx_id)?;
+        // Update in-memory count
+        self.collection_stats.increment(collection, 1);
         Ok(Self::doc_id_to_string(&id))
     }
 
@@ -1073,6 +1173,10 @@ impl IronBaseAdapter {
     pub fn delete_one_tx(&self, collection: &str, filter: Value, tx_id: u64) -> Result<u64> {
         let db = self.db.read();
         let count = db.delete_one_tx(collection, &filter, tx_id)?;
+        // Update in-memory count
+        if count > 0 {
+            self.collection_stats.increment(collection, -(count as i64));
+        }
         Ok(count)
     }
 

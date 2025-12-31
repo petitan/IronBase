@@ -894,3 +894,96 @@ fn test_database_reopen_after_error() {
         assert_eq!(count, 1);
     }
 }
+
+// ============================================================================
+// CORRUPTED data_end_offset RECOVERY TEST (Fix for sparse hole bug)
+// ============================================================================
+
+/// Test that corrupted data_end_offset (set to 0) is recovered from catalog
+/// This prevents the sparse hole creation bug where SeekFrom::End(0) was used
+/// as fallback when data_end_offset was invalid.
+#[test]
+fn test_corrupted_data_end_offset_recovery() {
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("corrupt_test.mlite");
+
+    // Step 1: Create a database with some documents
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        for i in 1..=10 {
+            db.insert_one("test", doc_with_id(i, &format!("User{}", i)))
+                .unwrap();
+        }
+        db.close().unwrap();
+    }
+
+    // Get file size before corruption
+    let original_size = fs::metadata(&db_path).unwrap().len();
+    assert!(original_size > 256); // Should have header + documents
+
+    // Step 2: Corrupt the header by setting data_end_offset to 0
+    // Header layout (bincode): magic(8) + version(4) + ...
+    // data_end_offset is at byte 24 (after magic, version, metadata_offset, metadata_size)
+    {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&db_path)
+            .unwrap();
+
+        // Read header to verify magic
+        let mut magic = [0u8; 8];
+        file.read_exact(&mut magic).unwrap();
+        assert_eq!(&magic, b"MONGOLTE");
+
+        // Seek to data_end_offset position (byte 24: magic(8) + version(4) + metadata_offset(8) + metadata_size(4))
+        // Actually in our Header struct with bincode:
+        // - magic: [u8; 8] = 8 bytes
+        // - version: u32 = 4 bytes
+        // - metadata_offset: u64 = 8 bytes
+        // - metadata_size: u32 = 4 bytes
+        // - data_end_offset: u64 = at byte 24
+        file.seek(SeekFrom::Start(24)).unwrap();
+
+        // Write 0 to corrupt data_end_offset
+        let zero: u64 = 0;
+        file.write_all(&zero.to_le_bytes()).unwrap();
+        file.sync_all().unwrap();
+    }
+
+    // Step 3: Reopen the database - should recover data_end_offset from catalog
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Verify all documents are still accessible
+        let coll = db.collection("test").unwrap();
+        let count = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count, 10, "Should have all 10 documents after recovery");
+
+        // Insert a new document - this should NOT create a sparse hole
+        db.insert_one("test", doc_with_id(11, "User11")).unwrap();
+
+        db.close().unwrap();
+    }
+
+    // Step 4: Verify file size is reasonable (no sparse hole created)
+    let final_size = fs::metadata(&db_path).unwrap().len();
+    // New size should be slightly larger than original (one new doc + metadata)
+    // but NOT massively larger (which would indicate sparse hole)
+    assert!(
+        final_size < original_size * 2,
+        "File size {} should not be much larger than original {} (no sparse hole)",
+        final_size,
+        original_size
+    );
+
+    // Step 5: Final verification - reopen and check all documents
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        let coll = db.collection("test").unwrap();
+        let count = coll.count_documents(&json!({})).unwrap();
+        assert_eq!(count, 11, "Should have 11 documents after all operations");
+    }
+}
