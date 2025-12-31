@@ -2502,6 +2502,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 skip,
                 limit
             );
+
+            // OOM PROTECTION: Check memory BEFORE collecting catalog entries
+            // This is the first major allocation - catches OOM early
+            let catalog_size = meta.document_catalog.len();
+            let mut pre_check = Vec::<(DocumentId, u64)>::new();
+            pre_check.try_reserve(catalog_size).map_err(|e| {
+                IronBaseError::OutOfMemory(format!(
+                    "Cannot allocate for {} catalog entries ({}). \
+                    Collection too large for available memory.",
+                    catalog_size, e
+                ))
+            })?;
+            drop(pre_check);
+
             let entries: Vec<(DocumentId, u64)> = meta
                 .document_catalog
                 .iter()
@@ -2520,17 +2534,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // No tombstones - safe to use fast path
             let effective_limit = limit.unwrap_or(usize::MAX);
 
-            // OOM PROTECTION: Check memory before allocating for sorted keys
-            let estimated_size = catalog_len.saturating_sub(skip).min(effective_limit);
-            let mut pre_check = Vec::<DocumentId>::new();
-            pre_check.try_reserve(estimated_size).map_err(|e| {
-                IronBaseError::OutOfMemory(format!(
-                    "Cannot allocate for {} document IDs ({}). \
-                    Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Increase system memory.",
-                    estimated_size, e
-                ))
-            })?;
-            drop(pre_check); // Release the pre-check allocation
+            // NOTE: OOM protection already done above when collecting catalog_entries
 
             // Sort keys for deterministic pagination across process restarts
             // HashMap iteration order is non-deterministic due to ASLR hash seeds
@@ -2568,14 +2572,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut doc_ids = Vec::new();
         let mut skipped = 0usize;
 
-        // OOM PROTECTION: Try to reserve for worst case (all docs match)
-        // This catches OOM early before spending time on disk I/O
-        let estimated_matches = limit.unwrap_or(catalog_len);
-        doc_ids.try_reserve(estimated_matches.min(catalog_len)).map_err(|e| {
+        // OOM PROTECTION: Reserve for expected results (limit or catalog size)
+        // Note: catalog_entries already allocated, so this is likely to succeed
+        // but we keep it as a safety check for the result Vec
+        let estimated_matches = limit.unwrap_or(catalog_len).min(catalog_len);
+        doc_ids.try_reserve(estimated_matches).map_err(|e| {
             IronBaseError::OutOfMemory(format!(
                 "Cannot allocate for {} document IDs ({}). \
                 Solutions: 1) Add 'limit' to your query, 2) Use an index, 3) Increase system memory.",
-                estimated_matches.min(catalog_len), e
+                estimated_matches, e
             ))
         })?;
 
