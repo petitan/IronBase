@@ -23,10 +23,10 @@ Rust-ban írva, Python és C# kötésekkel. Egyfájlos, zero-konfig, szerver né
 | Kategória | Funkciók |
 |-----------|----------|
 | **Core** | MongoDB-kompatibilis API, egyfájlos tárolás, zero-konfig, beágyazott |
-| **Lekérdezés** | 21 operátor: összehasonlítás, logikai, elem, tömb, regex, fuzzy |
+| **Lekérdezés** | 22 operátor: összehasonlítás, logikai, elem, tömb, regex, fuzzy, wildcard (`$**`) |
 | **Frissítés** | 7 operátor: `$set`, `$inc`, `$unset`, `$push`, `$pull`, `$addToSet`, `$pop` |
 | **Aggregáció** | 6 stage + 6 akkumulátor, dot notation támogatás |
-| **Indexelés** | B+ fa indexek, összetett indexek, fuzzy indexek, explain(), hint() |
+| **Indexelés** | B+ fa indexek, összetett indexek, fuzzy indexek, full-text indexek, explain(), hint() |
 | **Tartósság** | ACD tranzakciók, WAL, crash recovery, 3 tartóssági mód |
 | **Teljesítmény** | ~1M+ insert/sec, O(log n) index keresés |
 | **Nyelvek** | Rust, Python (PyO3), C# (.NET 8) |
@@ -180,6 +180,24 @@ cargo build --release -p ironbase-core
 |----------|--------|-------|
 | `$regex` | Regex egyezés | `{"name": {"$regex": "^A"}}` |
 
+### Wildcard (v1.0.100+)
+| Operátor | Leírás | Példa |
+|----------|--------|-------|
+| `$**` | Rekurzív keresés | `{"$**.name": "Alice"}` |
+
+```python
+# Mező keresése bármilyen mélységben
+users.find({"$**.name": "Alice"})  # Megtalálja: {"contact": {"name": "Alice"}}
+
+# Regex-szel kombinálva
+users.find({"$**.content": {"$regex": "sqrt"}})
+
+# Összehasonlítással
+users.find({"$**.score": {"$gte": 85}})
+```
+
+**Megjegyzés**: A `$**` operátor mindig collection scan-t használ, nem használ indexet.
+
 ### Fuzzy keresés (v1.0.5)
 | Operátor | Leírás | Példa |
 |----------|--------|-------|
@@ -201,6 +219,61 @@ users.find({"name": {"$fuzzy": {
 # - jaro_winkler (alapértelmezett): Leggyorsabb, nevek keresésére
 # - levenshtein: Legpontosabb, karakter-szintű távolság
 # - damerau_levenshtein: Elgépelésekhez, OCR hibákhoz
+```
+
+### Teljes szöveges keresés (v1.0.90+)
+
+Full-text search TF-IDF pontozással és többnyelvű támogatással.
+
+```python
+# Full-text index létrehozása
+articles.create_fulltext_index(
+    "content",           # mező neve
+    language="hungarian" # hungarian | english | german | none
+)
+
+# Keresés
+results = articles.fulltext_search(
+    field="content",
+    query="király",
+    limit=10,
+    min_score=0.5,
+    projection={"title": 1, "_id": 1}  # Csak ezeket a mezőket adja vissza
+)
+
+# Eredmény: [(doc, score, matched_tokens), ...]
+for doc, score, tokens in results:
+    print(f"{doc['title']}: {score:.2f} - {tokens}")
+```
+
+**Támogatott nyelvek:**
+- `hungarian`: Magyar stop words és stemming
+- `english`: Angol stop words és stemming
+- `german`: Német stop words és stemming
+- `none`: Nincs nyelvi feldolgozás
+
+**Funkciók:**
+- TF-IDF pontozás (term frequency × inverse document frequency)
+- Unicode ékezet normalizálás (áéíóú → aeiou)
+- Lapozás (limit/skip) és min_score szűrés
+- Projekció támogatás (csak bizonyos mezők visszaadása)
+
+### Tömb mező keresés
+
+MongoDB-kompatibilis tömb keresés dot notation-nel:
+
+```python
+# Dokumentum szerkezet:
+# {"to": [{"email": "a@b.com", "name": "A"}, {"email": "c@d.com", "name": "C"}]}
+
+# Egyszerű keresés tömb elemben
+emails.find({"to.email": "a@b.com"})  # ✅ Működik!
+
+# $elemMatch explicit formában
+emails.find({"to": {"$elemMatch": {"email": "a@b.com"}}})  # ✅ Ugyanaz
+
+# Distinct tömb mezőn
+emails.distinct("to.email")  # Összes egyedi email cím a to tömbből
 ```
 
 ## Frissítési operátorok
@@ -291,6 +364,15 @@ users.drop_index("users_age")
 | **Összetett** | B+ fa több mezőn | Többmezős lekérdezések |
 | **Egyedi** | Egyediség kényszer | Email, felhasználónév |
 | **Fuzzy** | Szöveg hasonlóság index | Névkeresés, elgépelés tolerancia |
+| **Full-text** | TF-IDF szövegkeresés | Tartalomkeresés, dokumentumok |
+
+```python
+# Full-text index létrehozása
+articles.create_fulltext_index("content", language="hungarian")
+
+# Full-text keresés
+results = articles.fulltext_search("content", "keresett szó", limit=10)
+```
 
 ## Tartósság
 

@@ -45,8 +45,12 @@ cargo build --release
 - **Full CRUD operations** with MongoDB-compatible query syntax
 - **Stored Scripts** with versioning, tags, dependencies, and execution tracking
 - **Aggregation pipeline** support
-- **Index management** including fuzzy text indexes
+- **Index management** including fuzzy and full-text indexes
+- **Full-text search** with TF-IDF scoring and multi-language support (Hungarian, English, German)
 - **JSON schema validation**
+- **Access Control (ACL)** with interface-based permissions (localhost/internal/external)
+- **Multi-listener support** for HTTP/HTTPS on multiple interfaces
+- **API key authentication** with optional TLS encryption
 
 ## Running the Server
 
@@ -159,6 +163,7 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 | `distinct` | Get distinct values for a field |
 | `aggregate` | Run aggregation pipeline |
 | `fuzzy_search` | Fuzzy text search with configurable algorithm |
+| `fulltext_search` | Full-text search with TF-IDF scoring |
 
 **Example - Aggregation:**
 ```json
@@ -183,6 +188,7 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 |------|-------------|
 | `index_create` | Create single-field or compound index |
 | `index_create_fuzzy` | Create fuzzy text index |
+| `index_create_fulltext` | Create full-text search index with language support |
 | `index_list` | List indexes for a collection |
 | `index_drop` | Drop an index |
 | `explain` | Explain query execution plan |
@@ -203,12 +209,76 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 }
 ```
 
+**Example - Create Full-text Index:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "index_create_fulltext",
+    "arguments": {
+      "collection": "articles",
+      "field": "content",
+      "language": "hungarian"
+    }
+  }
+}
+```
+
+**Example - Full-text Search:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "fulltext_search",
+    "arguments": {
+      "collection": "articles",
+      "field": "content",
+      "query": "keresett kifejezés",
+      "limit": 10,
+      "projection": {"title": 1, "_id": 1}
+    }
+  }
+}
+```
+
 ### Schema Validation
 
 | Tool | Description |
 |------|-------------|
 | `schema_set` | Set JSON schema for collection validation |
 | `schema_get` | Get current schema for a collection |
+
+### Access Control (ACL)
+
+| Tool | Description |
+|------|-------------|
+| `acl_list` | List all ACL rules |
+| `acl_get` | Get ACL for specific collection |
+| `acl_set` | Set ACL for collection (localhost only) |
+| `acl_delete` | Delete ACL (revert to defaults) |
+| `acl_cleanup` | Cleanup orphaned ACLs |
+
+See [ACL Documentation](docs/ACL.md) for details.
+
+### Listener Management
+
+| Tool | Description |
+|------|-------------|
+| `listener_list` | List all configured listeners |
+| `listener_get` | Get specific listener configuration |
+| `listener_add` | Add HTTP/HTTPS listener |
+| `listener_delete` | Delete a listener |
+| `listener_enable` | Enable a listener |
+| `listener_disable` | Disable a listener |
+
+### API Key Management
+
+| Tool | Description |
+|------|-------------|
+| `admin_apikey_create` | Create new API key (requires admin_key) |
+| `admin_apikey_list` | List all API keys (masked) |
+| `admin_apikey_revoke` | Disable an API key |
+| `admin_apikey_delete` | Permanently delete an API key |
 
 **Example - Set Schema:**
 ```json
