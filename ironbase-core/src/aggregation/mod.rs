@@ -579,4 +579,64 @@ mod tests {
         assert_eq!(results[1]["value"], 1);
         assert_eq!(results[2]["value"], 2);
     }
+
+    #[test]
+    #[ignore] // Run with: cargo test -p ironbase-core --release speed_benchmark_topk -- --nocapture --ignored
+    fn speed_benchmark_topk_vs_full_sort() {
+        use std::time::Instant;
+
+        println!("\n=== Top-K vs Full Sort Benchmark (streaming) ===\n");
+
+        for group_count in [10_000usize, 50_000, 100_000] {
+            println!("--- {} groups, limit 5 ---", group_count);
+
+            // Simulate $group output
+            let docs: Vec<Value> = (0..group_count)
+                .map(|i| json!({"_id": format!("email_{}", i), "count": group_count - i}))
+                .collect();
+
+            // Top-K: $sort + $limit (uses optimization via streaming)
+            let pipeline_topk = Pipeline::from_json(&json!([
+                {"$sort": {"count": -1}},
+                {"$limit": 5}
+            ]))
+            .unwrap();
+
+            let docs_clone = docs.clone();
+            let start = Instant::now();
+            // Use streaming to trigger Top-K optimization
+            let result = pipeline_topk
+                .execute_streaming(docs_clone.into_iter().map(Ok))
+                .unwrap();
+            let topk_time = start.elapsed();
+
+            assert_eq!(result.len(), 5);
+            assert_eq!(result[0]["count"], group_count as i64);
+
+            // Full sort: $sort only (no limit = no optimization)
+            let pipeline_full = Pipeline::from_json(&json!([
+                {"$sort": {"count": -1}}
+            ]))
+            .unwrap();
+
+            let docs_clone = docs.clone();
+            let start = Instant::now();
+            let _result = pipeline_full
+                .execute_streaming(docs_clone.into_iter().map(Ok))
+                .unwrap();
+            let full_time = start.elapsed();
+
+            let speedup = full_time.as_micros() as f64 / topk_time.as_micros().max(1) as f64;
+
+            println!(
+                "Top-K (limit 5): {:>10.3}ms",
+                topk_time.as_secs_f64() * 1000.0
+            );
+            println!(
+                "Full sort:       {:>10.3}ms",
+                full_time.as_secs_f64() * 1000.0
+            );
+            println!("Speedup:         {:>10.2}x\n", speedup);
+        }
+    }
 }
