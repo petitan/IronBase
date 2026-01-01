@@ -5,8 +5,14 @@
 // Changed from storing full documents per group to streaming accumulator states.
 // Memory usage: O(N * doc_size) → O(G * state_size) where G = number of groups
 // This fixes OOM issues with large collections (e.g., 650K emails → 15 groups)
+//
+// MEMORY SAFETY (2026-01):
+// Added max_group_count limit to prevent OOM with high-cardinality group keys.
+// See execute_streaming_with_limits() for implementation.
 
-use crate::aggregation::types::{Accumulator, AccumulatorState, GroupId, GroupStage};
+use crate::aggregation::types::{
+    Accumulator, AccumulatorState, AggregationLimits, GroupId, GroupStage,
+};
 use crate::error::{IronBaseError, Result};
 use crate::value_utils::{get_nested_value, value_hash};
 use serde_json::Value;
@@ -165,16 +171,53 @@ impl GroupStage {
     /// - Iterator input: ~0MB (documents processed and discarded)
     /// - Group states: 10K × 64 bytes = ~640KB
     /// - **Total: 640KB instead of 500MB+**
+    #[allow(dead_code)]
     pub(crate) fn execute_streaming<I>(&self, docs: I) -> Result<Vec<Value>>
+    where
+        I: Iterator<Item = Result<Value>>,
+    {
+        self.execute_streaming_with_limits(docs, AggregationLimits::default())
+    }
+
+    /// Execute $group with explicit memory limits
+    ///
+    /// Adds group count checking to prevent OOM with high-cardinality group keys.
+    ///
+    /// # Arguments
+    /// * `docs` - Iterator of documents to process
+    /// * `limits` - Memory safety limits including max_group_count
+    ///
+    /// # Errors
+    /// Returns error if group count exceeds `limits.max_group_count`
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let limits = AggregationLimits {
+    ///     max_group_count: 10_000,
+    ///     ..Default::default()
+    /// };
+    /// let results = group_stage.execute_streaming_with_limits(docs, limits)?;
+    /// ```
+    pub(crate) fn execute_streaming_with_limits<I>(
+        &self,
+        docs: I,
+        limits: AggregationLimits,
+    ) -> Result<Vec<Value>>
     where
         I: Iterator<Item = Result<Value>>,
     {
         // HashMap<hash, GroupEntry> - hash-based lookup avoids JSON serialization
         let mut groups: HashMap<u64, GroupEntry> = HashMap::new();
+        let mut doc_count: usize = 0;
+        let mut last_group_check: usize = 0;
 
         for doc_result in docs {
             let doc = doc_result?;
+            doc_count += 1;
+
             let (group_hash, group_value) = self.extract_group_key_hash(&doc)?;
+
+            let is_new_group = !groups.contains_key(&group_hash);
 
             let entry = groups.entry(group_hash).or_insert_with(|| GroupEntry {
                 key_value: group_value,
@@ -190,7 +233,39 @@ impl GroupStage {
                     state.update(&doc, accumulator);
                 }
             }
+
+            // MEMORY SAFETY: Check group count periodically
+            // Only check when a new group is added and we've processed at least 1000 more docs
+            if is_new_group && doc_count - last_group_check >= 1000 {
+                last_group_check = doc_count;
+
+                if groups.len() > limits.max_group_count {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "Aggregation exceeded group limit: {} unique groups after {} documents. \
+                         High-cardinality $group key detected. Consider:\n\
+                         1. Add a $match stage to filter documents first\n\
+                         2. Use a lower-cardinality group key\n\
+                         3. Increase max_group_count limit (current: {})\n\
+                         Group key: {:?}",
+                        groups.len(),
+                        doc_count,
+                        limits.max_group_count,
+                        self.id
+                    )));
+                }
+            }
+
             // doc is dropped here - NOT kept in memory!
+        }
+
+        // Final group count check
+        if groups.len() > limits.max_group_count {
+            return Err(IronBaseError::AggregationError(format!(
+                "Aggregation exceeded group limit: {} unique groups (limit: {}). \
+                 Add a $match stage to filter documents or use a lower-cardinality group key.",
+                groups.len(),
+                limits.max_group_count
+            )));
         }
 
         // Finalize

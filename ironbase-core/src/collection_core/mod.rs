@@ -1931,6 +1931,41 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// ])).unwrap();
     /// ```
     pub fn aggregate(&self, pipeline_json: &Value) -> Result<Vec<Value>> {
+        self.aggregate_with_limits(
+            pipeline_json,
+            crate::aggregation::AggregationLimits::default(),
+        )
+    }
+
+    /// Execute aggregation pipeline with custom memory limits
+    ///
+    /// This version allows specifying custom limits to prevent OOM on large collections.
+    ///
+    /// # Arguments
+    /// * `pipeline_json` - JSON array of pipeline stages
+    /// * `limits` - Memory safety limits
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Document count exceeds `max_docs_without_match` (when no $match)
+    /// - Group count exceeds `max_group_count`
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::aggregation::AggregationLimits;
+    ///
+    /// let limits = AggregationLimits {
+    ///     max_docs_without_match: 50_000,
+    ///     max_group_count: 10_000,
+    ///     max_memory_mb: 256,
+    /// };
+    /// let results = collection.aggregate_with_limits(&pipeline, limits)?;
+    /// ```
+    pub fn aggregate_with_limits(
+        &self,
+        pipeline_json: &Value,
+        limits: crate::aggregation::AggregationLimits,
+    ) -> Result<Vec<Value>> {
         self.check_not_closed()?;
         use crate::aggregation::Pipeline;
 
@@ -1943,13 +1978,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         //
         // Benefit: 10-1000x speedup for selective aggregations
         // Example: $match on indexed field reduces 49K docs to 1K before $group
-        let match_query = pipeline
-            .extract_leading_match()
-            .unwrap_or_else(|| serde_json::json!({}));
+        let match_query = pipeline.extract_leading_match();
+
+        // MEMORY SAFETY (2026-01):
+        // Track if we had a leading $match - this affects document limits
+        let had_match = match_query.is_some();
+        pipeline.set_has_leading_match(had_match);
+
+        let query = match_query.unwrap_or_else(|| serde_json::json!({}));
 
         log_debug!(
-            "aggregate: using query {:?} for initial document selection",
-            match_query
+            "aggregate: using query {:?} for initial document selection (has_match: {})",
+            query,
+            had_match
         );
 
         // STREAMING OPTIMIZATION (2024-12):
@@ -1965,7 +2006,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // 3. Materializes for final stages ($sort, $limit, etc.)
 
         // Get streaming cursor - uses index if match_query has indexed field
-        let mut cursor = self.find_streaming(&match_query)?;
+        let mut cursor = self.find_streaming(&query)?;
 
         // Create iterator that yields Result<Value> from cursor
         let doc_iter = std::iter::from_fn(move || match cursor.next() {
@@ -1974,8 +2015,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             Err(e) => Some(Err(e)),
         });
 
-        // Execute remaining pipeline stages with streaming
-        pipeline.execute_streaming(doc_iter)
+        // Execute remaining pipeline stages with streaming and limits
+        pipeline.execute_streaming_with_limits(doc_iter, limits)
     }
 
     // ========== TRANSACTION OPERATIONS ==========
