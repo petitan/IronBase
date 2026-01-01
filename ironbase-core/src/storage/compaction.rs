@@ -315,6 +315,10 @@ impl StorageEngine {
         let mut updated_header = header.clone();
         updated_header.metadata_offset = metadata_offset;
         updated_header.metadata_size = metadata_size;
+        // CRITICAL FIX: Update data_end_offset to point AFTER metadata
+        // Without this, Drop::flush() would write at the OLD offset (before compaction),
+        // recreating the sparse hole we just eliminated!
+        updated_header.data_end_offset = metadata_offset + metadata_size;
 
         // Rewrite header at file start
         new_file.seek(SeekFrom::Start(0))?;

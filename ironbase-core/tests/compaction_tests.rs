@@ -199,3 +199,62 @@ fn test_compaction_persistence() {
         assert_eq!(docs.len(), 5);
     }
 }
+
+/// Test that compaction correctly updates data_end_offset to prevent sparse hole recreation
+/// This was a critical bug: after compaction, Drop::flush() would write at the old offset,
+/// recreating the sparse hole that compaction just eliminated.
+#[test]
+fn test_compaction_no_sparse_hole_on_drop() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("compact_sparse.mlite");
+
+    let size_after_compact: u64;
+
+    // Phase 1: Create database with lots of data, delete most, compact
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+
+        // Insert many large documents to create significant file size
+        for i in 0..100 {
+            let mut doc = HashMap::new();
+            doc.insert("id".to_string(), json!(i));
+            doc.insert("data".to_string(), json!("x".repeat(1000))); // 1KB padding
+            db.insert_one("items", doc).unwrap();
+        }
+
+        // Delete 90% of documents
+        for i in 0..90i64 {
+            db.delete_one("items", &json!({"id": i})).unwrap();
+        }
+
+        // Compact to remove tombstones
+        let stats = db.compact().unwrap();
+        size_after_compact = stats.size_after;
+
+        // Database is dropped here - Drop::flush() should NOT recreate sparse hole
+    }
+
+    // Phase 2: Verify file size didn't grow significantly
+    let file_size = std::fs::metadata(&db_path).unwrap().len();
+
+    // File should be approximately the size after compact (with tolerance for metadata re-write)
+    // The bug would cause file_size to be >> size_after_compact (back to original size)
+    // Normal behavior: Drop::flush() appends metadata (~few KB to ~8MB depending on doc count)
+    let tolerance = 64 * 1024; // Allow 64KB for metadata re-write (append-only design)
+    assert!(
+        file_size <= size_after_compact + tolerance,
+        "File grew after Drop! size_after_compact={}, file_size={}, diff={}. \
+         This indicates data_end_offset was not properly updated during compaction.",
+        size_after_compact,
+        file_size,
+        file_size.saturating_sub(size_after_compact)
+    );
+
+    // Phase 3: Verify database still works correctly
+    {
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("items").unwrap();
+        let docs = coll.find(&json!({})).unwrap();
+        assert_eq!(docs.len(), 10, "Should have 10 documents after compact");
+    }
+}
