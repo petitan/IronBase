@@ -121,6 +121,10 @@ pub struct BackupHeader {
     /// This is where incremental backups should start, NOT original_db_size
     /// because IronBase stores metadata at the END of the file
     pub data_end_offset: u64,
+    /// Part number for multi-part backups (0 = single file, 1-255 = part N)
+    pub part_number: u8,
+    /// Total number of parts (0 = single file, 1-255 = total parts)
+    pub total_parts: u8,
 }
 
 impl BackupHeader {
@@ -131,6 +135,27 @@ impl BackupHeader {
         data_end_offset: u64,
         data_length: u64,
         compressed_length: u64,
+    ) -> Self {
+        Self::new_full_multipart(
+            db_name,
+            db_size,
+            data_end_offset,
+            data_length,
+            compressed_length,
+            0,
+            0,
+        )
+    }
+
+    /// Create a new header for a full backup with multi-part support
+    pub fn new_full_multipart(
+        db_name: &str,
+        db_size: u64,
+        data_end_offset: u64,
+        data_length: u64,
+        compressed_length: u64,
+        part_number: u8,
+        total_parts: u8,
     ) -> Self {
         let mut name_bytes = [0u8; 32];
         let name = db_name.as_bytes();
@@ -149,6 +174,8 @@ impl BackupHeader {
             db_name: name_bytes,
             includes_db_header: false, // Full backup already includes header at offset 0
             data_end_offset,           // Where document data ends (before metadata)
+            part_number,
+            total_parts,
         }
     }
 
@@ -163,6 +190,32 @@ impl BackupHeader {
         data_end_offset: u64,
         data_length: u64,
         compressed_length: u64,
+    ) -> Self {
+        Self::new_incremental_multipart(
+            db_name,
+            parent_hash,
+            db_size,
+            start_offset,
+            data_end_offset,
+            data_length,
+            compressed_length,
+            0,
+            0,
+        )
+    }
+
+    /// Create a new header for an incremental backup with multi-part support
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_incremental_multipart(
+        db_name: &str,
+        parent_hash: [u8; 32],
+        db_size: u64,
+        start_offset: u64,
+        data_end_offset: u64,
+        data_length: u64,
+        compressed_length: u64,
+        part_number: u8,
+        total_parts: u8,
     ) -> Self {
         let mut name_bytes = [0u8; 32];
         let name = db_name.as_bytes();
@@ -181,6 +234,8 @@ impl BackupHeader {
             db_name: name_bytes,
             includes_db_header: true, // Always include DB header for incremental backups
             data_end_offset,          // Where document data ends (before metadata)
+            part_number,
+            total_parts,
         }
     }
 
@@ -188,6 +243,20 @@ impl BackupHeader {
     pub fn db_name_str(&self) -> &str {
         let end = self.db_name.iter().position(|&b| b == 0).unwrap_or(32);
         std::str::from_utf8(&self.db_name[..end]).unwrap_or("unknown")
+    }
+
+    /// Check if this is a multi-part backup
+    pub fn is_multipart(&self) -> bool {
+        self.total_parts > 0
+    }
+
+    /// Create a copy of this header for a specific part
+    pub fn for_part(&self, part_number: u8, total_parts: u8, compressed_length: u64) -> Self {
+        let mut header = self.clone();
+        header.part_number = part_number;
+        header.total_parts = total_parts;
+        header.compressed_length = compressed_length;
+        header
     }
 
     /// Write header to a writer
@@ -234,9 +303,13 @@ impl BackupHeader {
         // This is critical for incremental backups - tells us where new data starts
         writer.write_u64::<LittleEndian>(self.data_end_offset)?;
 
-        // Reserved (3 bytes to reach 128 total)
-        // 8+2+1+1+8+32+8+8+8+8+32+1+8 = 125, so 3 more bytes needed
-        writer.write_all(&[0u8; 3])?;
+        // Multi-part support (2 bytes)
+        writer.write_u8(self.part_number)?;
+        writer.write_u8(self.total_parts)?;
+
+        // Reserved (1 byte to reach 128 total)
+        // 8+2+1+1+8+32+8+8+8+8+32+1+8+1+1 = 127, so 1 more byte needed
+        writer.write_all(&[0u8; 1])?;
 
         Ok(())
     }
@@ -292,8 +365,12 @@ impl BackupHeader {
         // Data end offset (8 bytes) - where document data ends in DB file
         let data_end_offset = reader.read_u64::<LittleEndian>()?;
 
-        // Reserved (3 bytes)
-        let mut _reserved = [0u8; 3];
+        // Multi-part support (2 bytes)
+        let part_number = reader.read_u8()?;
+        let total_parts = reader.read_u8()?;
+
+        // Reserved (1 byte)
+        let mut _reserved = [0u8; 1];
         reader.read_exact(&mut _reserved)?;
 
         Ok(Self {
@@ -308,6 +385,8 @@ impl BackupHeader {
             db_name,
             includes_db_header,
             data_end_offset,
+            part_number,
+            total_parts,
         })
     }
 

@@ -52,13 +52,21 @@ impl Chain {
             });
         }
 
-        // Find all .ibak files
+        // Find all backup files:
+        // - Single file backups: *.ibak
+        // - Multi-part backups: *.ibak.001 (first part only, others are found during restore)
         let entries = fs::read_dir(dir)?;
         let mut backups = Vec::new();
 
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("ibak") {
+            let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+            // Check for single-file backup (.ibak) or first part of multi-part (.ibak.001)
+            let is_single = filename.ends_with(".ibak");
+            let is_first_part = filename.ends_with(".ibak.001");
+
+            if is_single || is_first_part {
                 match read_backup_info(&path) {
                     Ok(info) => {
                         // Filter by database name
@@ -104,7 +112,13 @@ impl Chain {
 
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) == Some("ibak") {
+            let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+            // Check for single-file backup (.ibak) or first part of multi-part (.ibak.001)
+            let is_single = filename.ends_with(".ibak");
+            let is_first_part = filename.ends_with(".ibak.001");
+
+            if is_single || is_first_part {
                 if let Ok(info) = read_backup_info(&path) {
                     db_names.insert(info.header.db_name_str().to_string());
                 }
@@ -298,7 +312,13 @@ pub fn detect_db_name(dir: &Path) -> Result<String> {
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("ibak") {
+        let filename = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+
+        // Check for single-file backup (.ibak) or first part of multi-part (.ibak.001)
+        let is_single = filename.ends_with(".ibak");
+        let is_first_part = filename.ends_with(".ibak.001");
+
+        if is_single || is_first_part {
             if let Ok(info) = read_backup_info(&path) {
                 return Ok(info.header.db_name_str().to_string());
             }

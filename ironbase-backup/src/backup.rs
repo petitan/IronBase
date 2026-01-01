@@ -83,20 +83,24 @@ fn read_data_end_offset(db_path: &Path) -> Result<u64> {
 /// Result of a backup operation
 #[derive(Debug)]
 pub struct BackupResult {
-    /// Path to the created backup file
+    /// Path to the created backup file (first/only file)
     pub path: PathBuf,
+    /// All paths for multi-part backups
+    pub all_paths: Vec<PathBuf>,
     /// Backup type (full or incremental)
     pub backup_type: BackupType,
     /// Original data size (uncompressed)
     pub original_size: u64,
-    /// Compressed size
+    /// Compressed size (total across all parts)
     pub compressed_size: u64,
-    /// SHA256 hash of the backup
+    /// SHA256 hash of the backup (first part for multi-part)
     pub hash: [u8; 32],
     /// Time taken in seconds
     pub duration_secs: f64,
     /// True if database was written to during backup (data in next incremental)
     pub concurrent_writes: bool,
+    /// Number of parts (1 for single file, >1 for multi-part)
+    pub part_count: u8,
 }
 
 impl BackupResult {
@@ -115,7 +119,16 @@ impl BackupResult {
 
         println!("Backup completed successfully!");
         println!("  Type: {}", type_str);
-        println!("  File: {}", self.path.display());
+
+        if self.part_count > 1 {
+            println!("  Files: {} parts", self.part_count);
+            for (i, path) in self.all_paths.iter().enumerate() {
+                println!("    Part {}: {}", i + 1, path.display());
+            }
+        } else {
+            println!("  File: {}", self.path.display());
+        }
+
         println!(
             "  Size: {} -> {} ({:.1}x compression)",
             format_size(self.original_size),
@@ -136,10 +149,16 @@ impl BackupResult {
 /// * `db_path` - Path to the .mlite database file
 /// * `output_dir` - Directory to store backups
 /// * `force_full` - If true, create a full backup even if incrementals exist
+/// * `split_size` - Optional size in bytes to split backup into multiple parts
 ///
 /// # Returns
 /// BackupResult with details about the created backup
-pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Result<BackupResult> {
+pub fn create_backup(
+    db_path: &Path,
+    output_dir: &Path,
+    force_full: bool,
+    split_size: Option<u64>,
+) -> Result<BackupResult> {
     let start_time = std::time::Instant::now();
 
     // Validate inputs
@@ -254,15 +273,23 @@ pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Res
         ),
     };
 
-    // Calculate content hash (header + compressed payload)
-    let content_hash = calculate_hash(&header, &compressed);
+    // Generate base filename
+    let base_filename = generate_filename(&header, &chain);
 
-    // Generate filename
-    let filename = generate_filename(&header, &chain);
-    let backup_path = output_dir.join(&filename);
+    // Determine if we need to split
+    let compressed_len = compressed.len() as u64;
+    let should_split = split_size.is_some_and(|size| compressed_len > size);
 
-    // Write backup file
-    write_backup_file(&backup_path, &header, &compressed, content_hash)?;
+    let (backup_path, all_paths, content_hash, part_count) = if should_split {
+        let split_size = split_size.unwrap();
+        write_split_backup(output_dir, &base_filename, &header, &compressed, split_size)?
+    } else {
+        // Single file backup
+        let content_hash = calculate_hash(&header, &compressed);
+        let backup_path = output_dir.join(&base_filename);
+        write_backup_file(&backup_path, &header, &compressed, content_hash)?;
+        (backup_path.clone(), vec![backup_path], content_hash, 1u8)
+    };
 
     // SNAPSHOT ISOLATION: Verify no concurrent changes during backup
     // Re-read data_end_offset to check if new documents were added
@@ -281,12 +308,14 @@ pub fn create_backup(db_path: &Path, output_dir: &Path, force_full: bool) -> Res
 
     Ok(BackupResult {
         path: backup_path,
+        all_paths,
         backup_type,
         original_size: data_length,
-        compressed_size: compressed.len() as u64,
+        compressed_size: compressed_len,
         hash: content_hash,
         duration_secs: duration,
         concurrent_writes,
+        part_count,
     })
 }
 
@@ -345,6 +374,84 @@ fn write_backup_file(
     Ok(())
 }
 
+/// Write a split backup (multiple files)
+///
+/// Each part file has the structure:
+/// - Header (128 bytes) with part_number and total_parts set
+/// - Compressed payload chunk
+/// - Footer (40 bytes) with hash of header+chunk
+///
+/// Returns (first_path, all_paths, first_hash, part_count)
+fn write_split_backup(
+    output_dir: &Path,
+    base_filename: &str,
+    base_header: &BackupHeader,
+    compressed: &[u8],
+    split_size: u64,
+) -> Result<(PathBuf, Vec<PathBuf>, [u8; 32], u8)> {
+    use crate::format::{FOOTER_SIZE, HEADER_SIZE};
+
+    // Calculate how many parts we need
+    // Each part has header + footer overhead
+    let overhead = (HEADER_SIZE + FOOTER_SIZE) as u64;
+    let payload_per_part = split_size.saturating_sub(overhead);
+
+    if payload_per_part == 0 {
+        return Err(BackupError::InvalidBackupFile {
+            reason: "Split size too small for header/footer overhead".to_string(),
+        });
+    }
+
+    let total_parts_u64 = (compressed.len() as u64).div_ceil(payload_per_part);
+
+    if total_parts_u64 > 255 {
+        return Err(BackupError::InvalidBackupFile {
+            reason: format!(
+                "Backup would require {} parts, maximum is 255. Use larger split size.",
+                total_parts_u64
+            ),
+        });
+    }
+
+    let total_parts = total_parts_u64 as u8;
+
+    let mut all_paths = Vec::with_capacity(total_parts as usize);
+    let mut first_hash = [0u8; 32];
+
+    // Remove .ibak extension from base filename
+    let base_name = base_filename.trim_end_matches(".ibak");
+
+    for part_num in 1..=total_parts {
+        // Calculate chunk bounds
+        let start = ((part_num - 1) as usize) * (payload_per_part as usize);
+        let end = std::cmp::min(start + payload_per_part as usize, compressed.len());
+        let chunk = &compressed[start..end];
+
+        // Create part header
+        let part_header = base_header.for_part(part_num, total_parts, chunk.len() as u64);
+
+        // Calculate hash for this part
+        let part_hash = calculate_hash(&part_header, chunk);
+
+        if part_num == 1 {
+            first_hash = part_hash;
+        }
+
+        // Generate part filename: base_name.ibak.001, .002, etc.
+        let part_filename = format!("{}.ibak.{:03}", base_name, part_num);
+        let part_path = output_dir.join(&part_filename);
+
+        // Write part file
+        write_backup_file(&part_path, &part_header, chunk, part_hash)?;
+
+        all_paths.push(part_path);
+    }
+
+    let first_path = all_paths.first().cloned().unwrap_or_default();
+
+    Ok((first_path, all_paths, first_hash, total_parts))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,12 +466,13 @@ mod tests {
         // Create test database
         fs::write(&db_path, b"test database content".repeat(100)).unwrap();
 
-        // Create backup
-        let result = create_backup(&db_path, &backup_dir, false).unwrap();
+        // Create backup (no split)
+        let result = create_backup(&db_path, &backup_dir, false, None).unwrap();
 
         assert_eq!(result.backup_type, BackupType::Full);
         assert!(result.path.exists());
         assert!(result.compressed_size < result.original_size);
+        assert_eq!(result.part_count, 1);
     }
 
     #[test]
@@ -377,16 +485,49 @@ mod tests {
         fs::write(&db_path, b"initial content".repeat(100)).unwrap();
 
         // Create full backup
-        let _full = create_backup(&db_path, &backup_dir, false).unwrap();
+        let _full = create_backup(&db_path, &backup_dir, false, None).unwrap();
 
         // Append to database
         let mut file = fs::OpenOptions::new().append(true).open(&db_path).unwrap();
         file.write_all(&b"additional content".repeat(50)).unwrap();
 
         // Create incremental backup
-        let incr = create_backup(&db_path, &backup_dir, false).unwrap();
+        let incr = create_backup(&db_path, &backup_dir, false, None).unwrap();
 
         assert_eq!(incr.backup_type, BackupType::Incremental);
         assert!(incr.original_size < fs::metadata(&db_path).unwrap().len());
+    }
+
+    #[test]
+    fn test_split_backup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let backup_dir = temp_dir.path().join("backups");
+
+        // Create pseudo-random data (doesn't compress well)
+        // Using a simple LCG to generate non-compressible data without rand dependency
+        let mut seed: u64 = 12345;
+        let mut random_data = Vec::with_capacity(100 * 1024);
+        for _ in 0..(100 * 1024) {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            random_data.push((seed >> 33) as u8);
+        }
+        fs::write(&db_path, &random_data).unwrap();
+
+        // Create backup with 20KB split (should create multiple parts)
+        let result = create_backup(&db_path, &backup_dir, false, Some(20 * 1024)).unwrap();
+
+        assert_eq!(result.backup_type, BackupType::Full);
+        assert!(
+            result.part_count >= 2,
+            "Expected multi-part backup, got {} parts",
+            result.part_count
+        );
+        assert_eq!(result.all_paths.len(), result.part_count as usize);
+
+        // Verify all part files exist
+        for path in &result.all_paths {
+            assert!(path.exists(), "Part file should exist: {}", path.display());
+        }
     }
 }
