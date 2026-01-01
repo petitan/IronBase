@@ -424,11 +424,19 @@ impl StorageEngine {
                 eprintln!("[WARN] WAL recovery failed, rebuilding metadata from documents");
                 storage.rebuild_from_documents()?;
             }
+            // CRITICAL: Flush to persist recovered metadata and fix corrupt header on disk
+            eprintln!("[INFO] Persisting recovered metadata to fix corrupt header");
+            storage.flush_metadata()?;
+            storage.file.sync_all()?;
         }
 
         // CRITICAL FIX: Validate and recover data_end_offset if corrupted
         // This prevents sparse hole creation from SeekFrom::End(0) fallback
-        if storage.header.data_end_offset < HEADER_SIZE && !storage.collections.is_empty() {
+        // Check both: too small (< HEADER_SIZE) OR garbage large value (> file_size)
+        let file_size = storage.file.metadata()?.len();
+        let offset_invalid = storage.header.data_end_offset < HEADER_SIZE as u64
+            || storage.header.data_end_offset > file_size;
+        if offset_invalid && !storage.collections.is_empty() {
             let (max_offset, has_docs) = Self::find_max_document_offset(&storage.collections);
             if has_docs {
                 match Self::calculate_data_end_from_last_doc(&mut storage.file, max_offset) {
