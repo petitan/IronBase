@@ -1,4 +1,8 @@
 //! IronBase Adapter - Direct wrapper around IronBase core
+//!
+//! CONCURRENCY CONTROL (2026-01):
+//! Heavy operations (aggregate without $match) are throttled to prevent OOM.
+//! See `HEAVY_OP_SEMAPHORE` for configuration.
 
 use crate::error::Result;
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
@@ -7,6 +11,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 // ============================================================================
 // In-Memory Collection Stats (for fast db_stats without lock contention)
@@ -113,12 +118,22 @@ pub struct FulltextSearchOptions {
 }
 
 /// IronBase Adapter
+/// Maximum concurrent heavy operations (aggregate without $match, full collection scans)
+/// Set to 1 to prevent memory exhaustion on large collections
+const MAX_CONCURRENT_HEAVY_OPS: usize = 1;
+
+/// Timeout for waiting to acquire heavy operation permit (in seconds)
+const HEAVY_OP_TIMEOUT_SECS: u64 = 30;
+
 pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,
     /// Database file path (stored for stats, wrapped in RwLock for dynamic switching)
     db_path: RwLock<std::path::PathBuf>,
     /// In-memory document counts for fast stats() without lock contention
     collection_stats: CollectionStats,
+    /// Semaphore to limit concurrent heavy operations (aggregate without $match)
+    /// This prevents OOM when multiple full-collection scans run simultaneously
+    heavy_op_semaphore: Arc<Semaphore>,
 }
 
 /// Scripts collection name
@@ -285,6 +300,7 @@ impl IronBaseAdapter {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
             collection_stats: CollectionStats::new(),
+            heavy_op_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HEAVY_OPS)),
         };
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
@@ -843,14 +859,117 @@ impl IronBaseAdapter {
     // Aggregation
     // ============================================================
 
-    /// Execute aggregation pipeline (uses get_collection - no implicit creation)
-    pub fn aggregate(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
+    /// Check if a pipeline has a leading $match stage
+    /// Used to determine if this is a "heavy" operation that needs throttling
+    fn has_leading_match(pipeline: &[Value]) -> bool {
+        if let Some(first_stage) = pipeline.first() {
+            if let Some(obj) = first_stage.as_object() {
+                return obj.contains_key("$match");
+            }
+        }
+        false
+    }
+
+    /// Execute aggregation pipeline (sync version - no throttling)
+    /// For internal use only. External callers should use aggregate_async().
+    fn aggregate_internal(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         // Convert Vec<Value> to Value::Array
         let pipeline_value = Value::Array(pipeline);
         let results = coll.aggregate(&pipeline_value)?;
         Ok(results)
+    }
+
+    /// Execute aggregation pipeline with concurrency throttling
+    ///
+    /// Heavy operations (aggregates without leading $match) are throttled to
+    /// prevent OOM when multiple full-collection scans run simultaneously.
+    ///
+    /// # Throttling Rules
+    /// - Pipelines WITH `$match` as first stage: No throttling (indexed/filtered)
+    /// - Pipelines WITHOUT `$match`: Limited to MAX_CONCURRENT_HEAVY_OPS concurrent
+    ///
+    /// # Errors
+    /// - Returns error if timeout waiting for heavy operation slot
+    /// - Returns error if aggregation itself fails
+    pub async fn aggregate_async(
+        &self,
+        collection: &str,
+        pipeline: Vec<Value>,
+    ) -> Result<Vec<Value>> {
+        let is_heavy = !Self::has_leading_match(&pipeline);
+
+        if is_heavy {
+            // Try to acquire semaphore with timeout
+            let permit = tokio::time::timeout(
+                std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
+                self.heavy_op_semaphore.acquire(),
+            )
+            .await;
+
+            match permit {
+                Ok(Ok(_permit)) => {
+                    // Got permit - execute the heavy operation
+                    // The permit is automatically released when dropped
+                    tracing::info!(
+                        collection = collection,
+                        "Heavy aggregate started (no $match, full scan)"
+                    );
+                    let result = self.aggregate_internal(collection, pipeline);
+                    tracing::info!(
+                        collection = collection,
+                        success = result.is_ok(),
+                        "Heavy aggregate completed"
+                    );
+                    result
+                }
+                Ok(Err(_)) => {
+                    // Semaphore closed (shouldn't happen)
+                    Err(crate::error::McpError::Internal(
+                        "Heavy operation semaphore closed unexpectedly".to_string(),
+                    ))
+                }
+                Err(_) => {
+                    // Timeout waiting for permit
+                    Err(crate::error::McpError::OperationTooLarge(format!(
+                        "Timeout waiting for heavy aggregate slot. Another full-collection \
+                         aggregate is in progress. Either wait {}s or add a $match stage \
+                         to filter documents first.",
+                        HEAVY_OP_TIMEOUT_SECS
+                    )))
+                }
+            }
+        } else {
+            // Light operation - no throttling needed
+            self.aggregate_internal(collection, pipeline)
+        }
+    }
+
+    /// Execute aggregation pipeline (sync version, uses throttling internally)
+    /// Wraps aggregate_async in a blocking call for backwards compatibility
+    pub fn aggregate(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
+        // Check if we're in a tokio runtime
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            // We're in a tokio runtime - use block_in_place for sync call
+            let is_heavy = !Self::has_leading_match(&pipeline);
+            if is_heavy {
+                // For heavy ops, we need to handle async properly
+                // Since we can't easily do async here, just run without throttle
+                // The async version should be preferred for MCP calls
+                tracing::warn!(
+                    collection = collection,
+                    "Heavy aggregate called via sync API - consider using aggregate_async"
+                );
+            }
+            // Use block_in_place to avoid blocking the runtime
+            tokio::task::block_in_place(|| {
+                handle.block_on(self.aggregate_async(collection, pipeline))
+            })
+        } else {
+            // Not in tokio runtime - just run directly
+            self.aggregate_internal(collection, pipeline)
+        }
     }
 
     // ============================================================
