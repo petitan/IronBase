@@ -225,6 +225,115 @@ pub struct MetadataWALEntry {
     pub data_end_offset: u64,
 }
 
+// ============================================================================
+// HEADER WRITER - Safe, invariant-preserving header modifications
+// ============================================================================
+//
+// CRITICAL: The `data_end_offset` field MUST always point to the next writable
+// position. If this invariant is violated, sparse holes or data corruption occur.
+//
+// This struct provides semantic methods that AUTOMATICALLY calculate the correct
+// `data_end_offset` value, making it impossible to forget the update.
+//
+// History: 7+ critical bugs were caused by forgetting to update data_end_offset
+// in compaction, recovery, and metadata flush code paths.
+// ============================================================================
+
+/// HeaderWriter - Safe, invariant-preserving header modifications
+///
+/// # Purpose
+/// Encapsulates all modifications to `data_end_offset` to prevent bugs.
+/// The methods automatically calculate the correct value.
+///
+/// # Invariant
+/// `data_end_offset` always points to the next writable position:
+/// - After document write: end of last document
+/// - After metadata flush: end of metadata section
+///
+/// # Usage
+/// ```ignore
+/// // After document write:
+/// HeaderWriter::new(&mut self.header, &mut self.file).advance_after_write()?;
+///
+/// // After metadata flush:
+/// HeaderWriter::new(&mut self.header, &mut self.file)
+///     .set_after_metadata(metadata_offset, metadata_size);
+/// ```
+pub struct HeaderWriter<'a> {
+    header: &'a mut Header,
+    file: &'a mut File,
+}
+
+impl<'a> HeaderWriter<'a> {
+    /// Create a new HeaderWriter
+    pub fn new(header: &'a mut Header, file: &'a mut File) -> Self {
+        Self { header, file }
+    }
+
+    /// Update data_end_offset after a document write
+    ///
+    /// Uses current file position (`stream_position()`) as the new offset.
+    /// This is the correct value because we just finished writing data.
+    pub fn advance_after_write(&mut self) -> Result<u64> {
+        use std::io::Seek;
+        let new_offset = self.file.stream_position()?;
+        self.header.data_end_offset = new_offset;
+        Ok(new_offset)
+    }
+
+    /// Update header fields after metadata is written
+    ///
+    /// AUTOMATICALLY calculates: `data_end_offset = metadata_offset + metadata_size`
+    ///
+    /// This ensures the next document write will start AFTER the metadata,
+    /// preventing sparse holes that plagued earlier versions.
+    pub fn set_after_metadata(&mut self, metadata_offset: u64, metadata_size: u64) {
+        self.header.data_end_offset = metadata_offset + metadata_size;
+        self.header.metadata_offset = metadata_offset;
+        self.header.metadata_size = metadata_size;
+    }
+
+    /// Write header to file at position 0
+    pub fn write_to_file(&mut self) -> Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        self.file.seek(SeekFrom::Start(0))?;
+        let header_bytes = bincode::serialize(&*self.header)
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+        self.file.write_all(&header_bytes)?;
+        Ok(())
+    }
+
+    /// Get current data_end_offset (read-only)
+    pub fn data_end_offset(&self) -> u64 {
+        self.header.data_end_offset
+    }
+}
+
+/// Static helper for compaction - writes header to a NEW file
+///
+/// Compaction creates a completely new file, so we can't use the instance method.
+/// This function ensures all header fields are properly set.
+pub fn write_compaction_header(
+    file: &mut File,
+    base_header: &Header,
+    metadata_offset: u64,
+    metadata_size: u64,
+) -> Result<()> {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let mut updated_header = base_header.clone();
+    // CRITICAL: Set data_end_offset to point AFTER metadata
+    updated_header.data_end_offset = metadata_offset + metadata_size;
+    updated_header.metadata_offset = metadata_offset;
+    updated_header.metadata_size = metadata_size;
+
+    file.seek(SeekFrom::Start(0))?;
+    let header_bytes = bincode::serialize(&updated_header)
+        .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+    file.write_all(&header_bytes)?;
+    Ok(())
+}
+
 /// Storage engine - file-based storage
 pub struct StorageEngine {
     file: File,

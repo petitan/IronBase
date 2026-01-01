@@ -45,7 +45,7 @@
 //! Maximum metadata size per collection: 64 MB (allows ~2-4M documents).
 //! Protects against malicious files with corrupted length fields.
 
-use super::{CollectionMeta, Header, StorageEngine};
+use super::{CollectionMeta, Header, HeaderWriter, StorageEngine};
 use crate::error::{IronBaseError, Result};
 use std::collections::HashMap;
 use std::fs::File;
@@ -281,12 +281,11 @@ impl StorageEngine {
             }
         };
 
-        // CRITICAL FIX: Update data_end_offset to AFTER metadata BEFORE writing header
-        // Without this, next document write would overwrite the metadata!
-        // The layout is: [HEADER][DOCUMENTS][METADATA]
-        // After flush, next document should be written AFTER metadata.
-        let new_data_end = metadata_offset + metadata_bytes.len() as u64;
-        self.header.data_end_offset = new_data_end;
+        // CRITICAL: Use HeaderWriter to ensure data_end_offset is correctly updated
+        // HeaderWriter.set_after_metadata() calculates: data_end_offset = metadata_offset + metadata_size
+        // This prevents sparse hole bugs that plagued earlier versions.
+        HeaderWriter::new(&mut self.header, &mut self.file)
+            .set_after_metadata(metadata_offset, metadata_bytes.len() as u64);
 
         // 4. Write metadata and header atomically (header now includes correct data_end_offset)
         Self::write_metadata_and_header(

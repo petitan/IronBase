@@ -1,7 +1,7 @@
 // storage/io.rs
 // Low-level I/O operations for storage engine
 
-use super::StorageEngine;
+use super::{HeaderWriter, StorageEngine};
 use crate::error::Result;
 use std::io::{Read, Seek, SeekFrom, Write};
 
@@ -27,8 +27,8 @@ impl StorageEngine {
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
 
-        // Update data_end_offset
-        self.header.data_end_offset = self.file.stream_position()?;
+        // Update data_end_offset using HeaderWriter (prevents forgetting this step)
+        HeaderWriter::new(&mut self.header, &mut self.file).advance_after_write()?;
 
         self.metadata_dirty = true;
         Ok(write_offset)
@@ -232,8 +232,8 @@ impl StorageEngine {
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
 
-        // Update data_end_offset to point after this document
-        self.header.data_end_offset = self.file.stream_position()?;
+        // Update data_end_offset using HeaderWriter (prevents forgetting this step)
+        HeaderWriter::new(&mut self.header, &mut self.file).advance_after_write()?;
 
         self.metadata_dirty = true;
 
@@ -300,8 +300,8 @@ impl StorageEngine {
         self.file.write_all(&len)?;
         self.file.write_all(data)?;
 
-        // Update data_end_offset to point after this document
-        self.header.data_end_offset = self.file.stream_position()?;
+        // Update data_end_offset using HeaderWriter (prevents forgetting this step)
+        HeaderWriter::new(&mut self.header, &mut self.file).advance_after_write()?;
 
         self.metadata_dirty = true;
 
@@ -377,8 +377,8 @@ impl StorageEngine {
         self.file.write_all(&len)?;
         self.file.write_all(tombstone_json.as_bytes())?;
 
-        // Update data_end_offset
-        self.header.data_end_offset = self.file.stream_position()?;
+        // Update data_end_offset using HeaderWriter (prevents forgetting this step)
+        HeaderWriter::new(&mut self.header, &mut self.file).advance_after_write()?;
 
         self.metadata_dirty = true;
 
