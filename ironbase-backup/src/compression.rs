@@ -1,6 +1,7 @@
 //! Compression utilities using zstd
 
 use crate::error::{BackupError, Result};
+use std::io::{Read, Write};
 
 /// Default zstd compression level (3 is a good balance of speed and ratio)
 pub const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
@@ -15,9 +16,67 @@ pub fn compress_with_level(data: &[u8], level: i32) -> Result<Vec<u8>> {
     zstd::encode_all(data, level).map_err(|e| BackupError::Compression(e.to_string()))
 }
 
+/// Streaming compression: compress from reader to writer
+/// Uses bounded memory regardless of input size
+pub fn compress_stream<R: Read, W: Write>(mut reader: R, writer: W, level: i32) -> Result<u64> {
+    let mut encoder =
+        zstd::Encoder::new(writer, level).map_err(|e| BackupError::Compression(e.to_string()))?;
+
+    let mut buffer = vec![0u8; 256 * 1024]; // 256 KB buffer
+    let mut total_read = 0u64;
+
+    loop {
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|e| BackupError::Compression(e.to_string()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        encoder
+            .write_all(&buffer[..bytes_read])
+            .map_err(|e| BackupError::Compression(e.to_string()))?;
+        total_read += bytes_read as u64;
+    }
+
+    encoder
+        .finish()
+        .map_err(|e| BackupError::Compression(e.to_string()))?;
+
+    Ok(total_read)
+}
+
 /// Decompress zstd compressed data
 pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
     zstd::decode_all(data).map_err(|e| BackupError::Decompression(e.to_string()))
+}
+
+/// Streaming decompression: decompress from reader to writer
+/// Uses bounded memory regardless of input size
+pub fn decompress_stream<R: Read, W: Write>(reader: R, mut writer: W) -> Result<u64> {
+    let mut decoder =
+        zstd::Decoder::new(reader).map_err(|e| BackupError::Decompression(e.to_string()))?;
+
+    let mut buffer = vec![0u8; 256 * 1024]; // 256 KB buffer
+    let mut total_written = 0u64;
+
+    loop {
+        let bytes_read = decoder
+            .read(&mut buffer)
+            .map_err(|e| BackupError::Decompression(e.to_string()))?;
+        if bytes_read == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..bytes_read])
+            .map_err(|e| BackupError::Decompression(e.to_string()))?;
+        total_written += bytes_read as u64;
+    }
+
+    writer
+        .flush()
+        .map_err(|e| BackupError::Decompression(e.to_string()))?;
+
+    Ok(total_written)
 }
 
 /// Calculate compression ratio

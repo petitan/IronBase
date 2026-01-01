@@ -12,7 +12,7 @@
 //! 4. New data written during backup → included in next incremental
 
 use crate::chain::{db_name_from_path, Chain};
-use crate::compression::{compress, format_size};
+use crate::compression::{compress, compress_stream, format_size, DEFAULT_COMPRESSION_LEVEL};
 use crate::error::{BackupError, Result};
 use crate::format::{hash_to_short_hex, BackupFooter, BackupHeader, BackupType, DB_HEADER_SIZE};
 use byteorder::{LittleEndian, ReadBytesExt};
@@ -20,6 +20,9 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+/// Threshold for using streaming compression (1 GB)
+const STREAMING_THRESHOLD: u64 = 1024 * 1024 * 1024;
 
 /// IronBase header field offsets (see ironbase-core/src/storage/mod.rs)
 /// Header is 256 bytes, bincode-serialized
@@ -215,17 +218,55 @@ pub fn create_backup(
     // Calculate data to backup
     let incremental_data_length = db_size - start_offset;
 
-    // Open database file for reading
-    // NO LOCK NEEDED: Append-only storage guarantees data immutability
-    // The DB can continue writing - new data will be in next incremental backup
-    let db_file = File::open(db_path)?;
+    // Determine data_length (for header)
+    let data_length = if backup_type == BackupType::Incremental {
+        DB_HEADER_SIZE as u64 + incremental_data_length
+    } else {
+        incremental_data_length
+    };
 
-    // For incremental backups: payload = [DB header (256)] + [incremental data]
-    // This ensures the updated metadata_offset pointer is captured
-    let (data, data_length) = {
+    // Use streaming compression for large files to avoid OOM
+    let use_streaming = incremental_data_length > STREAMING_THRESHOLD;
+
+    // Compress data - either in-memory or streaming to temp file
+    let (compressed, temp_file_path): (Option<Vec<u8>>, Option<PathBuf>) = if use_streaming {
+        // Streaming compression for large files
+        let temp_path = output_dir.join(format!(".backup_temp_{}.zst", std::process::id()));
+        let temp_file = File::create(&temp_path)?;
+        let temp_writer = BufWriter::new(temp_file);
+
+        // Open database file for reading
+        let db_file = File::open(db_path)?;
         let mut reader = BufReader::new(&db_file);
 
         if backup_type == BackupType::Incremental {
+            // For incremental: create a chained reader [DB header] + [incremental data]
+            reader.seek(SeekFrom::Start(0))?;
+            let mut db_header = vec![0u8; DB_HEADER_SIZE];
+            reader.read_exact(&mut db_header)?;
+
+            reader.seek(SeekFrom::Start(start_offset))?;
+
+            // Chain the DB header with the incremental data
+            let header_reader = std::io::Cursor::new(db_header);
+            let limited_reader = reader.take(incremental_data_length);
+            let chained = header_reader.chain(limited_reader);
+
+            compress_stream(chained, temp_writer, DEFAULT_COMPRESSION_LEVEL)?;
+        } else {
+            // Full backup: stream from start_offset
+            reader.seek(SeekFrom::Start(start_offset))?;
+            let limited_reader = reader.take(incremental_data_length);
+            compress_stream(limited_reader, temp_writer, DEFAULT_COMPRESSION_LEVEL)?;
+        }
+
+        (None, Some(temp_path))
+    } else {
+        // In-memory compression for smaller files
+        let db_file = File::open(db_path)?;
+        let mut reader = BufReader::new(&db_file);
+
+        let data = if backup_type == BackupType::Incremental {
             // Read DB header first (0-255) - contains metadata_offset
             reader.seek(SeekFrom::Start(0))?;
             let mut db_header = vec![0u8; DB_HEADER_SIZE];
@@ -238,19 +279,25 @@ pub fn create_backup(
 
             // Concatenate: [db_header] + [incremental_data]
             db_header.extend(incremental_data);
-            let total_length = db_header.len() as u64;
-            (db_header, total_length)
+            db_header
         } else {
             // Full backup: read entire file from offset 0
             reader.seek(SeekFrom::Start(start_offset))?;
             let mut data = vec![0u8; incremental_data_length as usize];
             reader.read_exact(&mut data)?;
-            (data, incremental_data_length)
-        }
+            data
+        };
+
+        let compressed_data = compress(&data)?;
+        (Some(compressed_data), None)
     };
 
-    // Compress data
-    let compressed = compress(&data)?;
+    // Get compressed size
+    let compressed_size = if let Some(ref data) = compressed {
+        data.len() as u64
+    } else {
+        fs::metadata(temp_file_path.as_ref().unwrap())?.len()
+    };
 
     // Create header
     // Note: For incremental backups, data_length includes the 256-byte DB header
@@ -260,7 +307,7 @@ pub fn create_backup(
             db_size,
             current_data_end, // Store where document data ends
             data_length,
-            compressed.len() as u64,
+            compressed_size,
         ),
         BackupType::Incremental => BackupHeader::new_incremental(
             &db_name,
@@ -269,7 +316,7 @@ pub fn create_backup(
             start_offset,
             current_data_end, // Store where document data ends
             data_length,
-            compressed.len() as u64,
+            compressed_size,
         ),
     };
 
@@ -277,18 +324,54 @@ pub fn create_backup(
     let base_filename = generate_filename(&header, &chain);
 
     // Determine if we need to split
-    let compressed_len = compressed.len() as u64;
-    let should_split = split_size.is_some_and(|size| compressed_len > size);
+    let should_split = split_size.is_some_and(|size| compressed_size > size);
 
-    let (backup_path, all_paths, content_hash, part_count) = if should_split {
-        let split_size = split_size.unwrap();
-        write_split_backup(output_dir, &base_filename, &header, &compressed, split_size)?
+    let (backup_path, all_paths, content_hash, part_count) = if use_streaming {
+        // Streaming mode: read from temp file
+        let temp_path = temp_file_path.as_ref().unwrap();
+
+        if should_split {
+            let split_size_val = split_size.unwrap();
+            let result = write_split_backup_from_file(
+                output_dir,
+                &base_filename,
+                &header,
+                temp_path,
+                split_size_val,
+            )?;
+            // Clean up temp file
+            let _ = fs::remove_file(temp_path);
+            result
+        } else {
+            // Single file: read temp file and write final backup
+            let compressed_data = fs::read(temp_path)?;
+            let content_hash = calculate_hash(&header, &compressed_data);
+            let backup_path = output_dir.join(&base_filename);
+            write_backup_file(&backup_path, &header, &compressed_data, content_hash)?;
+            // Clean up temp file
+            let _ = fs::remove_file(temp_path);
+            (backup_path.clone(), vec![backup_path], content_hash, 1u8)
+        }
     } else {
-        // Single file backup
-        let content_hash = calculate_hash(&header, &compressed);
-        let backup_path = output_dir.join(&base_filename);
-        write_backup_file(&backup_path, &header, &compressed, content_hash)?;
-        (backup_path.clone(), vec![backup_path], content_hash, 1u8)
+        // In-memory mode
+        let compressed_data = compressed.as_ref().unwrap();
+
+        if should_split {
+            let split_size_val = split_size.unwrap();
+            write_split_backup(
+                output_dir,
+                &base_filename,
+                &header,
+                compressed_data,
+                split_size_val,
+            )?
+        } else {
+            // Single file backup
+            let content_hash = calculate_hash(&header, compressed_data);
+            let backup_path = output_dir.join(&base_filename);
+            write_backup_file(&backup_path, &header, compressed_data, content_hash)?;
+            (backup_path.clone(), vec![backup_path], content_hash, 1u8)
+        }
     };
 
     // SNAPSHOT ISOLATION: Verify no concurrent changes during backup
@@ -311,7 +394,7 @@ pub fn create_backup(
         all_paths,
         backup_type,
         original_size: data_length,
-        compressed_size: compressed_len,
+        compressed_size,
         hash: content_hash,
         duration_secs: duration,
         concurrent_writes,
@@ -443,6 +526,87 @@ fn write_split_backup(
 
         // Write part file
         write_backup_file(&part_path, &part_header, chunk, part_hash)?;
+
+        all_paths.push(part_path);
+    }
+
+    let first_path = all_paths.first().cloned().unwrap_or_default();
+
+    Ok((first_path, all_paths, first_hash, total_parts))
+}
+
+/// Write a split backup from a compressed temp file (streaming version)
+///
+/// This function reads from the temp file in chunks, avoiding loading
+/// the entire compressed data into memory at once.
+///
+/// Returns (first_path, all_paths, first_hash, part_count)
+fn write_split_backup_from_file(
+    output_dir: &Path,
+    base_filename: &str,
+    base_header: &BackupHeader,
+    temp_file_path: &Path,
+    split_size: u64,
+) -> Result<(PathBuf, Vec<PathBuf>, [u8; 32], u8)> {
+    use crate::format::{FOOTER_SIZE, HEADER_SIZE};
+
+    let compressed_size = fs::metadata(temp_file_path)?.len();
+
+    // Calculate how many parts we need
+    let overhead = (HEADER_SIZE + FOOTER_SIZE) as u64;
+    let payload_per_part = split_size.saturating_sub(overhead);
+
+    if payload_per_part == 0 {
+        return Err(BackupError::InvalidBackupFile {
+            reason: "Split size too small for header/footer overhead".to_string(),
+        });
+    }
+
+    let total_parts_u64 = compressed_size.div_ceil(payload_per_part);
+
+    if total_parts_u64 > 255 {
+        return Err(BackupError::InvalidBackupFile {
+            reason: format!(
+                "Backup would require {} parts, maximum is 255. Use larger split size.",
+                total_parts_u64
+            ),
+        });
+    }
+
+    let total_parts = total_parts_u64 as u8;
+
+    let mut temp_reader = BufReader::new(File::open(temp_file_path)?);
+    let mut all_paths = Vec::with_capacity(total_parts as usize);
+    let mut first_hash = [0u8; 32];
+
+    // Remove .ibak extension from base filename
+    let base_name = base_filename.trim_end_matches(".ibak");
+
+    for part_num in 1..=total_parts {
+        // Calculate chunk size for this part
+        let remaining = compressed_size - ((part_num - 1) as u64 * payload_per_part);
+        let chunk_size = std::cmp::min(remaining, payload_per_part) as usize;
+
+        // Read chunk from temp file
+        let mut chunk = vec![0u8; chunk_size];
+        temp_reader.read_exact(&mut chunk)?;
+
+        // Create part header
+        let part_header = base_header.for_part(part_num, total_parts, chunk_size as u64);
+
+        // Calculate hash for this part
+        let part_hash = calculate_hash(&part_header, &chunk);
+
+        if part_num == 1 {
+            first_hash = part_hash;
+        }
+
+        // Generate part filename: base_name.ibak.001, .002, etc.
+        let part_filename = format!("{}.ibak.{:03}", base_name, part_num);
+        let part_path = output_dir.join(&part_filename);
+
+        // Write part file
+        write_backup_file(&part_path, &part_header, &chunk, part_hash)?;
 
         all_paths.push(part_path);
     }

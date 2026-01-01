@@ -4,15 +4,18 @@
 //! database is first opened after restore. The .idx cache files are not
 //! included in backups and will be regenerated on first use.
 
-use crate::chain::{detect_db_name, Chain};
+use crate::chain::{detect_db_name, BackupInfo, Chain};
 use crate::color::{green, red};
-use crate::compression::{decompress, format_size};
+use crate::compression::{decompress, decompress_stream, format_size};
 use crate::error::{BackupError, Result};
-use crate::format::{hash_to_short_hex, DB_HEADER_SIZE, FOOTER_SIZE, HEADER_SIZE};
+use crate::format::{hash_to_short_hex, BackupHeader, DB_HEADER_SIZE, FOOTER_SIZE, HEADER_SIZE};
 use crate::verify::verify_backup;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+
+/// Threshold for using streaming decompression (1 GB compressed)
+const STREAMING_THRESHOLD: u64 = 1024 * 1024 * 1024;
 
 /// Result of a restore operation
 #[derive(Debug)]
@@ -171,25 +174,33 @@ pub fn restore(
         );
         std::io::stdout().flush()?;
 
-        // Read and decompress backup data
-        let data = read_and_decompress(&backup.path)?;
+        // Use streaming for large backups to avoid OOM
+        let use_streaming = backup.header.compressed_length > STREAMING_THRESHOLD;
 
-        // Handle includes_db_header flag for incremental backups
-        // When true, payload = [DB header (256)] + [incremental data]
-        if backup.header.includes_db_header && data.len() > DB_HEADER_SIZE {
-            // Extract DB header (first 256 bytes) and write at position 0
-            let db_header = &data[..DB_HEADER_SIZE];
-            writer.seek(SeekFrom::Start(0))?;
-            writer.write_all(db_header)?;
-
-            // Write incremental data at start_offset
-            let incremental_data = &data[DB_HEADER_SIZE..];
-            writer.seek(SeekFrom::Start(backup.header.start_offset))?;
-            writer.write_all(incremental_data)?;
+        if use_streaming {
+            // Streaming mode: decompress directly to output file
+            apply_backup_streaming(backup, &mut writer)?;
         } else {
-            // Full backup or legacy incremental without DB header
-            writer.seek(SeekFrom::Start(backup.header.start_offset))?;
-            writer.write_all(&data)?;
+            // In-memory mode for smaller backups
+            let data = read_and_decompress(&backup.path)?;
+
+            // Handle includes_db_header flag for incremental backups
+            // When true, payload = [DB header (256)] + [incremental data]
+            if backup.header.includes_db_header && data.len() > DB_HEADER_SIZE {
+                // Extract DB header (first 256 bytes) and write at position 0
+                let db_header = &data[..DB_HEADER_SIZE];
+                writer.seek(SeekFrom::Start(0))?;
+                writer.write_all(db_header)?;
+
+                // Write incremental data at start_offset
+                let incremental_data = &data[DB_HEADER_SIZE..];
+                writer.seek(SeekFrom::Start(backup.header.start_offset))?;
+                writer.write_all(incremental_data)?;
+            } else {
+                // Full backup or legacy incremental without DB header
+                writer.seek(SeekFrom::Start(backup.header.start_offset))?;
+                writer.write_all(&data)?;
+            }
         }
 
         println!("done");
@@ -294,6 +305,216 @@ fn read_multipart_backup(
 
     // Decompress concatenated data
     decompress(&all_compressed)
+}
+
+/// Apply a backup using streaming decompression (for large backups)
+///
+/// This function handles both single-file and multi-part backups,
+/// streaming decompression directly to the output file to avoid OOM.
+fn apply_backup_streaming<W: Write + Seek>(backup: &BackupInfo, writer: &mut W) -> Result<()> {
+    // Check if multi-part
+    let file = File::open(&backup.path)?;
+    let mut reader = BufReader::new(file);
+    let header = BackupHeader::read_from(&mut reader)?;
+
+    if header.is_multipart() {
+        // Multi-part backup: chain all parts together for streaming
+        apply_multipart_streaming(backup, &header, writer)?;
+    } else {
+        // Single-file backup
+        apply_single_file_streaming(&backup.path, &backup.header, writer)?;
+    }
+
+    Ok(())
+}
+
+/// Apply a single-file backup using streaming
+fn apply_single_file_streaming<W: Write + Seek>(
+    path: &Path,
+    header: &BackupHeader,
+    writer: &mut W,
+) -> Result<()> {
+    let file = File::open(path)?;
+    let file_size = file.metadata()?.len();
+    let mut reader = BufReader::new(file);
+
+    // Skip backup header
+    reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+
+    // Create a limited reader for the compressed payload
+    let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+    let limited_reader = reader.take(payload_size);
+
+    if header.includes_db_header {
+        // Decompress to temp buffer for DB header extraction
+        // For streaming with DB header, we need a different approach:
+        // decompress to a temp file, then process
+        let temp_path = path.with_extension("tmp");
+        {
+            let temp_file = File::create(&temp_path)?;
+            let temp_writer = BufWriter::new(temp_file);
+            decompress_stream(limited_reader, temp_writer)?;
+        }
+
+        // Read from temp file
+        let mut temp_reader = BufReader::new(File::open(&temp_path)?);
+
+        // Read and write DB header at position 0
+        let mut db_header = vec![0u8; DB_HEADER_SIZE];
+        temp_reader.read_exact(&mut db_header)?;
+        writer.seek(SeekFrom::Start(0))?;
+        writer.write_all(&db_header)?;
+
+        // Stream the rest at start_offset
+        writer.seek(SeekFrom::Start(header.start_offset))?;
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            let n = temp_reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..n])?;
+        }
+
+        // Clean up temp file
+        let _ = fs::remove_file(&temp_path);
+    } else {
+        // Full backup: stream directly to start_offset
+        writer.seek(SeekFrom::Start(header.start_offset))?;
+        decompress_stream(limited_reader, writer)?;
+    }
+
+    Ok(())
+}
+
+/// Apply a multi-part backup using streaming
+fn apply_multipart_streaming<W: Write + Seek>(
+    backup: &BackupInfo,
+    first_header: &BackupHeader,
+    writer: &mut W,
+) -> Result<()> {
+    let total_parts = first_header.total_parts;
+
+    // Derive base path from first part
+    let path_str = backup.path.to_string_lossy();
+    let base_path = if path_str.ends_with(".001") {
+        path_str.trim_end_matches(".001").to_string()
+    } else {
+        path_str.trim_end_matches(".ibak").to_string()
+    };
+
+    // Create a chained reader from all parts
+    // We'll decompress to a temp file first, then process
+    let temp_path = backup.path.with_extension("tmp");
+    {
+        let temp_file = File::create(&temp_path)?;
+        let mut temp_writer = BufWriter::new(temp_file);
+
+        // Create zstd decoder with streaming reader
+        let chained_reader = create_multipart_reader(&base_path, total_parts)?;
+        decompress_stream(chained_reader, &mut temp_writer)?;
+    }
+
+    // Process decompressed data
+    let temp_size = fs::metadata(&temp_path)?.len();
+    let mut temp_reader = BufReader::new(File::open(&temp_path)?);
+
+    if backup.header.includes_db_header && temp_size > DB_HEADER_SIZE as u64 {
+        // Read and write DB header at position 0
+        let mut db_header = vec![0u8; DB_HEADER_SIZE];
+        temp_reader.read_exact(&mut db_header)?;
+        writer.seek(SeekFrom::Start(0))?;
+        writer.write_all(&db_header)?;
+
+        // Stream the rest at start_offset
+        writer.seek(SeekFrom::Start(backup.header.start_offset))?;
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            let n = temp_reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..n])?;
+        }
+    } else {
+        // Full backup: stream to start_offset
+        writer.seek(SeekFrom::Start(backup.header.start_offset))?;
+        let mut buffer = vec![0u8; 256 * 1024];
+        loop {
+            let n = temp_reader.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buffer[..n])?;
+        }
+    }
+
+    // Clean up temp file
+    let _ = fs::remove_file(&temp_path);
+
+    Ok(())
+}
+
+/// Create a chained reader from multiple backup parts
+fn create_multipart_reader(base_path: &str, total_parts: u8) -> Result<impl Read> {
+    // We need to collect all parts into a single reader
+    // This is tricky because we can't return a dynamic chain of readers
+    // Instead, we'll create a custom reader that chains the parts
+
+    // First, collect all the file handles and their sizes
+    let mut readers: Vec<Box<dyn Read>> = Vec::with_capacity(total_parts as usize);
+
+    for part_num in 1..=total_parts {
+        let part_path = PathBuf::from(format!("{}.{:03}", base_path, part_num));
+
+        if !part_path.exists() {
+            return Err(BackupError::InvalidBackupFile {
+                reason: format!("Missing part {}: {}", part_num, part_path.display()),
+            });
+        }
+
+        let file = File::open(&part_path)?;
+        let file_size = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
+
+        // Skip header
+        reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+
+        // Take only the payload
+        let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+        readers.push(Box::new(reader.take(payload_size)));
+    }
+
+    // Chain all readers together
+    Ok(ChainedReader::new(readers))
+}
+
+/// A reader that chains multiple readers together
+struct ChainedReader {
+    readers: Vec<Box<dyn Read>>,
+    current: usize,
+}
+
+impl ChainedReader {
+    fn new(readers: Vec<Box<dyn Read>>) -> Self {
+        Self {
+            readers,
+            current: 0,
+        }
+    }
+}
+
+impl Read for ChainedReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.current < self.readers.len() {
+            let n = self.readers[self.current].read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            self.current += 1;
+        }
+        Ok(0)
+    }
 }
 
 /// List available restore points
