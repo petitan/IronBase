@@ -5,10 +5,80 @@ use crate::query::Query;
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Aggregation limits to prevent OOM on large collections
+///
+/// These limits protect against memory exhaustion when running aggregation
+/// pipelines without $match (full collection scans) or with high-cardinality $group.
+///
+/// # Default limits
+/// - `max_docs_without_match`: 100,000 - Max documents to process without $match
+/// - `max_group_count`: 50,000 - Max unique groups in $group stage
+/// - `max_memory_mb`: 512 - Max estimated memory usage (MB)
+///
+/// # Example
+/// ```rust,ignore
+/// use ironbase_core::aggregation::AggregationLimits;
+///
+/// // Use stricter limits for memory-constrained environment
+/// let limits = AggregationLimits {
+///     max_docs_without_match: 10_000,
+///     max_group_count: 5_000,
+///     max_memory_mb: 256,
+/// };
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct AggregationLimits {
+    /// Maximum documents to scan when there's no $match stage
+    /// Default: 100,000
+    pub max_docs_without_match: usize,
+
+    /// Maximum number of unique groups in $group stage
+    /// Prevents memory explosion with high-cardinality group keys
+    /// Default: 50,000
+    pub max_group_count: usize,
+
+    /// Maximum estimated memory usage in MB
+    /// Checked periodically during aggregation
+    /// Default: 512 MB
+    pub max_memory_mb: usize,
+}
+
+impl Default for AggregationLimits {
+    fn default() -> Self {
+        Self {
+            max_docs_without_match: 100_000,
+            max_group_count: 50_000,
+            max_memory_mb: 512,
+        }
+    }
+}
+
+impl AggregationLimits {
+    /// Create limits suitable for low-memory environments
+    pub fn low_memory() -> Self {
+        Self {
+            max_docs_without_match: 10_000,
+            max_group_count: 5_000,
+            max_memory_mb: 128,
+        }
+    }
+
+    /// Create limits with no restrictions (use with caution!)
+    pub fn unlimited() -> Self {
+        Self {
+            max_docs_without_match: usize::MAX,
+            max_group_count: usize::MAX,
+            max_memory_mb: usize::MAX,
+        }
+    }
+}
+
 /// Aggregation pipeline
 #[derive(Debug, Clone)]
 pub struct Pipeline {
     pub(crate) stages: Vec<Stage>,
+    /// Whether this pipeline has a leading $match (affects limits)
+    pub(crate) has_leading_match: bool,
 }
 
 impl Pipeline {

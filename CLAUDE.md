@@ -92,6 +92,7 @@ IronBase/
 - Stages: MatchStage, GroupStage, ProjectStage, SortStage, LimitStage, SkipStage
 - Accumulators: $sum, $avg, $min, $max, $first, $last
 - Full dot notation support for nested fields
+- **Memory limits** to prevent OOM (see AggregationLimits below)
 
 **find_options.rs** - Query options:
 - Projection (include/exclude mode)
@@ -195,6 +196,55 @@ Metadata flush után:  data_end_offset = metadata_offset + metadata_size
 - **Stages**: $match, $group, $project, $sort, $limit, $skip
 - **Accumulators**: $sum, $avg, $min, $max, $first, $last
 - **Dot notation**: Full support everywhere
+- **Memory limits**: OOM protection (see below)
+
+### Aggregation Memory Limits (OOM Protection)
+
+Aggregation pipelines have built-in memory safety limits to prevent OOM on large collections:
+
+| Limit | Default | Description |
+|-------|---------|-------------|
+| `max_docs_without_match` | 100,000 | Max documents to scan without `$match` |
+| `max_group_count` | 50,000 | Max unique groups in `$group` stage |
+| `max_memory_mb` | 512 | Max estimated memory usage |
+
+**When limits are triggered:**
+- Error: `"Aggregation exceeded document limit: X documents processed without $match"`
+- Error: `"Aggregation exceeded group limit: X unique groups"`
+
+**Best practices to avoid hitting limits:**
+1. **Always start with `$match`** - filter documents before `$group`
+2. **Use low-cardinality group keys** - don't group by unique IDs
+3. **Add indexes on `$match` fields** - reduces scan to indexed lookup
+
+**Example - BAD (will hit limit on large collections):**
+```json
+[{"$group": {"_id": "$email", "count": {"$sum": 1}}}]
+```
+
+**Example - GOOD (filtered first):**
+```json
+[
+  {"$match": {"date": {"$gt": "2024-01-01"}}},
+  {"$group": {"_id": "$email", "count": {"$sum": 1}}}
+]
+```
+
+**Custom limits (Rust API):**
+```rust
+use ironbase_core::aggregation::AggregationLimits;
+
+let limits = AggregationLimits {
+    max_docs_without_match: 50_000,
+    max_group_count: 10_000,
+    max_memory_mb: 256,
+};
+let results = collection.aggregate_with_limits(&pipeline, limits)?;
+
+// Or use presets:
+let limits = AggregationLimits::low_memory();  // 10K docs, 5K groups, 128MB
+let limits = AggregationLimits::unlimited();   // No limits (use with caution!)
+```
 
 ### Other Features
 - FindOptions: projection, sort, limit, skip, include_total (all with dot notation)
@@ -292,21 +342,65 @@ cd mcp-server && cargo build --release
 ```
 
 ### Key MCP Tools
+
+**Database Operations:**
+- `db_open` - Open or create a database file
+- `db_stats` - Database statistics
+- `db_compact` - Compact database (remove deleted documents, free space)
+- `db_checkpoint` - Force flush all pending writes to disk
+
+**Collection Operations:**
+- `collection_list` - List all collections
+- `collection_create` - Create a new collection
+- `collection_drop` - Drop a collection
+
+**CRUD Operations:**
 - `insert_one`, `insert_many` - Insert documents
 - `find`, `find_one` - Query documents
 - `update_one`, `update_many` - Update documents
 - `delete_one`, `delete_many` - Delete documents
+- `count_documents` - Count matching documents
+- `distinct` - Get distinct values for a field
 - `aggregate` - Run aggregation pipelines
-- `create_index`, `drop_index` - Index management
-- `index_create_fuzzy` - Create fuzzy text indexes
+
+**Index Operations:**
+- `index_create` - Create single/compound index
+- `index_list` - List indexes on a collection
+- `index_drop` - Drop an index
+- `index_create_fuzzy` - Create fuzzy text index
 - `fuzzy_search` - Execute fuzzy text queries
-- `index_create_fulltext` - Create full-text search indexes with language support
-- `fulltext_search` - Execute full-text search with TF-IDF scoring and projection
+- `index_create_fulltext` - Create full-text search index
+- `fulltext_search` - Execute full-text search with TF-IDF scoring
+- `index_list_fulltext` - List full-text indexes
+- `explain` - Explain query execution plan
+- `find_with_hint` - Find with specific index hint
+
+**Schema Validation:**
 - `schema_get`, `schema_set` - JSON schema validation
-- `db_stats` - Database statistics
-- `script_save`, `script_list`, `script_get`, `script_delete`, `script_run` - Rhai scripting
+
+**Scripting (Rhai):**
+- `script_save`, `script_list`, `script_get`, `script_delete`, `script_run` - Script management
+- `script_exec` - Execute inline Rhai code
+- `script_history`, `script_rollback`, `script_version_get` - Version control
+- `script_tags_add`, `script_tags_remove` - Tag management
+- `script_stats` - Execution statistics
+
+**Transactions:**
+- `begin_transaction`, `commit_transaction`, `rollback_transaction` - Transaction control
+- `insert_one_tx`, `update_one_tx`, `delete_one_tx` - Transactional operations
+- `transaction_status` - Check active transaction
+
+**Admin Operations:**
+- `admin_list_all_collections` - List all collections (including system)
+- `admin_create_system_collection` - Create system collection
+- `admin_set_collection_flags` - Set collection flags
+- `admin_drop_protected` - Force drop protected collection
 - `admin_apikey_create`, `admin_apikey_list`, `admin_apikey_revoke`, `admin_apikey_delete` - API key management
-- `acl_list`, `acl_get`, `acl_set`, `acl_delete`, `acl_cleanup` - Access Control List management
+
+**ACL (Access Control):**
+- `acl_list`, `acl_get`, `acl_set`, `acl_delete`, `acl_cleanup` - Access control rules
+
+**Listeners:**
 - `listener_list`, `listener_get`, `listener_add`, `listener_delete`, `listener_enable`, `listener_disable` - Multi-interface configuration
 
 ### Testing HTTP Mode

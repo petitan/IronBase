@@ -1,12 +1,20 @@
 // src/aggregation/pipeline.rs
 // Pipeline and Stage implementation
+//
+// MEMORY SAFETY (2026-01):
+// Added AggregationLimits to prevent OOM on large collections.
+// - max_docs_without_match: limits full collection scans
+// - max_group_count: limits $group cardinality
+// See execute_streaming_with_limits() for implementation.
 
 use crate::aggregation::types::{
-    GroupStage, LimitStage, MatchStage, Pipeline, ProjectStage, SkipStage, SortStage, Stage,
-    UnwindStage,
+    AggregationLimits, GroupStage, LimitStage, MatchStage, Pipeline, ProjectStage, SkipStage,
+    SortStage, Stage, UnwindStage,
 };
 use crate::error::{IronBaseError, Result};
 use serde_json::Value;
+use std::cell::Cell;
+use std::rc::Rc;
 
 impl Pipeline {
     /// Create pipeline from JSON array
@@ -19,17 +27,33 @@ impl Pipeline {
             }
 
             let mut stages = Vec::new();
-            for stage_json in stages_array {
+            let mut has_leading_match = false;
+
+            for (i, stage_json) in stages_array.iter().enumerate() {
                 let stage = Stage::from_json(stage_json)?;
+                // Check if first stage is $match
+                if i == 0 {
+                    if let Stage::Match(_) = &stage {
+                        has_leading_match = true;
+                    }
+                }
                 stages.push(stage);
             }
 
-            Ok(Pipeline { stages })
+            Ok(Pipeline {
+                stages,
+                has_leading_match,
+            })
         } else {
             Err(IronBaseError::AggregationError(
                 "Pipeline must be an array".to_string(),
             ))
         }
+    }
+
+    /// Mark that the leading $match was extracted (for limit checking)
+    pub fn set_has_leading_match(&mut self, value: bool) {
+        self.has_leading_match = value;
     }
 
     /// Execute pipeline on documents (legacy - loads all into memory)
@@ -60,7 +84,42 @@ impl Pipeline {
     /// - `execute()`: 650K × 800 bytes = ~500MB
     /// - `execute_streaming()`: ~640KB (only group states)
     /// - With `$project` first: even less (smaller projected docs)
+    #[allow(dead_code)]
     pub fn execute_streaming<I>(&self, docs: I) -> Result<Vec<Value>>
+    where
+        I: Iterator<Item = Result<Value>>,
+    {
+        // Use default limits
+        self.execute_streaming_with_limits(docs, AggregationLimits::default())
+    }
+
+    /// Execute pipeline with streaming and explicit memory limits
+    ///
+    /// This version allows specifying custom limits to prevent OOM on large collections.
+    ///
+    /// # Arguments
+    /// * `docs` - Iterator of documents to process
+    /// * `limits` - Memory safety limits
+    ///
+    /// # Errors
+    /// Returns error if:
+    /// - Document count exceeds `max_docs_without_match` (when no $match)
+    /// - Group count exceeds `max_group_count`
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let limits = AggregationLimits {
+    ///     max_docs_without_match: 10_000,
+    ///     max_group_count: 1_000,
+    ///     max_memory_mb: 256,
+    /// };
+    /// let results = pipeline.execute_streaming_with_limits(docs, limits)?;
+    /// ```
+    pub fn execute_streaming_with_limits<I>(
+        &self,
+        docs: I,
+        limits: AggregationLimits,
+    ) -> Result<Vec<Value>>
     where
         I: Iterator<Item = Result<Value>>,
     {
@@ -75,14 +134,60 @@ impl Pipeline {
         // These are applied inline without materializing
         let streaming_iter = self.apply_streamable_stages(docs, &mut stage_iter);
 
+        // MEMORY SAFETY: Wrap iterator with document counter
+        // Only enforce limit if there's no leading $match
+        let doc_limit = if self.has_leading_match {
+            usize::MAX // No limit when $match filters documents
+        } else {
+            limits.max_docs_without_match
+        };
+
+        // Use Rc<Cell> to share counter between iterator and error checking
+        let doc_count = Rc::new(Cell::new(0usize));
+        let doc_count_clone = Rc::clone(&doc_count);
+
+        let counted_iter = streaming_iter.map(move |doc_result| {
+            if doc_result.is_ok() {
+                let count = doc_count_clone.get() + 1;
+                doc_count_clone.set(count);
+
+                // Check limit every 1000 docs to reduce overhead
+                if count % 1000 == 0 && count > doc_limit {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "Aggregation exceeded document limit: {} documents processed without $match. \
+                         Add a $match stage to filter documents, or increase the limit. \
+                         Current limit: {} (set via AggregationLimits)",
+                        count, doc_limit
+                    )));
+                }
+            }
+            doc_result
+        });
+
         // Phase 2: Check for $group stage (main optimization target)
         let materialized = if let Some(Stage::Group(group_stage)) = stage_iter.peek() {
-            let result = group_stage.execute_streaming(streaming_iter)?;
+            // Pass limits to group stage for cardinality checking
+            let result = group_stage.execute_streaming_with_limits(counted_iter, limits)?;
             stage_iter.next(); // consume the $group stage
             result
         } else {
-            // No $group - materialize streamed results
-            streaming_iter.collect::<Result<Vec<Value>>>()?
+            // No $group - materialize streamed results with limit check
+            let mut results = Vec::new();
+            for doc_result in counted_iter {
+                let doc = doc_result?;
+                results.push(doc);
+
+                // Final limit check
+                if results.len() > doc_limit {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "Aggregation exceeded document limit: {} documents without $match. \
+                         Add a $match stage to filter documents. Limit: {}",
+                        results.len(),
+                        doc_limit
+                    )));
+                }
+            }
+            results
         };
 
         // Phase 3: Execute remaining stages on materialized results

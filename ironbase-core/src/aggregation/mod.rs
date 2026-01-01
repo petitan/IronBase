@@ -179,12 +179,13 @@ mod stages;
 mod types;
 
 // Re-export public types
+pub use types::AggregationLimits;
 pub use types::Pipeline;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     // ========== Pipeline tests ==========
 
@@ -388,5 +389,118 @@ mod tests {
         assert_eq!(results[0]["idx"], 0);
         assert_eq!(results[1]["idx"], 1);
         assert_eq!(results[2]["idx"], 2);
+    }
+
+    // ========== Aggregation Limits tests ==========
+
+    #[test]
+    fn test_aggregation_limits_default() {
+        let limits = AggregationLimits::default();
+        assert_eq!(limits.max_docs_without_match, 100_000);
+        assert_eq!(limits.max_group_count, 50_000);
+        assert_eq!(limits.max_memory_mb, 512);
+    }
+
+    #[test]
+    fn test_aggregation_limits_low_memory() {
+        let limits = AggregationLimits::low_memory();
+        assert_eq!(limits.max_docs_without_match, 10_000);
+        assert_eq!(limits.max_group_count, 5_000);
+        assert_eq!(limits.max_memory_mb, 128);
+    }
+
+    #[test]
+    fn test_aggregation_doc_limit_exceeded() {
+        // Generate docs that exceed the limit
+        let docs: Vec<Value> = (0..5000).map(|i| json!({"x": i})).collect();
+
+        // Pipeline WITHOUT $match - should hit doc limit
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": null, "count": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 1000, // Low limit
+            max_group_count: 50_000,
+            max_memory_mb: 512,
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeded document limit"),
+            "Expected 'exceeded document limit', got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_aggregation_doc_limit_with_match_ok() {
+        // Same docs, but WITH $match - should NOT hit doc limit
+        // because $match filters docs before the limit check
+        let docs: Vec<Value> = (0..5000).map(|i| json!({"x": i})).collect();
+
+        // Pipeline WITH $match
+        let mut pipeline = Pipeline::from_json(&json!([
+            {"$match": {"x": {"$lt": 100}}},  // Only keeps first 100
+            {"$group": {"_id": null, "count": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+        // Mark that we had a leading match (simulating what aggregate() does)
+        pipeline.set_has_leading_match(true);
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 1000, // This limit won't apply due to $match
+            max_group_count: 50_000,
+            max_memory_mb: 512,
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        assert!(result.is_ok());
+        let results = result.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["count"], 100); // Only matched 100 docs
+    }
+
+    #[test]
+    fn test_aggregation_group_limit_exceeded() {
+        // Generate docs with unique group keys
+        let docs: Vec<Value> = (0..5000)
+            .map(|i| json!({"user_id": format!("user_{}", i)}))
+            .collect();
+
+        // $group by user_id - creates 5000 unique groups
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$user_id", "count": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 100_000, // High doc limit
+            max_group_count: 1000,           // Low group limit
+            max_memory_mb: 512,
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeded group limit") || err_msg.contains("unique groups"),
+            "Expected group limit error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_aggregation_limits_unlimited() {
+        let limits = AggregationLimits::unlimited();
+        assert_eq!(limits.max_docs_without_match, usize::MAX);
+        assert_eq!(limits.max_group_count, usize::MAX);
     }
 }
