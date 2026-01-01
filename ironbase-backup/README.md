@@ -197,6 +197,36 @@ OPTIONS:
 | `BackupCorrupted` | Checksum mismatch | Re-download or restore from different backup |
 | `InsufficientSpace` | Not enough disk space | Free up space or use different output directory |
 
+## Large Database Support (Streaming + Split)
+
+For databases >1 GB, the backup tool uses **streaming compression** to avoid memory issues:
+
+```bash
+# Split into 2 GB parts (recommended for >10 GB databases)
+ironbase-backup backup --db /path/to/db.mlite --output ./backups --split 2G
+
+# Output files:
+# backup_20260102_120000_full_000.ibak.001
+# backup_20260102_120000_full_000.ibak.002
+# backup_20260102_120000_full_000.ibak.003
+# ...
+
+# Restore automatically detects multi-part backups
+ironbase-backup restore --dir ./backups --output /path/to/restored.mlite
+```
+
+**Split size formats:**
+- `--split 2G` or `--split 2GiB` - 2 gigabytes
+- `--split 500M` or `--split 500MB` - 500 megabytes
+- Minimum: 10 MB
+
+**Real-world performance (106 GB sparse / 39 GB actual data):**
+
+| Operation | Time | Result |
+|-----------|------|--------|
+| Backup | ~7 min | 106 GB → 25 GB (13 × 2 GB parts) |
+| Restore | ~13 min | 25 GB → 106 GB |
+
 ## Performance
 
 | Operation | Speed | Notes |
