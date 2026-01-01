@@ -238,8 +238,8 @@ mod tests {
         // Create test database
         std::fs::write(&db_path, b"test content".repeat(100)).unwrap();
 
-        // Create backup
-        let result = create_backup(&db_path, &backup_dir, false).unwrap();
+        // Create backup (no split)
+        let result = create_backup(&db_path, &backup_dir, false, None).unwrap();
 
         // Verify
         let verify_result = verify_backup(&result.path).unwrap();

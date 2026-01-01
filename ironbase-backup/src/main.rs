@@ -32,6 +32,11 @@ enum Commands {
         /// Force a full backup even if incrementals are available
         #[arg(long, short)]
         full: bool,
+
+        /// Split backup into parts of specified size (e.g., "2G", "500M", "1GiB")
+        /// Minimum split size is 10 MB. When specified, creates multiple .ibak.NNN files.
+        #[arg(long, short = 's', value_name = "SIZE")]
+        split: Option<String>,
     },
 
     /// Restore database from backups
@@ -87,7 +92,12 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Backup { db, output, full } => cmd_backup(&db, &output, full),
+        Commands::Backup {
+            db,
+            output,
+            full,
+            split,
+        } => cmd_backup(&db, &output, full, split),
         Commands::Restore {
             dir,
             output,
@@ -108,11 +118,61 @@ fn main() -> ExitCode {
     }
 }
 
-fn cmd_backup(db: &Path, output: &Path, full: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let result = backup::create_backup(db, output, full)?;
+fn cmd_backup(
+    db: &Path,
+    output: &Path,
+    full: bool,
+    split: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse split size if provided
+    let split_size = match split {
+        Some(s) => Some(parse_size(&s)?),
+        None => None,
+    };
+
+    let result = backup::create_backup(db, output, full, split_size)?;
     println!();
     result.print_summary();
     Ok(())
+}
+
+/// Parse a human-readable size string (e.g., "2G", "500M", "1GiB") into bytes
+fn parse_size(s: &str) -> Result<u64, Box<dyn std::error::Error>> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("Empty size string".into());
+    }
+
+    // Find where the number ends and the suffix begins
+    let (num_str, suffix) = {
+        let idx = s
+            .find(|c: char| !c.is_ascii_digit() && c != '.')
+            .unwrap_or(s.len());
+        (&s[..idx], s[idx..].trim())
+    };
+
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| format!("Invalid number: {}", num_str))?;
+
+    let multiplier: u64 = match suffix.to_uppercase().as_str() {
+        "" | "B" => 1,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024,
+        _ => return Err(format!("Unknown size suffix: {}", suffix).into()),
+    };
+
+    let bytes = (num * multiplier as f64) as u64;
+
+    // Minimum split size is 10 MB
+    const MIN_SPLIT_SIZE: u64 = 10 * 1024 * 1024;
+    if bytes < MIN_SPLIT_SIZE {
+        return Err(format!("Split size must be at least 10 MB, got {}", s).into());
+    }
+
+    Ok(bytes)
 }
 
 fn cmd_restore(

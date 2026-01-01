@@ -212,21 +212,88 @@ pub fn restore(
 }
 
 /// Read backup file and decompress payload
+/// Handles both single-file and multi-part backups
 fn read_and_decompress(path: &Path) -> Result<Vec<u8>> {
+    use crate::format::BackupHeader;
+
     let file = File::open(path)?;
-    let file_size = file.metadata()?.len();
     let mut reader = BufReader::new(file);
 
-    // Skip header
-    reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+    // Read header to check if multi-part
+    let header = BackupHeader::read_from(&mut reader)?;
 
-    // Read compressed payload
-    let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
-    let mut compressed = vec![0u8; payload_size as usize];
-    reader.read_exact(&mut compressed)?;
+    if header.is_multipart() {
+        // Multi-part backup: read and concatenate all parts
+        read_multipart_backup(path, &header)
+    } else {
+        // Single-file backup
+        let file = File::open(path)?;
+        let file_size = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
 
-    // Decompress
-    decompress(&compressed)
+        // Skip header
+        reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+
+        // Read compressed payload
+        let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+        let mut compressed = vec![0u8; payload_size as usize];
+        reader.read_exact(&mut compressed)?;
+
+        // Decompress
+        decompress(&compressed)
+    }
+}
+
+/// Read all parts of a multi-part backup and concatenate them
+fn read_multipart_backup(
+    first_part_path: &Path,
+    first_header: &crate::format::BackupHeader,
+) -> Result<Vec<u8>> {
+    let total_parts = first_header.total_parts;
+
+    // Derive base path from first part (remove .ibak.001 extension)
+    let path_str = first_part_path.to_string_lossy();
+    let base_path = if path_str.ends_with(".001") {
+        path_str.trim_end_matches(".001").to_string()
+    } else {
+        // Fallback: assume it's already the base path with .ibak extension
+        path_str.trim_end_matches(".ibak").to_string()
+    };
+
+    let mut all_compressed = Vec::new();
+
+    for part_num in 1..=total_parts {
+        let part_path = PathBuf::from(format!("{}.{:03}", base_path, part_num));
+
+        if !part_path.exists() {
+            return Err(BackupError::InvalidBackupFile {
+                reason: format!(
+                    "Missing part {} of {}: {}",
+                    part_num,
+                    total_parts,
+                    part_path.display()
+                ),
+            });
+        }
+
+        // Read this part's compressed payload
+        let file = File::open(&part_path)?;
+        let file_size = file.metadata()?.len();
+        let mut reader = BufReader::new(file);
+
+        // Skip header
+        reader.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
+
+        // Read compressed payload
+        let payload_size = file_size - HEADER_SIZE as u64 - FOOTER_SIZE as u64;
+        let mut part_data = vec![0u8; payload_size as usize];
+        reader.read_exact(&mut part_data)?;
+
+        all_compressed.extend_from_slice(&part_data);
+    }
+
+    // Decompress concatenated data
+    decompress(&all_compressed)
 }
 
 /// List available restore points
@@ -265,8 +332,8 @@ mod tests {
         let original_content = b"Hello, World! This is test data.".repeat(100);
         std::fs::write(&db_path, &original_content).unwrap();
 
-        // Create backup
-        create_backup(&db_path, &backup_dir, false).unwrap();
+        // Create backup (no split)
+        create_backup(&db_path, &backup_dir, false, None).unwrap();
 
         // Restore
         let result = restore(&backup_dir, &restore_path, None, None).unwrap();
@@ -289,7 +356,7 @@ mod tests {
         std::fs::write(&db_path, &initial).unwrap();
 
         // Create full backup
-        create_backup(&db_path, &backup_dir, false).unwrap();
+        create_backup(&db_path, &backup_dir, false, None).unwrap();
 
         // Append to database
         let mut file = std::fs::OpenOptions::new()
@@ -301,7 +368,7 @@ mod tests {
         drop(file);
 
         // Create incremental backup
-        create_backup(&db_path, &backup_dir, false).unwrap();
+        create_backup(&db_path, &backup_dir, false, None).unwrap();
 
         // Restore
         let result = restore(&backup_dir, &restore_path, None, None).unwrap();
@@ -312,5 +379,34 @@ mod tests {
         expected.extend_from_slice(&additional);
         assert_eq!(expected, restored);
         assert_eq!(result.backups_applied, 2);
+    }
+
+    #[test]
+    fn test_restore_split_backup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.mlite");
+        let backup_dir = temp_dir.path().join("backups");
+        let restore_path = temp_dir.path().join("restored.mlite");
+
+        // Create pseudo-random data (doesn't compress well)
+        let mut seed: u64 = 12345;
+        let mut original_content = Vec::with_capacity(100 * 1024);
+        for _ in 0..(100 * 1024) {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            original_content.push((seed >> 33) as u8);
+        }
+        std::fs::write(&db_path, &original_content).unwrap();
+
+        // Create split backup with 20KB parts
+        let backup_result = create_backup(&db_path, &backup_dir, false, Some(20 * 1024)).unwrap();
+        assert!(backup_result.part_count >= 2, "Expected multi-part backup");
+
+        // Restore from split backup
+        let result = restore(&backup_dir, &restore_path, None, None).unwrap();
+
+        // Verify restored content matches original
+        let restored_content = std::fs::read(&restore_path).unwrap();
+        assert_eq!(original_content.as_slice(), restored_content.as_slice());
+        assert_eq!(result.backups_applied, 1);
     }
 }

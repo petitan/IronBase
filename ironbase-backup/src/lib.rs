@@ -21,8 +21,18 @@
 //!     Path::new("/data/mydb.mlite"),
 //!     Path::new("/backups/"),
 //!     false, // auto-detect full vs incremental
+//!     None,  // no split (single file backup)
 //! ).unwrap();
 //! println!("Backup created: {}", result.path.display());
+//!
+//! // Create a split backup (2 GiB parts)
+//! let result = backup::create_backup(
+//!     Path::new("/data/mydb.mlite"),
+//!     Path::new("/backups/"),
+//!     false,
+//!     Some(2 * 1024 * 1024 * 1024), // 2 GiB per part
+//! ).unwrap();
+//! println!("Backup created in {} parts", result.part_count);
 //!
 //! // Restore from backup
 //! let result = restore::restore(
