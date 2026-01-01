@@ -6,7 +6,12 @@
 // - max_docs_without_match: limits full collection scans
 // - max_group_count: limits $group cardinality
 // See execute_streaming_with_limits() for implementation.
+//
+// TOP-K OPTIMIZATION (2026-01):
+// When $sort is followed by $limit K, we pass the limit hint to SortStage
+// for O(k) memory instead of O(n). See optimizer module.
 
+use crate::aggregation::optimizer::analyze_pipeline;
 use crate::aggregation::types::{
     AggregationLimits, GroupStage, LimitStage, MatchStage, Pipeline, ProjectStage, SkipStage,
     SortStage, Stage, UnwindStage,
@@ -191,8 +196,25 @@ impl Pipeline {
         };
 
         // Phase 3: Execute remaining stages on materialized results
+        // Apply Top-K optimization if $sort → $limit pattern detected
+        let remaining_stages: Vec<&Stage> = stage_iter.collect();
+        let opt = analyze_pipeline(
+            &remaining_stages
+                .iter()
+                .map(|s| (*s).clone())
+                .collect::<Vec<_>>(),
+        );
+
         let mut docs = materialized;
-        for stage in stage_iter {
+        for (i, stage) in remaining_stages.iter().enumerate() {
+            // Check if this is a $sort stage that can use Top-K optimization
+            if let Stage::Sort(sort_stage) = stage {
+                if opt.sort_stage_index == Some(i) && opt.sort_limit_hint.is_some() {
+                    // Use Top-K optimization
+                    docs = sort_stage.execute_with_limit_hint(docs, opt.sort_limit_hint)?;
+                    continue;
+                }
+            }
             docs = stage.execute(docs)?;
         }
 
