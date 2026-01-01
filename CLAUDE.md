@@ -148,6 +148,34 @@ IronBase/
 - No file truncation - append-only design for safety
 - `flush_metadata()` uses idempotent offset calculation
 
+### HeaderWriter - KRITIKUS INVARIÁNS
+
+A `data_end_offset` mező mutatja, hogy a következő adat HOVA íródjon.
+**TILOS közvetlenül módosítani!** Mindig a `HeaderWriter` metódusokat használd:
+
+| Helyzet | Metódus |
+|---------|---------|
+| Document write után | `HeaderWriter::new(&mut header, &mut file).advance_after_write()` |
+| Metadata flush után | `HeaderWriter::new(&mut header, &mut file).set_after_metadata(offset, size)` |
+| Compaction | `write_compaction_header(&mut file, &header, offset, size)` |
+
+**Miért fontos?**
+- 7+ kritikus bug volt korábban mert valaki elfelejtette frissíteni
+- A HeaderWriter **AUTOMATIKUSAN** számolja a helyes értéket
+- Ha `data_end_offset` rossz → sparse hole vagy metadata felülírás
+
+**Invariáns:**
+```
+Document write után:  data_end_offset = file.stream_position()
+Metadata flush után:  data_end_offset = metadata_offset + metadata_size
+```
+
+**Fájlok:**
+- `storage/mod.rs` - HeaderWriter struct, write_compaction_header()
+- `storage/io.rs` - advance_after_write() használat
+- `storage/metadata.rs` - set_after_metadata() használat
+- `storage/compaction.rs` - write_compaction_header() használat
+
 ## Implemented Features
 
 ### Query Operators (21)

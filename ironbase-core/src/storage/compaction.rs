@@ -1,7 +1,7 @@
 // storage/compaction.rs
 // Storage compaction functionality
 
-use super::StorageEngine;
+use super::{write_compaction_header, StorageEngine};
 use crate::error::Result;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -311,20 +311,10 @@ impl StorageEngine {
         new_file.seek(SeekFrom::Start(metadata_offset))?;
         new_file.write_all(&metadata_bytes)?;
 
-        // Update header with metadata location
-        let mut updated_header = header.clone();
-        updated_header.metadata_offset = metadata_offset;
-        updated_header.metadata_size = metadata_size;
-        // CRITICAL FIX: Update data_end_offset to point AFTER metadata
-        // Without this, Drop::flush() would write at the OLD offset (before compaction),
-        // recreating the sparse hole we just eliminated!
-        updated_header.data_end_offset = metadata_offset + metadata_size;
-
-        // Rewrite header at file start
-        new_file.seek(SeekFrom::Start(0))?;
-        let header_bytes = bincode::serialize(&updated_header)
-            .map_err(|e| crate::error::IronBaseError::Serialization(e.to_string()))?;
-        new_file.write_all(&header_bytes)?;
+        // Use write_compaction_header() to safely update header with correct offsets
+        // This function automatically sets data_end_offset = metadata_offset + metadata_size,
+        // preventing the sparse hole bug that was fixed earlier.
+        write_compaction_header(new_file, header, metadata_offset, metadata_size)?;
 
         new_file.sync_all()?;
 
