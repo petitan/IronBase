@@ -246,6 +246,36 @@ let limits = AggregationLimits::low_memory();  // 10K docs, 5K groups, 128MB
 let limits = AggregationLimits::unlimited();   // No limits (use with caution!)
 ```
 
+### Top-K Optimization (Sort + Limit)
+
+When an aggregation pipeline has `$sort` followed by `$limit`, IronBase automatically uses a bounded heap algorithm instead of full sorting:
+
+**Before (naive):** Sort all N documents → O(n log n) time, O(n) memory
+**After (optimized):** Maintain heap of K elements → O(n log k) time, O(k) memory
+
+**Example - Query that triggered OOM before optimization:**
+```json
+[
+  {"$group": {"_id": "$from.email", "count": {"$sum": 1}}},
+  {"$sort": {"count": -1}},
+  {"$limit": 5}
+]
+```
+
+With 50,000 unique groups:
+- **Before:** Sort all 50K groups → ~50MB memory
+- **After:** Heap of 5 elements → ~500 bytes memory
+
+**How it works:**
+1. Pipeline optimizer detects `$sort` → `$limit` pattern
+2. `SortStage` receives limit hint
+3. Uses `BinaryHeap` to track only top K elements
+4. Final sort of K elements for correct ordering
+
+**Key files:**
+- `ironbase-core/src/aggregation/optimizer.rs` - Pattern detection
+- `ironbase-core/src/aggregation/stages/sort_stage.rs` - Top-K implementation
+
 ### Other Features
 - FindOptions: projection, sort, limit, skip, include_total (all with dot notation)
 - B+ tree indexes: single-field, compound, unique, fuzzy

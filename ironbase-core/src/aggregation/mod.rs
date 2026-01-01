@@ -174,6 +174,7 @@
 //! - [`helpers`] - Segédfüggvények (dot notation, mező kinyerés)
 
 mod helpers;
+pub(crate) mod optimizer;
 mod pipeline;
 mod stages;
 mod types;
@@ -502,5 +503,80 @@ mod tests {
         let limits = AggregationLimits::unlimited();
         assert_eq!(limits.max_docs_without_match, usize::MAX);
         assert_eq!(limits.max_group_count, usize::MAX);
+    }
+
+    // ========== Top-K Optimization tests ==========
+
+    #[test]
+    fn test_topk_optimization_sort_limit() {
+        // Create docs with unique values
+        let docs: Vec<Value> = (0..1000)
+            .map(|i| json!({"id": i, "score": 1000 - i}))
+            .collect();
+
+        // Pipeline with $sort → $limit pattern
+        let pipeline = Pipeline::from_json(&json!([
+            {"$sort": {"score": -1}},
+            {"$limit": 5}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        // Should return top 5 by score descending
+        assert_eq!(results.len(), 5);
+        assert_eq!(results[0]["score"], 1000);
+        assert_eq!(results[1]["score"], 999);
+        assert_eq!(results[2]["score"], 998);
+        assert_eq!(results[3]["score"], 997);
+        assert_eq!(results[4]["score"], 996);
+    }
+
+    #[test]
+    fn test_topk_optimization_group_sort_limit() {
+        // Simulates the problematic query that caused OOM
+        let docs: Vec<Value> = (0..500)
+            .map(|i| json!({"city": format!("city_{}", i % 100), "amount": i}))
+            .collect();
+
+        // Pipeline: $group → $sort → $limit (Top-K pattern)
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$city", "total": {"$sum": "$amount"}}},
+            {"$sort": {"total": -1}},
+            {"$limit": 3}
+        ]))
+        .unwrap();
+
+        let results = pipeline
+            .execute_streaming(docs.into_iter().map(Ok))
+            .unwrap();
+
+        // Should return top 3 cities by total
+        assert_eq!(results.len(), 3);
+
+        // Verify descending order
+        let total0 = results[0]["total"].as_i64().unwrap();
+        let total1 = results[1]["total"].as_i64().unwrap();
+        let total2 = results[2]["total"].as_i64().unwrap();
+        assert!(total0 >= total1);
+        assert!(total1 >= total2);
+    }
+
+    #[test]
+    fn test_topk_ascending_sort() {
+        let docs: Vec<Value> = (0..100).map(|i| json!({"value": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$sort": {"value": 1}},
+            {"$limit": 3}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0]["value"], 0);
+        assert_eq!(results[1]["value"], 1);
+        assert_eq!(results[2]["value"], 2);
     }
 }
