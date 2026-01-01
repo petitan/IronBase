@@ -954,9 +954,56 @@ ironbase-backup backup --db /path/to/data.mlite --output ./backups --full
 # Incremental backup
 ironbase-backup backup --db /path/to/data.mlite --output ./backups
 
-# Restore
-ironbase-backup restore --backup ./backups/backup_xxx.tar.zst --output /path/to/restored.mlite
+# Split backup (nagy fájlokhoz, 2 GB-os részekre darabolva)
+ironbase-backup backup --db /path/to/data.mlite --output ./backups --split 2G
+
+# Restore (automatikusan felismeri a multi-part backupot)
+ironbase-backup restore --dir ./backups --output /path/to/restored.mlite
 ```
+
+### Streaming Backup (nagy fájlok kezelése)
+
+A backup tool **streaming tömörítést és dekompressziót** használ 1 GB feletti fájlokhoz, így nem fut ki a memóriából nagy adatbázisoknál.
+
+**Működési elv:**
+```
+Backup (>1 GB):
+  1. Streaming olvasás az adatbázisból
+  2. Streaming zstd tömörítés temp fájlba
+  3. Temp fájl darabolása (ha --split meg van adva)
+  4. Temp fájl törlése
+
+Restore (>1 GB compressed):
+  1. ChainedReader összeláncol minden part fájlt
+  2. Streaming dekompresszió közvetlenül a kimeneti fájlba
+  3. Temp fájl törlése
+```
+
+**Teljesítmény (106 GB sparse / 39 GB valós adat):**
+
+| Művelet | Idő | Eredmény |
+|---------|-----|----------|
+| **Backup** | ~7 perc | 106 GB → 25 GB (13 × 2 GB part) |
+| **Restore** | ~13 perc | 25 GB → 106 GB |
+
+**Split formátumok:**
+- `--split 2G` vagy `--split 2GiB` - 2 gigabyte
+- `--split 500M` vagy `--split 500MB` - 500 megabyte
+- `--split 1024K` - 1024 kilobyte
+- Minimum split méret: 10 MB
+
+**Multi-part fájlnevek:**
+```
+backup_20260101_120000_full_000.ibak.001  # Part 1
+backup_20260101_120000_full_000.ibak.002  # Part 2
+backup_20260101_120000_full_000.ibak.003  # Part 3
+...
+```
+
+**Key Files:**
+- `ironbase-backup/src/backup.rs` - Streaming backup + split logika
+- `ironbase-backup/src/restore.rs` - Streaming restore + ChainedReader
+- `ironbase-backup/src/compression.rs` - `compress_stream()`, `decompress_stream()`
 
 ### Lock architektúra (Windows kompatibilitás)
 
