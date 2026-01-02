@@ -307,6 +307,27 @@ With 50,000 unique groups:
 - Python: Map to PyIOError, PyRuntimeError, PyValueError
 - C#: Map to appropriate .NET exceptions
 
+### When Fixing Bugs (KRITIKUS!)
+
+**KÖTELEZŐ: Fix alkalmazása előtt keress MINDEN code path-ot ahol ugyanaz a logika létezik!**
+
+Példa eset (2025-01-02):
+- Bug: `create_fulltext_index()` OOM nagy collection-öknél
+- Fix: Batching hozzáadva `collection_core/mod.rs`-ben ✅
+- PROBLÉMA: `rebuild_indexes_from_catalog()` ugyanazt csinálja `database/collections.rs`-ben, de NEM lett fixelve!
+- Eredmény: 1 héttel később újra OOM backup/restore-nál
+
+**Ellenőrzőlista fix előtt:**
+1. `git grep "hasonló_pattern"` - keresd meg az összes előfordulást
+2. Minden fájlt ellenőrizz ahol ugyanaz a logika van
+3. Ha duplikált kód van, refaktoráld közös utility-be
+4. Írj tesztet MINDEN érintett code path-ra
+
+**Code Duplication Red Flags:**
+- Ugyanaz a logic `collection_core/` és `database/` könyvtárban
+- `create_*` és `rebuild_*` függvények hasonló tartalommal
+- Startup/warmup vs runtime kód ugyanazzal a művelettel
+
 ### OOM Prevention (KRITIKUS!)
 
 **TILOS minták - Soha ne csináld nagy kollekciókra:**
