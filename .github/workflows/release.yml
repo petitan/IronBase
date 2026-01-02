@@ -10,6 +10,12 @@ on:
         description: 'Tag to release (e.g., v1.0.29)'
         required: true
         type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: 'Tag to release (called from auto-tag)'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
