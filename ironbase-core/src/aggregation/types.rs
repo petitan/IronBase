@@ -97,6 +97,28 @@ impl Pipeline {
         }
         None
     }
+
+    /// Get leading $group stage reference for index optimization check
+    ///
+    /// Returns reference to the $group stage if it's the first stage.
+    /// Used to check if index-based group optimization is possible.
+    pub fn peek_leading_group(&self) -> Option<&GroupStage> {
+        if let Some(Stage::Group(group_stage)) = self.stages.first() {
+            Some(group_stage)
+        } else {
+            None
+        }
+    }
+
+    /// Remove the leading $group stage (after index-based execution)
+    ///
+    /// Call this after successfully executing $group using index optimization.
+    /// The remaining stages will be executed on the indexed results.
+    pub fn remove_leading_group(&mut self) {
+        if let Some(Stage::Group(_)) = self.stages.first() {
+            self.stages.remove(0);
+        }
+    }
 }
 
 /// Pipeline stage
