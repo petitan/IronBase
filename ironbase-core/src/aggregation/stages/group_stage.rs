@@ -111,6 +111,7 @@ impl GroupStage {
             });
 
             // Update each accumulator state with this document (streaming)
+            // Note: execute_streaming() has no limits - use execute_streaming_with_limits() for OOM protection
             for (field, accumulator) in &self.accumulators {
                 if let Some(state) = entry.states.get_mut(field) {
                     state.update(&doc, accumulator);
@@ -234,9 +235,15 @@ impl GroupStage {
                     .collect(),
             });
 
+            // Update accumulators with OOM-safe limits for $push/$addToSet
             for (field, accumulator) in &self.accumulators {
                 if let Some(state) = entry.states.get_mut(field) {
-                    state.update(&doc, accumulator);
+                    state.update_with_limits(
+                        &doc,
+                        accumulator,
+                        limits.max_push_elements,
+                        limits.max_addtoset_elements,
+                    )?;
                 }
             }
 

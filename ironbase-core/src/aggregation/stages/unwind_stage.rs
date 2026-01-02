@@ -56,14 +56,54 @@ impl UnwindStage {
         ))
     }
 
+    /// Default max output documents for $unwind to prevent OOM
+    /// 1000 docs × 10000 array elements = 10M output → ezt limitáljuk
+    const DEFAULT_MAX_UNWIND_OUTPUT: usize = 1_000_000;
+
     pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
+        self.execute_with_limit(docs, Self::DEFAULT_MAX_UNWIND_OUTPUT)
+    }
+
+    /// Execute $unwind with explicit output limit
+    ///
+    /// # OOM Protection
+    /// - Checks output count BEFORE each push
+    /// - Uses try_reserve() for memory safety
+    /// - Default limit: 1,000,000 output documents
+    pub(crate) fn execute_with_limit(
+        &self,
+        docs: Vec<Value>,
+        max_output: usize,
+    ) -> Result<Vec<Value>> {
+        // Estimate output size: worst case is sum of all array lengths
+        // We don't pre-calculate this to avoid scanning twice, but we check incrementally
         let mut results = Vec::new();
+        let mut output_count: usize = 0;
 
         for doc in docs {
             let array_value = get_nested_value(&doc, &self.path);
 
             match array_value {
                 Some(Value::Array(arr)) if !arr.is_empty() => {
+                    // Pre-check: will this array push us over the limit?
+                    if output_count.saturating_add(arr.len()) > max_output {
+                        return Err(IronBaseError::AggregationError(format!(
+                            "$unwind would exceed output limit: {} + {} > {} documents. \
+                             Array at path '{}' has {} elements. \
+                             Consider filtering with $match first or using $slice to limit array size.",
+                            output_count, arr.len(), max_output, self.path, arr.len()
+                        )));
+                    }
+
+                    // try_reserve for this batch
+                    results.try_reserve(arr.len()).map_err(|_| {
+                        IronBaseError::OutOfMemory(format!(
+                            "$unwind failed to allocate memory for {} elements at path '{}'",
+                            arr.len(),
+                            self.path
+                        ))
+                    })?;
+
                     for (index, element) in arr.iter().enumerate() {
                         let mut new_doc = doc.clone();
 
@@ -77,11 +117,19 @@ impl UnwindStage {
                             );
                         }
 
+                        output_count += 1;
                         results.push(new_doc);
                     }
                 }
                 Some(Value::Array(_)) => {
                     if self.preserve_null_and_empty_arrays {
+                        output_count += 1;
+                        if output_count > max_output {
+                            return Err(IronBaseError::AggregationError(format!(
+                                "$unwind exceeded output limit: {} documents (max: {})",
+                                output_count, max_output
+                            )));
+                        }
                         let mut new_doc = doc.clone();
                         set_nested_value(&mut new_doc, &self.path, Value::Null);
                         results.push(new_doc);
@@ -89,6 +137,13 @@ impl UnwindStage {
                 }
                 None => {
                     if self.preserve_null_and_empty_arrays {
+                        output_count += 1;
+                        if output_count > max_output {
+                            return Err(IronBaseError::AggregationError(format!(
+                                "$unwind exceeded output limit: {} documents (max: {})",
+                                output_count, max_output
+                            )));
+                        }
                         let mut new_doc = doc.clone();
                         set_nested_value(&mut new_doc, &self.path, Value::Null);
                         results.push(new_doc);
@@ -96,10 +151,24 @@ impl UnwindStage {
                 }
                 Some(Value::Null) => {
                     if self.preserve_null_and_empty_arrays {
+                        output_count += 1;
+                        if output_count > max_output {
+                            return Err(IronBaseError::AggregationError(format!(
+                                "$unwind exceeded output limit: {} documents (max: {})",
+                                output_count, max_output
+                            )));
+                        }
                         results.push(doc);
                     }
                 }
                 Some(_) => {
+                    output_count += 1;
+                    if output_count > max_output {
+                        return Err(IronBaseError::AggregationError(format!(
+                            "$unwind exceeded output limit: {} documents (max: {})",
+                            output_count, max_output
+                        )));
+                    }
                     if let Some(ref index_field) = self.include_array_index {
                         let mut new_doc = doc.clone();
                         set_nested_value(

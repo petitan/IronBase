@@ -194,7 +194,27 @@ impl Accumulator {
 impl AccumulatorState {
     /// Update state with a single document (streaming/incremental)
     /// This is the key optimization - we don't store the document, only update state
+    ///
+    /// **WARNING:** This method has NO LIMITS on $push/$addToSet!
+    /// Use `update_with_limits()` for OOM protection.
     pub(crate) fn update(&mut self, doc: &Value, accumulator: &Accumulator) {
+        // Delegate to unlimited version (backwards compatibility)
+        let _ = self.update_with_limits(doc, accumulator, usize::MAX, usize::MAX);
+    }
+
+    /// Update state with explicit limits for $push and $addToSet
+    ///
+    /// # OOM Protection
+    /// - Returns Err if $push exceeds max_push_elements
+    /// - Returns Err if $addToSet exceeds max_addtoset_elements
+    /// - Other accumulators are O(1) memory and don't need limits
+    pub(crate) fn update_with_limits(
+        &mut self,
+        doc: &Value,
+        accumulator: &Accumulator,
+        max_push_elements: usize,
+        max_addtoset_elements: usize,
+    ) -> Result<()> {
         match (self, accumulator) {
             (
                 AccumulatorState::Sum {
@@ -289,16 +309,49 @@ impl AccumulatorState {
             }
 
             (AccumulatorState::Push { values }, Accumulator::Push(field)) => {
-                // Must store all values - no optimization possible
+                // OOM Protection: check limit BEFORE push
+                if values.len() >= max_push_elements {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "$push exceeded limit: {} elements (max: {}). \
+                         Consider using $slice in $project or filtering with $match first.",
+                        values.len(),
+                        max_push_elements
+                    )));
+                }
                 if let Some(doc_val) = get_nested_value(doc, field) {
+                    // try_reserve for safety
+                    values.try_reserve(1).map_err(|_| {
+                        IronBaseError::OutOfMemory(format!(
+                            "$push failed to allocate memory for element {} in field '{}'",
+                            values.len(),
+                            field
+                        ))
+                    })?;
                     values.push(doc_val.clone());
                 }
             }
 
             (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(field)) => {
+                // OOM Protection: check limit BEFORE insert
+                if values.len() >= max_addtoset_elements {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "$addToSet exceeded limit: {} unique elements (max: {}). \
+                         High-cardinality field detected. Consider using $match to filter first.",
+                        values.len(),
+                        max_addtoset_elements
+                    )));
+                }
                 if let Some(doc_val) = get_nested_value(doc, field) {
                     let key = canonical_json_string(doc_val);
                     if seen.insert(key) {
+                        // try_reserve for safety
+                        values.try_reserve(1).map_err(|_| {
+                            IronBaseError::OutOfMemory(format!(
+                                "$addToSet failed to allocate memory for element {} in field '{}'",
+                                values.len(),
+                                field
+                            ))
+                        })?;
                         values.push(doc_val.clone());
                     }
                 }
@@ -309,6 +362,7 @@ impl AccumulatorState {
                 debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
             }
         }
+        Ok(())
     }
 
     /// Finalize state to produce the output value

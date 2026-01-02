@@ -140,26 +140,31 @@ impl Pipeline {
         let streaming_iter = self.apply_streamable_stages(docs, &mut stage_iter);
 
         // MEMORY SAFETY: Wrap iterator with document counter
-        // Only enforce limit if there's no leading $match
+        // Use different limits based on whether there's a leading $match
+        // Note: Even with $match, we still need a limit to prevent OOM if $match returns many docs!
         let doc_limit = if self.has_leading_match {
-            usize::MAX // No limit when $match filters documents
+            limits.max_docs_with_match // Higher limit when $match filters documents
         } else {
-            limits.max_docs_without_match
+            limits.max_docs_without_match // Stricter limit for full collection scans
         };
 
         // Use Rc<Cell> to share counter between iterator and error checking
         let doc_count = Rc::new(Cell::new(0usize));
         let doc_count_clone = Rc::clone(&doc_count);
 
+        // Calculate check interval: every 1000 docs or 10% of limit, whichever is smaller
+        // This ensures we catch limit violations promptly even for small limits
+        let check_interval = std::cmp::min(1000, doc_limit.saturating_div(10).max(1));
+
         let counted_iter = streaming_iter.map(move |doc_result| {
             if doc_result.is_ok() {
                 let count = doc_count_clone.get() + 1;
                 doc_count_clone.set(count);
 
-                // Check limit every 1000 docs to reduce overhead
-                if count % 1000 == 0 && count > doc_limit {
+                // Check limit periodically to balance overhead vs responsiveness
+                if count % check_interval == 0 && count > doc_limit {
                     return Err(IronBaseError::AggregationError(format!(
-                        "Aggregation exceeded document limit: {} documents processed without $match. \
+                        "Aggregation exceeded document limit: {} documents processed. \
                          Add a $match stage to filter documents, or increase the limit. \
                          Current limit: {} (set via AggregationLimits)",
                         count, doc_limit
