@@ -127,19 +127,21 @@ mod tests {
     }
 
     #[test]
-    fn test_btree_range_scan() {
+    fn test_btree_range_query() {
         let mut tree = BPlusTree::new("age_idx".to_string(), "age".to_string(), false, false);
 
         for i in 0..100 {
             tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
         }
 
-        let results = tree.range_scan(
-            &IndexKey::Int(10),
-            &IndexKey::Int(20),
-            true,  // inclusive start
-            false, // exclusive end
-        );
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: None,
+            order: ScanOrder::Asc,
+        };
+        let results = tree
+            .range_query(&IndexKey::Int(10), &IndexKey::Int(20), true, false, mode)
+            .unwrap_docs();
 
         assert_eq!(results.len(), 10); // 10..19
     }
@@ -343,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compound_index_range_scan() {
+    fn test_compound_index_range_query() {
         let mut tree = BPlusTree::new_compound(
             "users_location".to_string(),
             vec!["country".to_string(), "city".to_string()],
@@ -369,7 +371,7 @@ mod tests {
             tree.insert(key, DocumentId::Int(*id)).unwrap();
         }
 
-        // Range scan for all US cities
+        // Range query for all US cities
         let start = IndexKey::Compound(vec![
             IndexKey::String("US".to_string()),
             IndexKey::String("".to_string()), // Empty string sorts before any city
@@ -379,7 +381,14 @@ mod tests {
             IndexKey::String("\u{10ffff}".to_string()), // Max unicode sorts after any city
         ]);
 
-        let results = tree.range_scan(&start, &end, true, true);
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: None,
+            order: ScanOrder::Asc,
+        };
+        let results = tree
+            .range_query(&start, &end, true, true, mode)
+            .unwrap_docs();
         assert_eq!(results.len(), 3); // Chicago, LA, NYC
     }
 
@@ -491,24 +500,25 @@ mod tests {
         );
 
         // Verify each key has exactly one entry
-        let alice_results = tree.range_scan(
-            &IndexKey::String("alice".to_string()),
-            &IndexKey::String("alice".to_string()),
-            true,
-            true,
-        );
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: None,
+            order: ScanOrder::Asc,
+        };
+        let alice_key = IndexKey::String("alice".to_string());
+        let alice_results = tree
+            .range_query(&alice_key, &alice_key, true, true, mode.clone())
+            .unwrap_docs();
         assert_eq!(
             alice_results.len(),
             1,
             "BUG #3 regression: 'alice' has duplicates!"
         );
 
-        let bob_results = tree.range_scan(
-            &IndexKey::String("bob".to_string()),
-            &IndexKey::String("bob".to_string()),
-            true,
-            true,
-        );
+        let bob_key = IndexKey::String("bob".to_string());
+        let bob_results = tree
+            .range_query(&bob_key, &bob_key, true, true, mode)
+            .unwrap_docs();
         assert_eq!(
             bob_results.len(),
             1,
@@ -900,9 +910,16 @@ mod split_tests {
             "Last element should be found"
         );
 
-        // Verify range scan works on multi-level tree
-        let results = tree.range_scan(&IndexKey::Int(100), &IndexKey::Int(200), true, false);
-        assert_eq!(results.len(), 100, "Range scan should return 100 elements");
+        // Verify range query works on multi-level tree
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: None,
+            order: ScanOrder::Asc,
+        };
+        let results = tree
+            .range_query(&IndexKey::Int(100), &IndexKey::Int(200), true, false, mode)
+            .unwrap_docs();
+        assert_eq!(results.len(), 100, "Range query should return 100 elements");
     }
 
     /// Test that multiple splits create correct tree structure
@@ -1046,9 +1063,9 @@ mod compound_prefix_tests {
         }
     }
 
-    /// Test compound index prefix query via range scan
+    /// Test compound index prefix query via range_query
     #[test]
-    fn test_compound_prefix_query_range_scan() {
+    fn test_compound_prefix_query_range_query() {
         let mut tree = BPlusTree::new_compound(
             "users_country_city".to_string(),
             vec!["country".to_string(), "city".to_string()],
@@ -1073,10 +1090,18 @@ mod compound_prefix_tests {
             tree.insert(key, DocumentId::Int(*id)).unwrap();
         }
 
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: None,
+            order: ScanOrder::Asc,
+        };
+
         // Query: prefix = "US" (should find LA, NYC, SF)
         let prefix = IndexKey::String("US".to_string());
         let (start, end) = tree.build_prefix_range(prefix);
-        let results = tree.range_scan(&start, &end, true, true);
+        let results = tree
+            .range_query(&start, &end, true, true, mode.clone())
+            .unwrap_docs();
 
         assert_eq!(results.len(), 3, "Should find 3 US cities");
         assert!(results.contains(&DocumentId::Int(3)));
@@ -1086,7 +1111,9 @@ mod compound_prefix_tests {
         // Query: prefix = "HU" (should find Budapest, Debrecen)
         let prefix = IndexKey::String("HU".to_string());
         let (start, end) = tree.build_prefix_range(prefix);
-        let results = tree.range_scan(&start, &end, true, true);
+        let results = tree
+            .range_query(&start, &end, true, true, mode.clone())
+            .unwrap_docs();
 
         assert_eq!(results.len(), 2, "Should find 2 HU cities");
         assert!(results.contains(&DocumentId::Int(1)));
@@ -1095,7 +1122,9 @@ mod compound_prefix_tests {
         // Query: prefix = "DE" (should find nothing)
         let prefix = IndexKey::String("DE".to_string());
         let (start, end) = tree.build_prefix_range(prefix);
-        let results = tree.range_scan(&start, &end, true, true);
+        let results = tree
+            .range_query(&start, &end, true, true, mode)
+            .unwrap_docs();
 
         assert_eq!(results.len(), 0, "Should find no DE cities");
     }
@@ -1181,16 +1210,23 @@ mod non_unique_delete_tests {
         tree.delete(&email_key, &DocumentId::Int(500)).unwrap();
         assert_eq!(tree.metadata.num_keys, 2);
 
-        // Verify remaining documents are still in the index via range_scan
-        let remaining = tree.range_scan(&email_key, &email_key, true, true);
+        // Verify remaining documents are still in the index via range_query
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: None,
+            order: ScanOrder::Asc,
+        };
+        let remaining = tree
+            .range_query(&email_key, &email_key, true, true, mode)
+            .unwrap_docs();
         assert_eq!(remaining.len(), 2);
         assert!(remaining.contains(&DocumentId::Int(200)));
         assert!(remaining.contains(&DocumentId::Int(400)));
     }
 
-    /// Test that range_scan returns all documents with the same key (no duplicates issue)
+    /// Test that range_query returns all documents with the same key (no duplicates issue)
     #[test]
-    fn test_non_unique_range_scan_no_duplicates() {
+    fn test_non_unique_range_query_no_duplicates() {
         let mut tree = BPlusTree::new("status_idx".to_string(), "status".to_string(), false, false);
 
         let active_key = IndexKey::String("active".to_string());
@@ -1207,8 +1243,15 @@ mod non_unique_delete_tests {
         tree.insert(inactive_key.clone(), DocumentId::Int(20))
             .unwrap();
 
-        // Range scan for "active" should return exactly 3 unique doc_ids
-        let active_results = tree.range_scan(&active_key, &active_key, true, true);
+        // Range query for "active" should return exactly 3 unique doc_ids
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: None,
+            order: ScanOrder::Asc,
+        };
+        let active_results = tree
+            .range_query(&active_key, &active_key, true, true, mode)
+            .unwrap_docs();
         assert_eq!(active_results.len(), 3);
 
         // Verify NO duplicates in results
