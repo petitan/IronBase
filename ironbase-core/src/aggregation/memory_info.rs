@@ -11,7 +11,8 @@
 ///
 /// # Platform support
 /// - **Linux**: Reads `MemAvailable` from `/proc/meminfo` (most accurate)
-/// - **macOS/BSD**: Uses `sysconf(_SC_AVPHYS_PAGES)`
+/// - **macOS**: Estimates 50% of total memory (conservative)
+/// - **FreeBSD**: Uses `sysconf(_SC_AVPHYS_PAGES)`
 /// - **Windows**: Returns `None` (use fallback limits)
 ///
 /// # Example
