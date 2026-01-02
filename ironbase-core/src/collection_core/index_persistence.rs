@@ -128,7 +128,7 @@ pub fn try_load_fulltext_index_from_file(
         Ok(index) => Some(index),
         Err(e) => {
             eprintln!(
-                "[WARN] Failed to load fulltext index from {:?}: {:?}",
+                "[INFO] Fulltext index cache {:?} is stale or corrupted ({:?}), will rebuild from documents",
                 ftidx_path, e
             );
             None
@@ -182,7 +182,7 @@ pub fn try_load_fuzzy_index_from_file(
         Ok(index) => Some(index),
         Err(e) => {
             eprintln!(
-                "[WARN] Failed to load fuzzy index from {:?}: {:?}",
+                "[INFO] Fuzzy index cache {:?} is stale or corrupted ({:?}), will rebuild from documents",
                 fzidx_path, e
             );
             None

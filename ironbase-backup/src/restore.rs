@@ -26,8 +26,8 @@ pub struct RestoreResult {
     pub size: u64,
     /// Number of backups applied
     pub backups_applied: usize,
-    /// Number of stale .idx files cleaned up
-    pub idx_files_cleaned: usize,
+    /// Number of stale index cache files cleaned up (.idx, .ftidx, .fzidx)
+    pub index_files_cleaned: usize,
     /// Time taken in seconds
     pub duration_secs: f64,
 }
@@ -39,10 +39,10 @@ impl RestoreResult {
         println!("  Output:    {}", self.path.display());
         println!("  Size:      {}", format_size(self.size));
         println!("  Backups:   {} applied", self.backups_applied);
-        if self.idx_files_cleaned > 0 {
+        if self.index_files_cleaned > 0 {
             println!(
-                "  Cleanup:   {} stale .idx files removed",
-                self.idx_files_cleaned
+                "  Cleanup:   {} stale index cache files removed",
+                self.index_files_cleaned
             );
         }
         println!("  Time:      {:.2}s", self.duration_secs);
@@ -51,12 +51,17 @@ impl RestoreResult {
     }
 }
 
-/// Clean up stale .idx files that might exist from a previous database
+/// Clean up stale index cache files that might exist from a previous database
 ///
-/// IronBase stores index caches in separate .idx files. After restoring,
-/// any existing .idx files would be stale and inconsistent with the
-/// restored data. IronBase will automatically rebuild indexes on first open.
-fn cleanup_stale_idx_files(db_path: &Path) -> usize {
+/// IronBase stores index caches in separate files:
+/// - `.idx` - B+ tree index caches
+/// - `.ftidx` - Fulltext index caches
+/// - `.fzidx` - Fuzzy index caches
+///
+/// After restoring, any existing cache files would be stale and inconsistent
+/// with the restored data. IronBase will automatically rebuild all indexes
+/// from documents on first open.
+fn cleanup_stale_index_files(db_path: &Path) -> usize {
     let mut cleaned = 0;
 
     // Get the directory and stem of the database file
@@ -67,15 +72,16 @@ fn cleanup_stale_idx_files(db_path: &Path) -> usize {
         return 0;
     };
 
-    // Pattern: {stem}_*.idx
+    // Pattern: {stem}_*.{idx,ftidx,fzidx}
     let prefix = format!("{}_", stem);
+    let extensions = [".idx", ".ftidx", ".fzidx"];
 
     if let Ok(entries) = fs::read_dir(parent) {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
                 if name.starts_with(&prefix)
-                    && name.ends_with(".idx")
+                    && extensions.iter().any(|ext| name.ends_with(ext))
                     && fs::remove_file(&path).is_ok()
                 {
                     cleaned += 1;
@@ -130,10 +136,10 @@ pub fn restore(
         target_idx + 1
     );
 
-    // Clean up any stale .idx files from previous database
-    let idx_cleaned = cleanup_stale_idx_files(output_path);
+    // Clean up any stale index cache files from previous database
+    let idx_cleaned = cleanup_stale_index_files(output_path);
     if idx_cleaned > 0 {
-        println!("Cleaned up {} stale .idx file(s)", idx_cleaned);
+        println!("Cleaned up {} stale index cache file(s)", idx_cleaned);
     }
 
     // Verify chain integrity up to target
@@ -217,7 +223,7 @@ pub fn restore(
         path: output_path.to_path_buf(),
         size: final_size,
         backups_applied: target_idx + 1,
-        idx_files_cleaned: idx_cleaned,
+        index_files_cleaned: idx_cleaned,
         duration_secs: duration,
     })
 }

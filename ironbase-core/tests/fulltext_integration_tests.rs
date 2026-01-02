@@ -811,3 +811,89 @@ fn test_no_duplicate_documents_after_update_many() {
     let total = coll.count_documents(&json!({})).unwrap();
     assert_eq!(total, 3, "Total document count should be 3");
 }
+
+/// Test that fulltext index is properly rebuilt when .ftidx file is deleted
+/// (simulates backup/restore scenario where only .mlite is restored)
+#[test]
+fn test_fulltext_index_rebuild_after_ftidx_deletion() {
+    use std::fs;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test_fts_rebuild.mlite");
+
+    // Phase 1: Create database with fulltext index
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        db.insert_one(
+            "articles",
+            doc! {
+                "title" => "Test Article",
+                "content" => "Rust programming language is amazing"
+            },
+        )
+        .unwrap();
+        db.insert_one(
+            "articles",
+            doc! {
+                "title" => "Second Article",
+                "content" => "Python is also great for scripting"
+            },
+        )
+        .unwrap();
+
+        let coll = db.collection("articles").unwrap();
+        coll.create_fulltext_index("content".to_string(), "english", None, None)
+            .unwrap();
+
+        // Verify search works before drop
+        let results = coll
+            .fulltext_search("content", "rust", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1, "Should find Rust article before drop");
+    }
+    // db dropped here - indexes flushed
+
+    // Phase 2: Delete all .ftidx files (simulates backup/restore)
+    for entry in fs::read_dir(temp_dir.path()).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if path.extension().map_or(false, |e| e == "ftidx") {
+            println!("Deleting .ftidx file: {:?}", path);
+            fs::remove_file(&path).unwrap();
+        }
+    }
+
+    // Verify .ftidx files are deleted
+    let ftidx_count = fs::read_dir(temp_dir.path())
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .map(|e| e.path().extension().map_or(false, |e| e == "ftidx"))
+                .unwrap_or(false)
+        })
+        .count();
+    assert_eq!(ftidx_count, 0, "All .ftidx files should be deleted");
+
+    // Phase 3: Reopen database - fulltext index should be AUTOMATICALLY rebuilt
+    {
+        let db2 = DatabaseCore::open(&db_path).unwrap();
+        let coll2 = db2.collection("articles").unwrap();
+
+        // BUG: This search should work because the index was rebuilt from documents
+        let results = coll2
+            .fulltext_search("content", "rust", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            1,
+            "Fulltext search should work after .ftidx deletion - index should be rebuilt from documents"
+        );
+
+        // Verify Python search also works
+        let results = coll2
+            .fulltext_search("content", "python", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 1, "Python search should work after rebuild");
+    }
+}
