@@ -823,6 +823,10 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// BUG #2 FIX: This method returns the ACTUAL documents that were modified,
     /// eliminating the race condition where a concurrent insert could be updated
     /// but not logged in the WAL.
+    ///
+    /// MEMORY FIX: Uses streaming document loading instead of batch_read_documents_by_ids().
+    /// Previously loaded ALL matching documents into memory, causing OOM on large collections.
+    /// Now uses collect_doc_ids + streaming read - only IDs in memory, docs loaded one by one.
     fn update_many_raw_with_docs(
         &self,
         query_json: &Value,
@@ -851,15 +855,13 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             BatchConstraintValidator::new(&indexes, &self.name)
         };
 
-        // 🚀 BATCH OPTIMIZATION: Read all documents in a single lock acquisition
-        // Instead of N lock acquisitions for N documents, we only acquire 1 lock!
-        let docs_by_id = self.batch_read_documents_by_ids(&doc_ids)?;
-
-        // Only iterate through matching documents (not all 100K!)
+        // ⚠️ OOM PREVENTION: Streaming document loading instead of bulk load
+        // Previously: batch_read_documents_by_ids() loaded ALL matching docs (OOM on 78K emails!)
+        // Now: load one document at a time - O(1) memory per iteration
         for doc_id in doc_ids {
-            // Read document from batch (already loaded!)
-            let doc = match docs_by_id.get(&doc_id) {
-                Some(d) => d.clone(),
+            // Stream-load document one at a time
+            let doc = match self.read_document_by_id(&doc_id)? {
+                Some(d) => d,
                 None => continue, // Document was deleted or not found
             };
 
@@ -1097,6 +1099,10 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// - Applies update operators in memory
     /// - Validates constraints (unique indexes, schema)
     /// - Returns prepared data for WAL and persist phase
+    ///
+    /// MEMORY FIX: Uses streaming document loading instead of batch_read_documents_by_ids().
+    /// Previously loaded ALL matching documents into memory, causing OOM on large collections.
+    /// Now uses collect_doc_ids + streaming read - only IDs in memory, docs loaded one by one.
     fn update_many_prepare(
         &self,
         query_json: &Value,
@@ -1121,13 +1127,13 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             BatchConstraintValidator::new(&indexes, &self.name)
         };
 
-        // BATCH OPTIMIZATION: Read all documents in a single lock acquisition
-        let docs_by_id = self.batch_read_documents_by_ids(&doc_ids)?;
-
-        // Only iterate through matching documents
+        // ⚠️ OOM PREVENTION: Streaming document loading instead of bulk load
+        // Previously: batch_read_documents_by_ids() loaded ALL matching docs (OOM on 78K emails!)
+        // Now: load one document at a time - O(1) memory per iteration
         for doc_id in doc_ids {
-            let doc = match docs_by_id.get(&doc_id) {
-                Some(d) => d.clone(),
+            // Stream-load document one at a time
+            let doc = match self.read_document_by_id(&doc_id)? {
+                Some(d) => d,
                 None => continue,
             };
 
