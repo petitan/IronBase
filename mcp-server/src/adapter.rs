@@ -433,9 +433,7 @@ impl IronBaseAdapter {
             match db.collection(name) {
                 Ok(coll) => {
                     // Initialize document count in memory (one-time cost at startup)
-                    let count = coll
-                        .count_documents(&serde_json::json!({}))
-                        .unwrap_or(0);
+                    let count = coll.count_documents(&serde_json::json!({})).unwrap_or(0);
                     self.collection_stats.set(name, count);
 
                     let elapsed = coll_start.elapsed();
@@ -703,7 +701,8 @@ impl IronBaseAdapter {
     /// Call this before dropping the adapter for graceful shutdown.
     pub fn close(&self) -> Result<()> {
         let db = self.db.write();
-        db.close().map_err(|e| crate::error::McpError::Storage(e.to_string()))?;
+        db.close()
+            .map_err(|e| crate::error::McpError::Storage(e.to_string()))?;
         Ok(())
     }
 

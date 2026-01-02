@@ -147,9 +147,7 @@ mod tests {
         assert_eq!(json_to_dynamic(&json!(42)).as_int().unwrap(), 42);
         assert_eq!(json_to_dynamic(&json!(2.5)).as_float().unwrap(), 2.5);
         assert_eq!(
-            json_to_dynamic(&json!("hello"))
-                .into_string()
-                .unwrap(),
+            json_to_dynamic(&json!("hello")).into_string().unwrap(),
             "hello"
         );
     }

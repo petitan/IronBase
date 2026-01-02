@@ -438,7 +438,11 @@ async fn run_http_server_internal(
 
         eprintln!(
             "⚠️  SYNC LOGGING ENABLED - fsync after every log write (source: {})",
-            if env_sync { "IRONBASE_SYNC_LOG env" } else { "config.toml + debug mode" }
+            if env_sync {
+                "IRONBASE_SYNC_LOG env"
+            } else {
+                "config.toml + debug mode"
+            }
         );
     } else {
         // Normal async logging (fast but may lose last logs on crash)

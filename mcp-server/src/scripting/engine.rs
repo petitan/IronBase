@@ -213,9 +213,7 @@ impl RhaiEngine {
             Ok(value) => {
                 // Check if cancelled during execution
                 if cancelled.load(Ordering::Relaxed) {
-                    return Err(McpError::ScriptError(
-                        "Script was cancelled".to_string()
-                    ));
+                    return Err(McpError::ScriptError("Script was cancelled".to_string()));
                 }
 
                 let json_result = dynamic_to_json(&value);
@@ -239,9 +237,7 @@ impl RhaiEngine {
             Err(e) => {
                 // Check if it was a cancellation
                 if cancelled.load(Ordering::Relaxed) {
-                    return Err(McpError::ScriptError(
-                        "Script was cancelled".to_string()
-                    ));
+                    return Err(McpError::ScriptError("Script was cancelled".to_string()));
                 }
 
                 let err_str = format_rhai_error(&e);
@@ -304,9 +300,10 @@ impl RhaiEngine {
         // Apply timeout
         match tokio::time::timeout(timeout_duration, handle).await {
             Ok(Ok(result)) => result,
-            Ok(Err(join_err)) => {
-                Err(McpError::ScriptError(format!("Script task panicked: {}", join_err)))
-            }
+            Ok(Err(join_err)) => Err(McpError::ScriptError(format!(
+                "Script task panicked: {}",
+                join_err
+            ))),
             Err(_elapsed) => {
                 // Timeout - signal cancellation
                 cancelled.store(true, Ordering::SeqCst);
@@ -437,11 +434,7 @@ mod tests {
         };
 
         // This should exceed the limit
-        let result = engine.run_with_limits(
-            r#"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"#,
-            None,
-            &limits,
-        );
+        let result = engine.run_with_limits(r#"[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"#, None, &limits);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -476,12 +469,8 @@ mod tests {
 
         let cancelled = Arc::new(AtomicBool::new(true)); // Pre-cancelled
 
-        let result = engine.run_with_cancellation(
-            "1 + 1",
-            None,
-            &ScriptLimits::default(),
-            cancelled,
-        );
+        let result =
+            engine.run_with_cancellation("1 + 1", None, &ScriptLimits::default(), cancelled);
 
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();

@@ -88,15 +88,28 @@ pub use engine::RhaiEngine;
 pub use error::format_rhai_error;
 pub use limits::{
     // Core types
-    estimate_json_size, DynamicLimits, LimitsManager, LogCollector, ScriptLimits,
-    // Operation limits (fixed)
-    DEFAULT_MAX_OPERATIONS, DEFAULT_TIMEOUT_MS,
-    // Memory limits (min/max for dynamic calculation)
-    DEFAULT_RESULT_SIZE_BYTES, DEFAULT_TOTAL_LOG_BYTES,
-    MAX_LOG_ENTRIES, MAX_RESULT_SIZE_BYTES, MAX_SINGLE_LOG_ENTRY_BYTES, MAX_TOTAL_LOG_BYTES,
-    MIN_RESULT_SIZE_BYTES, MIN_TOTAL_LOG_BYTES,
+    estimate_json_size,
+    DynamicLimits,
+    LimitsManager,
+    LogCollector,
+    ScriptLimits,
     // Database query limits
-    ABSOLUTE_MAX_FIND_DOCUMENTS, DYNAMIC_MAX_FIND_DOCUMENTS, MAX_FIND_DOCUMENTS, MIN_FIND_DOCUMENTS,
+    ABSOLUTE_MAX_FIND_DOCUMENTS,
+    // Operation limits (fixed)
+    DEFAULT_MAX_OPERATIONS,
+    // Memory limits (min/max for dynamic calculation)
+    DEFAULT_RESULT_SIZE_BYTES,
+    DEFAULT_TIMEOUT_MS,
+    DEFAULT_TOTAL_LOG_BYTES,
+    DYNAMIC_MAX_FIND_DOCUMENTS,
+    MAX_FIND_DOCUMENTS,
+    MAX_LOG_ENTRIES,
+    MAX_RESULT_SIZE_BYTES,
+    MAX_SINGLE_LOG_ENTRY_BYTES,
+    MAX_TOTAL_LOG_BYTES,
+    MIN_FIND_DOCUMENTS,
+    MIN_RESULT_SIZE_BYTES,
+    MIN_TOTAL_LOG_BYTES,
 };
 pub use manager::ScriptManager;
 pub use tracker::{ActiveScriptTracker, ScriptExecutionGuard};
