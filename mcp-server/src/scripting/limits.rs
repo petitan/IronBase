@@ -271,7 +271,8 @@ impl DynamicLimits {
         let max_total_log_size = (max_log_mb * 1024.0 * 1024.0) as usize;
 
         // max_find_documents: result_size / 1KB avg doc size, clamped to [1K, 500K]
-        let max_find_docs = (max_result_size / 1024).clamp(MIN_FIND_DOCUMENTS, DYNAMIC_MAX_FIND_DOCUMENTS);
+        let max_find_docs =
+            (max_result_size / 1024).clamp(MIN_FIND_DOCUMENTS, DYNAMIC_MAX_FIND_DOCUMENTS);
 
         Self {
             available_memory_mb: available_mb,
@@ -302,8 +303,8 @@ impl DynamicLimits {
             return false;
         }
         let current = crate::monitoring::get_system_memory();
-        let change = (current.available_mb - self.available_memory_mb).abs()
-            / self.available_memory_mb;
+        let change =
+            (current.available_mb - self.available_memory_mb).abs() / self.available_memory_mb;
         change > 0.20
     }
 }
@@ -341,9 +342,15 @@ impl LimitsManager {
         let dynamic = DynamicLimits::calculate();
         tracing::info!(
             available_mb = format!("{:.0}", dynamic.available_memory_mb),
-            max_result_mb = format!("{:.1}", dynamic.script_limits.max_result_size as f64 / 1024.0 / 1024.0),
+            max_result_mb = format!(
+                "{:.1}",
+                dynamic.script_limits.max_result_size as f64 / 1024.0 / 1024.0
+            ),
             max_find_docs = dynamic.script_limits.max_find_documents,
-            max_log_mb = format!("{:.1}", dynamic.script_limits.max_total_log_size as f64 / 1024.0 / 1024.0),
+            max_log_mb = format!(
+                "{:.1}",
+                dynamic.script_limits.max_total_log_size as f64 / 1024.0 / 1024.0
+            ),
             "Dynamic script limits initialized"
         );
 
@@ -374,7 +381,10 @@ impl LimitsManager {
             let new_limits = DynamicLimits::calculate();
             tracing::info!(
                 available_mb = format!("{:.0}", new_limits.available_memory_mb),
-                max_result_mb = format!("{:.1}", new_limits.script_limits.max_result_size as f64 / 1024.0 / 1024.0),
+                max_result_mb = format!(
+                    "{:.1}",
+                    new_limits.script_limits.max_result_size as f64 / 1024.0 / 1024.0
+                ),
                 "Script limits refreshed due to memory change"
             );
             *self.limits.write() = new_limits;
@@ -469,11 +479,7 @@ impl LogCollector {
                 .last()
                 .map(|(i, c)| i + c.len_utf8())
                 .unwrap_or(0);
-            format!(
-                "{}... [TRUNCATED: {} bytes]",
-                &s[..truncate_at],
-                s.len()
-            )
+            format!("{}... [TRUNCATED: {} bytes]", &s[..truncate_at], s.len())
         } else {
             s.to_string()
         };
@@ -543,8 +549,8 @@ pub fn estimate_json_size(value: &serde_json::Value) -> usize {
         Value::Number(n) => n.to_string().len(),
         Value::String(s) => s.len() + 2, // quotes
         Value::Array(arr) => {
-            2 + arr.iter().map(estimate_json_size).sum::<usize>()
-                + arr.len().saturating_sub(1) // commas
+            2 + arr.iter().map(estimate_json_size).sum::<usize>() + arr.len().saturating_sub(1)
+            // commas
         }
         Value::Object(obj) => {
             2 + obj

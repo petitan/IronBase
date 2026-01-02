@@ -178,7 +178,10 @@ mod tests {
         let mem = get_system_memory();
         // Should have positive values on all systems
         assert!(mem.total_mb > 0.0, "Total memory should be positive");
-        assert!(mem.available_mb > 0.0, "Available memory should be positive");
+        assert!(
+            mem.available_mb > 0.0,
+            "Available memory should be positive"
+        );
         assert!(
             mem.available_mb <= mem.total_mb,
             "Available should not exceed total"

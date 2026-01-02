@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 use super::engine::RhaiEngine;
 use super::limits::ScriptLimits;
-use super::types::{Script, ScriptInfo, ScriptListFilter, ScriptResult, ScriptStats, ScriptVersion};
+use super::types::{
+    Script, ScriptInfo, ScriptListFilter, ScriptResult, ScriptStats, ScriptVersion,
+};
 
 /// Script Manager - CRUD operations for scripts.
 ///

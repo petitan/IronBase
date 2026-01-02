@@ -56,9 +56,7 @@ fn register_error_functions(engine: &mut Engine) {
 
     // is_null(value) -> bool
     // Check if value is null/unit
-    engine.register_fn("is_null", |value: Dynamic| -> bool {
-        value.is_unit()
-    });
+    engine.register_fn("is_null", |value: Dynamic| -> bool { value.is_unit() });
 
     // get_error(value) -> string
     // Extract error message (without "Error: " prefix)
@@ -134,14 +132,10 @@ fn register_type_functions(engine: &mut Engine) {
 /// Register UUID and timestamp functions.
 fn register_time_functions(engine: &mut Engine) {
     // uuid() -> random UUID v4 string
-    engine.register_fn("uuid", || -> String {
-        uuid::Uuid::new_v4().to_string()
-    });
+    engine.register_fn("uuid", || -> String { uuid::Uuid::new_v4().to_string() });
 
     // timestamp() -> current Unix timestamp in seconds (i64)
-    engine.register_fn("timestamp", || -> i64 {
-        chrono::Utc::now().timestamp()
-    });
+    engine.register_fn("timestamp", || -> i64 { chrono::Utc::now().timestamp() });
 
     // timestamp_ms() -> current Unix timestamp in milliseconds (i64)
     engine.register_fn("timestamp_ms", || -> i64 {
@@ -149,9 +143,7 @@ fn register_time_functions(engine: &mut Engine) {
     });
 
     // now_iso() -> current time as ISO 8601 string
-    engine.register_fn("now_iso", || -> String {
-        chrono::Utc::now().to_rfc3339()
-    });
+    engine.register_fn("now_iso", || -> String { chrono::Utc::now().to_rfc3339() });
 }
 
 #[cfg(test)]

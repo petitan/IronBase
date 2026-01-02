@@ -74,7 +74,11 @@ pub fn register_db_functions(
 // Read Operations
 // ============================================================
 
-fn register_read_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>, limits: &ScriptLimits) {
+fn register_read_functions(
+    engine: &mut Engine,
+    adapter: Arc<IronBaseAdapter>,
+    limits: &ScriptLimits,
+) {
     let default_limit = limits.max_find_documents;
 
     // db_find(collection, query) -> array of documents
@@ -272,8 +276,7 @@ fn is_system_collection(collection: &str) -> bool {
 }
 
 /// Error message for system collection write attempt.
-const SYSTEM_COLLECTION_ERROR: &str =
-    "Error: Scripts cannot modify system collections (_system.*)";
+const SYSTEM_COLLECTION_ERROR: &str = "Error: Scripts cannot modify system collections (_system.*)";
 
 fn register_write_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) {
     // db_insert_one(collection, document) -> inserted_id
