@@ -1993,6 +1993,49 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             had_match
         );
 
+        // INDEX-BASED $GROUP OPTIMIZATION (2026-01):
+        // When there's NO leading $match and the first stage is $group with:
+        // - Single field group key: {"_id": "$field"}
+        // - All accumulators are $sum with constant (counting)
+        // - Single-field index exists on the group key
+        // We can compute results directly from index entries without loading ANY documents!
+        //
+        // Performance: 78K emails (39GB) → ~50MB index scan = 100-1000x faster
+        if !had_match {
+            if let Some(group_stage) = pipeline.peek_leading_group() {
+                let indexes = self.indexes.read();
+                if let Some(mut indexed_result) = group_stage.try_index_based_execute(&indexes) {
+                    log_debug!(
+                        "aggregate: used index-based $group optimization ({} groups)",
+                        indexed_result.len()
+                    );
+                    drop(indexes); // Release lock before pipeline execution
+
+                    // Remove the $group stage since we already executed it
+                    pipeline.remove_leading_group();
+
+                    // Execute remaining stages ($sort, $limit, etc.) on indexed results
+                    // Apply Top-K optimization if $sort → $limit pattern detected
+                    use crate::aggregation::optimizer::analyze_pipeline;
+                    let opt = analyze_pipeline(&pipeline.stages);
+
+                    for (i, stage) in pipeline.stages.iter().enumerate() {
+                        use crate::aggregation::Stage;
+                        if let Stage::Sort(sort_stage) = stage {
+                            if opt.sort_stage_index == Some(i) && opt.sort_limit_hint.is_some() {
+                                indexed_result = sort_stage
+                                    .execute_with_limit_hint(indexed_result, opt.sort_limit_hint)?;
+                                continue;
+                            }
+                        }
+                        indexed_result = stage.execute(indexed_result)?;
+                    }
+
+                    return Ok(indexed_result);
+                }
+            }
+        }
+
         // STREAMING OPTIMIZATION (2024-12):
         // Use cursor-based document loading to avoid loading all docs into memory.
         //

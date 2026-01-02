@@ -182,6 +182,7 @@ mod types;
 // Re-export public types
 pub use types::AggregationLimits;
 pub use types::Pipeline;
+pub use types::Stage;
 
 #[cfg(test)]
 mod tests {

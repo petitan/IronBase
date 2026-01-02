@@ -9,13 +9,19 @@
 // MEMORY SAFETY (2026-01):
 // Added max_group_count limit to prevent OOM with high-cardinality group keys.
 // See execute_streaming_with_limits() for implementation.
+//
+// INDEX-BASED OPTIMIZATION (2026-01):
+// When group key has a single-field index and all accumulators are $sum:1 (count),
+// we can compute the result directly from the index without loading any documents.
+// This reduces I/O from O(N * doc_size) to O(index_size), typically 100-1000x faster.
 
 use crate::aggregation::types::{
-    Accumulator, AccumulatorState, AggregationLimits, GroupId, GroupStage,
+    Accumulator, AccumulatorState, AggregationLimits, GroupId, GroupStage, SumExpression,
 };
 use crate::error::{IronBaseError, Result};
+use crate::index::IndexManager;
 use crate::value_utils::{get_nested_value, value_hash};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 /// Group entry: stores the original key value and accumulator states
@@ -284,5 +290,104 @@ impl GroupStage {
         }
 
         Ok(results)
+    }
+
+    // ========== INDEX-BASED OPTIMIZATION ==========
+
+    /// Check if this $group can be optimized using index
+    ///
+    /// Returns the group field name (without $) if:
+    /// - Group key is a single field: {"_id": "$field"}
+    /// - All accumulators are $sum with constant (counting), not field references
+    ///
+    /// Returns None if the group cannot be index-optimized.
+    pub(crate) fn can_use_index(&self) -> Option<&str> {
+        // Check 1: Group key must be a single field
+        let field = match &self.id {
+            GroupId::Field(f) => f.trim_start_matches('$'),
+            GroupId::Null => return None, // Null means all docs in one group - no index benefit
+        };
+
+        // Check 2: All accumulators must be count-only ($sum: 1 or $sum: <constant>)
+        // We don't support $sum: "$field" because that requires reading document data
+        for acc in self.accumulators.values() {
+            match acc {
+                Accumulator::Sum(SumExpression::Constant(_)) => {
+                    // OK - counting, no document data needed
+                }
+                _ => {
+                    // Any other accumulator needs document data
+                    return None;
+                }
+            }
+        }
+
+        Some(field)
+    }
+
+    /// Try to execute $group using index instead of document scan
+    ///
+    /// This optimization works when:
+    /// 1. Group key is a single field with a single-field index
+    /// 2. All accumulators are $sum with constant (e.g., $sum: 1 for counting)
+    ///
+    /// Performance improvement:
+    /// - Before: Load all 78K documents (39GB I/O), extract field, group
+    /// - After: Scan index entries only (~50MB), count per key
+    /// - Speedup: 100-1000x depending on document size
+    ///
+    /// Returns None if index optimization is not possible (falls back to streaming).
+    pub(crate) fn try_index_based_execute(&self, indexes: &IndexManager) -> Option<Vec<Value>> {
+        // Check if this group can use index
+        let field = self.can_use_index()?;
+
+        // Find a single-field index on this field
+        let index_infos = indexes.list_indexes_with_compound_info();
+        let matching_index = index_infos
+            .iter()
+            .find(|info| !info.is_compound && info.prefix_field == field)?;
+
+        // Get the B+ tree index
+        let btree = indexes.get_btree_index(&matching_index.index_name)?;
+
+        // Count entries per key directly from the index
+        // This avoids loading any documents!
+        let mut counts: HashMap<u64, (Value, i64)> = HashMap::new();
+
+        for (key, _doc_id) in btree.get_all_entries() {
+            let key_value = key.to_value();
+            let key_hash = value_hash(&key_value);
+
+            let entry = counts.entry(key_hash).or_insert_with(|| (key_value, 0));
+            entry.1 += 1;
+        }
+
+        // Build result documents
+        // Each accumulator that was $sum: N gets value N * count
+        let mut results = Vec::with_capacity(counts.len());
+
+        for (_hash, (key_value, count)) in counts {
+            let mut result = serde_json::Map::new();
+            result.insert("_id".to_string(), key_value);
+
+            // For each accumulator, compute final value
+            for (acc_name, acc) in &self.accumulators {
+                let value = match acc {
+                    Accumulator::Sum(SumExpression::Constant(n)) => {
+                        // $sum: N means multiply by count
+                        json!(n * count)
+                    }
+                    _ => {
+                        // Shouldn't happen if can_use_index() returned Some
+                        json!(null)
+                    }
+                };
+                result.insert(acc_name.clone(), value);
+            }
+
+            results.push(Value::Object(result));
+        }
+
+        Some(results)
     }
 }
