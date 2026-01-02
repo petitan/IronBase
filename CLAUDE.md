@@ -307,6 +307,38 @@ With 50,000 unique groups:
 - Python: Map to PyIOError, PyRuntimeError, PyValueError
 - C#: Map to appropriate .NET exceptions
 
+### OOM Prevention (KRITIKUS!)
+
+**TILOS minták - Soha ne csináld nagy kollekciókra:**
+
+| Pattern | Probléma | Megoldás |
+|---------|----------|----------|
+| `docs.iter().map(\|d\| load(d)).collect::<Vec<_>>()` | Összes doc memóriában | Streaming: egyesével |
+| `Vec<Vec<u8>>` összes doc-ból | GB-ok memóriában | Iterator/for loop |
+| `.collect()` catalog-on filter nélkül | 78K+ doc memóriában | Limit vagy streaming |
+
+**KÖTELEZŐ minták:**
+
+1. **Streaming Document Loading** - Egy doc egyszerre:
+```rust
+for doc_id in doc_ids {
+    let doc = load_one(doc_id)?;  // ← EGY doc memóriában
+    process(doc);
+    // doc felszabadul itt
+}
+```
+
+2. **try_reserve() használata MINDEN nagy Vec allokáció előtt:**
+```rust
+let mut results = Vec::new();
+results.try_reserve(count).map_err(|e| IronBaseError::OutOfMemory(...))?;
+```
+
+**Korábbi OOM hibák (tanulság):**
+- `4904ccc9` - scan_documents_via_catalog() összes doc betöltése
+- `567e0d11` - aggregation pipeline összes doc memóriában
+- `2026-01-02` - count_with_scan párhuzamos verzió 39GB memória 78K email-nél
+
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
 
