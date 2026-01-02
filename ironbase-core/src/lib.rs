@@ -50,8 +50,6 @@ pub(crate) mod aggregation;
 pub(crate) mod catalog_serde;
 pub mod index; // Public for FuzzyIndex and FuzzyAlgorithm exports
 pub(crate) mod logging;
-#[cfg(feature = "parallel")]
-pub(crate) mod parallel;
 pub(crate) mod query_cache;
 pub(crate) mod query_planner;
 pub(crate) mod recovery;

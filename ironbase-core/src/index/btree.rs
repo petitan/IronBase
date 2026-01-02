@@ -76,7 +76,63 @@ use std::path::PathBuf;
 
 use super::key::IndexKey;
 
+// ============================================================================
+// Range Query Types - Unified API for all range operations
+// ============================================================================
+
+/// Scan order for range queries
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanOrder {
+    /// Ascending order (smallest to largest)
+    Asc,
+    /// Descending order (largest to smallest)
+    Desc,
+}
+
+/// Mode for range_query() - determines what operation to perform
+#[derive(Debug, Clone)]
+pub enum RangeQueryMode {
+    /// Count entries in range without materializing them - O(1) memory
+    Count,
+    /// Scan entries with optional skip/limit and order - O(limit) memory
+    Scan {
+        skip: usize,
+        limit: Option<usize>,
+        order: ScanOrder,
+    },
+}
+
+/// Result of a range_query() operation
+#[derive(Debug)]
+pub enum RangeQueryResult {
+    /// Count result (from RangeQueryMode::Count)
+    Count(usize),
+    /// Document IDs (from RangeQueryMode::Scan)
+    Docs(Vec<DocumentId>),
+}
+
+impl RangeQueryResult {
+    /// Unwrap as count, panics if not a Count variant
+    pub fn unwrap_count(self) -> usize {
+        match self {
+            RangeQueryResult::Count(c) => c,
+            RangeQueryResult::Docs(_) => panic!("Expected Count, got Docs"),
+        }
+    }
+
+    /// Unwrap as docs, panics if not a Docs variant
+    pub fn unwrap_docs(self) -> Vec<DocumentId> {
+        match self {
+            RangeQueryResult::Docs(d) => d,
+            RangeQueryResult::Count(_) => panic!("Expected Docs, got Count"),
+        }
+    }
+}
+
+// ============================================================================
 // Node page constants (for file-based persistence)
+// ============================================================================
+
 pub const NODE_PAGE_SIZE: usize = 16384; // 16KB pages - supports long keys
 const NODE_TYPE_INTERNAL: u8 = 0;
 const NODE_TYPE_LEAF: u8 = 1;
@@ -732,6 +788,9 @@ impl BPlusTree {
 
     /// Range scan: find all keys between start and end
     /// Supports multi-level B+ trees by recursively traversing internal nodes
+    ///
+    /// NOTE: This is a backwards-compatible wrapper around `range_query()`.
+    /// For new code, prefer using `range_query()` directly with explicit mode.
     pub fn range_scan(
         &self,
         start: &IndexKey,
@@ -739,66 +798,19 @@ impl BPlusTree {
         inclusive_start: bool,
         inclusive_end: bool,
     ) -> Vec<DocumentId> {
-        fn collect_range(
-            node: &BTreeNode,
-            start: &IndexKey,
-            end: &IndexKey,
-            inclusive_start: bool,
-            inclusive_end: bool,
-            results: &mut Vec<DocumentId>,
-        ) {
-            match node {
-                BTreeNode::Leaf(leaf) => {
-                    let start_idx = if inclusive_start {
-                        leaf.keys.partition_point(|k| k < start)
-                    } else {
-                        leaf.keys.partition_point(|k| k <= start)
-                    };
-                    let end_idx = if inclusive_end {
-                        leaf.keys.partition_point(|k| k <= end)
-                    } else {
-                        leaf.keys.partition_point(|k| k < end)
-                    };
-                    for idx in start_idx..end_idx {
-                        if idx < leaf.document_ids.len() {
-                            results.push(leaf.document_ids[idx].clone());
-                        }
-                    }
-                }
-                BTreeNode::Internal(internal) => {
-                    // Find which children might contain keys in the range
-                    // We need to check all children whose key range overlaps [start, end]
-                    for (i, child) in internal.children.iter().enumerate() {
-                        // Determine if this child could contain keys in range
-                        let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
-                        let child_max_might_match =
-                            i >= internal.keys.len() || &internal.keys[i] >= start;
-
-                        if child_min_might_match && child_max_might_match {
-                            collect_range(
-                                child,
-                                start,
-                                end,
-                                inclusive_start,
-                                inclusive_end,
-                                results,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut results = Vec::new();
-        collect_range(
-            &self.root,
+        // Delegate to unified API
+        self.range_query(
             start,
             end,
             inclusive_start,
             inclusive_end,
-            &mut results,
-        );
-        results
+            RangeQueryMode::Scan {
+                skip: 0,
+                limit: None,
+                order: ScanOrder::Asc,
+            },
+        )
+        .unwrap_docs()
     }
 
     /// Reverse range scan with skip and limit (for DESC sort optimization)
@@ -806,8 +818,8 @@ impl BPlusTree {
     /// Traverses the B+ tree from largest to smallest values, supporting early termination.
     /// This is critical for queries like: `find({}).sort({date: -1}).limit(5)` on large collections.
     ///
-    /// Instead of collecting all 49,200 IDs and reversing, this traverses from right-to-left
-    /// and stops as soon as we have enough results.
+    /// NOTE: This is a backwards-compatible wrapper around `range_query()`.
+    /// For new code, prefer using `range_query()` directly with explicit mode.
     ///
     /// # Arguments
     /// * `start` - Minimum key value (inclusive)
@@ -824,8 +836,223 @@ impl BPlusTree {
         skip: usize,
         limit: Option<usize>,
     ) -> Vec<DocumentId> {
-        // First, collect all leaf nodes (we need to traverse them in reverse)
-        // This is O(log n) to find leaves, then we iterate backwards
+        // Delegate to unified API (uses inclusive bounds)
+        self.range_query(
+            start,
+            end,
+            true, // inclusive_start
+            true, // inclusive_end
+            RangeQueryMode::Scan {
+                skip,
+                limit,
+                order: ScanOrder::Desc,
+            },
+        )
+        .unwrap_docs()
+    }
+
+    // ========================================================================
+    // Unified Range Query API
+    // ========================================================================
+
+    /// Unified range query - single entry point for all range operations
+    ///
+    /// This is the recommended API for all range-based index operations.
+    /// It provides O(1) memory for counts and O(limit) memory for scans.
+    ///
+    /// # Examples
+    ///
+    /// ```ignore
+    /// // Count entries in range (O(1) memory)
+    /// let count = tree.range_query(start, end, true, true, RangeQueryMode::Count);
+    ///
+    /// // Scan with limit, ascending (O(limit) memory)
+    /// let docs = tree.range_query(start, end, true, true,
+    ///     RangeQueryMode::Scan { skip: 0, limit: Some(10), order: ScanOrder::Asc });
+    ///
+    /// // Scan with limit, descending (O(limit) memory)
+    /// let docs = tree.range_query(start, end, true, true,
+    ///     RangeQueryMode::Scan { skip: 0, limit: Some(10), order: ScanOrder::Desc });
+    /// ```
+    pub fn range_query(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
+        mode: RangeQueryMode,
+    ) -> RangeQueryResult {
+        match mode {
+            RangeQueryMode::Count => {
+                let count = self.count_range_internal(start, end, inclusive_start, inclusive_end);
+                RangeQueryResult::Count(count)
+            }
+            RangeQueryMode::Scan { skip, limit, order } => {
+                let docs = match order {
+                    ScanOrder::Asc => self.scan_asc_internal(
+                        start,
+                        end,
+                        inclusive_start,
+                        inclusive_end,
+                        skip,
+                        limit,
+                    ),
+                    ScanOrder::Desc => self.scan_desc_internal(start, end, skip, limit),
+                };
+                RangeQueryResult::Docs(docs)
+            }
+        }
+    }
+
+    /// Internal: Count entries in range without materializing
+    fn count_range_internal(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
+    ) -> usize {
+        fn count_range(
+            node: &BTreeNode,
+            start: &IndexKey,
+            end: &IndexKey,
+            inclusive_start: bool,
+            inclusive_end: bool,
+        ) -> usize {
+            match node {
+                BTreeNode::Leaf(leaf) => {
+                    let start_idx = if inclusive_start {
+                        leaf.keys.partition_point(|k| k < start)
+                    } else {
+                        leaf.keys.partition_point(|k| k <= start)
+                    };
+                    let end_idx = if inclusive_end {
+                        leaf.keys.partition_point(|k| k <= end)
+                    } else {
+                        leaf.keys.partition_point(|k| k < end)
+                    };
+                    end_idx.saturating_sub(start_idx)
+                }
+                BTreeNode::Internal(internal) => {
+                    let mut count = 0;
+                    for (i, child) in internal.children.iter().enumerate() {
+                        let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
+                        let child_max_might_match =
+                            i >= internal.keys.len() || &internal.keys[i] >= start;
+                        if child_min_might_match && child_max_might_match {
+                            count += count_range(child, start, end, inclusive_start, inclusive_end);
+                        }
+                    }
+                    count
+                }
+            }
+        }
+        count_range(&self.root, start, end, inclusive_start, inclusive_end)
+    }
+
+    /// Internal: Scan ascending with skip/limit and early termination
+    fn scan_asc_internal(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Vec<DocumentId> {
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+        let limit_count = limit.unwrap_or(usize::MAX);
+
+        fn scan_asc(
+            node: &BTreeNode,
+            start: &IndexKey,
+            end: &IndexKey,
+            inclusive_start: bool,
+            inclusive_end: bool,
+            results: &mut Vec<DocumentId>,
+            skipped: &mut usize,
+            skip: usize,
+            limit_count: usize,
+        ) -> bool {
+            // returns true if limit reached
+            match node {
+                BTreeNode::Leaf(leaf) => {
+                    let start_idx = if inclusive_start {
+                        leaf.keys.partition_point(|k| k < start)
+                    } else {
+                        leaf.keys.partition_point(|k| k <= start)
+                    };
+                    let end_idx = if inclusive_end {
+                        leaf.keys.partition_point(|k| k <= end)
+                    } else {
+                        leaf.keys.partition_point(|k| k < end)
+                    };
+
+                    for idx in start_idx..end_idx {
+                        if *skipped < skip {
+                            *skipped += 1;
+                            continue;
+                        }
+                        if results.len() >= limit_count {
+                            return true; // Early termination!
+                        }
+                        if idx < leaf.document_ids.len() {
+                            results.push(leaf.document_ids[idx].clone());
+                        }
+                    }
+                    false
+                }
+                BTreeNode::Internal(internal) => {
+                    for (i, child) in internal.children.iter().enumerate() {
+                        let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
+                        let child_max_might_match =
+                            i >= internal.keys.len() || &internal.keys[i] >= start;
+                        if child_min_might_match
+                            && child_max_might_match
+                            && scan_asc(
+                                child,
+                                start,
+                                end,
+                                inclusive_start,
+                                inclusive_end,
+                                results,
+                                skipped,
+                                skip,
+                                limit_count,
+                            )
+                        {
+                            return true; // Propagate early termination
+                        }
+                    }
+                    false
+                }
+            }
+        }
+
+        scan_asc(
+            &self.root,
+            start,
+            end,
+            inclusive_start,
+            inclusive_end,
+            &mut results,
+            &mut skipped,
+            skip,
+            limit_count,
+        );
+        results
+    }
+
+    /// Internal: Scan descending with skip/limit and early termination
+    fn scan_desc_internal(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Vec<DocumentId> {
+        // Collect all leaf nodes first (we need to traverse them in reverse)
         let mut all_leaves: Vec<&LeafNode> = Vec::new();
         fn collect_leaves<'a>(node: &'a BTreeNode, leaves: &mut Vec<&'a LeafNode>) {
             match node {
@@ -839,14 +1066,12 @@ impl BPlusTree {
         }
         collect_leaves(&self.root, &mut all_leaves);
 
-        // Traverse leaves in reverse order (rightmost leaf first = largest values)
         let mut results = Vec::new();
         let mut skipped = 0usize;
         let limit_count = limit.unwrap_or(usize::MAX);
 
-        // Iterate leaves from right to left
+        // Iterate leaves from right to left (largest values first)
         for leaf in all_leaves.into_iter().rev() {
-            // Within each leaf, iterate keys from right to left (largest first)
             for idx in (0..leaf.keys.len()).rev() {
                 let key = &leaf.keys[idx];
 
