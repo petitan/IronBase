@@ -2481,6 +2481,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// 🚀 OPTIMIZED: Batch read documents by IDs in a single lock acquisition
     /// Instead of N lock acquisitions for N documents, we only acquire 1 lock
+    ///
+    /// ⚠️ OOM WARNING: This function loads ALL documents into memory at once!
+    /// For large collections (e.g., 78K emails), this can cause OOM (39GB+).
+    /// Use streaming via read_document_by_id() in a loop instead.
+    /// Kept for backwards compatibility but marked as dead code.
+    #[allow(dead_code)]
     fn batch_read_documents_by_ids(
         &self,
         doc_ids: &[DocumentId],
