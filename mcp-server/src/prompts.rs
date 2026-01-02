@@ -38,6 +38,11 @@ pub fn get_prompts_list() -> Value {
                 "arguments": []
             },
             {
+                "name": "aggregation-limits",
+                "description": "Guide for aggregation memory limits, OOM prevention, and dynamic limits based on system RAM",
+                "arguments": []
+            },
+            {
                 "name": "query-examples",
                 "description": "Common query patterns and examples for typical use cases",
                 "arguments": [
@@ -154,6 +159,7 @@ pub fn get_prompt_content(name: &str, arguments: &Value) -> Option<Value> {
         "discover-schema" => Some(get_discover_schema_prompt(arguments)),
         "query-operators" => Some(get_query_operators_prompt()),
         "aggregation-guide" => Some(get_aggregation_guide_prompt()),
+        "aggregation-limits" => Some(get_aggregation_limits_prompt()),
         "query-examples" => Some(get_query_examples_prompt(arguments)),
         "date-query" => Some(get_date_query_prompt(arguments)),
         "wildcard-operator" => Some(get_wildcard_operator_prompt()),
@@ -237,6 +243,24 @@ Always use $limit in pipelines:
   {"$project": {"name": 1, "score": 1}}
 ]
 ```
+
+### ⚡ Index-Based Count (2300x faster!)
+For counting by field, **skip $match** to enable index-based optimization:
+```json
+// FAST (47ms on 78K docs) - uses index
+[{"$group": {"_id": "$category", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}, {"$limit": 10}]
+
+// SLOW (284s on 78K docs) - $match disables index optimization
+[{"$match": {"field": {"$exists": true}}}, {"$group": {"_id": "$field", "count": {"$sum": 1}}}]
+```
+
+### Memory Limits
+Aggregation has built-in OOM protection:
+- Max 100K docs without $match
+- Max 50K unique groups
+- Max 512 MB memory
+
+If limit errors occur: add $match filter, use lower-cardinality group key, or reduce scope.
 
 ## Quick Reference
 
@@ -550,7 +574,173 @@ Reduce an array to a single value with custom logic.
   }},
   {"$sort": {"orderTotal": -1}}
 ]
-```"#
+```
+
+## ⚡ Performance Optimizations
+
+### Index-Based $group (2300x faster!)
+
+For counting by a field that has an index, **skip the $match stage**:
+
+#### ❌ SLOW (284 seconds on 78K docs):
+```json
+[
+  {"$match": {"email": {"$exists": true}}},
+  {"$group": {"_id": "$email", "count": {"$sum": 1}}},
+  {"$sort": {"count": -1}},
+  {"$limit": 5}
+]
+```
+
+#### ✅ FAST (47 milliseconds on 78K docs):
+```json
+[
+  {"$group": {"_id": "$email", "count": {"$sum": 1}}},
+  {"$sort": {"count": -1}},
+  {"$limit": 5}
+]
+```
+
+**Why?** Without `$match`, IronBase uses index-based `$group` optimization - reads only index entries, NOT full documents.
+
+**Requirements for Index-Based $group:**
+1. NO leading `$match` stage
+2. Single field group key: `{"_id": "$field"}`
+3. All accumulators are `$sum: 1` (counting)
+4. Single-field index exists on the group field
+
+**When to use $match:** Only when you need to FILTER documents (e.g., `{"status": "active"}`). Skip it for full collection counts.
+
+### Top-K Optimization ($sort + $limit)
+
+When `$sort` is followed by `$limit`, IronBase automatically uses a heap-based algorithm:
+- Memory: O(k) instead of O(n)
+- Time: O(n log k) instead of O(n log n)
+
+Example (50K groups → only 5 kept in memory):
+```json
+[
+  {"$group": {"_id": "$category", "count": {"$sum": 1}}},
+  {"$sort": {"count": -1}},
+  {"$limit": 5}
+]
+```
+
+## Memory Limits (OOM Protection)
+
+IronBase has built-in limits to prevent out-of-memory errors:
+
+| Limit | Default | Purpose |
+|-------|---------|---------|
+| max_docs_without_match | 100,000 | Max docs to scan without $match |
+| max_docs_with_match | 1,000,000 | Max docs even with $match |
+| max_group_count | 50,000 | Max unique groups in $group |
+| max_push_elements | 100,000 | Max elements per $push accumulator |
+| max_memory_mb | 512 | Max estimated memory usage |
+
+**Triggered errors:**
+- `"Aggregation exceeded document limit: X documents processed"`
+- `"Aggregation exceeded group limit: X unique groups"`
+
+**Solutions:** Add `$match` to filter, use lower-cardinality group key, or use index-based optimization."#
+                }
+            }
+        ]
+    })
+}
+
+fn get_aggregation_limits_prompt() -> Value {
+    json!({
+        "messages": [
+            {
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": r#"# Aggregation Memory Limits Guide
+
+## Why Limits Exist
+
+IronBase has built-in memory limits to prevent out-of-memory (OOM) errors on large collections. These limits protect your server from crashing during heavy aggregation operations.
+
+## Dynamic Limits (Recommended)
+
+IronBase automatically calculates limits based on your system's available RAM:
+
+| Available RAM | max_memory_mb | max_docs | max_groups |
+|---------------|---------------|----------|------------|
+| < 512 MB | 64 | 10,000 | 5,000 |
+| 512 MB - 2 GB | 128 | 50,000 | 25,000 |
+| 2 GB - 8 GB | 256 | 100,000 | 50,000 |
+| 8 GB - 32 GB | 512 | 250,000 | 100,000 |
+| > 32 GB | 1,024 | 500,000 | 250,000 |
+
+## Default Static Limits
+
+| Limit | Default Value | Purpose |
+|-------|---------------|---------|
+| max_docs_without_match | 100,000 | Max documents to scan without $match |
+| max_docs_with_match | 1,000,000 | Max documents even WITH $match |
+| max_group_count | 50,000 | Max unique groups in $group stage |
+| max_push_elements | 100,000 | Max elements per $push accumulator |
+| max_addtoset_elements | 100,000 | Max elements per $addToSet accumulator |
+| max_unwind_output | 1,000,000 | Max documents after $unwind |
+| max_memory_mb | 512 | Max estimated memory usage |
+
+## Common Error Messages
+
+### "Aggregation exceeded document limit: X documents processed"
+**Cause:** Too many documents being scanned.
+**Solutions:**
+1. Add `$match` stage to filter documents first
+2. Use index-based aggregation (skip $match for counts)
+3. Process in smaller batches
+
+### "Aggregation exceeded group limit: X unique groups"
+**Cause:** Group key has too many unique values (high cardinality).
+**Solutions:**
+1. Group by a lower-cardinality field
+2. Add `$match` to reduce input documents
+3. Use `$limit` after `$group`
+
+## Best Practices
+
+### 1. Always start with $match (when filtering)
+```json
+[
+  {"$match": {"status": "active", "date": {"$gte": "2024-01-01"}}},
+  {"$group": {"_id": "$category", "count": {"$sum": 1}}}
+]
+```
+
+### 2. Skip $match for full collection counts (2300x faster!)
+```json
+// Uses index - 47ms on 78K docs
+[{"$group": {"_id": "$email", "count": {"$sum": 1}}}, {"$limit": 10}]
+```
+
+### 3. Use low-cardinality group keys
+- Good: `status`, `category`, `country` (few unique values)
+- Bad: `email`, `user_id`, `timestamp` (many unique values)
+
+### 4. Add indexes on $match fields
+Create indexes on fields used in `$match` for faster filtering.
+
+### 5. Use $limit after $group
+```json
+[
+  {"$group": {"_id": "$tag", "count": {"$sum": 1}}},
+  {"$sort": {"count": -1}},
+  {"$limit": 100}  // Only keep top 100
+]
+```
+
+## Top-K Optimization
+
+When `$sort` is followed by `$limit`, IronBase uses a heap-based algorithm:
+- Memory: O(k) instead of O(n)
+- Time: O(n log k) instead of O(n log n)
+
+This means sorting 50,000 groups with `$limit: 5` only keeps 5 items in memory!"#
                 }
             }
         ]
@@ -1072,7 +1262,27 @@ Force specific index usage:
 ## Limitations
 - `$**` wildcard queries cannot use indexes
 - `$or` queries may not use compound indexes efficiently
-- `$regex` without anchor (^) cannot use index"#,
+- `$regex` without anchor (^) cannot use index
+
+## Index-Based Aggregation (2300x speedup!)
+
+When a `$group` pipeline meets these conditions, IronBase reads ONLY the index:
+
+1. **NO leading `$match`** stage
+2. Single field group key: `{{"_id": "$field"}}`
+3. All accumulators are `$sum: 1` (counting)
+4. Single-field index exists on the group field
+
+### Example Performance (78K docs, 39GB database):
+```json
+// FAST (47ms) - Uses index, no document loading
+[{{"$group": {{"_id": "$email", "count": {{"$sum": 1}}}}}}, {{"$sort": {{"count": -1}}}}, {{"$limit": 5}}]
+
+// SLOW (284s) - $match disables index optimization, loads all docs
+[{{"$match": {{"email": {{"$exists": true}}}}}}, {{"$group": {{"_id": "$email", "count": {{"$sum": 1}}}}}}]
+```
+
+**Tip:** For full collection counts, skip the `$match` stage entirely!"#,
                         collection, collection, collection, collection, collection, collection, collection)
                 }
             }
@@ -2180,18 +2390,41 @@ Returns:
 
 ### Hot Backup (Lock-Free)
 
-IronBase supports hot backup without stopping the server:
+IronBase supports hot backup without stopping the server using the `ironbase-backup` CLI tool.
 
+#### Full Backup
 ```bash
-# Full backup
 ironbase-backup backup --db /path/to/data.mlite --output ./backups --full
-
-# Incremental backup
-ironbase-backup backup --db /path/to/data.mlite --output ./backups
-
-# Restore
-ironbase-backup restore --backup ./backups/backup_xxx.tar.zst --output /path/to/restored.mlite
 ```
+
+#### Split Backup (for large databases >10GB)
+```bash
+# Split into 5GB parts for easier transfer/storage
+ironbase-backup backup --db /path/to/data.mlite --output ./backups --split 5G
+```
+
+#### Restore
+```bash
+# From single backup
+ironbase-backup restore --backup ./backups/backup_xxx.ibak --output /path/to/restored.mlite
+
+# From split backup (auto-reassembles parts)
+ironbase-backup restore --backup ./backups/backup_xxx.ibak.001 --output /path/to/restored.mlite
+```
+
+#### Example: 39GB Database Backup
+```
+Time: ~6 minutes
+Original: 39 GB
+Compressed: 25 GB (1.5x compression)
+Parts: 6 × 5GB files
+Hash: CRC32 verification included
+```
+
+### Backup Verification
+- Each backup includes CRC32 hash for integrity verification
+- Split parts are automatically reassembled during restore
+- Backup files use `.ibak` extension (IronBase Backup)
 
 ### Why Lock-Free Works
 
@@ -2199,7 +2432,7 @@ IronBase uses append-only storage:
 - Documents are never modified in-place
 - Updates create new versions + tombstones
 - All data up to `data_end_offset` is immutable
-- Backup reads immutable data safely
+- Backup reads immutable data safely without locking
 
 ## Performance Tuning
 
