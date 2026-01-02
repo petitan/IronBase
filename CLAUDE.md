@@ -334,10 +334,27 @@ let mut results = Vec::new();
 results.try_reserve(count).map_err(|e| IronBaseError::OutOfMemory(...))?;
 ```
 
+3. **Chunked Parallel Processing** - Ha párhuzamosítás kell:
+```rust
+const CHUNK_SIZE: usize = 1000;  // Max ~500MB memória
+for chunk in catalog_entries.chunks(CHUNK_SIZE) {
+    let batch = load_batch(chunk);  // Max 1000 doc
+    process_parallel(batch);        // rayon par_iter
+    // batch felszabadul itt
+}
+```
+
+**Dead code (OOM veszélyes, NE HASZNÁLD):**
+- `scan_documents_via_catalog()` - összes doc betöltése
+- `inline_scan_with_catalog()` - összes doc betöltése
+- `batch_read_documents_by_ids()` - összes matching doc betöltése
+
 **Korábbi OOM hibák (tanulság):**
 - `4904ccc9` - scan_documents_via_catalog() összes doc betöltése
 - `567e0d11` - aggregation pipeline összes doc memóriában
-- `2026-01-02` - count_with_scan párhuzamos verzió 39GB memória 78K email-nél
+- `e0001bbe` - count_with_scan párhuzamos verzió → chunked parallel fix
+- `49f27a77` - update_one bulk load → streaming fix
+- `88f0a79c` - update_many bulk load → streaming fix
 
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
