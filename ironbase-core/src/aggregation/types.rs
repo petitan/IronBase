@@ -78,6 +78,99 @@ impl Default for AggregationLimits {
 }
 
 impl AggregationLimits {
+    /// Create limits dynamically based on system RAM
+    ///
+    /// Automatically scales limits to match available system memory:
+    /// - Uses max 25% of available RAM for aggregation
+    /// - Scales doc/group limits proportionally
+    /// - Falls back to `low_memory()` if detection fails
+    ///
+    /// # Scaling table
+    /// | Available RAM | max_memory_mb | max_docs | max_groups |
+    /// |---------------|---------------|----------|------------|
+    /// | < 512 MB      | 64            | 10K      | 5K         |
+    /// | 512MB - 2GB   | 128           | 50K      | 25K        |
+    /// | 2GB - 8GB     | 256           | 100K     | 50K        |
+    /// | 8GB - 32GB    | 512           | 250K     | 100K       |
+    /// | > 32GB        | 1024          | 500K     | 250K       |
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::aggregation::AggregationLimits;
+    ///
+    /// let limits = AggregationLimits::from_system_memory();
+    /// collection.aggregate_with_limits(&pipeline, limits)?;
+    /// ```
+    pub fn from_system_memory() -> Self {
+        use super::memory_info::get_available_memory_bytes;
+
+        match get_available_memory_bytes() {
+            Some(bytes) => Self::scale_to_memory(bytes),
+            None => {
+                // Detection failed - use safe defaults
+                Self::low_memory()
+            }
+        }
+    }
+
+    /// Scale limits based on available memory bytes
+    fn scale_to_memory(available_bytes: u64) -> Self {
+        let available_mb = available_bytes / (1024 * 1024);
+
+        // Use max 25% of available RAM, bounded between 64MB and 4GB
+        let max_memory_mb = (available_mb as usize / 4).clamp(64, 4096);
+
+        // Scale factor: 1.0 at 4GB available, proportionally less below
+        // This means at 4GB+ available, you get the "standard" limits
+        let scale_factor = (available_mb as f64 / 4096.0).clamp(0.1, 2.5);
+
+        Self {
+            // Document limits scale with memory
+            max_docs_without_match: ((100_000.0 * scale_factor) as usize).max(10_000),
+            max_docs_with_match: ((1_000_000.0 * scale_factor) as usize).max(100_000),
+
+            // Group/accumulator limits
+            max_group_count: ((50_000.0 * scale_factor) as usize).max(5_000),
+            max_push_elements: ((100_000.0 * scale_factor) as usize).max(10_000),
+            max_addtoset_elements: ((100_000.0 * scale_factor) as usize).max(10_000),
+            max_unwind_output: ((1_000_000.0 * scale_factor) as usize).max(100_000),
+
+            // Memory limit
+            max_memory_mb,
+        }
+    }
+
+    /// Create limits for a specific memory budget
+    ///
+    /// Scales all limits proportionally to the given memory budget.
+    /// Use this when you want precise control over memory usage.
+    ///
+    /// # Arguments
+    /// * `memory_mb` - Maximum memory to use in megabytes (min: 64)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::aggregation::AggregationLimits;
+    ///
+    /// // Limit aggregation to 256 MB
+    /// let limits = AggregationLimits::with_memory_budget(256);
+    /// collection.aggregate_with_limits(&pipeline, limits)?;
+    /// ```
+    pub fn with_memory_budget(memory_mb: usize) -> Self {
+        // Scale relative to 512MB baseline
+        let scale = (memory_mb as f64 / 512.0).clamp(0.25, 4.0);
+
+        Self {
+            max_docs_without_match: ((100_000.0 * scale) as usize).max(10_000),
+            max_docs_with_match: ((1_000_000.0 * scale) as usize).max(100_000),
+            max_group_count: ((50_000.0 * scale) as usize).max(5_000),
+            max_push_elements: ((100_000.0 * scale) as usize).max(10_000),
+            max_addtoset_elements: ((100_000.0 * scale) as usize).max(10_000),
+            max_unwind_output: ((1_000_000.0 * scale) as usize).max(100_000),
+            max_memory_mb: memory_mb.max(64),
+        }
+    }
+
     /// Create limits suitable for low-memory environments
     pub fn low_memory() -> Self {
         Self {

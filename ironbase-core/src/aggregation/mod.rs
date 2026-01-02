@@ -174,12 +174,16 @@
 //! - [`helpers`] - Segédfüggvények (dot notation, mező kinyerés)
 
 mod helpers;
+pub mod memory_info;
 pub(crate) mod optimizer;
 mod pipeline;
 mod stages;
 mod types;
 
 // Re-export public types
+// Memory detection functions are re-exported for users who want to check system memory manually
+#[allow(unused_imports)]
+pub use memory_info::{get_available_memory_bytes, get_total_memory_bytes};
 pub use types::AggregationLimits;
 pub use types::Pipeline;
 pub use types::Stage;
@@ -775,5 +779,118 @@ mod tests {
         let results = result.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["all"].as_array().unwrap().len(), 50);
+    }
+
+    // ========== Dynamic Memory Limits Tests ==========
+
+    #[test]
+    fn test_from_system_memory_returns_valid_limits() {
+        let limits = AggregationLimits::from_system_memory();
+
+        // Limits should be positive and reasonable
+        assert!(limits.max_docs_without_match >= 10_000);
+        assert!(limits.max_memory_mb >= 64);
+        assert!(limits.max_memory_mb <= 4096);
+        assert!(limits.max_group_count >= 5_000);
+    }
+
+    #[test]
+    fn test_with_memory_budget_scales_correctly() {
+        let small = AggregationLimits::with_memory_budget(128);
+        let large = AggregationLimits::with_memory_budget(1024);
+
+        // Larger budget should give larger limits
+        assert!(
+            large.max_docs_without_match > small.max_docs_without_match,
+            "large.max_docs_without_match ({}) should be > small ({}) ",
+            large.max_docs_without_match,
+            small.max_docs_without_match
+        );
+        assert!(
+            large.max_group_count > small.max_group_count,
+            "large.max_group_count ({}) should be > small ({})",
+            large.max_group_count,
+            small.max_group_count
+        );
+        assert!(large.max_memory_mb > small.max_memory_mb);
+    }
+
+    #[test]
+    fn test_with_memory_budget_enforces_minimum() {
+        // Even with tiny budget, should have minimum limits
+        let limits = AggregationLimits::with_memory_budget(1); // 1 MB - very small
+
+        assert!(limits.max_docs_without_match >= 10_000);
+        assert!(limits.max_memory_mb >= 64);
+        assert!(limits.max_group_count >= 5_000);
+    }
+
+    #[test]
+    fn test_with_memory_budget_caps_maximum() {
+        // Very large budget should be capped
+        let limits = AggregationLimits::with_memory_budget(100_000); // 100 GB
+
+        // Scale factor is capped at 4.0, so limits shouldn't be astronomical
+        assert!(limits.max_docs_without_match <= 1_000_000);
+        assert!(limits.max_group_count <= 500_000);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_memory_detection_works_on_unix() {
+        use super::memory_info::{get_available_memory_bytes, get_total_memory_bytes};
+
+        // Test available memory
+        let avail = get_available_memory_bytes();
+        assert!(
+            avail.is_some(),
+            "Available memory detection should work on Unix"
+        );
+        let avail_bytes = avail.unwrap();
+        assert!(avail_bytes > 0, "Available memory should be > 0");
+
+        // Test total memory
+        let total = get_total_memory_bytes();
+        assert!(
+            total.is_some(),
+            "Total memory detection should work on Unix"
+        );
+        let total_bytes = total.unwrap();
+        assert!(total_bytes > 0, "Total memory should be > 0");
+
+        // Total should be >= available
+        assert!(
+            total_bytes >= avail_bytes,
+            "Total memory ({} MB) should be >= available ({} MB)",
+            total_bytes / 1024 / 1024,
+            avail_bytes / 1024 / 1024
+        );
+
+        // Sanity check: at least 100MB available
+        let mb = avail_bytes / 1024 / 1024;
+        assert!(
+            mb >= 100,
+            "Should have at least 100MB available (got {}MB)",
+            mb
+        );
+    }
+
+    #[test]
+    fn test_scale_to_memory_profiles() {
+        // Test the scale_to_memory function indirectly through with_memory_budget
+        // which uses similar scaling logic
+
+        // Low memory profile
+        let low = AggregationLimits::with_memory_budget(128);
+        assert!(low.max_docs_without_match <= 50_000);
+
+        // Standard profile
+        let standard = AggregationLimits::with_memory_budget(512);
+        assert!(standard.max_docs_without_match >= 50_000);
+        assert!(standard.max_docs_without_match <= 150_000);
+
+        // High memory profile
+        let high = AggregationLimits::with_memory_budget(2048);
+        assert!(high.max_docs_without_match >= 150_000);
     }
 }
