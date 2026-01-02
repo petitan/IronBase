@@ -656,24 +656,86 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             None => return Ok((0, 0)), // Collection doesn't exist
         };
 
-        // Read documents WITHIN the write lock
-        // OPTIMIZATION: O(1) lookup for _id queries, fallback to full scan
-        let docs_by_id: HashMap<DocumentId, Value> =
-            match try_direct_id_lookup(&mut *storage, &catalog, query_json) {
-                Some(map) => map,
-                None => inline_scan_with_catalog(&mut *storage, &catalog)?,
-            };
-
-        // Find first matching and update (skip tombstones already filtered by catalog scan)
+        // ⚠️ OOM PREVENTION: Streaming document lookup instead of bulk load
+        // Previously used inline_scan_with_catalog() which loaded ALL documents (~39GB for 78K emails)
+        // Now we stream through documents one by one and stop at first match
         let mut matched = 0u64;
         let mut modified = 0u64;
 
-        for (_, doc) in docs_by_id {
+        // OPTIMIZATION: O(1) lookup for _id queries
+        if let Some(direct_map) = try_direct_id_lookup(&mut *storage, &catalog, query_json) {
+            for (_, doc) in direct_map {
+                let mut document = Document::from_value(&doc)?;
+                if parsed_query.matches(&document)? {
+                    matched = 1;
+
+                    let original_document = document.clone();
+                    let was_modified = super::update_operators::apply_update_operators(
+                        &mut document,
+                        update_json,
+                    )?;
+
+                    if was_modified {
+                        self.check_index_constraints(&document, Some(&document.id))?;
+                        self.remove_from_indexes(&original_document)?;
+                        self.add_to_indexes(&document)?;
+
+                        let mut tombstone = doc.clone();
+                        if let Value::Object(ref mut map) = tombstone {
+                            map.insert("_tombstone".to_string(), Value::Bool(true));
+                            map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                        }
+                        let tombstone_json = serde_json::to_string(&tombstone)?;
+                        storage.write_data(tombstone_json.as_bytes())?;
+
+                        self.validate_document(&document)?;
+                        let updated_json = document.to_json()?;
+                        storage.write_document_raw(
+                            &self.name,
+                            &document.id,
+                            updated_json.as_bytes(),
+                        )?;
+                        storage.adjust_live_count(&self.name, -1);
+                        storage.adjust_live_count(&self.name, 1);
+
+                        modified = 1;
+                    }
+                    break;
+                }
+            }
+
+            if modified > 0 {
+                self.query_cache.invalidate_collection(&self.name);
+            }
+            return Ok((matched, modified));
+        }
+
+        // STREAMING: Process documents one by one - O(1) memory per doc
+        for (_doc_id, &offset) in catalog.iter() {
             if matched > 0 {
                 break; // Only update first match
             }
 
-            // PERF: Direct Value→Document (no serialization roundtrip)
+            // Read single document
+            let doc_bytes = match storage.read_data(offset) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
+            };
+
+            let doc: Value = match serde_json::from_slice(&doc_bytes) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Skip tombstones
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
             let mut document = Document::from_value(&doc)?;
 
             // Check if matches query
@@ -1582,15 +1644,91 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             }
         };
 
-        // Read documents under write lock
-        let docs_by_id: HashMap<DocumentId, Value> =
-            match try_direct_id_lookup(&mut *storage, &catalog, query_json) {
-                Some(map) => map,
-                None => inline_scan_with_catalog(&mut *storage, &catalog)?,
+        // ⚠️ OOM PREVENTION: Streaming document lookup instead of bulk load
+        // Previously used inline_scan_with_catalog() which loaded ALL documents
+
+        // OPTIMIZATION: O(1) lookup for _id queries
+        if let Some(direct_map) = try_direct_id_lookup(&mut *storage, &catalog, query_json) {
+            for (_, doc) in direct_map {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let mut document = Document::from_json(&doc_json_str)?;
+
+                if parsed_query.matches(&document)? {
+                    let old_doc_value = doc.clone();
+                    let original_document = document.clone();
+                    let was_modified = super::update_operators::apply_update_operators(
+                        &mut document,
+                        update_json,
+                    )?;
+
+                    if was_modified {
+                        self.check_index_constraints(&document, Some(&document.id))?;
+                        self.remove_from_indexes(&original_document)?;
+                        self.add_to_indexes(&document)?;
+
+                        let mut tombstone = old_doc_value.clone();
+                        if let Value::Object(ref mut map) = tombstone {
+                            map.insert("_tombstone".to_string(), Value::Bool(true));
+                            map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                        }
+                        let tombstone_json = serde_json::to_string(&tombstone)?;
+                        storage.write_data(tombstone_json.as_bytes())?;
+
+                        self.validate_document(&document)?;
+                        let updated_json = document.to_json()?;
+                        storage.write_document_raw(
+                            &self.name,
+                            &document.id,
+                            updated_json.as_bytes(),
+                        )?;
+
+                        let new_doc_value = serde_json::to_value(&document)
+                            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+
+                        return Ok(UpdateOnePrepared {
+                            doc_id: Some(document.id),
+                            old_doc: Some(old_doc_value),
+                            new_doc: Some(new_doc_value),
+                            matched: 1,
+                            modified: 1,
+                            collection_name: self.name.clone(),
+                        });
+                    } else {
+                        return Ok(UpdateOnePrepared {
+                            doc_id: Some(document.id),
+                            old_doc: Some(old_doc_value.clone()),
+                            new_doc: Some(old_doc_value),
+                            matched: 1,
+                            modified: 0,
+                            collection_name: self.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        // STREAMING: Process documents one by one - O(1) memory per doc
+        for (_doc_id, &offset) in catalog.iter() {
+            // Read single document
+            let doc_bytes = match storage.read_data(offset) {
+                Ok(bytes) => bytes,
+                Err(_) => continue,
             };
 
-        // Find first matching document
-        for (_, doc) in docs_by_id {
+            let doc: Value = match serde_json::from_slice(&doc_bytes) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Skip tombstones
+            if doc
+                .get("_tombstone")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
             let doc_json_str = serde_json::to_string(&doc)?;
             let mut document = Document::from_json(&doc_json_str)?;
 
@@ -1900,6 +2038,11 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 ///
 /// 🔒 ATOMIC: This function is designed to be called while holding a write lock,
 /// avoiding the read-then-write race condition that causes lost updates.
+///
+/// ⚠️ OOM WARNING: This loads ALL documents into memory!
+/// Use streaming approach instead for large collections.
+/// Kept for potential future use in small-collection scenarios.
+#[allow(dead_code)]
 fn inline_scan_with_catalog<S: Storage + RawStorage>(
     storage: &mut S,
     catalog: &HashMap<DocumentId, u64>,
