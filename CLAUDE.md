@@ -198,29 +198,55 @@ Metadata flush után:  data_end_offset = metadata_offset + metadata_size
 - **Dot notation**: Full support everywhere
 - **Memory limits**: OOM protection (see below)
 
-### Aggregation Memory Limits (DEPRECATED - lásd "Hardcoded Limitek" szekció!)
+### Aggregation Memory Limits (OOM Protection)
 
-> ⚠️ **FIGYELEM:** Ezek a hardcoded limitek HIBÁS megközelítést képviselnek!
-> Lásd: "Hardcoded Limitek - ANTIPATTERN!" szekció az OOM Prevention alatt.
->
-> **Ismert hibák:**
-> - `max_memory_mb` NINCS IMPLEMENTÁLVA (csak dokumentálva)!
-> - `$match` hozzáadása kikapcsolja a limitet (`usize::MAX`)
-> - `$push`/`$addToSet` KORLÁTLAN memóriát használhat
-> - `$unwind` output KORLÁTLAN lehet
+Az aggregation pipeline-ok memória védelemmel rendelkeznek OOM megelőzésre.
 
-**Jelenlegi (hibás) limitek:**
+**Ajánlott használat - Dinamikus limitek (2026-01):**
 
-| Limit | Default | Probléma |
-|-------|---------|----------|
-| `max_docs_without_match` | 100,000 | `$match` megkerüli! |
-| `max_group_count` | 50,000 | Csak csoportszám, nem méret |
-| `max_memory_mb` | 512 | ❌ **NEM IMPLEMENTÁLT!** |
+```rust
+// AJÁNLOTT: Automatikus rendszer RAM alapú skálázás
+let results = collection.aggregate_auto(&pipeline)?;
 
-**Valódi OOM védelem:**
-1. `try_reserve()` használata MINDEN Vec allokációnál
-2. Streaming feldolgozás materializálás helyett
-3. Rendszer RAM % alapú dinamikus limit
+// Vagy explicit:
+let limits = AggregationLimits::from_system_memory();
+let results = collection.aggregate_with_limits(&pipeline, limits)?;
+
+// Fix memória budget:
+let limits = AggregationLimits::with_memory_budget(256); // 256 MB
+```
+
+**Skálázási táblázat (`from_system_memory()`):**
+
+| Elérhető RAM | max_memory_mb | max_docs | max_groups |
+|--------------|---------------|----------|------------|
+| < 512 MB     | 64            | 10K      | 5K         |
+| 512MB - 2GB  | 128           | 50K      | 25K        |
+| 2GB - 8GB    | 256           | 100K     | 50K        |
+| 8GB - 32GB   | 512           | 250K     | 100K       |
+| > 32GB       | 1024          | 500K     | 250K       |
+
+**Static limitek (backward compatible):**
+
+| Limit | Default | Leírás |
+|-------|---------|--------|
+| `max_docs_without_match` | 100,000 | Max doc `$match` nélkül |
+| `max_docs_with_match` | 1,000,000 | Max doc `$match`-el is! |
+| `max_group_count` | 50,000 | Max egyedi csoportok |
+| `max_push_elements` | 100,000 | Max elemek `$push`-ban per csoport |
+| `max_addtoset_elements` | 100,000 | Max elemek `$addToSet`-ben per csoport |
+| `max_unwind_output` | 1,000,000 | Max `$unwind` output dokumentumok |
+| `max_memory_mb` | 512 | Becsült max memória |
+
+**OOM védelem implementálva (2026-01):**
+- ✅ `$match` NEM kapcsolja ki a limitet (max 1M doc)
+- ✅ `$push`/`$addToSet` limitálva per csoport
+- ✅ `$unwind` output limitálva
+- ✅ `try_reserve()` használat allokációk előtt
+
+**Key files:**
+- `ironbase-core/src/aggregation/memory_info.rs` - RAM detektálás
+- `ironbase-core/src/aggregation/types.rs` - AggregationLimits
 
 ### Top-K Optimization (Sort + Limit)
 
@@ -343,24 +369,34 @@ for chunk in catalog_entries.chunks(CHUNK_SIZE) {
 
 ### Hardcoded Limitek - ANTIPATTERN! ❌
 
-**A hardcoded limitek (100K doc, 50K group, stb.) a faszság és baromarcúság kategóriája.**
+**A hardcoded limitek (100K doc, 50K group, stb.) önmagukban NEM elegendőek OOM védelemhez.**
 
-Miért NEM működnek:
+Miért NEM működnek önmagukban:
 1. **Rendszerfüggő:** 512MB limit értelmetlen 64GB RAM-mal, és túl sok 2GB-os gépen
 2. **Workload-függő:** 100K 100 byte-os doc ≠ 100K 10KB-os doc
 3. **Hamis biztonságérzet:** "Van limit" → de nincs VALÓS memória ellenőrzés
-4. **Megkerülhetők:** `$match` hozzáadása kikapcsolja a limitet (usize::MAX)
 
-**Helyes megközelítés:**
-1. **Valós memória tracking:** `std::alloc` vagy `jemalloc` statisztikák
-2. **Rendszer RAM %:** Max 25% system RAM az aggregation-re
-3. **try_reserve():** Allokáció ELŐTT ellenőrzés, nem utána crash
-4. **Streaming MINDENHOL:** Ne gyűjts össze semmit ami elkerülhető
+**✅ MEGOLDÁS IMPLEMENTÁLVA (2026-01):**
+
+```rust
+// Dinamikus limitek - rendszer RAM alapján skálázódik!
+let results = collection.aggregate_auto(&pipeline)?;
+
+// Vagy explicit API:
+let limits = AggregationLimits::from_system_memory();
+let limits = AggregationLimits::with_memory_budget(256); // 256 MB
+```
+
+**Ami implementálva lett:**
+1. ✅ **Rendszer RAM detektálás:** `memory_info.rs` (`/proc/meminfo`, `libc::sysconf`)
+2. ✅ **Rendszer RAM %:** Max 25% available RAM az aggregation-re
+3. ✅ **try_reserve():** `$push`, `$addToSet`, `$unwind` allokációk előtt
+4. ✅ **Minden stage limitálva:** `$match` sem kapcsolja ki a védelmet
 
 **SOHA ne írj olyan kódot ami:**
-- Hardcoded számra támaszkodik memória védelemhez
+- Csak hardcoded számra támaszkodik memória védelemhez
 - "Működik a gépemen" alapon van tesztelve
-- Dokumentál egy limitet amit nem implementál (`max_memory_mb`)
+- Dokumentál egy limitet amit nem implementál
 
 ### Egységes Range Query API (KÖTELEZŐ!)
 

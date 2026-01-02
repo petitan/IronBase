@@ -871,12 +871,16 @@ impl IronBaseAdapter {
 
     /// Execute aggregation pipeline (sync version - no throttling)
     /// For internal use only. External callers should use aggregate_async().
+    ///
+    /// Uses `aggregate_auto()` which automatically scales memory limits based on
+    /// available system RAM, preventing OOM on resource-constrained servers.
     fn aggregate_internal(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         // Convert Vec<Value> to Value::Array
         let pipeline_value = Value::Array(pipeline);
-        let results = coll.aggregate(&pipeline_value)?;
+        // Use aggregate_auto() for dynamic memory limits based on system RAM
+        let results = coll.aggregate_auto(&pipeline_value)?;
         Ok(results)
     }
 
