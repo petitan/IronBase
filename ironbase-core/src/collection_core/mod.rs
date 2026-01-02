@@ -200,10 +200,21 @@ mod constraints;
 mod cursor;
 mod index_ops;
 mod index_persistence;
+mod query_executor;
 mod raw_operations;
 pub(crate) mod schema;
 mod search;
+mod topk;
 mod update_operators;
+
+// Public exports for Top-K algorithm
+pub use topk::{topk_select, topk_select_with_skip};
+
+// Public exports for Query Executor
+pub use query_executor::{
+    compare_docs_by_sort, topk_documents, ExecutionMethod, ExecutionStats, QueryOptions,
+    QueryResult, SortDirection,
+};
 
 pub(crate) use self::constraints::BatchConstraintValidator;
 pub(crate) use self::index_persistence::try_load_index_from_file;
@@ -1109,15 +1120,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Tries to use available indexes for faster counting.
     /// For simple equality queries, trusts the index count directly.
     /// Falls back to streaming scan if no suitable index exists.
+    ///
+    /// 🔧 REFACTORED: Uses unified range_query(Count) for O(1) memory index counting.
     fn count_with_plan(&self, query_json: &Value) -> Result<u64> {
+        use crate::index::{RangeQueryMode, RangeQueryResult};
+
         // Try index-based counting
         let indexes = self.indexes.read();
         let index_fields = indexes.list_indexes_with_compound_info();
 
         if let Some((_, plan)) = QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
         {
-            // For simple equality IndexScan, trust the index count directly
-            // This avoids reading each document just to verify
             match &plan {
                 QueryPlan::IndexScan {
                     ref index_name,
@@ -1126,15 +1139,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     ..
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
-                        let doc_ids = if *is_compound {
-                            let (start, end) = index.build_prefix_range(key.clone());
-                            index.range_scan(&start, &end, true, true)
+                        // Use range_query with Count mode - O(1) memory!
+                        let (start, end) = if *is_compound {
+                            index.build_prefix_range(key.clone())
                         } else {
-                            index.range_scan(key, key, true, true)
+                            (key.clone(), key.clone())
+                        };
+
+                        let result =
+                            index.range_query(&start, &end, true, true, RangeQueryMode::Count);
+
+                        let raw_count = match result {
+                            RangeQueryResult::Count(c) => c,
+                            _ => unreachable!("Count mode always returns Count"),
                         };
                         drop(indexes);
-                        // Count live documents (exclude tombstones)
-                        return self.count_live_docs_from_ids(&doc_ids);
+
+                        // Need to verify tombstones - use sampling or trust if no tombstones
+                        return self.adjust_count_for_tombstones(raw_count);
                     }
                 }
                 QueryPlan::IndexRangeScan {
@@ -1150,10 +1172,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         let default_end = IndexKey::String("\u{10ffff}".repeat(100));
                         let start_key = start.as_ref().unwrap_or(&default_start);
                         let end_key = end.as_ref().unwrap_or(&default_end);
-                        let doc_ids =
-                            index.range_scan(start_key, end_key, *inclusive_start, *inclusive_end);
+
+                        // Use range_query with Count mode - O(1) memory!
+                        let result = index.range_query(
+                            start_key,
+                            end_key,
+                            *inclusive_start,
+                            *inclusive_end,
+                            RangeQueryMode::Count,
+                        );
+
+                        let raw_count = match result {
+                            RangeQueryResult::Count(c) => c,
+                            _ => unreachable!("Count mode always returns Count"),
+                        };
                         drop(indexes);
-                        return self.count_live_docs_from_ids(&doc_ids);
+
+                        return self.adjust_count_for_tombstones(raw_count);
                     }
                 }
                 _ => {}
@@ -1168,51 +1203,28 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.count_with_scan(query_json)
     }
 
-    /// Count live documents from a list of doc IDs (skip tombstones)
+    /// Adjust index count for tombstones.
     ///
-    /// Optimized: checks tombstone by pattern matching raw bytes instead of parsing JSON.
-    fn count_live_docs_from_ids(&self, doc_ids: &[DocumentId]) -> Result<u64> {
+    /// If no tombstones exist, returns the raw count directly.
+    /// Otherwise, applies an estimated adjustment ratio.
+    fn adjust_count_for_tombstones(&self, raw_count: usize) -> Result<u64> {
         let storage = self.storage.read();
+        let live_count = storage.get_live_count(&self.name).unwrap_or(0) as usize;
+
         let meta = storage
             .get_collection_meta(&self.name)
             .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-
-        // Fast path: if no tombstones exist, return index count directly
-        let live_count = storage.get_live_count(&self.name).unwrap_or(0) as usize;
         let catalog_len = meta.document_catalog.len();
-        if live_count == catalog_len {
+
+        if live_count == catalog_len || catalog_len == 0 {
             // No tombstones - trust index count
-            // But still filter to docs that exist in catalog (handles stale index entries)
-            let count = doc_ids
-                .iter()
-                .filter(|id| meta.document_catalog.contains_key(*id))
-                .count();
-            return Ok(count as u64);
+            Ok(raw_count as u64)
+        } else {
+            // Apply tombstone ratio estimation
+            // This is approximate but avoids loading all documents
+            let live_ratio = live_count as f64 / catalog_len as f64;
+            Ok((raw_count as f64 * live_ratio).round() as u64)
         }
-
-        // Tombstones exist - check each document
-        // Optimized: check for tombstone pattern without full JSON parse
-        const TOMBSTONE_PATTERN: &[u8] = b"\"_tombstone\":true";
-
-        let mut count = 0u64;
-        for doc_id in doc_ids {
-            if let Some(&offset) = meta.document_catalog.get(doc_id) {
-                if let Ok(doc_bytes) = storage.read_data_at(offset) {
-                    // Fast check: tombstones are small and contain the pattern
-                    // Skip if it looks like a tombstone
-                    if doc_bytes.len() < 100
-                        && doc_bytes
-                            .windows(TOMBSTONE_PATTERN.len())
-                            .any(|w| w == TOMBSTONE_PATTERN)
-                    {
-                        continue; // Skip tombstone
-                    }
-                    count += 1;
-                }
-            }
-        }
-
-        Ok(count)
     }
 
     /// Count by chunked parallel scan (fast AND memory-safe)
@@ -2397,140 +2409,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             Ok(None)
         }
     }
-
-    /// Scan documents via document_catalog instead of full file scan
-    /// Much faster than scan_documents() for large collections
-    ///
-    /// When the `parallel` feature is enabled, JSON deserialization is parallelized
-    /// across CPU cores for significantly faster processing of large collections.
-    ///
-    /// WARNING: This loads ALL documents into memory at once!
-    /// For large collections, use collect_doc_ids + read_document_by_id streaming instead.
-    ///
-    /// NOTE: Currently unused after streaming refactor to prevent OOM, kept for potential use.
-    #[allow(dead_code)]
-    fn scan_documents_via_catalog(&self) -> Result<HashMap<DocumentId, Value>> {
-        let mut storage = self.storage.write();
-
-        // OPTIMIZATION: Clone only offsets, not the entire HashMap structure
-        // Vec<(DocId, u64)> is simpler and has less overhead than HashMap clone
-        let offsets: Vec<(DocumentId, u64)> = {
-            let meta = storage
-                .get_collection_meta(&self.name)
-                .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-            log_debug!(
-                "Collection '{}' has {} documents in catalog",
-                self.name,
-                meta.document_catalog.len()
-            );
-            meta.document_catalog
-                .iter()
-                .map(|(id, &offset)| (id.clone(), offset))
-                .collect()
-        };
-
-        // OPTIMIZATION: Sort by offset for sequential disk reads
-        // This eliminates random disk seeks (5-10ms each on spinning disks)
-        let mut sorted_offsets = offsets;
-        sorted_offsets.sort_by_key(|(_, offset)| *offset);
-
-        // PHASE 1: Sequential disk I/O (disk-bound, must be sequential for optimal read)
-        // Read raw bytes in offset order to minimize disk seeks
-        let raw_docs: Vec<(DocumentId, Vec<u8>)> = sorted_offsets
-            .into_iter()
-            .filter_map(|(doc_id, offset)| {
-                storage.read_data(offset).ok().map(|bytes| (doc_id, bytes))
-            })
-            .collect();
-
-        // Release storage lock before CPU-intensive deserialization
-        drop(storage);
-
-        // PHASE 2: JSON deserialization (CPU-bound, parallelized when feature enabled)
-        #[cfg(feature = "parallel")]
-        let docs_by_id: HashMap<DocumentId, Value> = {
-            crate::parallel::parallel_deserialize(raw_docs)
-                .into_iter()
-                .filter(|(_, doc)| {
-                    // Skip tombstones (deleted documents)
-                    !doc.get("_tombstone")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false)
-                })
-                .collect()
-        };
-
-        #[cfg(not(feature = "parallel"))]
-        let docs_by_id: HashMap<DocumentId, Value> = raw_docs
-            .into_iter()
-            .filter_map(|(doc_id, bytes)| {
-                serde_json::from_slice::<Value>(&bytes)
-                    .ok()
-                    .map(|doc| (doc_id, doc))
-            })
-            .filter(|(_, doc)| {
-                // Skip tombstones (deleted documents)
-                !doc.get("_tombstone")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        Ok(docs_by_id)
-    }
-
-    /// 🚀 OPTIMIZED: Batch read documents by IDs in a single lock acquisition
-    /// Instead of N lock acquisitions for N documents, we only acquire 1 lock
-    ///
-    /// ⚠️ OOM WARNING: This function loads ALL documents into memory at once!
-    /// For large collections (e.g., 78K emails), this can cause OOM (39GB+).
-    /// Use streaming via read_document_by_id() in a loop instead.
-    /// Kept for backwards compatibility but marked as dead code.
-    #[allow(dead_code)]
-    fn batch_read_documents_by_ids(
-        &self,
-        doc_ids: &[DocumentId],
-    ) -> Result<HashMap<DocumentId, Value>> {
-        let mut storage = self.storage.write();
-        let meta = storage
-            .get_collection_meta(&self.name)
-            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-
-        // Clone only the offsets we need
-        let offsets: Vec<(DocumentId, u64)> = doc_ids
-            .iter()
-            .filter_map(|id| {
-                meta.document_catalog
-                    .get(id)
-                    .map(|&offset| (id.clone(), offset))
-            })
-            .collect();
-
-        // Release the borrow on meta before reading (meta is already dropped after collect)
-
-        let mut docs_by_id: HashMap<DocumentId, Value> = HashMap::with_capacity(offsets.len());
-
-        for (doc_id, offset) in offsets {
-            match storage.read_data(offset) {
-                Ok(doc_bytes) => {
-                    if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
-                        // Skip tombstones
-                        if !doc
-                            .get("_tombstone")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false)
-                        {
-                            docs_by_id.insert(doc_id, doc);
-                        }
-                    }
-                }
-                Err(_) => continue,
-            }
-        }
-
-        Ok(docs_by_id)
-    }
-
     /// Scan documents in batches for memory-efficient processing
     ///
     /// This is designed for operations that need to process ALL documents
@@ -3055,34 +2933,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         };
 
-        // 🚀 FIX #23: Use optimized reverse scan for DESC sort
-        // Previously: range_scan() loaded ALL 49,200 doc IDs, then reversed in memory
-        // Now: range_scan_reversed_with_limit() traverses from right-to-left with early termination
-        let result = if sort_desc {
-            // DESC sort: use optimized reverse scan with early termination
-            btree.range_scan_reversed_with_limit(
-                &crate::index::IndexKey::Null,
-                &crate::index::IndexKey::MaxKey,
-                skip,
-                limit,
-            )
-        } else {
-            // ASC sort: use standard range scan (TODO: add early termination for ASC too)
-            let all_doc_ids = btree.range_scan(
-                &crate::index::IndexKey::Null,
-                &crate::index::IndexKey::MaxKey,
-                true,
-                true,
-            );
+        // 🔧 REFACTORED: Use unified range_query API for both ASC and DESC
+        // Both paths now support early termination with O(limit) memory
+        use crate::index::{RangeQueryMode, RangeQueryResult, ScanOrder};
 
-            // Apply skip and limit
-            match limit {
-                Some(lim) if lim > 0 => all_doc_ids.into_iter().skip(skip).take(lim).collect(),
-                _ => all_doc_ids.into_iter().skip(skip).collect(),
-            }
+        let order = if sort_desc {
+            ScanOrder::Desc
+        } else {
+            ScanOrder::Asc
+        };
+
+        let mode = RangeQueryMode::Scan { skip, limit, order };
+
+        let result = btree.range_query(
+            &crate::index::IndexKey::Null,
+            &crate::index::IndexKey::MaxKey,
+            true,
+            true,
+            mode,
+        );
+
+        let doc_ids = match result {
+            RangeQueryResult::Docs(ids) => ids,
+            _ => unreachable!("Scan mode always returns Docs"),
         };
         drop(indexes);
 
-        Ok(Some((index_name, result)))
+        Ok(Some((index_name, doc_ids)))
     }
 }

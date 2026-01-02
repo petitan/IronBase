@@ -65,7 +65,9 @@ pub mod manager;
 pub mod traits;
 
 // Re-export main types for convenience
-pub use btree::{BPlusTree, IndexMetadata, NODE_PAGE_SIZE};
+pub use btree::{
+    BPlusTree, IndexMetadata, RangeQueryMode, RangeQueryResult, ScanOrder, NODE_PAGE_SIZE,
+};
 pub use fuzzy::{FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata};
 pub use key::{IndexKey, IndexPrefixInfo, OrderedFloat};
 pub use legacy::{Index, IndexDefinition, IndexType};
