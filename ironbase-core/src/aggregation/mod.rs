@@ -735,7 +735,7 @@ mod tests {
             .map(|i| {
                 json!({
                     "id": i,
-                    "items": (0..200).map(|j| j).collect::<Vec<_>>()
+                    "items": (0..200).collect::<Vec<_>>()
                 })
             })
             .collect();

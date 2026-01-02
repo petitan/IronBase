@@ -858,7 +858,7 @@ fn test_fulltext_index_rebuild_after_ftidx_deletion() {
     for entry in fs::read_dir(temp_dir.path()).unwrap() {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().map_or(false, |e| e == "ftidx") {
+        if path.extension().is_some_and(|e| e == "ftidx") {
             println!("Deleting .ftidx file: {:?}", path);
             fs::remove_file(&path).unwrap();
         }
@@ -869,7 +869,7 @@ fn test_fulltext_index_rebuild_after_ftidx_deletion() {
         .unwrap()
         .filter(|e| {
             e.as_ref()
-                .map(|e| e.path().extension().map_or(false, |e| e == "ftidx"))
+                .map(|e| e.path().extension().is_some_and(|e| e == "ftidx"))
                 .unwrap_or(false)
         })
         .count();
