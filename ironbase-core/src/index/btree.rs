@@ -789,8 +789,15 @@ impl BPlusTree {
     /// Range scan: find all keys between start and end
     /// Supports multi-level B+ trees by recursively traversing internal nodes
     ///
-    /// NOTE: This is a backwards-compatible wrapper around `range_query()`.
-    /// For new code, prefer using `range_query()` directly with explicit mode.
+    /// # Deprecated
+    /// This is a backwards-compatible wrapper around `range_query()`.
+    /// **For new code, use `range_query()` directly with explicit mode.**
+    ///
+    /// ⚠️ WARNING: Without limit, this loads ALL matching IDs into memory (OOM risk!)
+    #[deprecated(
+        since = "0.3.46",
+        note = "Use range_query() with RangeQueryMode::Scan for explicit memory control"
+    )]
     pub fn range_scan(
         &self,
         start: &IndexKey,
@@ -818,8 +825,9 @@ impl BPlusTree {
     /// Traverses the B+ tree from largest to smallest values, supporting early termination.
     /// This is critical for queries like: `find({}).sort({date: -1}).limit(5)` on large collections.
     ///
-    /// NOTE: This is a backwards-compatible wrapper around `range_query()`.
-    /// For new code, prefer using `range_query()` directly with explicit mode.
+    /// # Deprecated
+    /// This is a backwards-compatible wrapper around `range_query()`.
+    /// **For new code, use `range_query()` directly with explicit mode.**
     ///
     /// # Arguments
     /// * `start` - Minimum key value (inclusive)
@@ -829,6 +837,10 @@ impl BPlusTree {
     ///
     /// # Returns
     /// Document IDs in descending key order, respecting skip and limit.
+    #[deprecated(
+        since = "0.3.46",
+        note = "Use range_query() with RangeQueryMode::Scan { order: ScanOrder::Desc } for explicit memory control"
+    )]
     pub fn range_scan_reversed_with_limit(
         &self,
         start: &IndexKey,

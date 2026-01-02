@@ -189,7 +189,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
-use crate::index::{IndexKey, IndexManager};
+use crate::index::{IndexKey, IndexManager, RangeQueryMode, ScanOrder};
 use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
 use crate::query_planner::{QueryPlan, QueryPlanner};
@@ -1123,7 +1123,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// 🔧 REFACTORED: Uses unified range_query(Count) for O(1) memory index counting.
     fn count_with_plan(&self, query_json: &Value) -> Result<u64> {
-        use crate::index::{RangeQueryMode, RangeQueryResult};
+        use crate::index::RangeQueryResult;
 
         // Try index-based counting
         let indexes = self.indexes.read();
@@ -2788,13 +2788,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     ..
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
+                        let mode = RangeQueryMode::Scan {
+                            skip: 0,
+                            limit: None,
+                            order: ScanOrder::Asc,
+                        };
                         if is_compound {
                             // Compound index prefix query: use range scan with compound bounds
                             let (start, end) = index.build_prefix_range(key.clone());
-                            index.range_scan(&start, &end, true, true)
+                            index
+                                .range_query(&start, &end, true, true, mode)
+                                .unwrap_docs()
                         } else {
                             // Single-field index: point lookup
-                            index.range_scan(key, key, true, true)
+                            index.range_query(key, key, true, true, mode).unwrap_docs()
                         }
                     } else {
                         vec![]
@@ -2814,7 +2821,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                         let start_key = start.as_ref().unwrap_or(&default_start);
                         let end_key = end.as_ref().unwrap_or(&default_end);
-                        index.range_scan(start_key, end_key, inclusive_start, inclusive_end)
+                        let mode = RangeQueryMode::Scan {
+                            skip: 0,
+                            limit: None,
+                            order: ScanOrder::Asc,
+                        };
+                        index
+                            .range_query(start_key, end_key, inclusive_start, inclusive_end, mode)
+                            .unwrap_docs()
                     } else {
                         vec![]
                     }
@@ -2827,7 +2841,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         // Full range scan from minimum to maximum key
                         let start = IndexKey::Null;
                         let end = IndexKey::MaxKey;
-                        index.range_scan(&start, &end, true, true)
+                        let mode = RangeQueryMode::Scan {
+                            skip: 0,
+                            limit: None,
+                            order: ScanOrder::Asc,
+                        };
+                        index
+                            .range_query(&start, &end, true, true, mode)
+                            .unwrap_docs()
                     } else {
                         vec![]
                     }
@@ -2935,7 +2956,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // 🔧 REFACTORED: Use unified range_query API for both ASC and DESC
         // Both paths now support early termination with O(limit) memory
-        use crate::index::{RangeQueryMode, RangeQueryResult, ScanOrder};
+        use crate::index::RangeQueryResult;
 
         let order = if sort_desc {
             ScanOrder::Desc
