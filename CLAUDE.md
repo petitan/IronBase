@@ -198,53 +198,29 @@ Metadata flush után:  data_end_offset = metadata_offset + metadata_size
 - **Dot notation**: Full support everywhere
 - **Memory limits**: OOM protection (see below)
 
-### Aggregation Memory Limits (OOM Protection)
+### Aggregation Memory Limits (DEPRECATED - lásd "Hardcoded Limitek" szekció!)
 
-Aggregation pipelines have built-in memory safety limits to prevent OOM on large collections:
+> ⚠️ **FIGYELEM:** Ezek a hardcoded limitek HIBÁS megközelítést képviselnek!
+> Lásd: "Hardcoded Limitek - ANTIPATTERN!" szekció az OOM Prevention alatt.
+>
+> **Ismert hibák:**
+> - `max_memory_mb` NINCS IMPLEMENTÁLVA (csak dokumentálva)!
+> - `$match` hozzáadása kikapcsolja a limitet (`usize::MAX`)
+> - `$push`/`$addToSet` KORLÁTLAN memóriát használhat
+> - `$unwind` output KORLÁTLAN lehet
 
-| Limit | Default | Description |
-|-------|---------|-------------|
-| `max_docs_without_match` | 100,000 | Max documents to scan without `$match` |
-| `max_group_count` | 50,000 | Max unique groups in `$group` stage |
-| `max_memory_mb` | 512 | Max estimated memory usage |
+**Jelenlegi (hibás) limitek:**
 
-**When limits are triggered:**
-- Error: `"Aggregation exceeded document limit: X documents processed without $match"`
-- Error: `"Aggregation exceeded group limit: X unique groups"`
+| Limit | Default | Probléma |
+|-------|---------|----------|
+| `max_docs_without_match` | 100,000 | `$match` megkerüli! |
+| `max_group_count` | 50,000 | Csak csoportszám, nem méret |
+| `max_memory_mb` | 512 | ❌ **NEM IMPLEMENTÁLT!** |
 
-**Best practices to avoid hitting limits:**
-1. **Always start with `$match`** - filter documents before `$group`
-2. **Use low-cardinality group keys** - don't group by unique IDs
-3. **Add indexes on `$match` fields** - reduces scan to indexed lookup
-
-**Example - BAD (will hit limit on large collections):**
-```json
-[{"$group": {"_id": "$email", "count": {"$sum": 1}}}]
-```
-
-**Example - GOOD (filtered first):**
-```json
-[
-  {"$match": {"date": {"$gt": "2024-01-01"}}},
-  {"$group": {"_id": "$email", "count": {"$sum": 1}}}
-]
-```
-
-**Custom limits (Rust API):**
-```rust
-use ironbase_core::aggregation::AggregationLimits;
-
-let limits = AggregationLimits {
-    max_docs_without_match: 50_000,
-    max_group_count: 10_000,
-    max_memory_mb: 256,
-};
-let results = collection.aggregate_with_limits(&pipeline, limits)?;
-
-// Or use presets:
-let limits = AggregationLimits::low_memory();  // 10K docs, 5K groups, 128MB
-let limits = AggregationLimits::unlimited();   // No limits (use with caution!)
-```
+**Valódi OOM védelem:**
+1. `try_reserve()` használata MINDEN Vec allokációnál
+2. Streaming feldolgozás materializálás helyett
+3. Rendszer RAM % alapú dinamikus limit
 
 ### Top-K Optimization (Sort + Limit)
 
@@ -364,6 +340,27 @@ for chunk in catalog_entries.chunks(CHUNK_SIZE) {
     // batch felszabadul itt
 }
 ```
+
+### Hardcoded Limitek - ANTIPATTERN! ❌
+
+**A hardcoded limitek (100K doc, 50K group, stb.) a faszság és baromarcúság kategóriája.**
+
+Miért NEM működnek:
+1. **Rendszerfüggő:** 512MB limit értelmetlen 64GB RAM-mal, és túl sok 2GB-os gépen
+2. **Workload-függő:** 100K 100 byte-os doc ≠ 100K 10KB-os doc
+3. **Hamis biztonságérzet:** "Van limit" → de nincs VALÓS memória ellenőrzés
+4. **Megkerülhetők:** `$match` hozzáadása kikapcsolja a limitet (usize::MAX)
+
+**Helyes megközelítés:**
+1. **Valós memória tracking:** `std::alloc` vagy `jemalloc` statisztikák
+2. **Rendszer RAM %:** Max 25% system RAM az aggregation-re
+3. **try_reserve():** Allokáció ELŐTT ellenőrzés, nem utána crash
+4. **Streaming MINDENHOL:** Ne gyűjts össze semmit ami elkerülhető
+
+**SOHA ne írj olyan kódot ami:**
+- Hardcoded számra támaszkodik memória védelemhez
+- "Működik a gépemen" alapon van tesztelve
+- Dokumentál egy limitet amit nem implementál (`max_memory_mb`)
 
 ### Egységes Range Query API (KÖTELEZŐ!)
 

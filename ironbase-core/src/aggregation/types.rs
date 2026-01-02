@@ -32,13 +32,33 @@ pub struct AggregationLimits {
     /// Default: 100,000
     pub max_docs_without_match: usize,
 
+    /// Maximum documents to scan even WITH $match stage
+    /// Prevents OOM when $match returns too many documents
+    /// Default: 1,000,000 (was: usize::MAX - UNSAFE!)
+    pub max_docs_with_match: usize,
+
     /// Maximum number of unique groups in $group stage
     /// Prevents memory explosion with high-cardinality group keys
     /// Default: 50,000
     pub max_group_count: usize,
 
+    /// Maximum elements in a single $push accumulator per group
+    /// Prevents OOM when collecting many values
+    /// Default: 100,000
+    pub max_push_elements: usize,
+
+    /// Maximum elements in a single $addToSet accumulator per group
+    /// Prevents OOM with high-cardinality fields
+    /// Default: 100,000
+    pub max_addtoset_elements: usize,
+
+    /// Maximum output documents from $unwind stage
+    /// Prevents explosion when unwinding large arrays
+    /// Default: 1,000,000
+    pub max_unwind_output: usize,
+
     /// Maximum estimated memory usage in MB
-    /// Checked periodically during aggregation
+    /// NOTE: Currently used for try_reserve() failures, not runtime tracking
     /// Default: 512 MB
     pub max_memory_mb: usize,
 }
@@ -47,7 +67,11 @@ impl Default for AggregationLimits {
     fn default() -> Self {
         Self {
             max_docs_without_match: 100_000,
+            max_docs_with_match: 1_000_000,
             max_group_count: 50_000,
+            max_push_elements: 100_000,
+            max_addtoset_elements: 100_000,
+            max_unwind_output: 1_000_000,
             max_memory_mb: 512,
         }
     }
@@ -58,16 +82,25 @@ impl AggregationLimits {
     pub fn low_memory() -> Self {
         Self {
             max_docs_without_match: 10_000,
+            max_docs_with_match: 100_000,
             max_group_count: 5_000,
+            max_push_elements: 10_000,
+            max_addtoset_elements: 10_000,
+            max_unwind_output: 100_000,
             max_memory_mb: 128,
         }
     }
 
     /// Create limits with no restrictions (use with caution!)
+    /// WARNING: This can cause OOM on large collections!
     pub fn unlimited() -> Self {
         Self {
             max_docs_without_match: usize::MAX,
+            max_docs_with_match: usize::MAX,
             max_group_count: usize::MAX,
+            max_push_elements: usize::MAX,
+            max_addtoset_elements: usize::MAX,
+            max_unwind_output: usize::MAX,
             max_memory_mb: usize::MAX,
         }
     }
