@@ -344,10 +344,58 @@ for chunk in catalog_entries.chunks(CHUNK_SIZE) {
 }
 ```
 
-**Dead code (OOM veszélyes, NE HASZNÁLD):**
-- `scan_documents_via_catalog()` - összes doc betöltése
-- `inline_scan_with_catalog()` - összes doc betöltése
-- `batch_read_documents_by_ids()` - összes matching doc betöltése
+### Egységes Range Query API (KÖTELEZŐ!)
+
+**2025-01-től a `range_query()` az EGYETLEN ajánlott belépési pont minden B+ tree range művelethez.**
+
+```rust
+use crate::index::{RangeQueryMode, RangeQueryResult, ScanOrder};
+
+// ✅ HELYES: Count O(1) memóriával
+let result = btree.range_query(
+    &start, &end, true, true,
+    RangeQueryMode::Count
+);
+let count = result.unwrap_count();
+
+// ✅ HELYES: Scan limittel O(limit) memóriával
+let result = btree.range_query(
+    &start, &end, true, true,
+    RangeQueryMode::Scan { skip: 0, limit: Some(10), order: ScanOrder::Asc }
+);
+let docs = result.unwrap_docs();
+
+// ❌ TILOS: Régi metódusok közvetlen használata (wrapper-ek, OOM kockázat limit nélkül!)
+// btree.range_scan() - NE HASZNÁLD új kódban!
+// btree.range_scan_reversed_with_limit() - NE HASZNÁLD új kódban!
+```
+
+**Memória garanciák:**
+
+| Művelet | Mód | Memória |
+|---------|-----|---------|
+| Count | `RangeQueryMode::Count` | O(1) |
+| Scan + limit | `RangeQueryMode::Scan { limit: Some(k) }` | O(k) |
+| Scan unlimited | `RangeQueryMode::Scan { limit: None }` | O(n) ⚠️ |
+
+**Top-K dokumentum rendezés (sort + limit):**
+
+```rust
+use crate::collection_core::{topk_documents, compare_docs_by_sort};
+
+// ✅ HELYES: Top-K O(k) memóriával
+let sort_spec = vec![("age".to_string(), 1)]; // ASC
+let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
+
+// ❌ TILOS: Teljes rendezés majd limit
+// docs.sort_by(...); docs.truncate(10); - NE CSINÁLD!
+```
+
+**Törölt dead code (e445b44e):**
+- `scan_documents_via_catalog()` - törölve
+- `batch_read_documents_by_ids()` - törölve
+- `count_live_docs_from_ids()` - törölve
+- `parallel.rs` modul - törölve
 
 **Korábbi OOM hibák (tanulság):**
 - `4904ccc9` - scan_documents_via_catalog() összes doc betöltése
@@ -355,6 +403,7 @@ for chunk in catalog_entries.chunks(CHUNK_SIZE) {
 - `e0001bbe` - count_with_scan párhuzamos verzió → chunked parallel fix
 - `49f27a77` - update_one bulk load → streaming fix
 - `88f0a79c` - update_many bulk load → streaming fix
+- `e445b44e` - range_query + Top-K egységesítés
 
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
