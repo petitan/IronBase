@@ -2123,6 +2123,31 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         pipeline.execute_streaming_with_limits(doc_iter, limits)
     }
 
+    /// Run aggregation with automatic memory-based limits
+    ///
+    /// Automatically detects system RAM and scales limits accordingly.
+    /// This is the **recommended** method for production use where memory
+    /// constraints may vary across deployment environments.
+    ///
+    /// # Memory scaling
+    /// - Uses max 25% of available RAM for aggregation
+    /// - Limits scale proportionally with available memory
+    /// - Falls back to conservative defaults if detection fails
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Automatically scales limits based on system RAM
+    /// let results = collection.aggregate_auto(&pipeline)?;
+    ///
+    /// // Equivalent to:
+    /// let limits = AggregationLimits::from_system_memory();
+    /// let results = collection.aggregate_with_limits(&pipeline, limits)?;
+    /// ```
+    pub fn aggregate_auto(&self, pipeline_json: &Value) -> Result<Vec<Value>> {
+        let limits = crate::aggregation::AggregationLimits::from_system_memory();
+        self.aggregate_with_limits(pipeline_json, limits)
+    }
+
     // ========== TRANSACTION OPERATIONS ==========
 
     /// Insert one document within a transaction
