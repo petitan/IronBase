@@ -234,7 +234,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         persisted_indexes: &[crate::index::IndexMetadata],
         id_index_name: &str,
     ) -> Result<u64> {
-        use crate::log_warn;
+        use crate::{log_debug, log_warn};
+
+        // Batch size for memory-efficient rebuilding (same as INDEX_BUILD_BATCH_SIZE)
+        // Lower for fulltext/fuzzy (memory intensive), higher for B+ tree (fast)
+        const REBUILD_BATCH_SIZE: usize = 100;
 
         let mut rebuilt_count = 0u64;
 
@@ -274,115 +278,147 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             .map(|idx| (idx.name.clone(), idx.field.clone()))
             .collect();
 
-        for (_id_key, offset) in catalog.iter() {
-            // Read document from disk
-            let doc_bytes = match storage.read_document_at(collection_name, *offset) {
-                Ok(bytes) => bytes,
-                Err(e) => {
-                    log_warn!(
-                        "Failed to read document at offset during index rebuild: {:?}",
-                        e
-                    );
-                    continue;
-                }
-            };
+        // Sort offsets for sequential disk reads (optimization)
+        let mut sorted_entries: Vec<_> = catalog.iter().collect();
+        sorted_entries.sort_by_key(|(_, offset)| *offset);
 
-            // Parse JSON
-            let doc: Value = match serde_json::from_slice(&doc_bytes) {
-                Ok(d) => d,
-                Err(e) => {
-                    log_warn!(
-                        "Failed to parse document JSON during index rebuild: {:?}",
-                        e
-                    );
-                    continue;
-                }
-            };
+        let total_docs = sorted_entries.len();
 
-            // Skip tombstones
-            if doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                continue;
-            }
+        // Process documents in batches to prevent OOM
+        for (batch_num, batch) in sorted_entries.chunks(REBUILD_BATCH_SIZE).enumerate() {
+            // Read and parse documents for this batch
+            let mut batch_docs: Vec<(DocumentId, Value)> = Vec::with_capacity(batch.len());
 
-            // Extract _id
-            let Some(id_value) = doc.get("_id") else {
-                continue;
-            };
-            let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_value.clone()) else {
-                continue;
-            };
-
-            // Rebuild _id index ONLY if needed (not loaded from .idx file)
-            if rebuild_id_index {
-                let index_key = IndexKey::from(id_value);
-                if let Some(id_index) = index_manager.get_btree_index_mut(id_index_name) {
-                    // BUG #4 FIX: Log duplicate key errors instead of silently ignoring
-                    // This helps diagnose database inconsistencies after crash recovery
-                    if let Err(e) = id_index.insert(index_key, doc_id.clone()) {
+            for (_id_key, offset) in batch {
+                // Read document from disk
+                let doc_bytes = match storage.read_document_at(collection_name, **offset) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
                         log_warn!(
-                            "Index rebuild: duplicate _id key ignored for {}: {:?}",
-                            collection_name,
+                            "Failed to read document at offset during index rebuild: {:?}",
                             e
                         );
+                        continue;
                     }
-                }
-            }
+                };
 
-            // Rebuild custom B+ tree indexes ONLY if needed (not loaded from .idx file)
-            for index_meta in &btree_indexes_to_rebuild {
-                let Some(index) = index_manager.get_btree_index_mut(&index_meta.name) else {
+                // Parse JSON
+                let doc: Value = match serde_json::from_slice(&doc_bytes) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        log_warn!(
+                            "Failed to parse document JSON during index rebuild: {:?}",
+                            e
+                        );
+                        continue;
+                    }
+                };
+
+                // Skip tombstones
+                if doc
+                    .get("_tombstone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                // Extract _id
+                let Some(id_value) = doc.get("_id") else {
+                    continue;
+                };
+                let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_value.clone()) else {
                     continue;
                 };
 
-                let key = index.extract_key(&doc);
-                let is_all_null = match &key {
-                    IndexKey::Null => true,
-                    IndexKey::Compound(keys) => keys.iter().all(|k| matches!(k, IndexKey::Null)),
-                    _ => false,
-                };
-
-                // Include null keys for unique indexes, skip for non-unique
-                if !is_all_null || index.metadata.unique {
-                    // BUG #4 FIX: Log duplicate key errors instead of silently ignoring
-                    if let Err(e) = index.insert(key, doc_id.clone()) {
-                        log_warn!(
-                            "Index rebuild: duplicate key ignored for index {} in {}: {:?}",
-                            index_meta.name,
-                            collection_name,
-                            e
-                        );
-                    }
-                    rebuilt_count += 1;
-                }
+                batch_docs.push((doc_id, doc));
             }
 
-            // Rebuild fuzzy indexes (using pre-collected info from outside the loop)
-            for (index_name, field) in &fuzzy_info {
-                if let Some(value) = crate::value_utils::get_nested_value(&doc, field) {
-                    if let Some(s) = value.as_str() {
-                        if let Some(index) = index_manager.get_fuzzy_index_mut(index_name) {
-                            index.insert(s, doc_id.clone());
-                            rebuilt_count += 1;
+            // Process batch: rebuild all indexes
+            for (doc_id, doc) in &batch_docs {
+                let id_value = doc.get("_id").unwrap(); // Safe: we extracted _id above
+
+                // Rebuild _id index ONLY if needed (not loaded from .idx file)
+                if rebuild_id_index {
+                    let index_key = IndexKey::from(id_value);
+                    if let Some(id_index) = index_manager.get_btree_index_mut(id_index_name) {
+                        if let Err(e) = id_index.insert(index_key, doc_id.clone()) {
+                            log_warn!(
+                                "Index rebuild: duplicate _id key ignored for {}: {:?}",
+                                collection_name,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                // Rebuild custom B+ tree indexes ONLY if needed (not loaded from .idx file)
+                for index_meta in &btree_indexes_to_rebuild {
+                    let Some(index) = index_manager.get_btree_index_mut(&index_meta.name) else {
+                        continue;
+                    };
+
+                    let key = index.extract_key(doc);
+                    let is_all_null = match &key {
+                        IndexKey::Null => true,
+                        IndexKey::Compound(keys) => {
+                            keys.iter().all(|k| matches!(k, IndexKey::Null))
+                        }
+                        _ => false,
+                    };
+
+                    // Include null keys for unique indexes, skip for non-unique
+                    if !is_all_null || index.metadata.unique {
+                        if let Err(e) = index.insert(key, doc_id.clone()) {
+                            log_warn!(
+                                "Index rebuild: duplicate key ignored for index {} in {}: {:?}",
+                                index_meta.name,
+                                collection_name,
+                                e
+                            );
+                        }
+                        rebuilt_count += 1;
+                    }
+                }
+
+                // Rebuild fuzzy indexes (using pre-collected info from outside the loop)
+                for (index_name, field) in &fuzzy_info {
+                    if let Some(value) = crate::value_utils::get_nested_value(doc, field) {
+                        if let Some(s) = value.as_str() {
+                            if let Some(index) = index_manager.get_fuzzy_index_mut(index_name) {
+                                index.insert(s, doc_id.clone());
+                                rebuilt_count += 1;
+                            }
+                        }
+                    }
+                }
+
+                // Rebuild fulltext indexes (using pre-collected info from outside the loop)
+                for (index_name, field) in &fulltext_info {
+                    if let Some(value) = crate::value_utils::get_nested_value(doc, field) {
+                        if let Some(s) = value.as_str() {
+                            if let Some(index) = index_manager.get_fulltext_index_mut(index_name) {
+                                let _ = index.insert(doc_id, s);
+                                rebuilt_count += 1;
+                            }
                         }
                     }
                 }
             }
 
-            // Rebuild fulltext indexes (using pre-collected info from outside the loop)
-            for (index_name, field) in &fulltext_info {
-                if let Some(value) = crate::value_utils::get_nested_value(&doc, field) {
-                    if let Some(s) = value.as_str() {
-                        if let Some(index) = index_manager.get_fulltext_index_mut(index_name) {
-                            let _ = index.insert(&doc_id, s);
-                            rebuilt_count += 1;
-                        }
-                    }
-                }
+            // Log progress for large collections
+            if total_docs > 1000 && (batch_num + 1) % 10 == 0 {
+                let processed = (batch_num + 1) * REBUILD_BATCH_SIZE;
+                log_debug!(
+                    "Index rebuild progress: {}/{} docs ({}%)",
+                    processed.min(total_docs),
+                    total_docs,
+                    (processed * 100 / total_docs).min(100)
+                );
             }
+
+            // Drop batch_docs to free memory before next batch
+            drop(batch_docs);
         }
 
         Ok(rebuilt_count)
