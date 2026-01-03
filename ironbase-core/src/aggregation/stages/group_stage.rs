@@ -486,4 +486,91 @@ impl GroupStage {
 
         Some(results)
     }
+
+    /// Index-based $group execution with context tracking
+    ///
+    /// Same as `try_index_based_execute` but uses `AggregationLimitContext`
+    /// for consistent limit tracking across all code paths.
+    ///
+    /// Key differences:
+    /// - Uses `ctx.increment_index_entries()` to count entries
+    /// - Uses `ctx.register_new_group()` for group limit checking
+    /// - Returns `Option<Vec<Value>>` (None = can't use index or error)
+    ///
+    /// Note: Returns None on errors to fall back to streaming path
+    /// which provides better error messages via context.
+    pub(crate) fn try_index_based_execute_with_context(
+        &self,
+        indexes: &IndexManager,
+        ctx: &super::super::context::AggregationLimitContext,
+    ) -> Option<Vec<Value>> {
+        // Check if this group can use index
+        let field = self.can_use_index()?;
+
+        // Find a single-field index on this field
+        let index_infos = indexes.list_indexes_with_compound_info();
+        let matching_index = index_infos
+            .iter()
+            .find(|info| !info.is_compound && info.prefix_field == field)?;
+
+        // Get the B+ tree index
+        let btree = indexes.get_btree_index(&matching_index.index_name)?;
+
+        // Count entries per key directly from the index
+        // Uses context for both entry and group limit tracking
+        let mut counts: HashMap<u64, (Value, i64)> = HashMap::new();
+
+        for (key, _doc_id) in btree.get_all_entries() {
+            // Track index entry (equivalent to document processing)
+            if ctx.increment_index_entries(1).is_err() {
+                // Hit entry limit - fall back to streaming for proper error
+                return None;
+            }
+
+            let key_value = key.to_value();
+            let key_hash = value_hash(&key_value);
+
+            // Use Entry API for clippy compliance
+            use std::collections::hash_map::Entry;
+            match counts.entry(key_hash) {
+                Entry::Vacant(e) => {
+                    // Register new group via context
+                    if ctx.register_new_group(key_hash).is_err() {
+                        // Hit group limit - fall back to streaming for proper error
+                        return None;
+                    }
+                    e.insert((key_value, 1));
+                }
+                Entry::Occupied(mut e) => {
+                    // Update existing group's count
+                    e.get_mut().1 += 1;
+                }
+            }
+        }
+
+        // Build result documents
+        let mut results = Vec::with_capacity(counts.len());
+
+        for (_hash, (key_value, count)) in counts {
+            let mut result = serde_json::Map::new();
+            result.insert("_id".to_string(), key_value);
+
+            // For each accumulator, compute final value
+            for (acc_name, acc) in &self.accumulators {
+                let value = match acc {
+                    Accumulator::Sum(SumExpression::Constant(n)) => {
+                        json!(n * count)
+                    }
+                    _ => {
+                        json!(null)
+                    }
+                };
+                result.insert(acc_name.clone(), value);
+            }
+
+            results.push(Value::Object(result));
+        }
+
+        Some(results)
+    }
 }

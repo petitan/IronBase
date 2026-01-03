@@ -303,11 +303,13 @@ impl Pipeline {
     /// - Group count tracking in $group stage
     /// - Per-group $push/$addToSet limits
     /// - $unwind output limits
+    /// - Early termination (prevents $limit bypass)
     ///
     /// # Memory Efficiency
     /// - Streamable stages ($match, $project) are chained as iterators
     /// - Documents are processed one at a time until materialization is needed
     /// - Top-K optimization for $sort + $limit patterns
+    /// - Early $limit prevents loading unnecessary documents
     ///
     /// # Example
     /// ```rust,ignore
@@ -335,7 +337,17 @@ impl Pipeline {
             return iter.collect();
         }
 
+        // Detect early $limit/$skip BEFORE streaming to set context limit
+        // This ensures doc_limit is respected even with large $limit values
+        let remaining_check_stages = &self.stages[..];
+        if let Some((skip, limit, _)) = Self::detect_early_limit_from_start(remaining_check_stages)
+        {
+            // Set effective limit in context (capped at doc_limit)
+            ctx.set_early_limit(skip.saturating_add(limit));
+        }
+
         // Phase 1: Chain streamable stages ($match, $project) as iterators
+        // These use with_counting internally if no $match is first
         let (streaming_iter, consumed) = chain_streamable_stages(docs, &self.stages, ctx.clone());
 
         // Remaining stages after streamable prefix
@@ -359,18 +371,31 @@ impl Pipeline {
 
                 if let Some((skip, limit, stages_to_skip)) = early_limit {
                     // Apply $skip/$limit during materialization
+                    // The context already has the effective limit set
+                    let effective = ctx.effective_limit();
                     let mut results = Vec::new();
                     let mut skipped = 0;
+                    let mut processed = 0;
 
                     for doc_result in streaming_iter {
                         let doc = doc_result?;
+                        processed += 1;
+
+                        // Check against effective limit (includes doc_limit cap)
+                        if processed > effective {
+                            return Err(IronBaseError::AggregationError(format!(
+                                "Aggregation exceeded document limit: {} documents (limit: {})",
+                                processed, effective
+                            )));
+                        }
 
                         if skipped < skip {
                             skipped += 1;
                             continue;
                         }
 
-                        if results.len() >= limit {
+                        // Use min of user limit and remaining effective budget
+                        if results.len() >= limit.min(effective.saturating_sub(skip)) {
                             break; // Early termination
                         }
 
@@ -404,6 +429,44 @@ impl Pipeline {
         }
 
         Ok(docs)
+    }
+
+    /// Detect early limit from start of pipeline (before streaming extraction)
+    fn detect_early_limit_from_start(stages: &[Stage]) -> Option<(usize, usize, usize)> {
+        let mut skip = 0;
+        let mut limit = None;
+        let mut stages_consumed = 0;
+        let mut found_non_passthrough = false;
+
+        for stage in stages {
+            match stage {
+                Stage::Skip(s) => {
+                    skip += s.skip;
+                    stages_consumed += 1;
+                }
+                Stage::Limit(l) => {
+                    limit = Some(l.limit);
+                    stages_consumed += 1;
+                    break;
+                }
+                Stage::Match(_) | Stage::Project(_) => {
+                    // Streamable stages - continue looking
+                    found_non_passthrough = true;
+                }
+                _ => {
+                    found_non_passthrough = true;
+                    break;
+                }
+            }
+        }
+
+        // Only return if we found a $limit and didn't skip required stages
+        if !found_non_passthrough {
+            limit.map(|l| (skip, l, stages_consumed))
+        } else {
+            // Check after non-passthrough for $group -> $limit patterns
+            None
+        }
     }
 
     /// Apply consecutive streamable stages ($match, $project) inline on the iterator

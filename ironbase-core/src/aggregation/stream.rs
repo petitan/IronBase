@@ -138,6 +138,10 @@ where
 /// Takes the initial document iterator and a slice of stages, and chains
 /// together the streamable stages ($match, $project) into an iterator pipeline.
 ///
+/// IMPORTANT: If the first stage is NOT $match, a CountingIterator is added
+/// to ensure document limits are enforced. The $match iterator handles counting
+/// internally, so we only add explicit counting when $match is not first.
+///
 /// Returns the chained iterator and the index of the first non-streamable stage.
 ///
 /// # Example
@@ -161,20 +165,41 @@ where
 {
     let mut iter: Box<dyn Iterator<Item = Result<Value>>> = Box::new(docs);
     let mut consumed = 0;
+    let mut has_match = false;
 
     for stage in stages {
         match stage {
             Stage::Match(m) => {
+                // $match includes counting internally
                 iter = Box::new(MatchIterator::new(iter, m.clone(), ctx.clone()));
                 consumed += 1;
+                has_match = true;
             }
             Stage::Project(p) => {
+                // If no $match before $project, add counting first
+                if !has_match && consumed == 0 {
+                    iter = Box::new(CountingIterator::new(iter, ctx.clone()));
+                }
                 iter = Box::new(ProjectIterator::new(iter, p.clone()));
                 consumed += 1;
             }
             // Non-streamable stages stop the chain
-            _ => break,
+            _ => {
+                // If no streamable stages and no $match, add counting
+                if !has_match && consumed == 0 {
+                    iter = Box::new(CountingIterator::new(iter, ctx.clone()));
+                }
+                break;
+            }
         }
+    }
+
+    // If we processed all stages and none were $match, ensure counting
+    if !has_match && consumed > 0 {
+        // Already processed via $project path above
+    } else if !has_match && consumed == 0 && stages.is_empty() {
+        // Empty stages - add counting
+        iter = Box::new(CountingIterator::new(iter, ctx));
     }
 
     (iter, consumed)
