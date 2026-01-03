@@ -68,7 +68,7 @@
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::get_nested_value;
+use crate::value_utils::get_all_nested_values;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -299,17 +299,34 @@ impl BPlusTree {
     /// Extract all keys for a document (supports multi-key indexes on arrays)
     pub fn extract_keys(&self, doc: &serde_json::Value) -> Vec<IndexKey> {
         if self.metadata.is_compound() {
-            let keys: Vec<IndexKey> = self
+            let field_values: Vec<Vec<IndexKey>> = self
                 .metadata
                 .fields
                 .iter()
                 .map(|field| {
-                    get_nested_value(doc, field)
-                        .map(IndexKey::from)
-                        .unwrap_or(IndexKey::Null)
+                    let values = get_all_nested_values(doc, field);
+                    if values.is_empty() {
+                        vec![IndexKey::Null]
+                    } else {
+                        values.into_iter().map(IndexKey::from).collect()
+                    }
                 })
                 .collect();
-            vec![IndexKey::Compound(keys)]
+
+            let mut combinations: Vec<Vec<IndexKey>> = vec![Vec::new()];
+            for values in field_values {
+                let mut next = Vec::new();
+                for prefix in &combinations {
+                    for value in &values {
+                        let mut key = prefix.clone();
+                        key.push(value.clone());
+                        next.push(key);
+                    }
+                }
+                combinations = next;
+            }
+
+            combinations.into_iter().map(IndexKey::Compound).collect()
         } else {
             let values = crate::value_utils::get_all_nested_values(doc, &self.metadata.field);
             if values.is_empty() {

@@ -1053,6 +1053,15 @@ mod tests {
         assert!(!matches_filter(&doc, &filter_go).unwrap());
     }
 
+    #[test]
+    fn test_regex_with_invalid_options_error() {
+        let doc = create_test_document(1, vec![("name", json!("Alice"))]);
+        let filter = json!({"name": {"$regex": "alice", "$options": "iz"}});
+
+        let err = matches_filter(&doc, &filter).unwrap_err();
+        assert!(err.to_string().contains("Invalid regex option"));
+    }
+
     // ========================================================================
     // $expr OPERATOR TESTS
     // ========================================================================

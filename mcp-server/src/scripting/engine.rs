@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use super::conversion::{dynamic_to_json, json_to_dynamic};
 use super::db_functions::register_db_functions;
-use super::error::format_rhai_error;
+use super::error::{format_rhai_error, is_operation_limit_error};
 use super::limits::{estimate_json_size, LogCollector, ScriptLimits, DEFAULT_MAX_OPERATIONS};
 use super::types::ScriptResult;
 use super::utility_functions::register_utility_functions;
@@ -243,7 +243,7 @@ impl RhaiEngine {
                 let err_str = format_rhai_error(&e);
 
                 // Check for operation limit
-                if err_str.contains("operation") {
+                if is_operation_limit_error(&e) {
                     Err(McpError::ScriptError(format!(
                         "Script exceeded maximum operations limit ({})",
                         max_ops

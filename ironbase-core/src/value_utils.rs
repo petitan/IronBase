@@ -72,7 +72,18 @@ fn collect_all_values_recursive<'a>(
     results: &mut Vec<&'a Value>,
 ) {
     if remaining.is_empty() {
-        results.push(value);
+        match value {
+            Value::Array(arr) => {
+                for elem in arr {
+                    if let Value::Array(_) = elem {
+                        collect_all_values_recursive(elem, remaining, results);
+                    } else {
+                        results.push(elem);
+                    }
+                }
+            }
+            _ => results.push(value),
+        }
         return;
     }
 
@@ -111,6 +122,44 @@ fn collect_all_values_recursive<'a>(
         }
         _ => {}
     }
+}
+
+/// Returns true if the given path crosses an array without an explicit numeric index.
+///
+/// This is used to detect multikey paths for compound index validation.
+pub fn path_crosses_array(doc: &Value, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut current = doc;
+
+    for part in parts {
+        match current {
+            Value::Object(map) => {
+                if let Some(next) = map.get(part) {
+                    current = next;
+                } else {
+                    return false;
+                }
+            }
+            Value::Array(arr) => {
+                if let Ok(index) = part.parse::<usize>() {
+                    if let Some(next) = arr.get(index) {
+                        current = next;
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
+
+    matches!(current, Value::Array(_))
 }
 
 /// Set a value at a nested path with dot notation support

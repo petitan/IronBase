@@ -31,14 +31,21 @@ lazy_static! {
 /// Build regex pattern string with MongoDB-style options
 ///
 /// Converts MongoDB options (i, m, s, x) to Rust regex inline flags
-pub(crate) fn build_regex_pattern(pattern: &str, options: &str) -> String {
+pub(crate) fn build_regex_pattern(pattern: &str, options: &str) -> Result<String> {
     let mut regex_str = String::new();
 
     // Handle options - only add prefix if there are valid options
-    let valid_options: String = options
-        .chars()
-        .filter(|c| matches!(c, 'i' | 'm' | 's' | 'x'))
-        .collect();
+    let mut valid_options = String::new();
+    for option in options.chars() {
+        if matches!(option, 'i' | 'm' | 's' | 'x') {
+            valid_options.push(option);
+        } else {
+            return Err(IronBaseError::InvalidQuery(format!(
+                "Invalid regex option '{}'",
+                option
+            )));
+        }
+    }
 
     if !valid_options.is_empty() {
         regex_str.push_str("(?");
@@ -47,7 +54,7 @@ pub(crate) fn build_regex_pattern(pattern: &str, options: &str) -> String {
     }
 
     regex_str.push_str(pattern);
-    regex_str
+    Ok(regex_str)
 }
 
 /// Get or compile a regex pattern with caching
@@ -68,7 +75,7 @@ pub(crate) fn get_or_compile_regex(pattern: &str, options: &str) -> Result<Arc<R
     }
 
     // Build and compile regex with options
-    let regex_pattern = build_regex_pattern(pattern, options);
+    let regex_pattern = build_regex_pattern(pattern, options)?;
     let regex = Arc::new(Regex::new(&regex_pattern).map_err(|e| {
         IronBaseError::InvalidQuery(format!("Invalid regex pattern '{}': {}", pattern, e))
     })?);

@@ -83,6 +83,8 @@ mod tests {
     use super::btree::{BTreeNode, LeafNode};
     use super::*;
     use crate::document::DocumentId;
+    use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn test_index_key_ordering() {
@@ -123,6 +125,67 @@ mod tests {
             IndexKey::String("test@example.com".to_string()),
             DocumentId::Int(2),
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_multikey_extract_keys_array_field() {
+        let tree = BPlusTree::new("tags_idx".to_string(), "tags".to_string(), false, false);
+        let doc = json!({"tags": ["urgent", "important"]});
+
+        let keys: HashSet<IndexKey> = tree.extract_keys(&doc).into_iter().collect();
+        let expected: HashSet<IndexKey> = [
+            IndexKey::String("urgent".to_string()),
+            IndexKey::String("important".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn test_compound_multikey_single_array_field() {
+        let tree = BPlusTree::new_compound(
+            "country_tags_idx".to_string(),
+            vec!["country".to_string(), "tags".to_string()],
+            false,
+            false,
+        );
+        let doc = json!({"country": "US", "tags": ["a", "b"]});
+
+        let keys: HashSet<IndexKey> = tree.extract_keys(&doc).into_iter().collect();
+        let expected: HashSet<IndexKey> = [
+            IndexKey::Compound(vec![
+                IndexKey::String("US".to_string()),
+                IndexKey::String("a".to_string()),
+            ]),
+            IndexKey::Compound(vec![
+                IndexKey::String("US".to_string()),
+                IndexKey::String("b".to_string()),
+            ]),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn test_compound_multikey_multiple_arrays_rejected() {
+        let mut manager = IndexManager::new();
+        manager
+            .create_compound_index(
+                "country_tags_idx".to_string(),
+                vec!["country".to_string(), "tags".to_string()],
+                false,
+                false,
+            )
+            .unwrap();
+
+        let doc = json!({"country": ["US", "CA"], "tags": ["a", "b"]});
+        let result = manager.add_document_to_indexes(&doc, &DocumentId::Int(1), None);
+
         assert!(result.is_err());
     }
 

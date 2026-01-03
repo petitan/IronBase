@@ -101,8 +101,8 @@ fn test_get_prompts_list_returns_prompts() {
 fn test_prompts_list_has_expected_count() {
     let result = get_prompts_list();
     let prompts = result.get("prompts").unwrap().as_array().unwrap();
-    // Expected: 17 prompts (including fulltext-search, acl-guide, database-admin, security-guide, listener-config)
-    assert_eq!(prompts.len(), 17);
+    // Expected: 18 prompts (including fulltext-search, acl-guide, database-admin, security-guide, listener-config)
+    assert_eq!(prompts.len(), 18);
 }
 
 #[test]

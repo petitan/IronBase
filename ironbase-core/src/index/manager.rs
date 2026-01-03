@@ -53,7 +53,7 @@ use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
 use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
 use crate::log_error;
-use crate::value_utils::get_nested_value;
+use crate::value_utils::{get_nested_value, path_crosses_array};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -588,6 +588,16 @@ impl IndexManager {
             }
 
             if let Some(index) = self.btree_indexes.get_mut(&index_name) {
+                if index.metadata.is_compound()
+                    && Self::count_compound_array_fields(doc, &index.metadata.fields) > 1
+                {
+                    return Err(IronBaseError::IndexError(format!(
+                        "Compound index '{}' cannot index multiple array fields: {}",
+                        index.metadata.name,
+                        index.metadata.fields.join(", ")
+                    )));
+                }
+
                 let keys = index.extract_keys(doc);
                 let mut seen = HashSet::new();
                 for index_key in keys {
@@ -771,6 +781,16 @@ impl IndexManager {
                 continue;
             }
 
+            if index.metadata.is_compound()
+                && Self::count_compound_array_fields(doc, &index.metadata.fields) > 1
+            {
+                return Err(IronBaseError::IndexError(format!(
+                    "Compound index '{}' cannot index multiple array fields: {}",
+                    index.metadata.name,
+                    index.metadata.fields.join(", ")
+                )));
+            }
+
             let keys = index.extract_keys(doc);
             let mut seen = HashSet::new();
             for index_key in keys {
@@ -804,6 +824,13 @@ impl IndexManager {
             IndexKey::Compound(keys) => keys.iter().all(|k| matches!(k, IndexKey::Null)),
             _ => false,
         }
+    }
+
+    pub(crate) fn count_compound_array_fields(doc: &serde_json::Value, fields: &[String]) -> usize {
+        fields
+            .iter()
+            .filter(|field| path_crosses_array(doc, field))
+            .count()
     }
 }
 
