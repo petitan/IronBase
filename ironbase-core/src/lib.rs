@@ -44,9 +44,9 @@ pub mod transaction;
 // ============================================================================
 // INTERNAL IMPLEMENTATION MODULES - Not part of public API
 // ============================================================================
-pub(crate) mod aggregation;
-// NOTE: btree.rs was removed - it was an alternative B+ tree implementation that was never integrated
-// The actual B+ tree implementation is in index.rs (BTreeNode, InternalNode, LeafNode)
+pub mod aggregation; // Made public for AggregationLimitContext API
+                     // NOTE: btree.rs was removed - it was an alternative B+ tree implementation that was never integrated
+                     // The actual B+ tree implementation is in index.rs (BTreeNode, InternalNode, LeafNode)
 pub(crate) mod catalog_serde;
 pub mod index; // Public for FuzzyIndex and FuzzyAlgorithm exports
 pub(crate) mod logging;
@@ -92,4 +92,9 @@ pub use index::{FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata};
 // Full-text search exports
 pub use fulltext::{
     FtsLanguage, FtsOptions, FtsSearchResult, FulltextIndex, FulltextIndexMetadata,
+};
+
+// Aggregation context exports (for memory-aware aggregation)
+pub use aggregation::{
+    limits_from_tier, AggregationLimitContext, AggregationLimits, MemoryTier, Pipeline,
 };
