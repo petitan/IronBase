@@ -67,7 +67,7 @@ pub fn register_db_functions(
     register_read_functions(engine, adapter.clone(), limits);
     register_write_functions(engine, adapter.clone());
     register_index_functions(engine, adapter.clone());
-    register_search_functions(engine, adapter);
+    register_search_functions(engine, adapter, limits);
 }
 
 // ============================================================
@@ -79,7 +79,8 @@ fn register_read_functions(
     adapter: Arc<IronBaseAdapter>,
     limits: &ScriptLimits,
 ) {
-    let default_limit = limits.max_find_documents;
+    let max_find_documents = limits.max_find_documents;
+    let default_limit = max_find_documents.min(ABSOLUTE_MAX_FIND_DOCUMENTS);
 
     // db_find(collection, query) -> array of documents
     // SECURITY: Always applies default limit to prevent OOM
@@ -122,8 +123,12 @@ fn register_read_functions(
                 .map(|l| l as usize)
                 .unwrap_or(default_limit);
 
-            // Cap at absolute maximum
-            find_options.limit = Some(requested_limit.min(ABSOLUTE_MAX_FIND_DOCUMENTS));
+            // Enforce script limits and absolute cap
+            find_options.limit = Some(
+                requested_limit
+                    .min(max_find_documents)
+                    .min(ABSOLUTE_MAX_FIND_DOCUMENTS),
+            );
 
             // Parse skip
             if let Some(skip_val) = options.get("skip") {
@@ -481,7 +486,11 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
 // Search Operations (Fuzzy + Fulltext)
 // ============================================================
 
-fn register_search_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) {
+fn register_search_functions(
+    engine: &mut Engine,
+    adapter: Arc<IronBaseAdapter>,
+    limits: &ScriptLimits,
+) {
     // db_create_fuzzy_index(collection, field, algorithm, threshold) -> index_name
     let adapter_fzidx = adapter.clone();
     engine.register_fn(
@@ -530,12 +539,22 @@ fn register_search_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>)
     );
 
     // db_fulltext_search(collection, field, query, limit) -> array of {doc, score, tokens}
+    let max_find_documents = limits.max_find_documents;
+    let default_limit = max_find_documents.min(ABSOLUTE_MAX_FIND_DOCUMENTS);
     let adapter_ftsrch = adapter;
     engine.register_fn(
         "db_fulltext_search",
         move |collection: &str, field: &str, query: &str, limit: i64| -> Dynamic {
+            let requested_limit = if limit > 0 {
+                limit as usize
+            } else {
+                default_limit
+            };
+            let effective_limit = requested_limit
+                .min(max_find_documents)
+                .min(ABSOLUTE_MAX_FIND_DOCUMENTS);
             let options = FulltextSearchOptions {
-                limit: Some(limit as usize),
+                limit: Some(effective_limit),
                 skip: None,
                 min_score: None,
                 projection: None,

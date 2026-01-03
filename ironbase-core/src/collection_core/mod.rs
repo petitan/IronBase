@@ -1696,6 +1696,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let id_index_name = format!("{}_id", self.name);
         let index_names: Vec<String> = indexes.list_indexes();
 
+        // Preflight: reject compound indexes with multiple array fields (MongoDB restriction)
+        for index_name in &index_names {
+            if index_name == &id_index_name {
+                continue;
+            }
+            if let Some(index) = indexes.get_btree_index(index_name) {
+                if index.metadata.is_compound() {
+                    for (_, updated_doc) in updates {
+                        let updated_value =
+                            serde_json::to_value(updated_doc).unwrap_or(serde_json::Value::Null);
+                        if IndexManager::count_compound_array_fields(
+                            &updated_value,
+                            &index.metadata.fields,
+                        ) > 1
+                        {
+                            return Err(IronBaseError::IndexError(format!(
+                                "Compound index '{}' cannot index multiple array fields: {}",
+                                index.metadata.name,
+                                index.metadata.fields.join(", ")
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+
         // --- _id INDEX: Use apply_batch_updates ---
         {
             let id_updates: Vec<(IndexKey, DocumentId, IndexKey, DocumentId)> = updates

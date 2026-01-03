@@ -552,7 +552,7 @@ async fn run_http_server_internal(
 
     let app_state = Arc::new(HttpAppState {
         service,
-        initialized: std::sync::atomic::AtomicBool::new(false),
+        initialized_clients: std::sync::Mutex::new(std::collections::HashSet::new()),
         tool_timeout: std::time::Duration::from_secs(config.tool_timeout_secs),
     });
 
@@ -602,7 +602,7 @@ async fn run_http_server_internal(
                 handle_request(
                     &request,
                     &state_clone.service,
-                    &state_clone.initialized,
+                    &state_clone.initialized_clients,
                     api_key.as_deref(),
                     Some(remote_addr),
                 )
@@ -838,9 +838,9 @@ async fn run_http_server_internal(
 struct HttpAppState {
     /// Central service layer for tool execution
     service: Arc<crate::IronBaseService>,
-    /// MCP lifecycle state: track if initialize has been called
+    /// MCP lifecycle state: track initialize per client
     /// Per spec: "The initialization phase MUST be the first interaction"
-    initialized: std::sync::atomic::AtomicBool,
+    initialized_clients: std::sync::Mutex<std::collections::HashSet<String>>,
     /// Timeout for long-running tool operations
     tool_timeout: std::time::Duration,
 }
@@ -918,6 +918,43 @@ struct ServerInfo {
     version: String,
 }
 
+fn client_identity(
+    api_key: Option<&str>,
+    remote_addr: Option<std::net::SocketAddr>,
+) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    if let Some(key) = api_key {
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        return format!("api:{:x}", hasher.finish());
+    }
+
+    remote_addr
+        .map(|addr| format!("ip:{}", addr.ip()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn is_client_initialized(
+    initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
+    client_id: &str,
+) -> bool {
+    initialized_clients
+        .lock()
+        .map(|set| set.contains(client_id))
+        .unwrap_or(false)
+}
+
+fn mark_client_initialized(
+    initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
+    client_id: &str,
+) {
+    if let Ok(mut set) = initialized_clients.lock() {
+        set.insert(client_id.to_string());
+    }
+}
+
 /// Handle MCP request using the service layer
 ///
 /// This function handles MCP protocol routing and delegates tool execution
@@ -925,7 +962,7 @@ struct ServerInfo {
 fn handle_request(
     request: &McpRequest,
     service: &crate::IronBaseService,
-    initialized: &std::sync::atomic::AtomicBool,
+    initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
     api_key: Option<&str>,
     remote_addr: Option<std::net::SocketAddr>,
 ) -> Option<McpResponse> {
@@ -933,13 +970,13 @@ fn handle_request(
         get_prompt_content, get_prompts_list, get_resources_list, get_tools_list_filtered,
         read_resource, ServiceContext, ToolRequest,
     };
-    use std::sync::atomic::Ordering;
-
     let is_notification = request.id.is_none() || matches!(&request.id, Some(v) if v.is_null());
+    let client_id = client_identity(api_key, remote_addr);
+    let is_initialized = is_client_initialized(initialized_clients, &client_id);
 
     // MCP lifecycle enforcement: only allow initialize and ping before initialization
     // Per spec: "The initialization phase MUST be the first interaction"
-    if !initialized.load(Ordering::SeqCst)
+    if !is_initialized
         && request.method != "initialize"
         && request.method != "ping"
         && !request.method.starts_with("notifications/")
@@ -953,7 +990,7 @@ fn handle_request(
 
     match request.method.as_str() {
         "initialize" => {
-            initialized.store(true, Ordering::SeqCst);
+            mark_client_initialized(initialized_clients, &client_id);
             Some(create_success_response(
                 serde_json::to_value(InitializeResult {
                     protocol_version: "2025-06-18".to_string(),
@@ -1010,7 +1047,7 @@ fn handle_request(
 
             // Create service context
             let caller = CallerContext::new(remote_addr, api_key.map(|s| s.to_string()));
-            let ctx = ServiceContext::new(caller, initialized.load(Ordering::SeqCst));
+            let ctx = ServiceContext::new(caller, is_initialized);
 
             // Create tool request
             let tool_request = ToolRequest::new(&params.name, arguments);

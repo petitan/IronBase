@@ -21,8 +21,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mcp_ironbase::{
-    dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list, get_tools_list,
-    http_server, read_resource, service, IronBaseAdapter, VERSION,
+    dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list,
+    get_tools_list_filtered, http_server, read_resource, service, IronBaseAdapter, McpError,
+    VERSION,
 };
 
 // ============================================================
@@ -448,10 +449,16 @@ fn handle_request(
             None
         }
 
-        "tools/list" => Some(create_success_response(
-            get_tools_list(),
-            request.id.clone(),
-        )),
+        "tools/list" => {
+            let restrict_admin = std::env::var("MCP_STDIO_RESTRICT_TOOLS")
+                .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
+                .unwrap_or(false);
+            let is_localhost = !restrict_admin;
+            Some(create_success_response(
+                get_tools_list_filtered(is_localhost),
+                request.id.clone(),
+            ))
+        }
 
         "tools/call" => {
             let params: ToolsCallParams = match serde_json::from_value(request.params.clone()) {
@@ -477,16 +484,7 @@ fn handle_request(
                     });
                     Some(create_success_response(response, request.id.clone()))
                 }
-                Err(e) => {
-                    let response = serde_json::json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!("Error: {}", e)
-                        }],
-                        "isError": true
-                    });
-                    Some(create_success_response(response, request.id.clone()))
-                }
+                Err(e) => Some(create_tool_error_response(e, request.id.clone())),
             }
         }
 
@@ -588,6 +586,23 @@ fn create_error_response(code: i32, message: &str, id: Option<serde_json::Value>
             message: message.to_string(),
             data: None,
         },
+    }
+}
+
+fn create_tool_error_response(err: McpError, id: Option<serde_json::Value>) -> McpResponse {
+    let message = err.to_string();
+    match err {
+        McpError::InvalidParams(_) => create_error_response(-32602, &message, id),
+        _ => {
+            let response = serde_json::json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Error: {}", message)
+                }],
+                "isError": true
+            });
+            create_success_response(response, id)
+        }
     }
 }
 
