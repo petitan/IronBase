@@ -162,6 +162,14 @@ pub fn path_crosses_array(doc: &Value, path: &str) -> bool {
     matches!(current, Value::Array(_))
 }
 
+/// Return a substring by character index and length.
+pub fn substr_string(value: &str, start: usize, length: usize) -> String {
+    if length == 0 {
+        return String::new();
+    }
+    value.chars().skip(start).take(length).collect()
+}
+
 /// Set a value at a nested path with dot notation support
 ///
 /// Creates intermediate objects if they don't exist.

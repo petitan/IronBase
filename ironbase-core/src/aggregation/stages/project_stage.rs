@@ -3,10 +3,10 @@
 
 use crate::aggregation::types::{
     ArithmeticOperand, ProjectExpression, ProjectField, ProjectStage, ReduceExpression,
-    ReduceInExpr,
+    ReduceInExpr, StringOperand,
 };
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::{get_nested_value, set_nested_value};
+use crate::value_utils::{get_nested_value, set_nested_value, substr_string};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -104,6 +104,7 @@ impl ProjectStage {
                     ))
                 }
             }
+            "$substr" => Self::parse_substr_expression(arg),
             "$reduce" => Self::parse_reduce_expression(arg),
             // Arithmetic operators
             "$add" => Self::parse_variadic_arithmetic(arg, ProjectExpression::Add),
@@ -227,6 +228,52 @@ impl ProjectStage {
                 None,
             )))
         }
+    }
+
+    fn parse_substr_expression(arg: &Value) -> Result<ProjectField> {
+        let arr = arg.as_array().ok_or_else(|| {
+            IronBaseError::AggregationError("$substr must be an array".to_string())
+        })?;
+        if arr.len() != 3 {
+            return Err(IronBaseError::AggregationError(
+                "$substr requires [string, start, length]".to_string(),
+            ));
+        }
+
+        let input = Self::parse_string_operand(&arr[0])?;
+        let start = Self::parse_substr_number(&arr[1], "start")?;
+        let length = Self::parse_substr_number(&arr[2], "length")?;
+
+        Ok(ProjectField::Expression(ProjectExpression::Substr(
+            input, start, length,
+        )))
+    }
+
+    fn parse_string_operand(value: &Value) -> Result<StringOperand> {
+        if let Some(s) = value.as_str() {
+            if s.starts_with('$') {
+                Ok(StringOperand::Field(s.trim_start_matches('$').to_string()))
+            } else {
+                Ok(StringOperand::Literal(s.to_string()))
+            }
+        } else {
+            Err(IronBaseError::AggregationError(
+                "String operand must be a field reference or literal".to_string(),
+            ))
+        }
+    }
+
+    fn parse_substr_number(value: &Value, label: &str) -> Result<usize> {
+        let num = value.as_i64().ok_or_else(|| {
+            IronBaseError::AggregationError(format!("$substr {} must be integer", label))
+        })?;
+        if num < 0 {
+            return Err(IronBaseError::AggregationError(format!(
+                "$substr {} must be non-negative",
+                label
+            )));
+        }
+        Ok(num as usize)
     }
 
     /// Parse an arithmetic operand: field reference, literal, or nested expression
@@ -515,6 +562,12 @@ impl ProjectStage {
                     Value::Null
                 }
             }
+            ProjectExpression::Substr(input, start, length) => {
+                match Self::evaluate_string_operand(input, doc) {
+                    Some(text) => Value::String(substr_string(&text, *start, *length)),
+                    None => Value::Null,
+                }
+            }
             ProjectExpression::Reduce(reduce_expr) => Self::evaluate_reduce(reduce_expr, doc),
             ProjectExpression::Add(operands) => {
                 let mut result = 0.0;
@@ -583,6 +636,15 @@ impl ProjectStage {
                     Value::from((v * multiplier).round() / multiplier)
                 })
                 .unwrap_or(Value::Null),
+        }
+    }
+
+    fn evaluate_string_operand(op: &StringOperand, doc: &Value) -> Option<String> {
+        match op {
+            StringOperand::Field(field) => get_nested_value(doc, field)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            StringOperand::Literal(value) => Some(value.clone()),
         }
     }
 
@@ -845,6 +907,19 @@ mod tests {
         // 100 * 1.1 = 110.0
         let val = result[0]["withTax"].as_f64().unwrap();
         assert!((val - 110.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_project_substr() {
+        let stage = ProjectStage::from_json(&json!({
+            "prefix": {"$substr": ["$name", 0, 2]}
+        }))
+        .unwrap();
+
+        let doc = json!({"name": "Alice"});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        assert_eq!(result[0]["prefix"], json!("Al"));
     }
 
     #[test]

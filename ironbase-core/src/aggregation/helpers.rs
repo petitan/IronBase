@@ -1,6 +1,7 @@
 // src/aggregation/helpers.rs
 // Helper functions for aggregation pipeline
 
+use crate::aggregation::types::ValueExpression;
 use crate::error::{IronBaseError, Result};
 use crate::value_utils::get_nested_value;
 use serde_json::Value;
@@ -24,6 +25,91 @@ pub(crate) fn parse_field_reference(value: &Value, op_name: &str) -> Result<Stri
             op_name
         )))
     }
+}
+
+pub(crate) fn parse_value_expression(value: &Value, op_name: &str) -> Result<ValueExpression> {
+    if let Some(s) = value.as_str() {
+        if s.starts_with('$') {
+            return Ok(ValueExpression::Field(
+                s.trim_start_matches('$').to_string(),
+            ));
+        }
+        return Err(IronBaseError::AggregationError(format!(
+            "{} field reference must start with $",
+            op_name
+        )));
+    }
+
+    if let Some(obj) = value.as_object() {
+        if obj.len() != 1 {
+            return Err(IronBaseError::AggregationError(format!(
+                "{} expression must have exactly one operator",
+                op_name
+            )));
+        }
+        let (op, arg) = obj.iter().next().unwrap();
+        match op.as_str() {
+            "$substr" => {
+                let (field, start, length) = parse_substr_spec(arg, op_name)?;
+                return Ok(ValueExpression::Substr {
+                    field,
+                    start,
+                    length,
+                });
+            }
+            _ => {
+                return Err(IronBaseError::AggregationError(format!(
+                    "{} expression operator not supported: {}",
+                    op_name, op
+                )))
+            }
+        }
+    }
+
+    Err(IronBaseError::AggregationError(format!(
+        "{} must be a field reference or expression",
+        op_name
+    )))
+}
+
+fn parse_substr_spec(spec: &Value, op_name: &str) -> Result<(String, usize, usize)> {
+    let arr = spec.as_array().ok_or_else(|| {
+        IronBaseError::AggregationError(format!("{} $substr must be an array", op_name))
+    })?;
+    if arr.len() != 3 {
+        return Err(IronBaseError::AggregationError(format!(
+            "{} $substr requires [field, start, length]",
+            op_name
+        )));
+    }
+
+    let field = arr[0].as_str().ok_or_else(|| {
+        IronBaseError::AggregationError(format!("{} $substr field must be a string", op_name))
+    })?;
+    if !field.starts_with('$') {
+        return Err(IronBaseError::AggregationError(format!(
+            "{} $substr field must start with $",
+            op_name
+        )));
+    }
+
+    let start = parse_substr_number(&arr[1], op_name, "start")?;
+    let length = parse_substr_number(&arr[2], op_name, "length")?;
+
+    Ok((field.trim_start_matches('$').to_string(), start, length))
+}
+
+fn parse_substr_number(value: &Value, op_name: &str, label: &str) -> Result<usize> {
+    let num = value.as_i64().ok_or_else(|| {
+        IronBaseError::AggregationError(format!("{} $substr {} must be integer", op_name, label))
+    })?;
+    if num < 0 {
+        return Err(IronBaseError::AggregationError(format!(
+            "{} $substr {} must be non-negative",
+            op_name, label
+        )));
+    }
+    Ok(num as usize)
 }
 
 /// DEPRECATED: Used by the old batch-based Accumulator::compute() method.

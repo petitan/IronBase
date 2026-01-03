@@ -21,7 +21,7 @@ use crate::aggregation::types::{
 };
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
-use crate::value_utils::{get_nested_value, value_hash};
+use crate::value_utils::{get_nested_value, substr_string, value_hash};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -44,6 +44,19 @@ impl GroupStage {
                     } else {
                         return Err(IronBaseError::AggregationError(
                             "Group _id field reference must start with $".to_string(),
+                        ));
+                    }
+                } else if let Some(id_obj) = id_value.as_object() {
+                    if let Some(substr_spec) = id_obj.get("$substr") {
+                        let (field, start, length) = Self::parse_substr_spec(substr_spec)?;
+                        GroupId::Substring {
+                            field,
+                            start,
+                            length,
+                        }
+                    } else {
+                        return Err(IronBaseError::AggregationError(
+                            "Group _id object must use a supported operator".to_string(),
                         ));
                     }
                 } else {
@@ -161,7 +174,62 @@ impl GroupStage {
                     Ok((value_hash(&Value::Null), Value::Null))
                 }
             }
+            GroupId::Substring {
+                field,
+                start,
+                length,
+            } => {
+                let field_name = field.trim_start_matches('$');
+                let value = if let Some(raw) = get_nested_value(doc, field_name) {
+                    match raw.as_str() {
+                        Some(text) => Value::String(substr_string(text, *start, *length)),
+                        None => Value::Null,
+                    }
+                } else {
+                    Value::Null
+                };
+                let hash = value_hash(&value);
+                Ok((hash, value))
+            }
         }
+    }
+
+    fn parse_substr_number(value: &Value, label: &str) -> Result<usize> {
+        let num = value.as_i64().ok_or_else(|| {
+            IronBaseError::AggregationError(format!("$substr {} must be integer", label))
+        })?;
+        if num < 0 {
+            return Err(IronBaseError::AggregationError(format!(
+                "$substr {} must be non-negative",
+                label
+            )));
+        }
+        Ok(num as usize)
+    }
+
+    fn parse_substr_spec(spec: &Value) -> Result<(String, usize, usize)> {
+        let arr = spec.as_array().ok_or_else(|| {
+            IronBaseError::AggregationError("$substr must be an array".to_string())
+        })?;
+        if arr.len() != 3 {
+            return Err(IronBaseError::AggregationError(
+                "$substr requires [field, start, length]".to_string(),
+            ));
+        }
+
+        let field = arr[0].as_str().ok_or_else(|| {
+            IronBaseError::AggregationError("$substr field must be a string".to_string())
+        })?;
+        if !field.starts_with('$') {
+            return Err(IronBaseError::AggregationError(
+                "$substr field must start with $".to_string(),
+            ));
+        }
+
+        let start = Self::parse_substr_number(&arr[1], "start")?;
+        let length = Self::parse_substr_number(&arr[2], "length")?;
+
+        Ok((field.to_string(), start, length))
     }
 
     /// Execute $group stage with streaming document input (iterator-based)
@@ -418,6 +486,7 @@ impl GroupStage {
         let field = match &self.id {
             GroupId::Field(f) => f.trim_start_matches('$'),
             GroupId::Null => return None, // Null means all docs in one group - no index benefit
+            GroupId::Substring { .. } => return None,
         };
 
         // Check 2: All accumulators must be count-only ($sum: 1 or $sum: <constant>)
@@ -727,5 +796,61 @@ mod tests {
             "Error should mention group limit: {}",
             err_msg
         );
+    }
+
+    #[test]
+    fn test_group_id_substr() {
+        let docs = vec![
+            json!({"name": "Alice"}),
+            json!({"name": "Aaron"}),
+            json!({"name": "Bob"}),
+            json!({"other": "missing"}),
+        ];
+
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": {"$substr": ["$name", 0, 1]},
+            "count": {"$sum": 1}
+        }))
+        .unwrap();
+
+        let results = group_stage.execute(docs).unwrap();
+        let mut counts = std::collections::HashMap::new();
+
+        for doc in results {
+            let key = doc.get("_id").cloned().unwrap_or(Value::Null);
+            let count = doc.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
+            counts.insert(key, count);
+        }
+
+        assert_eq!(counts.get(&Value::String("A".to_string())), Some(&2));
+        assert_eq!(counts.get(&Value::String("B".to_string())), Some(&1));
+        assert_eq!(counts.get(&Value::Null), Some(&1));
+    }
+
+    #[test]
+    fn test_group_accumulator_substr() {
+        let docs = vec![
+            json!({"group": 1, "name": "Alice"}),
+            json!({"group": 1, "name": "Aaron"}),
+            json!({"group": 2, "name": "Bob"}),
+        ];
+
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": "$group",
+            "prefix": {"$first": {"$substr": ["$name", 0, 1]}}
+        }))
+        .unwrap();
+
+        let results = group_stage.execute(docs).unwrap();
+        let mut prefixes = std::collections::HashMap::new();
+        for doc in results {
+            prefixes.insert(
+                doc.get("_id").cloned().unwrap(),
+                doc.get("prefix").cloned().unwrap(),
+            );
+        }
+
+        assert_eq!(prefixes.get(&json!(1)), Some(&json!("A")));
+        assert_eq!(prefixes.get(&json!(2)), Some(&json!("B")));
     }
 }

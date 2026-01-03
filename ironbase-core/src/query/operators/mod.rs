@@ -1138,6 +1138,17 @@ mod tests {
     }
 
     #[test]
+    fn test_expr_substr() {
+        let doc = create_test_document(1, vec![("name", json!("Alice"))]);
+
+        let filter = json!({"$expr": {"$eq": [{"$substr": ["$name", 0, 1]}, "A"]}});
+        let filter_no_match = json!({"$expr": {"$eq": [{"$substr": ["$name", 0, 1]}, "B"]}});
+
+        assert!(matches_filter(&doc, &filter).unwrap());
+        assert!(!matches_filter(&doc, &filter_no_match).unwrap());
+    }
+
+    #[test]
     fn test_expr_missing_field() {
         // Test $expr when a field is missing
         let doc = create_test_document(1, vec![("quantity", json!(100))]);

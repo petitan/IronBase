@@ -7,12 +7,63 @@
 // Memory: O(N * doc_size) → O(G * state_size) where G = number of groups
 
 use crate::aggregation::context::AggregationLimitContext;
-use crate::aggregation::helpers::{compute_extremum, parse_field_reference};
-use crate::aggregation::types::{Accumulator, AccumulatorState, SumExpression};
+use crate::aggregation::helpers::{parse_field_reference, parse_value_expression};
+use crate::aggregation::types::{Accumulator, AccumulatorState, SumExpression, ValueExpression};
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::{canonical_json_string, compare_values, get_nested_value};
+use crate::value_utils::{canonical_json_string, compare_values, get_nested_value, substr_string};
 use serde_json::Value;
 use std::collections::HashSet;
+
+fn evaluate_value_expr(doc: &Value, expr: &ValueExpression) -> Option<Value> {
+    match expr {
+        ValueExpression::Field(field) => get_nested_value(doc, field).cloned(),
+        ValueExpression::Substr {
+            field,
+            start,
+            length,
+        } => {
+            let raw = get_nested_value(doc, field)?;
+            raw.as_str()
+                .map(|text| Value::String(substr_string(text, *start, *length)))
+        }
+    }
+}
+
+fn expr_debug_name(expr: &ValueExpression) -> String {
+    match expr {
+        ValueExpression::Field(field) => field.clone(),
+        ValueExpression::Substr {
+            field,
+            start,
+            length,
+        } => format!("$substr(${},{},{})", field, start, length),
+    }
+}
+
+fn compute_extremum_expr(docs: &[Value], expr: &ValueExpression, is_min: bool) -> Result<Value> {
+    let mut result: Option<Value> = None;
+
+    for doc in docs {
+        if let Some(value) = evaluate_value_expr(doc, expr) {
+            match &result {
+                None => result = Some(value),
+                Some(current) => {
+                    if compare_values(&value, current)
+                        == Some(if is_min {
+                            std::cmp::Ordering::Less
+                        } else {
+                            std::cmp::Ordering::Greater
+                        })
+                    {
+                        result = Some(value);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(result.unwrap_or(Value::Null))
+}
 
 impl Accumulator {
     pub(crate) fn from_json(spec: &Value) -> Result<Self> {
@@ -46,12 +97,12 @@ impl Accumulator {
                     }
                 }
                 "$avg" => Ok(Accumulator::Avg(parse_field_reference(value, "$avg")?)),
-                "$min" => Ok(Accumulator::Min(parse_field_reference(value, "$min")?)),
-                "$max" => Ok(Accumulator::Max(parse_field_reference(value, "$max")?)),
-                "$first" => Ok(Accumulator::First(parse_field_reference(value, "$first")?)),
-                "$last" => Ok(Accumulator::Last(parse_field_reference(value, "$last")?)),
-                "$push" => Ok(Accumulator::Push(parse_field_reference(value, "$push")?)),
-                "$addToSet" => Ok(Accumulator::AddToSet(parse_field_reference(
+                "$min" => Ok(Accumulator::Min(parse_value_expression(value, "$min")?)),
+                "$max" => Ok(Accumulator::Max(parse_value_expression(value, "$max")?)),
+                "$first" => Ok(Accumulator::First(parse_value_expression(value, "$first")?)),
+                "$last" => Ok(Accumulator::Last(parse_value_expression(value, "$last")?)),
+                "$push" => Ok(Accumulator::Push(parse_value_expression(value, "$push")?)),
+                "$addToSet" => Ok(Accumulator::AddToSet(parse_value_expression(
                     value,
                     "$addToSet",
                 )?)),
@@ -123,35 +174,35 @@ impl Accumulator {
                 }
             }
 
-            Accumulator::Min(field) => compute_extremum(docs, field, true),
+            Accumulator::Min(expr) => compute_extremum_expr(docs, expr, true),
 
-            Accumulator::Max(field) => compute_extremum(docs, field, false),
+            Accumulator::Max(expr) => compute_extremum_expr(docs, expr, false),
 
-            Accumulator::First(field) => Ok(docs
+            Accumulator::First(expr) => Ok(docs
                 .first()
-                .and_then(|doc| get_nested_value(doc, field).cloned())
+                .and_then(|doc| evaluate_value_expr(doc, expr))
                 .unwrap_or(Value::Null)),
 
-            Accumulator::Last(field) => Ok(docs
+            Accumulator::Last(expr) => Ok(docs
                 .last()
-                .and_then(|doc| get_nested_value(doc, field).cloned())
+                .and_then(|doc| evaluate_value_expr(doc, expr))
                 .unwrap_or(Value::Null)),
 
-            Accumulator::Push(field) => {
+            Accumulator::Push(expr) => {
                 let values: Vec<Value> = docs
                     .iter()
-                    .filter_map(|doc| get_nested_value(doc, field).cloned())
+                    .filter_map(|doc| evaluate_value_expr(doc, expr))
                     .collect();
                 Ok(Value::Array(values))
             }
 
-            Accumulator::AddToSet(field) => {
+            Accumulator::AddToSet(expr) => {
                 let mut seen = HashSet::new();
                 let mut values = Vec::new();
 
                 for doc in docs {
-                    if let Some(value) = get_nested_value(doc, field) {
-                        let key = canonical_json_string(value);
+                    if let Some(value) = evaluate_value_expr(doc, expr) {
+                        let key = canonical_json_string(&value);
                         if seen.insert(key) {
                             values.push(value.clone());
                         }
@@ -254,12 +305,12 @@ impl AccumulatorState {
                 }
             }
 
-            (AccumulatorState::Min { value: min_val }, Accumulator::Min(field)) => {
-                if let Some(doc_val) = get_nested_value(doc, field) {
+            (AccumulatorState::Min { value: min_val }, Accumulator::Min(expr)) => {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
                     match min_val {
                         None => *min_val = Some(doc_val.clone()),
                         Some(current) => {
-                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Less) {
+                            if compare_values(&doc_val, current) == Some(std::cmp::Ordering::Less) {
                                 *min_val = Some(doc_val.clone());
                             }
                         }
@@ -267,12 +318,13 @@ impl AccumulatorState {
                 }
             }
 
-            (AccumulatorState::Max { value: max_val }, Accumulator::Max(field)) => {
-                if let Some(doc_val) = get_nested_value(doc, field) {
+            (AccumulatorState::Max { value: max_val }, Accumulator::Max(expr)) => {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
                     match max_val {
                         None => *max_val = Some(doc_val.clone()),
                         Some(current) => {
-                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Greater)
+                            if compare_values(&doc_val, current)
+                                == Some(std::cmp::Ordering::Greater)
                             {
                                 *max_val = Some(doc_val.clone());
                             }
@@ -286,13 +338,13 @@ impl AccumulatorState {
                     value: first_val,
                     captured,
                 },
-                Accumulator::First(field),
+                Accumulator::First(expr),
             ) => {
                 // Only capture first document's value (even if missing/null)
                 if !*captured {
                     *captured = true;
                     // Store the value (or None if field is missing)
-                    *first_val = get_nested_value(doc, field).cloned();
+                    *first_val = evaluate_value_expr(doc, expr);
                 }
             }
 
@@ -301,15 +353,15 @@ impl AccumulatorState {
                     value: last_val,
                     doc_count,
                 },
-                Accumulator::Last(field),
+                Accumulator::Last(expr),
             ) => {
                 // Always update to latest document's value (even if missing/null)
                 *doc_count += 1;
                 // Store the value (or None if field is missing)
-                *last_val = get_nested_value(doc, field).cloned();
+                *last_val = evaluate_value_expr(doc, expr);
             }
 
-            (AccumulatorState::Push { values }, Accumulator::Push(field)) => {
+            (AccumulatorState::Push { values }, Accumulator::Push(expr)) => {
                 // OOM Protection: check limit BEFORE push
                 if values.len() >= max_push_elements {
                     return Err(IronBaseError::AggregationError(format!(
@@ -319,20 +371,21 @@ impl AccumulatorState {
                         max_push_elements
                     )));
                 }
-                if let Some(doc_val) = get_nested_value(doc, field) {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    let expr_name = expr_debug_name(expr);
                     // try_reserve for safety
                     values.try_reserve(1).map_err(|_| {
                         IronBaseError::OutOfMemory(format!(
                             "$push failed to allocate memory for element {} in field '{}'",
                             values.len(),
-                            field
+                            expr_name
                         ))
                     })?;
                     values.push(doc_val.clone());
                 }
             }
 
-            (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(field)) => {
+            (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(expr)) => {
                 // OOM Protection: check limit BEFORE insert
                 if values.len() >= max_addtoset_elements {
                     return Err(IronBaseError::AggregationError(format!(
@@ -342,15 +395,16 @@ impl AccumulatorState {
                         max_addtoset_elements
                     )));
                 }
-                if let Some(doc_val) = get_nested_value(doc, field) {
-                    let key = canonical_json_string(doc_val);
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    let expr_name = expr_debug_name(expr);
+                    let key = canonical_json_string(&doc_val);
                     if seen.insert(key) {
                         // try_reserve for safety
                         values.try_reserve(1).map_err(|_| {
                             IronBaseError::OutOfMemory(format!(
                                 "$addToSet failed to allocate memory for element {} in field '{}'",
                                 values.len(),
-                                field
+                                expr_name
                             ))
                         })?;
                         values.push(doc_val.clone());
@@ -423,12 +477,12 @@ impl AccumulatorState {
                 }
             }
 
-            (AccumulatorState::Min { value: min_val }, Accumulator::Min(field)) => {
-                if let Some(doc_val) = get_nested_value(doc, field) {
+            (AccumulatorState::Min { value: min_val }, Accumulator::Min(expr)) => {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
                     match min_val {
                         None => *min_val = Some(doc_val.clone()),
                         Some(current) => {
-                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Less) {
+                            if compare_values(&doc_val, current) == Some(std::cmp::Ordering::Less) {
                                 *min_val = Some(doc_val.clone());
                             }
                         }
@@ -436,12 +490,13 @@ impl AccumulatorState {
                 }
             }
 
-            (AccumulatorState::Max { value: max_val }, Accumulator::Max(field)) => {
-                if let Some(doc_val) = get_nested_value(doc, field) {
+            (AccumulatorState::Max { value: max_val }, Accumulator::Max(expr)) => {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
                     match max_val {
                         None => *max_val = Some(doc_val.clone()),
                         Some(current) => {
-                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Greater)
+                            if compare_values(&doc_val, current)
+                                == Some(std::cmp::Ordering::Greater)
                             {
                                 *max_val = Some(doc_val.clone());
                             }
@@ -455,11 +510,11 @@ impl AccumulatorState {
                     value: first_val,
                     captured,
                 },
-                Accumulator::First(field),
+                Accumulator::First(expr),
             ) => {
                 if !*captured {
                     *captured = true;
-                    *first_val = get_nested_value(doc, field).cloned();
+                    *first_val = evaluate_value_expr(doc, expr);
                 }
             }
 
@@ -468,23 +523,24 @@ impl AccumulatorState {
                     value: last_val,
                     doc_count,
                 },
-                Accumulator::Last(field),
+                Accumulator::Last(expr),
             ) => {
                 *doc_count += 1;
-                *last_val = get_nested_value(doc, field).cloned();
+                *last_val = evaluate_value_expr(doc, expr);
             }
 
             // $push - uses context for per-group limit tracking
-            (AccumulatorState::Push { values }, Accumulator::Push(field)) => {
+            (AccumulatorState::Push { values }, Accumulator::Push(expr)) => {
                 // Check limit via context BEFORE push
                 ctx.check_push_limit(group_hash)?;
 
-                if let Some(doc_val) = get_nested_value(doc, field) {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    let expr_name = expr_debug_name(expr);
                     values.try_reserve(1).map_err(|_| {
                         IronBaseError::OutOfMemory(format!(
                             "$push failed to allocate memory for element {} in field '{}'",
                             values.len(),
-                            field
+                            expr_name
                         ))
                     })?;
                     values.push(doc_val.clone());
@@ -495,18 +551,19 @@ impl AccumulatorState {
             }
 
             // $addToSet - uses context for per-group limit tracking
-            (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(field)) => {
+            (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(expr)) => {
                 // Check limit via context BEFORE insert
                 ctx.check_addtoset_limit(group_hash)?;
 
-                if let Some(doc_val) = get_nested_value(doc, field) {
-                    let key = canonical_json_string(doc_val);
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    let expr_name = expr_debug_name(expr);
+                    let key = canonical_json_string(&doc_val);
                     if seen.insert(key) {
                         values.try_reserve(1).map_err(|_| {
                             IronBaseError::OutOfMemory(format!(
                                 "$addToSet failed to allocate memory for element {} in field '{}'",
                                 values.len(),
-                                field
+                                expr_name
                             ))
                         })?;
                         values.push(doc_val.clone());
