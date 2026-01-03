@@ -46,6 +46,73 @@ pub fn get_nested_value<'a>(doc: &'a Value, path: &str) -> Option<&'a Value> {
     Some(value)
 }
 
+/// Retrieve all values that match a dot-notation path, flattening arrays.
+///
+/// This mirrors MongoDB's implicit array traversal used by queries/indexes.
+pub fn get_all_nested_values<'a>(doc: &'a Value, path: &str) -> Vec<&'a Value> {
+    if path.is_empty() {
+        return Vec::new();
+    }
+
+    let parts: Vec<&str> = path.split('.').collect();
+    if parts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    if let Some(first) = doc.get(parts[0]) {
+        collect_all_values_recursive(first, &parts[1..], &mut results);
+    }
+    results
+}
+
+fn collect_all_values_recursive<'a>(
+    value: &'a Value,
+    remaining: &[&str],
+    results: &mut Vec<&'a Value>,
+) {
+    if remaining.is_empty() {
+        results.push(value);
+        return;
+    }
+
+    let next_part = remaining[0];
+    let rest = &remaining[1..];
+
+    match value {
+        Value::Object(map) => {
+            if let Some(child) = map.get(next_part) {
+                collect_all_values_recursive(child, rest, results);
+            }
+        }
+        Value::Array(arr) => {
+            // Explicit numeric index (e.g., items.0.name)
+            if let Ok(index) = next_part.parse::<usize>() {
+                if let Some(elem) = arr.get(index) {
+                    collect_all_values_recursive(elem, rest, results);
+                }
+            } else {
+                // Implicit traversal: examine each element
+                for elem in arr {
+                    match elem {
+                        Value::Object(map) => {
+                            if let Some(child) = map.get(next_part) {
+                                collect_all_values_recursive(child, rest, results);
+                            }
+                        }
+                        Value::Array(_) => {
+                            // Array of arrays: recurse without consuming the path component
+                            collect_all_values_recursive(elem, remaining, results);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Set a value at a nested path with dot notation support
 ///
 /// Creates intermediate objects if they don't exist.

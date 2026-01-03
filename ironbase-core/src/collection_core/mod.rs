@@ -571,20 +571,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                             if let Some(index) =
                                                 index_manager.get_btree_index_mut(&index_meta.name)
                                             {
-                                                let key = index.extract_key(&doc);
-                                                // Check if all key components are Null
-                                                let is_all_null = match &key {
-                                                    IndexKey::Null => true,
-                                                    IndexKey::Compound(keys) => keys
-                                                        .iter()
-                                                        .all(|k| matches!(k, IndexKey::Null)),
-                                                    _ => false,
-                                                };
-                                                // For unique indexes: include null keys (null is a value)
-                                                // For non-unique indexes: skip null keys (no query benefit)
-                                                if !is_all_null || index.metadata.unique {
-                                                    let _ = index.insert(key, doc_id.clone());
-                                                    rebuilt_count += 1;
+                                                let keys = index.extract_keys(&doc);
+                                                let mut seen = HashSet::new();
+                                                for key in keys {
+                                                    if !seen.insert(key.clone()) {
+                                                        continue;
+                                                    }
+                                                    let is_all_null =
+                                                        IndexManager::is_key_all_null(&key);
+                                                    if !is_all_null || index.metadata.unique {
+                                                        let _ = index.insert(key, doc_id.clone());
+                                                        rebuilt_count += 1;
+                                                    }
                                                 }
                                             }
                                         }
@@ -1727,112 +1725,40 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // --- OTHER INDEXES: Use extract_key for proper compound index support ---
+        // --- OTHER INDEXES: multi-key aware updates ---
         for index_name in &index_names {
             if index_name == &id_index_name {
                 continue;
             }
 
-            // Extract keys using index's extract_key method (handles compound indexes)
-            // Also handle cases where field is added/removed (not just changed)
-            let mut field_updates: Vec<(IndexKey, DocumentId, IndexKey, DocumentId)> = Vec::new();
-            let mut removals: Vec<(IndexKey, DocumentId)> = Vec::new();
-            let mut additions: Vec<(IndexKey, DocumentId)> = Vec::new();
-
-            if let Some(idx) = indexes.get_btree_index(index_name) {
-                let is_unique = idx.metadata.unique;
-
+            if let Some(index) = indexes.get_btree_index_mut(index_name) {
                 for (original_doc, updated_doc) in updates {
-                    // Convert Document to Value for extract_key
                     let old_doc_value =
                         serde_json::to_value(original_doc).unwrap_or(serde_json::Value::Null);
                     let new_doc_value =
                         serde_json::to_value(updated_doc).unwrap_or(serde_json::Value::Null);
-                    let old_key = idx.extract_key(&old_doc_value);
-                    let new_key = idx.extract_key(&new_doc_value);
 
-                    // Skip if keys are identical
-                    if old_key == new_key {
-                        continue;
-                    }
+                    let old_keys: HashSet<IndexKey> =
+                        index.extract_keys(&old_doc_value).into_iter().collect();
+                    let new_keys: HashSet<IndexKey> =
+                        index.extract_keys(&new_doc_value).into_iter().collect();
 
-                    let old_is_null = crate::index::IndexManager::is_key_all_null(&old_key);
-                    let new_is_null = crate::index::IndexManager::is_key_all_null(&new_key);
+                    let doc_id = &original_doc.id;
 
-                    // Handle all cases:
-                    // 1. Both have values (update): use batch update
-                    // 2. Old has value, new is null (removed): remove from index
-                    // 3. Old is null, new has value (added): add to index
-                    // 4. Both null: skip (no change)
-
-                    match (old_is_null, new_is_null) {
-                        (false, false) => {
-                            // Both have values - update
-                            field_updates.push((
-                                old_key,
-                                original_doc.id.clone(),
-                                new_key,
-                                updated_doc.id.clone(),
-                            ));
-                        }
-                        (false, true) => {
-                            // Value removed - delete from index (if was indexed)
-                            if is_unique {
-                                // Unique indexes include null, so we need to update
-                                field_updates.push((
-                                    old_key,
-                                    original_doc.id.clone(),
-                                    new_key,
-                                    updated_doc.id.clone(),
-                                ));
-                            } else {
-                                // Non-unique: just remove old entry
-                                removals.push((old_key, original_doc.id.clone()));
-                            }
-                        }
-                        (true, false) => {
-                            // Value added - add to index
-                            if is_unique {
-                                // Unique indexes include null, so we need to update
-                                field_updates.push((
-                                    old_key,
-                                    original_doc.id.clone(),
-                                    new_key,
-                                    updated_doc.id.clone(),
-                                ));
-                            } else {
-                                // Non-unique: just add new entry
-                                additions.push((new_key, updated_doc.id.clone()));
-                            }
-                        }
-                        (true, true) => {
-                            // Both null - no action needed for non-unique
-                            // For unique indexes, both null means same value
+                    for key in old_keys.difference(&new_keys) {
+                        if let Err(e) = index.delete(key, doc_id) {
+                            log_warn!(
+                                "B+tree index '{}' delete failed for doc {:?}: {:?}",
+                                index_name,
+                                doc_id,
+                                e
+                            );
                         }
                     }
-                }
-            }
 
-            // Apply updates
-            if let Some(index) = indexes.get_btree_index_mut(index_name) {
-                // Apply batch updates for changed values
-                if !field_updates.is_empty() {
-                    index.apply_batch_updates(field_updates)?;
-                }
-                // Apply removals (log warning if delete fails unexpectedly)
-                for (key, doc_id) in removals {
-                    if let Err(e) = index.delete(&key, &doc_id) {
-                        log_warn!(
-                            "B+tree index '{}' delete failed for doc {:?}: {:?}",
-                            index_name,
-                            doc_id,
-                            e
-                        );
+                    for key in new_keys.difference(&old_keys) {
+                        index.insert(key.clone(), doc_id.clone())?;
                     }
-                }
-                // Apply additions
-                for (key, doc_id) in additions {
-                    index.insert(key, doc_id)?;
                 }
             }
         }

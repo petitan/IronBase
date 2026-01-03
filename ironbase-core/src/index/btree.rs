@@ -290,6 +290,14 @@ impl BPlusTree {
     /// For compound indexes, creates an IndexKey::Compound from multiple fields
     /// For single-field indexes, returns a simple IndexKey
     pub fn extract_key(&self, doc: &serde_json::Value) -> IndexKey {
+        self.extract_keys(doc)
+            .into_iter()
+            .next()
+            .unwrap_or(IndexKey::Null)
+    }
+
+    /// Extract all keys for a document (supports multi-key indexes on arrays)
+    pub fn extract_keys(&self, doc: &serde_json::Value) -> Vec<IndexKey> {
         if self.metadata.is_compound() {
             let keys: Vec<IndexKey> = self
                 .metadata
@@ -301,11 +309,14 @@ impl BPlusTree {
                         .unwrap_or(IndexKey::Null)
                 })
                 .collect();
-            IndexKey::Compound(keys)
+            vec![IndexKey::Compound(keys)]
         } else {
-            get_nested_value(doc, &self.metadata.field)
-                .map(IndexKey::from)
-                .unwrap_or(IndexKey::Null)
+            let values = crate::value_utils::get_all_nested_values(doc, &self.metadata.field);
+            if values.is_empty() {
+                vec![IndexKey::Null]
+            } else {
+                values.into_iter().map(IndexKey::from).collect()
+            }
         }
     }
 

@@ -1078,6 +1078,7 @@ mod tests {
     fn test_bugfix_large_limit_respects_doc_limit() {
         // BUG: $limit: 1_000_000 bypassed doc_limit protection
         // FIX: effective_limit = min(user_limit, doc_limit)
+        // NEW BEHAVIOR: Early exit at doc_limit, returns doc_limit docs (safe from OOM)
         let docs: Vec<Value> = (0..500).map(|i| json!({"i": i})).collect();
 
         let pipeline = Pipeline::from_json(&json!([{"$limit": 1_000_000}])).unwrap();
@@ -1087,16 +1088,12 @@ mod tests {
             ..Default::default()
         };
 
-        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+        let result = pipeline
+            .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
+            .unwrap();
 
-        // Should fail because 500 docs > 100 limit, even though $limit is 1M
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("exceeded document limit"),
-            "Expected doc limit error, got: {}",
-            err
-        );
+        // Should return exactly doc_limit docs (early exit protects from OOM)
+        assert_eq!(result.len(), 100);
     }
 
     #[test]
@@ -1224,6 +1221,7 @@ mod tests {
     #[test]
     fn test_bugfix_skip_limit_respects_doc_limit() {
         // Verify $skip + $limit combination also respects doc_limit
+        // NEW BEHAVIOR: Early exit at (doc_limit - skip) docs after skipping
         let docs: Vec<Value> = (0..500).map(|i| json!({"i": i})).collect();
 
         let pipeline = Pipeline::from_json(&json!([
@@ -1237,17 +1235,16 @@ mod tests {
             ..Default::default()
         };
 
-        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+        let result = pipeline
+            .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
+            .unwrap();
 
-        // Should fail: needs to process 50 (skip) + some more, but limit is 100
-        // Actually this should fail because we're trying to process > 100 docs
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("exceeded document limit"),
-            "Expected doc limit error, got: {}",
-            err
-        );
+        // Should return (doc_limit - skip) = 50 docs
+        // Processes 50 skipped + 50 returned = 100 total (within limit)
+        assert_eq!(result.len(), 50);
+        // Verify we got the correct docs (after skip)
+        assert_eq!(result[0]["i"], 50);
+        assert_eq!(result[49]["i"], 99);
     }
 
     #[test]

@@ -323,6 +323,25 @@ mod tests {
     }
 
     #[test]
+    fn test_query_matches_array_nested_field() {
+        let query = Query::from_json(&json!({"to.email": "petitan@example.com"})).unwrap();
+        let doc = create_test_document(
+            1,
+            vec![(
+                "to",
+                json!([
+                    {"email": "admin@example.com"},
+                    {"email": "petitan@example.com"}
+                ]),
+            )],
+        );
+        assert!(
+            query.matches(&doc).unwrap(),
+            "Array traversal should match nested email values"
+        );
+    }
+
+    #[test]
     fn test_query_matches_logical_and() {
         let query = Query::from_json(&json!({
             "$and": [
