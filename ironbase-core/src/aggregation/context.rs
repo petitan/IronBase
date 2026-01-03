@@ -45,6 +45,9 @@ struct ContextInner {
     // Document counter
     docs_processed: usize,
 
+    // Index entry counter (for index-based $group paths)
+    index_entries_scanned: usize,
+
     // Group counter
     groups_created: usize,
 
@@ -56,6 +59,9 @@ struct ContextInner {
 
     // Flag: pipeline has leading $match (allows higher doc limit)
     has_leading_match: bool,
+
+    // Early termination limit (for $limit stages)
+    early_limit: Option<usize>,
 }
 
 #[allow(dead_code)] // Phase 2: methods will be used in pipeline.rs
@@ -66,10 +72,12 @@ impl AggregationLimitContext {
             inner: Rc::new(RefCell::new(ContextInner {
                 limits,
                 docs_processed: 0,
+                index_entries_scanned: 0,
                 groups_created: 0,
                 unwind_outputs: 0,
                 group_counters: HashMap::new(),
                 has_leading_match: false,
+                early_limit: None,
             })),
         }
     }
@@ -295,6 +303,79 @@ impl AggregationLimitContext {
         self.inner.borrow().unwind_outputs
     }
 
+    // ========== Index entry counting (for index-based paths) ==========
+
+    /// Increment index entry counter and check limit
+    ///
+    /// Used by index-based $group optimization. The limit is the same
+    /// as document limit since each index entry corresponds to a document.
+    pub fn increment_index_entries(&self, count: usize) -> Result<()> {
+        let mut inner = self.inner.borrow_mut();
+        inner.index_entries_scanned += count;
+
+        // Use same logic as doc limit
+        let limit = if inner.has_leading_match {
+            inner.limits.max_docs_with_match
+        } else {
+            inner.limits.max_docs_without_match
+        };
+
+        if inner.index_entries_scanned > limit {
+            return Err(IronBaseError::AggregationError(format!(
+                "Index-based aggregation exceeded entry limit: {} entries (limit: {}). \
+                 Add a more selective $match or reduce index size.",
+                inner.index_entries_scanned, limit
+            )));
+        }
+        Ok(())
+    }
+
+    /// Get current index entry count
+    pub fn index_entries_scanned(&self) -> usize {
+        self.inner.borrow().index_entries_scanned
+    }
+
+    // ========== Early termination for $limit ==========
+
+    /// Set early termination limit
+    ///
+    /// When set, documents beyond this limit can be skipped.
+    /// The limit is capped at the current doc_limit to prevent bypass.
+    pub fn set_early_limit(&self, limit: usize) {
+        let mut inner = self.inner.borrow_mut();
+        let doc_limit = if inner.has_leading_match {
+            inner.limits.max_docs_with_match
+        } else {
+            inner.limits.max_docs_without_match
+        };
+        // Cap at doc_limit to prevent $limit: 1_000_000 bypass
+        inner.early_limit = Some(limit.min(doc_limit));
+    }
+
+    /// Get effective limit considering both early_limit and doc_limit
+    pub fn effective_limit(&self) -> usize {
+        let inner = self.inner.borrow();
+        let doc_limit = if inner.has_leading_match {
+            inner.limits.max_docs_with_match
+        } else {
+            inner.limits.max_docs_without_match
+        };
+        inner
+            .early_limit
+            .map(|l| l.min(doc_limit))
+            .unwrap_or(doc_limit)
+    }
+
+    /// Check if we've reached the early termination limit
+    pub fn should_terminate_early(&self) -> bool {
+        let inner = self.inner.borrow();
+        if let Some(limit) = inner.early_limit {
+            inner.docs_processed >= limit
+        } else {
+            false
+        }
+    }
+
     // ========== Accessors ==========
 
     /// Get the configured limits
@@ -311,9 +392,11 @@ impl AggregationLimitContext {
     pub fn reset(&self) {
         let mut inner = self.inner.borrow_mut();
         inner.docs_processed = 0;
+        inner.index_entries_scanned = 0;
         inner.groups_created = 0;
         inner.unwind_outputs = 0;
         inner.group_counters.clear();
+        inner.early_limit = None;
     }
 }
 

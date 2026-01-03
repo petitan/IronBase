@@ -2190,6 +2190,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let had_match = match_query.is_some();
         pipeline.set_has_leading_match(had_match);
 
+        // Set context flag BEFORE any processing
+        ctx.set_leading_match(had_match);
+
         let query = match_query.unwrap_or_else(|| serde_json::json!({}));
 
         log_debug!(
@@ -2199,11 +2202,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         );
 
         // INDEX-BASED $GROUP OPTIMIZATION
+        // NOTE: Index path uses ctx.increment_index_entries() for limit checking
         if !had_match {
             if let Some(group_stage) = pipeline.peek_leading_group() {
                 let indexes = self.indexes.read();
                 if let Some(mut indexed_result) =
-                    group_stage.try_index_based_execute(&indexes, ctx.limits())
+                    group_stage.try_index_based_execute_with_context(&indexes, ctx)
                 {
                     log_debug!(
                         "aggregate_with_context: index-based $group ({} groups)",
@@ -2224,30 +2228,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // STREAMING EXECUTION with context
-        // Note: We collect documents into a Vec because execute_with_context requires 'static iterator
-        // The streaming optimization happens inside the pipeline via chain_streamable_stages
+        // Collect documents first due to lifetime constraints (cursor borrows self)
+        // The pipeline.execute_with_context handles all limit checking via context
         let mut cursor = self.find_streaming(&query)?;
         let mut docs: Vec<Result<Value>> = Vec::new();
-        let max_docs = if had_match {
-            ctx.limits().max_docs_with_match
-        } else {
-            ctx.limits().max_docs_without_match
-        };
 
         while let Ok(Some(doc)) = cursor.next() {
             docs.push(Ok(doc));
-
-            // Check document limit early to fail fast
-            if docs.len() > max_docs {
-                return Err(crate::error::IronBaseError::AggregationError(format!(
-                    "Document collection exceeded limit: {} documents (limit: {})",
-                    docs.len(),
-                    max_docs
-                )));
-            }
         }
 
-        // Execute pipeline with context
+        // Execute pipeline with context - all limit checking happens inside
         pipeline.execute_with_context(docs.into_iter(), ctx)
     }
 
