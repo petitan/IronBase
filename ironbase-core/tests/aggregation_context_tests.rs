@@ -590,3 +590,72 @@ fn test_context_multiple_stages() {
     assert_eq!(results.len(), 3); // Limited to 3
     assert_eq!(ctx.groups_created(), 5); // 5 categories
 }
+
+// ========== Multi-Key Array Query Tests ==========
+
+#[test]
+fn test_array_element_query_simple() {
+    let db = create_test_db();
+
+    // Insert document with simple array
+    db.insert_one(
+        "test",
+        json_to_hashmap(json!({
+            "tags": ["urgent", "important"]
+        })),
+    )
+    .unwrap();
+
+    let coll = db.collection("test").unwrap();
+
+    // Query for array element
+    let results = coll.find(&json!({"tags": "urgent"})).unwrap();
+
+    println!("Query: {{\"tags\": \"urgent\"}}");
+    println!("Found: {} documents", results.len());
+    for doc in &results {
+        println!("  Doc: {:?}", doc);
+    }
+
+    assert_eq!(
+        results.len(),
+        1,
+        "Should find document with 'urgent' in tags array"
+    );
+}
+
+#[test]
+fn test_array_nested_field_query() {
+    let db = create_test_db();
+
+    // Insert document with array of objects
+    db.insert_one(
+        "emails",
+        json_to_hashmap(json!({
+            "to": [
+                {"email": "admin@example.com"},
+                {"email": "petitan@example.com"}
+            ]
+        })),
+    )
+    .unwrap();
+
+    let coll = db.collection("emails").unwrap();
+
+    // Query for nested array field
+    let results = coll
+        .find(&json!({"to.email": "petitan@example.com"}))
+        .unwrap();
+
+    println!("Query: {{\"to.email\": \"petitan@example.com\"}}");
+    println!("Found: {} documents", results.len());
+    for doc in &results {
+        println!("  Doc: {:?}", doc);
+    }
+
+    assert_eq!(
+        results.len(),
+        1,
+        "Should find document with nested email in to array"
+    );
+}
