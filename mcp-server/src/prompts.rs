@@ -98,7 +98,7 @@ pub fn get_prompts_list() -> Value {
             },
             {
                 "name": "transaction-guide",
-                "description": "Guide for using ACD transactions with begin, commit, and rollback operations",
+                "description": "Guide for using ACID transactions with begin, commit, and rollback operations",
                 "arguments": []
             },
             {
@@ -200,7 +200,7 @@ fn get_best_practices_prompt() -> Value {
 ## Step 1: Check Collection Size FIRST
 ```json
 // count_documents tool
-{"collection": "users", "filter": {}}
+{"collection": "users", "query": {}}
 ```
 
 ## Step 2: Use Appropriate Limits
@@ -244,13 +244,16 @@ Always use $limit in pipelines:
 ]
 ```
 
-### ⚡ Index-Based Count (2300x faster!)
-For counting by field, **skip $match** to enable index-based optimization:
+### ⚡ Index-Based Count (When Eligible)
+For counting by field, index-based optimization is only available when:
+- `$group` uses a simple field `_id` (e.g. `"$category"`)\n+- Accumulators are only `$sum: 1`\n+- A B+ tree index exists on the group field
+
+When eligible, skipping unnecessary `$match` stages can help the optimizer use the index path:
 ```json
-// FAST (47ms on 78K docs) - uses index
+// FAST (index path when eligible)
 [{"$group": {"_id": "$category", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}, {"$limit": 10}]
 
-// SLOW (284s on 78K docs) - $match disables index optimization
+// SLOW (full scan)
 [{"$match": {"field": {"$exists": true}}}, {"$group": {"_id": "$field", "count": {"$sum": 1}}}]
 ```
 
@@ -2322,13 +2325,13 @@ Use cases:
 ### Drop Collection
 ```json
 // collection_drop tool
-{"collection": "old_collection"}
+{"name": "old_collection"}
 ```
 
 ### Get Collection Stats
 ```json
 // count_documents tool
-{"collection": "users", "filter": {}}
+{"collection": "users", "query": {}}
 ```
 
 ## Index Management
@@ -2347,7 +2350,7 @@ Use cases:
 
 ### Create Compound Index
 ```json
-// index_create_compound tool
+// index_create tool (compound via fields)
 {"collection": "orders", "fields": ["user_id", "created_at"], "unique": false}
 ```
 

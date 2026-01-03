@@ -659,3 +659,87 @@ fn test_array_nested_field_query() {
         "Should find document with nested email in to array"
     );
 }
+
+// ========== Optimizer Fast Path Tests ==========
+
+#[test]
+fn test_optimizer_count_only_fast_path() {
+    // Test that {$group: {_id: null, count: {$sum: 1}}} uses count_documents() fast path
+    let db = create_test_db();
+    insert_test_docs(&db, "test_count", 1000);
+
+    let coll = db.collection("test_count").unwrap();
+
+    // This pipeline should trigger the CountOnly fast path
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": null, "total": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["_id"], Value::Null);
+    assert_eq!(results[0]["total"], 1000);
+}
+
+#[test]
+fn test_optimizer_count_only_with_match_fast_path() {
+    // Test that {$match: {...}, $group: {_id: null, count: {$sum: 1}}} uses fast path
+    let db = create_test_db();
+    insert_test_docs(&db, "test_count_match", 100);
+
+    let coll = db.collection("test_count_match").unwrap();
+
+    // Count only documents where i < 50
+    let results = coll
+        .aggregate(&json!([
+            {"$match": {"i": {"$lt": 50}}},
+            {"$group": {"_id": null, "count": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["_id"], Value::Null);
+    assert_eq!(results[0]["count"], 50);
+}
+
+#[test]
+fn test_optimizer_no_fast_path_for_sum_field() {
+    // Test that {$group: {_id: null, total: {$sum: "$value"}}} does NOT use fast path
+    // (because it sums a field, not counts)
+    let db = create_test_db();
+    insert_test_docs(&db, "test_sum_field", 10);
+
+    let coll = db.collection("test_sum_field").unwrap();
+
+    // This should NOT use fast path (sums $value field)
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": null, "total": {"$sum": "$value"}}}
+        ]))
+        .unwrap();
+
+    assert_eq!(results.len(), 1);
+    // value = i * 10, so sum = 0*10 + 1*10 + ... + 9*10 = 10*(0+1+...+9) = 10*45 = 450
+    assert_eq!(results[0]["total"], 450);
+}
+
+#[test]
+fn test_optimizer_no_fast_path_for_field_group() {
+    // Test that {$group: {_id: "$group", count: {$sum: 1}}} does NOT use CountOnly fast path
+    // (but may use CountByField or index-based)
+    let db = create_test_db();
+    insert_test_docs(&db, "test_group_field", 30);
+
+    let coll = db.collection("test_group_field").unwrap();
+
+    // This groups by $group field, not null - should NOT use CountOnly
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": "$group", "count": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+    // 30 docs with group = group_0..group_9 (10 unique groups)
+    assert_eq!(results.len(), 10);
+}
