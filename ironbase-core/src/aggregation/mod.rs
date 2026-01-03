@@ -1046,4 +1046,185 @@ mod tests {
         assert!(low.max_docs_without_match < standard.max_docs_without_match);
         assert!(standard.max_docs_without_match < high.max_docs_without_match);
     }
+
+    // ============================================================
+    // BUG FIX REGRESSION TESTS (2026-01)
+    // These tests verify that the specific OOM bugs are fixed
+    // ============================================================
+
+    #[test]
+    fn test_bugfix_large_limit_respects_doc_limit() {
+        // BUG: $limit: 1_000_000 bypassed doc_limit protection
+        // FIX: effective_limit = min(user_limit, doc_limit)
+        let docs: Vec<Value> = (0..500).map(|i| json!({"i": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([{"$limit": 1_000_000}])).unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 100, // Only allow 100 docs
+            ..Default::default()
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        // Should fail because 500 docs > 100 limit, even though $limit is 1M
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeded document limit"),
+            "Expected doc limit error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_bugfix_limit_within_doc_limit_succeeds() {
+        // Verify that small $limit still works when within doc_limit
+        let docs: Vec<Value> = (0..500).map(|i| json!({"i": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([{"$limit": 10}])).unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 100, // Allow 100 docs
+            ..Default::default()
+        };
+
+        let result = pipeline
+            .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
+            .unwrap();
+
+        // Should succeed with exactly 10 docs (early exit before hitting 100)
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_bugfix_unwind_uses_custom_limit() {
+        use crate::aggregation::types::UnwindStage;
+
+        // BUG: $unwind used hardcoded 1M limit instead of AggregationLimits
+        // FIX: Stage::execute_with_limits passes limits.max_unwind_output
+
+        // Create documents with arrays
+        let docs: Vec<Value> = (0..10)
+            .map(|i| {
+                json!({
+                    "i": i,
+                    "items": (0..100).map(|j| json!({"j": j})).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let unwind = UnwindStage::from_json(&json!("$items")).unwrap();
+
+        // With default limit (1M), this should succeed (10 docs × 100 items = 1000)
+        let result = unwind.execute(docs.clone()).unwrap();
+        assert_eq!(result.len(), 1000);
+
+        // With custom low limit (500), should fail
+        let result = unwind.execute_with_limit(docs, 500);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceed output limit"),
+            "Expected unwind limit error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_bugfix_unwind_through_pipeline_uses_limits() {
+        // Test that $unwind in pipeline uses AggregationLimits.max_unwind_output
+        let docs: Vec<Value> = (0..5)
+            .map(|i| {
+                json!({
+                    "i": i,
+                    "items": (0..50).map(|j| json!({"j": j})).collect::<Vec<_>>()
+                })
+            })
+            .collect();
+
+        let pipeline = Pipeline::from_json(&json!([{"$unwind": "$items"}])).unwrap();
+
+        // With restrictive max_unwind_output (100), should fail (5 docs × 50 items = 250)
+        let limits = AggregationLimits {
+            max_docs_without_match: 10000, // High doc limit
+            max_unwind_output: 100,        // Low unwind limit
+            ..Default::default()
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceed output limit") || err.contains("$unwind"),
+            "Expected unwind limit error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_bugfix_with_memory_budget_scales_above_4gb() {
+        // BUG: with_memory_budget() capped at 4GB, preventing scaling on large systems
+        // FIX: Removed 4GB cap, allows unlimited scaling
+
+        let gb4 = AggregationLimits::with_memory_budget(4096);
+        let gb8 = AggregationLimits::with_memory_budget(8192);
+        let gb16 = AggregationLimits::with_memory_budget(16384);
+        let gb32 = AggregationLimits::with_memory_budget(32768);
+
+        // Each doubling should approximately double the limits
+        assert!(
+            gb8.max_docs_without_match > gb4.max_docs_without_match,
+            "8GB ({}) should have higher limit than 4GB ({})",
+            gb8.max_docs_without_match,
+            gb4.max_docs_without_match
+        );
+        assert!(
+            gb16.max_docs_without_match > gb8.max_docs_without_match,
+            "16GB ({}) should have higher limit than 8GB ({})",
+            gb16.max_docs_without_match,
+            gb8.max_docs_without_match
+        );
+        assert!(
+            gb32.max_docs_without_match > gb16.max_docs_without_match,
+            "32GB ({}) should have higher limit than 16GB ({})",
+            gb32.max_docs_without_match,
+            gb16.max_docs_without_match
+        );
+
+        // Memory budget should be preserved, not capped
+        assert_eq!(gb8.max_memory_mb, 8192);
+        assert_eq!(gb16.max_memory_mb, 16384);
+        assert_eq!(gb32.max_memory_mb, 32768);
+    }
+
+    #[test]
+    fn test_bugfix_skip_limit_respects_doc_limit() {
+        // Verify $skip + $limit combination also respects doc_limit
+        let docs: Vec<Value> = (0..500).map(|i| json!({"i": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$skip": 50},
+            {"$limit": 1_000_000}  // Very large limit
+        ]))
+        .unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 100, // Only allow 100 docs to be processed
+            ..Default::default()
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        // Should fail: needs to process 50 (skip) + some more, but limit is 100
+        // Actually this should fail because we're trying to process > 100 docs
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeded document limit"),
+            "Expected doc limit error, got: {}",
+            err
+        );
+    }
 }
