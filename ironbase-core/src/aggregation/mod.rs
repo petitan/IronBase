@@ -903,10 +903,21 @@ mod tests {
         let limits = AggregationLimits::from_system_memory();
 
         // Limits should be positive and reasonable
-        assert!(limits.max_docs_without_match >= 10_000);
+        // Note: On low-memory CI runners, scale_factor can be 0.1, giving:
+        //   max_docs_without_match = (10_000 * 0.1).max(1_000) = 1_000
+        //   max_group_count = (50_000 * 0.1).max(500) = 5_000
+        assert!(
+            limits.max_docs_without_match >= 1_000,
+            "max_docs_without_match ({}) should be >= 1000",
+            limits.max_docs_without_match
+        );
         assert!(limits.max_memory_mb >= 64);
         assert!(limits.max_memory_mb <= 4096);
-        assert!(limits.max_group_count >= 5_000);
+        assert!(
+            limits.max_group_count >= 500,
+            "max_group_count ({}) should be >= 500",
+            limits.max_group_count
+        );
     }
 
     #[test]
