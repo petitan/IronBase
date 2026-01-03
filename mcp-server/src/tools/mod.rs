@@ -442,14 +442,19 @@ fn get_all_tools_json() -> Value {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
-                        "query": { "type": "object", "description": "MongoDB-style query filter" },
+                        "query": { "type": "object", "description": "MongoDB-style query filter (defaults to {})" },
                         "projection": { "type": "object", "description": "Fields to include (1) or exclude (0)" },
-                        "sort": { "type": "array", "description": "Sort order as array of [field, direction] pairs" },
+                        "sort": { "description": "Sort order as array of [field, direction] pairs or object map",
+                            "oneOf": [
+                                { "type": "array" },
+                                { "type": "object" }
+                            ]
+                        },
                         "limit": { "type": "integer", "description": "Maximum number of documents to return" },
                         "skip": { "type": "integer", "description": "Number of documents to skip" },
                         "include_total": { "type": "boolean", "description": "If true, also return total count of matching documents", "default": false }
                     },
-                    "required": ["collection", "query"]
+                    "required": ["collection"]
                 }
             },
             {
@@ -460,10 +465,10 @@ fn get_all_tools_json() -> Value {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
-                        "query": { "type": "object", "description": "MongoDB-style query filter" },
+                        "query": { "type": "object", "description": "MongoDB-style query filter (defaults to {})" },
                         "projection": { "type": "object", "description": "Fields to include (1) or exclude (0)" }
                     },
-                    "required": ["collection", "query"]
+                    "required": ["collection"]
                 }
             },
             {
@@ -570,11 +575,15 @@ fn get_all_tools_json() -> Value {
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
                         "field": { "type": "string", "description": "Field name to index (for single-field index)" },
-                        "fields": { "type": "array", "items": { "type": "string" }, "description": "Field names for compound index" },
+                        "fields": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Field names for compound index" },
                         "unique": { "type": "boolean", "description": "Whether the index should enforce uniqueness", "default": false },
                         "sparse": { "type": "boolean", "description": "If true, only index documents where the field exists (skip null/missing). Enables O(k) $exists:true queries instead of O(n) collection scan.", "default": false }
                     },
-                    "required": ["collection"]
+                    "required": ["collection"],
+                    "anyOf": [
+                        { "required": ["field"] },
+                        { "required": ["fields"] }
+                    ]
                 }
             },
             {
@@ -689,9 +698,9 @@ fn get_all_tools_json() -> Value {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
-                        "query": { "type": "object", "description": "Query to analyze" }
+                        "query": { "type": "object", "description": "Query to analyze (defaults to {})" }
                     },
-                    "required": ["collection", "query"]
+                    "required": ["collection"]
                 }
             },
             {
@@ -702,14 +711,19 @@ fn get_all_tools_json() -> Value {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
-                        "query": { "type": "object", "description": "Query filter" },
+                        "query": { "type": "object", "description": "Query filter (defaults to {})" },
                         "hint": { "type": "string", "description": "Index name to use" },
                         "projection": { "type": "object", "description": "Fields to include (1) or exclude (0)" },
-                        "sort": { "type": "array", "description": "Sort order" },
+                        "sort": { "description": "Sort order as array of [field, direction] pairs or object map",
+                            "oneOf": [
+                                { "type": "array" },
+                                { "type": "object" }
+                            ]
+                        },
                         "limit": { "type": "integer", "description": "Maximum number of documents" },
                         "skip": { "type": "integer", "description": "Number of documents to skip" }
                     },
-                    "required": ["collection", "query", "hint"]
+                    "required": ["collection", "hint"]
                 }
             },
             // Schema Management
@@ -721,7 +735,12 @@ fn get_all_tools_json() -> Value {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
-                        "schema": { "type": "object", "description": "JSON Schema object. Pass null to clear schema." }
+                        "schema": { "description": "JSON Schema object. Pass null to clear schema.",
+                            "oneOf": [
+                                { "type": "object" },
+                                { "type": "null" }
+                            ]
+                        }
                     },
                     "required": ["collection"]
                 }
