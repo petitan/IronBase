@@ -62,6 +62,9 @@ struct ContextInner {
 
     // Early termination limit (for $limit stages)
     early_limit: Option<usize>,
+
+    // Flag: streaming to $group (disables doc limit - docs not collected)
+    streaming_to_group: bool,
 }
 
 #[allow(dead_code)] // Phase 2: methods will be used in pipeline.rs
@@ -78,6 +81,7 @@ impl AggregationLimitContext {
                 group_counters: HashMap::new(),
                 has_leading_match: false,
                 early_limit: None,
+                streaming_to_group: false,
             })),
         }
     }
@@ -96,11 +100,34 @@ impl AggregationLimitContext {
         self.inner.borrow_mut().has_leading_match = has_match;
     }
 
+    /// Enter streaming-to-group mode (doc limit temporarily disabled)
+    pub fn enter_streaming_group(&self) {
+        self.inner.borrow_mut().streaming_to_group = true;
+    }
+
+    /// Exit streaming-to-group mode and set processed doc count
+    pub fn exit_streaming_group(&self, output_docs: usize) {
+        let mut inner = self.inner.borrow_mut();
+        inner.streaming_to_group = false;
+        inner.docs_processed = output_docs;
+        inner.index_entries_scanned = 0;
+    }
+
     // ========== Document counting ==========
 
     /// Check if document count is within limit
+    ///
+    /// IMPORTANT: Returns Ok immediately if streaming_to_group is true,
+    /// because docs are not being collected into memory.
     pub fn check_doc_limit(&self) -> Result<()> {
         let inner = self.inner.borrow();
+
+        // Skip limit check in streaming-to-group mode
+        // Docs are processed one at a time and discarded, not collected
+        if inner.streaming_to_group {
+            return Ok(());
+        }
+
         let limit = if inner.has_leading_match {
             inner.limits.max_docs_with_match
         } else {
@@ -124,7 +151,10 @@ impl AggregationLimitContext {
 
     /// Increment document counter and check limit
     pub fn increment_docs(&self) -> Result<()> {
-        self.inner.borrow_mut().docs_processed += 1;
+        {
+            let mut inner = self.inner.borrow_mut();
+            inner.docs_processed += 1;
+        }
         self.check_doc_limit()
     }
 
@@ -289,6 +319,23 @@ impl AggregationLimitContext {
         Ok(())
     }
 
+    /// Check if adding `count` unwind outputs would exceed limit
+    ///
+    /// Call this BEFORE allocating memory for the unwind results.
+    /// This prevents OOM by failing before the allocation, not after.
+    pub fn check_unwind_would_exceed(&self, count: usize) -> Result<()> {
+        let inner = self.inner.borrow();
+        let new_total = inner.unwind_outputs.saturating_add(count);
+        if new_total > inner.limits.max_unwind_output {
+            return Err(IronBaseError::AggregationError(format!(
+                "$unwind would exceed output limit: {} + {} = {} (limit: {}). \
+                 Consider adding a $match stage before $unwind or using $slice.",
+                inner.unwind_outputs, count, new_total, inner.limits.max_unwind_output
+            )));
+        }
+        Ok(())
+    }
+
     /// Increment $unwind output counter
     pub fn increment_unwind(&self, count: usize) -> Result<()> {
         {
@@ -312,6 +359,10 @@ impl AggregationLimitContext {
     pub fn increment_index_entries(&self, count: usize) -> Result<()> {
         let mut inner = self.inner.borrow_mut();
         inner.index_entries_scanned += count;
+
+        if inner.streaming_to_group {
+            return Ok(());
+        }
 
         // Use same logic as doc limit
         let limit = if inner.has_leading_match {

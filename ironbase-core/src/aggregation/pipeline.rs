@@ -320,13 +320,13 @@ impl Pipeline {
     /// let results = pipeline.execute_with_context(docs, &ctx)?;
     /// ```
     #[allow(dead_code)] // Will be used in collection_core integration
-    pub fn execute_with_context<I>(
+    pub fn execute_with_context<'a, I>(
         &self,
         docs: I,
         ctx: &AggregationLimitContext,
     ) -> Result<Vec<Value>>
     where
-        I: Iterator<Item = Result<Value>> + 'static,
+        I: Iterator<Item = Result<Value>> + 'a,
     {
         // Set leading match flag in context
         ctx.set_leading_match(self.has_leading_match);
@@ -361,9 +361,20 @@ impl Pipeline {
         // Phase 2: Handle $group stage specially (streaming accumulators)
         let (materialized, group_consumed) =
             if let Some(Stage::Group(group_stage)) = remaining_stages.first() {
-                // Use context-aware execution for $group
-                let docs_vec: Vec<Value> = streaming_iter.collect::<Result<Vec<_>>>()?;
-                let result = group_stage.execute_with_context_impl(docs_vec, ctx)?;
+                // CRITICAL FIX (2026-01): Use STREAMING execution, not collect()!
+                // OLD (BAD): streaming_iter.collect() → 650K docs in memory
+                // NEW (GOOD): process one at a time, only group states in memory
+                ctx.enter_streaming_group();
+                let result = match group_stage.execute_streaming_with_context(streaming_iter, ctx) {
+                    Ok(res) => {
+                        ctx.exit_streaming_group(res.len());
+                        res
+                    }
+                    Err(err) => {
+                        ctx.exit_streaming_group(0);
+                        return Err(err);
+                    }
+                };
                 (result, 1)
             } else {
                 // No $group - check for early $limit/$skip
@@ -404,9 +415,28 @@ impl Pipeline {
 
                     (results, stages_to_skip)
                 } else {
-                    // No early limit - materialize all
-                    let docs_vec: Vec<Value> = streaming_iter.collect::<Result<Vec<_>>>()?;
-                    (docs_vec, 0)
+                    // No early limit - materialize with limit checking
+                    // CRITICAL FIX (2026-01): Don't blindly collect() - check limits!
+                    let effective = ctx.effective_limit();
+                    let mut results = Vec::new();
+                    let mut processed = 0;
+
+                    for doc_result in streaming_iter {
+                        let doc = doc_result?;
+                        processed += 1;
+
+                        if processed > effective {
+                            return Err(IronBaseError::AggregationError(format!(
+                                "Aggregation exceeded document limit: {} documents (limit: {}). \
+                                 Add a $match stage to filter documents.",
+                                processed, effective
+                            )));
+                        }
+
+                        results.push(doc);
+                    }
+
+                    (results, 0)
                 }
             };
 
@@ -432,41 +462,48 @@ impl Pipeline {
     }
 
     /// Detect early limit from start of pipeline (before streaming extraction)
+    ///
+    /// Scans through streamable stages ($match, $project, $skip, $limit) to find
+    /// if a $limit appears early enough that we can use it to stop iteration.
+    ///
+    /// CRITICAL FIX (2026-01): $match and $project are "transparent" for limit detection!
+    /// Pipeline like [$match, $project, $limit: 5] should return Some((0, 5, 1))
+    /// because $match/$project don't change document count.
+    ///
+    /// Materializing stages ($group, $sort, $unwind) DO block limit detection because
+    /// they need all documents to produce correct results.
     fn detect_early_limit_from_start(stages: &[Stage]) -> Option<(usize, usize, usize)> {
         let mut skip = 0;
         let mut limit = None;
-        let mut stages_consumed = 0;
-        let mut found_non_passthrough = false;
+        let mut limit_skip_stages = 0; // Only count $skip/$limit stages consumed
 
         for stage in stages {
             match stage {
                 Stage::Skip(s) => {
                     skip += s.skip;
-                    stages_consumed += 1;
+                    limit_skip_stages += 1;
                 }
                 Stage::Limit(l) => {
                     limit = Some(l.limit);
-                    stages_consumed += 1;
-                    break;
+                    limit_skip_stages += 1;
+                    break; // Found $limit - stop here
                 }
+                // $match/$project are STREAMABLE - they don't block limit detection
+                // because they don't change document count (match filters, project transforms)
                 Stage::Match(_) | Stage::Project(_) => {
-                    // Streamable stages - continue looking
-                    found_non_passthrough = true;
+                    // Continue searching for $limit after streamable stages
+                    continue;
                 }
-                _ => {
-                    found_non_passthrough = true;
-                    break;
+                // MATERIALIZING stages block limit detection
+                // $group/$sort/$unwind need ALL documents first
+                Stage::Group(_) | Stage::Sort(_) | Stage::Unwind(_) => {
+                    break; // Stop searching - limit after these can't be applied early
                 }
             }
         }
 
-        // Only return if we found a $limit and didn't skip required stages
-        if !found_non_passthrough {
-            limit.map(|l| (skip, l, stages_consumed))
-        } else {
-            // Check after non-passthrough for $group -> $limit patterns
-            None
-        }
+        // Return if we found a $limit (skip/limit counts are valid even if 0)
+        limit.map(|l| (skip, l, limit_skip_stages))
     }
 
     /// Apply consecutive streamable stages ($match, $project) inline on the iterator

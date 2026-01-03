@@ -398,7 +398,9 @@ fn test_collection_aggregate_with_context() {
 }
 
 #[test]
-fn test_collection_aggregate_with_context_limit_exceeded() {
+fn test_collection_aggregate_with_context_limit_exceeded_non_streaming() {
+    // NOTE: $group with streaming does NOT hit doc limit (docs processed one at a time)
+    // This test uses $sort which DOES require materialization (all docs in memory)
     let db = create_test_db();
     insert_test_docs(&db, "test", 100);
 
@@ -410,7 +412,36 @@ fn test_collection_aggregate_with_context_limit_exceeded() {
     };
     let ctx = AggregationLimitContext::new(limits);
 
-    // This should fail because we have 100 docs and limit is 50
+    // $sort requires materializing all documents, so doc limit applies
+    let result = coll.aggregate_with_context(
+        &json!([
+            {"$sort": {"value": 1}}
+        ]),
+        &ctx,
+    );
+
+    assert!(
+        result.is_err(),
+        "Should fail because $sort needs to materialize 100 docs (limit: 50)"
+    );
+}
+
+#[test]
+fn test_collection_aggregate_streaming_group_bypasses_doc_limit() {
+    // Streaming $group does NOT hit doc limit - docs are processed one at a time
+    let db = create_test_db();
+    insert_test_docs(&db, "test", 100);
+
+    let coll = db.collection("test").unwrap();
+    let limits = AggregationLimits {
+        max_docs_without_match: 50, // Only 50 docs allowed if materialized
+        max_docs_with_match: 50,
+        max_group_count: 100, // But allow all groups
+        ..Default::default()
+    };
+    let ctx = AggregationLimitContext::new(limits);
+
+    // $group is streaming - should SUCCEED even with 100 docs and 50 doc limit
     let result = coll.aggregate_with_context(
         &json!([
             {"$group": {"_id": "$group", "count": {"$sum": 1}}}
@@ -418,7 +449,13 @@ fn test_collection_aggregate_with_context_limit_exceeded() {
         &ctx,
     );
 
-    assert!(result.is_err());
+    assert!(
+        result.is_ok(),
+        "Streaming $group should bypass doc limit: {:?}",
+        result
+    );
+    let groups = result.unwrap();
+    assert_eq!(groups.len(), 10); // 100 docs with group = value % 10 = 10 groups
 }
 
 #[test]
