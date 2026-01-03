@@ -316,6 +316,8 @@ pub enum ProjectField {
 pub enum ProjectExpression {
     /// $size - returns the length of an array field
     Size(String), // Field name (e.g., "$tags" -> "tags")
+    /// $substr - substring of a string field
+    Substr(StringOperand, usize, usize),
     /// $reduce - apply a custom reduction to an array
     Reduce(ReduceExpression),
     /// $add - add numbers: { $add: ["$price", "$tax"] }
@@ -347,6 +349,13 @@ pub enum ArithmeticOperand {
     Literal(f64),
     /// Nested expression: { $add: [...] }
     Expression(Box<ProjectExpression>),
+}
+
+/// Operand for string expressions - field reference or literal
+#[derive(Debug, Clone)]
+pub enum StringOperand {
+    Field(String),
+    Literal(String),
 }
 
 /// $reduce expression - reduces an array to a single value
@@ -406,18 +415,33 @@ pub struct GroupStage {
 pub enum GroupId {
     Field(String), // "$city"
     Null,          // null (all documents in one group)
+    Substring {
+        field: String, // "$field"
+        start: usize,
+        length: usize,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ValueExpression {
+    Field(String),
+    Substr {
+        field: String, // "$field"
+        start: usize,
+        length: usize,
+    },
 }
 
 #[derive(Debug, Clone)]
 pub enum Accumulator {
     Sum(SumExpression),
     Avg(String), // Field name
-    Min(String),
-    Max(String),
-    First(String),
-    Last(String),
-    Push(String),     // $push - collect all values into array
-    AddToSet(String), // $addToSet - collect unique values into array
+    Min(ValueExpression),
+    Max(ValueExpression),
+    First(ValueExpression),
+    Last(ValueExpression),
+    Push(ValueExpression),     // $push - collect all values into array
+    AddToSet(ValueExpression), // $addToSet - collect unique values into array
 }
 
 /// Streaming accumulator state - stores only the accumulated value, NOT full documents

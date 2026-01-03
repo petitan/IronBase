@@ -38,9 +38,7 @@ fn resolve_expr_value(value: &Value, document: &Document) -> Result<Option<Value
         if obj.len() == 1 {
             let (op, _) = obj.iter().next().unwrap();
             if op.starts_with('$') {
-                // It's an expression like { "$add": [...] } - evaluate it
-                let computed = evaluate_arithmetic_expr(value, document)?;
-                return Ok(computed.map(Value::from));
+                return evaluate_expression_value(value, document);
             }
         }
     }
@@ -54,6 +52,66 @@ fn resolve_expr_value(value: &Value, document: &Document) -> Result<Option<Value
     }
     // Return the literal value
     Ok(Some(value.clone()))
+}
+
+fn evaluate_expression_value(expr: &Value, document: &Document) -> Result<Option<Value>> {
+    let expr_obj = expr
+        .as_object()
+        .ok_or_else(|| IronBaseError::InvalidQuery("Expression must be an object".to_string()))?;
+    if expr_obj.len() != 1 {
+        return Err(IronBaseError::InvalidQuery(
+            "Expression must have exactly one operator".to_string(),
+        ));
+    }
+
+    let (op, args) = expr_obj.iter().next().unwrap();
+    match op.as_str() {
+        "$substr" => {
+            let arr = args.as_array().ok_or_else(|| {
+                IronBaseError::InvalidQuery("$substr requires an array".to_string())
+            })?;
+            if arr.len() != 3 {
+                return Err(IronBaseError::InvalidQuery(
+                    "$substr requires [string, start, length]".to_string(),
+                ));
+            }
+
+            let input = resolve_expr_value(&arr[0], document)?;
+            let text = match input {
+                Some(Value::String(s)) => s,
+                Some(Value::Null) | None => return Ok(Some(Value::Null)),
+                Some(other) => {
+                    return Err(IronBaseError::InvalidQuery(format!(
+                        "$substr requires a string, got {:?}",
+                        other
+                    )))
+                }
+            };
+
+            let start = parse_substr_number(&arr[1], "start")?;
+            let length = parse_substr_number(&arr[2], "length")?;
+            Ok(Some(Value::String(crate::value_utils::substr_string(
+                &text, start, length,
+            ))))
+        }
+        _ => {
+            let computed = evaluate_arithmetic_expr(expr, document)?;
+            Ok(computed.map(Value::from))
+        }
+    }
+}
+
+fn parse_substr_number(value: &Value, label: &str) -> Result<usize> {
+    let num = value
+        .as_i64()
+        .ok_or_else(|| IronBaseError::InvalidQuery(format!("$substr {} must be integer", label)))?;
+    if num < 0 {
+        return Err(IronBaseError::InvalidQuery(format!(
+            "$substr {} must be non-negative",
+            label
+        )));
+    }
+    Ok(num as usize)
 }
 
 /// Evaluate an arithmetic expression and return a numeric result

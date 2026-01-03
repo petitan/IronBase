@@ -81,6 +81,7 @@ pub enum AccumulatorKind {
     LastField(String),
     PushField(String),
     AddToSetField(String),
+    Expression,
 }
 
 impl AccumulatorKind {
@@ -117,6 +118,7 @@ impl GroupShape {
         let id_kind = match &group.id {
             GroupId::Null => GroupIdKind::Null,
             GroupId::Field(f) => GroupIdKind::Field(f.clone()),
+            GroupId::Substring { .. } => GroupIdKind::Expression,
         };
 
         let accumulators: Vec<(String, AccumulatorKind)> = group
@@ -130,12 +132,42 @@ impl GroupShape {
                         AccumulatorKind::SumField(f.clone())
                     }
                     Accumulator::Avg(f) => AccumulatorKind::AvgField(f.clone()),
-                    Accumulator::Min(f) => AccumulatorKind::MinField(f.clone()),
-                    Accumulator::Max(f) => AccumulatorKind::MaxField(f.clone()),
-                    Accumulator::First(f) => AccumulatorKind::FirstField(f.clone()),
-                    Accumulator::Last(f) => AccumulatorKind::LastField(f.clone()),
-                    Accumulator::Push(f) => AccumulatorKind::PushField(f.clone()),
-                    Accumulator::AddToSet(f) => AccumulatorKind::AddToSetField(f.clone()),
+                    Accumulator::Min(expr) => match expr {
+                        crate::aggregation::types::ValueExpression::Field(f) => {
+                            AccumulatorKind::MinField(f.clone())
+                        }
+                        _ => AccumulatorKind::Expression,
+                    },
+                    Accumulator::Max(expr) => match expr {
+                        crate::aggregation::types::ValueExpression::Field(f) => {
+                            AccumulatorKind::MaxField(f.clone())
+                        }
+                        _ => AccumulatorKind::Expression,
+                    },
+                    Accumulator::First(expr) => match expr {
+                        crate::aggregation::types::ValueExpression::Field(f) => {
+                            AccumulatorKind::FirstField(f.clone())
+                        }
+                        _ => AccumulatorKind::Expression,
+                    },
+                    Accumulator::Last(expr) => match expr {
+                        crate::aggregation::types::ValueExpression::Field(f) => {
+                            AccumulatorKind::LastField(f.clone())
+                        }
+                        _ => AccumulatorKind::Expression,
+                    },
+                    Accumulator::Push(expr) => match expr {
+                        crate::aggregation::types::ValueExpression::Field(f) => {
+                            AccumulatorKind::PushField(f.clone())
+                        }
+                        _ => AccumulatorKind::Expression,
+                    },
+                    Accumulator::AddToSet(expr) => match expr {
+                        crate::aggregation::types::ValueExpression::Field(f) => {
+                            AccumulatorKind::AddToSetField(f.clone())
+                        }
+                        _ => AccumulatorKind::Expression,
+                    },
                 };
                 (name.clone(), kind)
             })
