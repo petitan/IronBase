@@ -6,6 +6,7 @@
 // Instead of storing all documents per group, we maintain only the accumulated state.
 // Memory: O(N * doc_size) → O(G * state_size) where G = number of groups
 
+use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::helpers::{compute_extremum, parse_field_reference};
 use crate::aggregation::types::{Accumulator, AccumulatorState, SumExpression};
 use crate::error::{IronBaseError, Result};
@@ -359,6 +360,164 @@ impl AccumulatorState {
 
             _ => {
                 // Mismatched state/accumulator - should never happen
+                debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
+            }
+        }
+        Ok(())
+    }
+
+    /// Update state using centralized AggregationLimitContext
+    ///
+    /// This method uses the context for per-group tracking of $push/$addToSet.
+    /// The context automatically tracks counts and provides consistent error messages.
+    ///
+    /// # Arguments
+    /// * `doc` - Document to process
+    /// * `accumulator` - Accumulator definition
+    /// * `group_hash` - Hash of the group key (for per-group tracking)
+    /// * `ctx` - Shared context for limit tracking
+    #[allow(dead_code)] // Will be used in pipeline.rs integration
+    pub(crate) fn update_with_context(
+        &mut self,
+        doc: &Value,
+        accumulator: &Accumulator,
+        group_hash: u64,
+        ctx: &AggregationLimitContext,
+    ) -> Result<()> {
+        match (self, accumulator) {
+            // Sum, Avg, Min, Max, First, Last - O(1) memory, no limit needed
+            (
+                AccumulatorState::Sum {
+                    int_sum,
+                    float_sum,
+                    has_float,
+                    is_count,
+                },
+                Accumulator::Sum(expr),
+            ) => match expr {
+                SumExpression::Constant(n) => {
+                    *int_sum = int_sum.saturating_add(*n);
+                    *is_count = true;
+                }
+                SumExpression::Field(field) => {
+                    if let Some(value) = get_nested_value(doc, field) {
+                        if let Some(n) = value.as_i64() {
+                            *int_sum = int_sum.saturating_add(n);
+                        } else if let Some(f) = value.as_f64() {
+                            *float_sum += f;
+                            *has_float = true;
+                        }
+                    }
+                }
+            },
+
+            (AccumulatorState::Avg { sum, count }, Accumulator::Avg(field)) => {
+                if let Some(value) = get_nested_value(doc, field) {
+                    if let Some(n) = value.as_f64() {
+                        *sum += n;
+                        *count = count.saturating_add(1);
+                    } else if let Some(n) = value.as_i64() {
+                        *sum += n as f64;
+                        *count = count.saturating_add(1);
+                    }
+                }
+            }
+
+            (AccumulatorState::Min { value: min_val }, Accumulator::Min(field)) => {
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    match min_val {
+                        None => *min_val = Some(doc_val.clone()),
+                        Some(current) => {
+                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Less) {
+                                *min_val = Some(doc_val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            (AccumulatorState::Max { value: max_val }, Accumulator::Max(field)) => {
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    match max_val {
+                        None => *max_val = Some(doc_val.clone()),
+                        Some(current) => {
+                            if compare_values(doc_val, current) == Some(std::cmp::Ordering::Greater)
+                            {
+                                *max_val = Some(doc_val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            (
+                AccumulatorState::First {
+                    value: first_val,
+                    captured,
+                },
+                Accumulator::First(field),
+            ) => {
+                if !*captured {
+                    *captured = true;
+                    *first_val = get_nested_value(doc, field).cloned();
+                }
+            }
+
+            (
+                AccumulatorState::Last {
+                    value: last_val,
+                    doc_count,
+                },
+                Accumulator::Last(field),
+            ) => {
+                *doc_count += 1;
+                *last_val = get_nested_value(doc, field).cloned();
+            }
+
+            // $push - uses context for per-group limit tracking
+            (AccumulatorState::Push { values }, Accumulator::Push(field)) => {
+                // Check limit via context BEFORE push
+                ctx.check_push_limit(group_hash)?;
+
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    values.try_reserve(1).map_err(|_| {
+                        IronBaseError::OutOfMemory(format!(
+                            "$push failed to allocate memory for element {} in field '{}'",
+                            values.len(),
+                            field
+                        ))
+                    })?;
+                    values.push(doc_val.clone());
+
+                    // Increment counter in context
+                    ctx.increment_push(group_hash)?;
+                }
+            }
+
+            // $addToSet - uses context for per-group limit tracking
+            (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(field)) => {
+                // Check limit via context BEFORE insert
+                ctx.check_addtoset_limit(group_hash)?;
+
+                if let Some(doc_val) = get_nested_value(doc, field) {
+                    let key = canonical_json_string(doc_val);
+                    if seen.insert(key) {
+                        values.try_reserve(1).map_err(|_| {
+                            IronBaseError::OutOfMemory(format!(
+                                "$addToSet failed to allocate memory for element {} in field '{}'",
+                                values.len(),
+                                field
+                            ))
+                        })?;
+                        values.push(doc_val.clone());
+
+                        // Increment counter in context (only for new elements)
+                        ctx.increment_addtoset(group_hash)?;
+                    }
+                }
+            }
+
+            _ => {
                 debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
             }
         }

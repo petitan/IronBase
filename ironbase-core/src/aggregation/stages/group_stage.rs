@@ -15,6 +15,7 @@
 // we can compute the result directly from the index without loading any documents.
 // This reduces I/O from O(N * doc_size) to O(index_size), typically 100-1000x faster.
 
+use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::types::{
     Accumulator, AccumulatorState, AggregationLimits, GroupId, GroupStage, SumExpression,
 };
@@ -285,6 +286,73 @@ impl GroupStage {
                 groups.len(),
                 limits.max_group_count
             )));
+        }
+
+        // Finalize
+        let mut results = Vec::new();
+        for (_hash, mut entry) in groups {
+            let mut result = serde_json::Map::new();
+            result.insert("_id".to_string(), entry.key_value);
+
+            for field in self.accumulators.keys() {
+                if let Some(state) = entry.states.remove(field) {
+                    let value = state.finalize();
+                    result.insert(field.clone(), value);
+                }
+            }
+            results.push(Value::Object(result));
+        }
+
+        Ok(results)
+    }
+
+    // ========== CONTEXT-AWARE EXECUTION ==========
+
+    /// Execute $group with centralized context for limit tracking
+    ///
+    /// Uses AggregationLimitContext for:
+    /// - Group count tracking (register_new_group)
+    /// - Per-group $push limit tracking (increment_push)
+    /// - Per-group $addToSet limit tracking (increment_addtoset)
+    ///
+    /// This method integrates with the unified limit system introduced in 2026-01.
+    #[allow(dead_code)] // Will be used in pipeline.rs integration
+    pub(crate) fn execute_with_context_impl(
+        &self,
+        docs: Vec<Value>,
+        ctx: &AggregationLimitContext,
+    ) -> Result<Vec<Value>> {
+        use std::collections::hash_map::Entry;
+
+        let mut groups: HashMap<u64, GroupEntry> = HashMap::new();
+
+        for doc in docs {
+            let (group_hash, group_value) = self.extract_group_key_hash(&doc)?;
+
+            // Use Entry API to check and insert atomically
+            let entry = match groups.entry(group_hash) {
+                Entry::Vacant(e) => {
+                    // New group - register with context first
+                    ctx.register_new_group(group_hash)?;
+
+                    e.insert(GroupEntry {
+                        key_value: group_value,
+                        states: self
+                            .accumulators
+                            .iter()
+                            .map(|(field, acc)| (field.clone(), acc.init_state()))
+                            .collect(),
+                    })
+                }
+                Entry::Occupied(e) => e.into_mut(),
+            };
+
+            // Update accumulators with context-aware limit tracking
+            for (field, accumulator) in &self.accumulators {
+                if let Some(state) = entry.states.get_mut(field) {
+                    state.update_with_context(&doc, accumulator, group_hash, ctx)?;
+                }
+            }
         }
 
         // Finalize
