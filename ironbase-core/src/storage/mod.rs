@@ -1211,6 +1211,12 @@ impl StorageEngine {
         //
         // FIX: flush_metadata() updates header with current data_end_offset,
         // ensuring crash recovery always finds valid metadata.
+        //
+        // Isolation note:
+        // - The current engine targets **read committed**: a transaction's writes
+        //   only become visible after WAL commit + metadata/catalog update.
+        // - No repeatable-read guarantees: long-running queries may see new commits
+        //   mid-scan, and lost updates are possible if clients overwrite each other.
         if sync_file {
             if self.metadata_dirty {
                 self.ensure_metadata_snapshot()?;

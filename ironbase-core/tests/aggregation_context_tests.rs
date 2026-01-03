@@ -459,6 +459,26 @@ fn test_collection_aggregate_streaming_group_bypasses_doc_limit() {
 }
 
 #[test]
+fn test_collection_aggregate_with_context_limit_only() {
+    let db = create_test_db();
+    insert_test_docs(&db, "test", 20);
+
+    let coll = db.collection("test").unwrap();
+    let ctx = AggregationLimitContext::new(AggregationLimits::default());
+
+    let results = coll
+        .aggregate_with_context(&json!([{"$limit": 5}]), &ctx)
+        .unwrap();
+
+    assert_eq!(
+        results.len(),
+        5,
+        "Limit stage without other operators should still return the first K docs"
+    );
+    assert!(results.iter().all(|doc| doc.get("i").is_some()));
+}
+
+#[test]
 fn test_collection_aggregate_with_context_inspectable() {
     let db = create_test_db();
     insert_test_docs(&db, "test", 30);

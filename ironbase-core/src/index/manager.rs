@@ -54,7 +54,7 @@ use crate::error::{IronBaseError, Result};
 use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
 use crate::log_error;
 use crate::value_utils::get_nested_value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use super::btree::BPlusTree;
@@ -588,15 +588,22 @@ impl IndexManager {
             }
 
             if let Some(index) = self.btree_indexes.get_mut(&index_name) {
-                let index_key = index.extract_key(doc);
-                let is_null = Self::is_key_all_null(&index_key);
+                let keys = index.extract_keys(doc);
+                let mut seen = HashSet::new();
+                for index_key in keys {
+                    if !seen.insert(index_key.clone()) {
+                        continue;
+                    }
+                    let is_null = Self::is_key_all_null(&index_key);
 
-                // Sparse indexes: NEVER include null keys (that's the whole point)
-                // Non-sparse unique indexes: include null keys (null is a value, enforce uniqueness)
-                // Non-sparse non-unique indexes: skip null keys (no query benefit)
-                let should_index = !is_null || (index.metadata.unique && !index.metadata.sparse);
-                if should_index {
-                    index.insert(index_key, doc_id.clone())?;
+                    // Sparse indexes: NEVER include null keys (that's the whole point)
+                    // Non-sparse unique indexes: include null keys (null is a value, enforce uniqueness)
+                    // Non-sparse non-unique indexes: skip null keys (no query benefit)
+                    let should_index =
+                        !is_null || (index.metadata.unique && !index.metadata.sparse);
+                    if should_index {
+                        index.insert(index_key, doc_id.clone())?;
+                    }
                 }
             }
         }
@@ -679,16 +686,19 @@ impl IndexManager {
             }
 
             if let Some(index) = self.btree_indexes.get_mut(&index_name) {
-                let index_key = index.extract_key(doc);
-                let is_null = Self::is_key_all_null(&index_key);
+                let keys = index.extract_keys(doc);
+                let mut seen = HashSet::new();
+                for index_key in keys {
+                    if !seen.insert(index_key.clone()) {
+                        continue;
+                    }
+                    let is_null = Self::is_key_all_null(&index_key);
 
-                // Mirror the insert logic: only delete what was inserted
-                // Sparse indexes: null keys were never inserted
-                // Non-sparse unique indexes: null keys were inserted
-                // Non-sparse non-unique indexes: null keys were not inserted
-                let was_indexed = !is_null || (index.metadata.unique && !index.metadata.sparse);
-                if was_indexed {
-                    index.delete(&index_key, doc_id)?;
+                    // Mirror the insert logic: only delete what was inserted
+                    let was_indexed = !is_null || (index.metadata.unique && !index.metadata.sparse);
+                    if was_indexed {
+                        index.delete(&index_key, doc_id)?;
+                    }
                 }
             }
         }
@@ -761,25 +771,25 @@ impl IndexManager {
                 continue;
             }
 
-            let index_key = index.extract_key(doc);
+            let keys = index.extract_keys(doc);
+            let mut seen = HashSet::new();
+            for index_key in keys {
+                if !seen.insert(index_key.clone()) {
+                    continue;
+                }
 
-            // MongoDB behavior: null IS a value for unique constraint purposes
-            // Do NOT skip null keys - duplicate nulls should be rejected
-
-            // Check if key already exists
-            if let Some(existing_id) = index.search(&index_key) {
-                // Allow update to same document (exclude_doc_id matches)
-                if exclude_doc_id != Some(&existing_id) {
-                    // Format field names for error message
-                    let fields_str = if index.metadata.is_compound() {
-                        index.metadata.fields.join(", ")
-                    } else {
-                        index.metadata.field.clone()
-                    };
-                    return Err(IronBaseError::IndexError(format!(
-                        "Duplicate key: {:?} in field(s) '{}' (unique index)",
-                        index_key, fields_str
-                    )));
+                if let Some(existing_id) = index.search(&index_key) {
+                    if exclude_doc_id != Some(&existing_id) {
+                        let fields_str = if index.metadata.is_compound() {
+                            index.metadata.fields.join(", ")
+                        } else {
+                            index.metadata.field.clone()
+                        };
+                        return Err(IronBaseError::IndexError(format!(
+                            "Duplicate key: {:?} in field(s) '{}' (unique index)",
+                            index_key, fields_str
+                        )));
+                    }
                 }
             }
         }

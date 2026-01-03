@@ -358,26 +358,26 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                         continue;
                     };
 
-                    let key = index.extract_key(doc);
-                    let is_all_null = match &key {
-                        IndexKey::Null => true,
-                        IndexKey::Compound(keys) => {
-                            keys.iter().all(|k| matches!(k, IndexKey::Null))
+                    let keys = index.extract_keys(doc);
+                    let mut seen = std::collections::HashSet::new();
+                    for key in keys {
+                        if !seen.insert(key.clone()) {
+                            continue;
                         }
-                        _ => false,
-                    };
+                        let is_all_null = IndexManager::is_key_all_null(&key);
 
-                    // Include null keys for unique indexes, skip for non-unique
-                    if !is_all_null || index.metadata.unique {
-                        if let Err(e) = index.insert(key, doc_id.clone()) {
-                            log_warn!(
-                                "Index rebuild: duplicate key ignored for index {} in {}: {:?}",
-                                index_meta.name,
-                                collection_name,
-                                e
-                            );
+                        // Include null keys for unique indexes, skip for non-unique
+                        if !is_all_null || index.metadata.unique {
+                            if let Err(e) = index.insert(key, doc_id.clone()) {
+                                log_warn!(
+                                    "Index rebuild: duplicate key ignored for index {} in {}: {:?}",
+                                    index_meta.name,
+                                    collection_name,
+                                    e
+                                );
+                            }
+                            rebuilt_count += 1;
                         }
-                        rebuilt_count += 1;
                     }
                 }
 

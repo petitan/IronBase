@@ -230,8 +230,20 @@ impl Pipeline {
                 let mut results = Vec::new();
                 let mut skipped = 0;
                 let mut total_processed = 0usize;
+                let mut iter = counted_iter;
 
-                for doc_result in counted_iter {
+                loop {
+                    if let Some((_, limit, _)) = effective_limit {
+                        if results.len() >= limit {
+                            break;
+                        }
+                    }
+
+                    let doc_result = match iter.next() {
+                        Some(dr) => dr,
+                        None => break,
+                    };
+
                     let doc = doc_result?;
                     total_processed += 1;
 
@@ -244,16 +256,10 @@ impl Pipeline {
                         )));
                     }
 
-                    // Early termination if we have enough docs (OOM FIX)
-                    if let Some((skip, limit, _)) = effective_limit {
-                        // Skip documents first (MongoDB semantics)
+                    if let Some((skip, _, _)) = effective_limit {
                         if skipped < skip {
                             skipped += 1;
-                            continue; // Skip without materializing
-                        }
-                        // Check if we have enough documents
-                        if results.len() >= limit {
-                            break; // EARLY EXIT - don't load more!
+                            continue;
                         }
                     }
 
@@ -387,12 +393,22 @@ impl Pipeline {
                     let mut results = Vec::new();
                     let mut skipped = 0;
                     let mut processed = 0;
+                    let mut iter = streaming_iter;
 
-                    for doc_result in streaming_iter {
+                    loop {
+                        let allowed = limit.min(effective.saturating_sub(skip));
+                        if results.len() >= allowed {
+                            break;
+                        }
+
+                        let doc_result = match iter.next() {
+                            Some(dr) => dr,
+                            None => break,
+                        };
+
                         let doc = doc_result?;
                         processed += 1;
 
-                        // Check against effective limit (includes doc_limit cap)
                         if processed > effective {
                             return Err(IronBaseError::AggregationError(format!(
                                 "Aggregation exceeded document limit: {} documents (limit: {})",
@@ -403,11 +419,6 @@ impl Pipeline {
                         if skipped < skip {
                             skipped += 1;
                             continue;
-                        }
-
-                        // Use min of user limit and remaining effective budget
-                        if results.len() >= limit.min(effective.saturating_sub(skip)) {
-                            break; // Early termination
                         }
 
                         results.push(doc);
