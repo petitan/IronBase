@@ -2065,7 +2065,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if !had_match {
             if let Some(group_stage) = pipeline.peek_leading_group() {
                 let indexes = self.indexes.read();
-                if let Some(mut indexed_result) = group_stage.try_index_based_execute(&indexes) {
+                if let Some(mut indexed_result) =
+                    group_stage.try_index_based_execute(&indexes, limits)
+                {
                     log_debug!(
                         "aggregate: used index-based $group optimization ({} groups)",
                         indexed_result.len()

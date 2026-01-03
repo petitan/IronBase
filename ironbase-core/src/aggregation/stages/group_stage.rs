@@ -343,8 +343,12 @@ impl GroupStage {
     /// - After: Scan index entries only (~50MB), count per key
     /// - Speedup: 100-1000x depending on document size
     ///
-    /// Returns None if index optimization is not possible (falls back to streaming).
-    pub(crate) fn try_index_based_execute(&self, indexes: &IndexManager) -> Option<Vec<Value>> {
+    /// Returns None if index optimization is not possible or would exceed limits (falls back to streaming).
+    pub(crate) fn try_index_based_execute(
+        &self,
+        indexes: &IndexManager,
+        limits: AggregationLimits,
+    ) -> Option<Vec<Value>> {
         // Check if this group can use index
         let field = self.can_use_index()?;
 
@@ -359,14 +363,25 @@ impl GroupStage {
 
         // Count entries per key directly from the index
         // This avoids loading any documents!
+        // OOM FIX (2026-01): Apply max_group_count limit
         let mut counts: HashMap<u64, (Value, i64)> = HashMap::new();
 
         for (key, _doc_id) in btree.get_all_entries() {
             let key_value = key.to_value();
             let key_hash = value_hash(&key_value);
 
-            let entry = counts.entry(key_hash).or_insert_with(|| (key_value, 0));
-            entry.1 += 1;
+            // Check if this is a NEW group (not updating existing count)
+            if !counts.contains_key(&key_hash) {
+                // Check group count limit BEFORE inserting new group
+                if counts.len() >= limits.max_group_count {
+                    // Too many groups - fall back to streaming which has proper error handling
+                    return None;
+                }
+                counts.insert(key_hash, (key_value, 1));
+            } else {
+                // Update existing group's count
+                counts.get_mut(&key_hash).unwrap().1 += 1;
+            }
         }
 
         // Build result documents

@@ -402,7 +402,8 @@ mod tests {
     #[test]
     fn test_aggregation_limits_default() {
         let limits = AggregationLimits::default();
-        assert_eq!(limits.max_docs_without_match, 100_000);
+        // OOM FIX (2026-01): Reduced from 100K to 10K for safety
+        assert_eq!(limits.max_docs_without_match, 10_000);
         assert_eq!(limits.max_group_count, 50_000);
         assert_eq!(limits.max_memory_mb, 512);
     }
@@ -507,6 +508,109 @@ mod tests {
         let limits = AggregationLimits::unlimited();
         assert_eq!(limits.max_docs_without_match, usize::MAX);
         assert_eq!(limits.max_group_count, usize::MAX);
+    }
+
+    // ========== OOM FIX tests (2026-01) ==========
+
+    #[test]
+    fn test_limit_only_pipeline_early_exit() {
+        // OOM FIX: [{"$limit": 5}] should only materialize 5 docs, not all
+        let docs: Vec<Value> = (0..1000).map(|i| json!({"i": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([{"$limit": 5}])).unwrap();
+
+        // Use very low limit to ensure early exit is working
+        let limits = AggregationLimits {
+            max_docs_without_match: 100, // Would fail if all docs were loaded
+            ..Default::default()
+        };
+
+        let result = pipeline
+            .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
+            .unwrap();
+
+        assert_eq!(result.len(), 5);
+        // Verify we got the first 5 docs
+        assert_eq!(result[0]["i"], 0);
+        assert_eq!(result[4]["i"], 4);
+    }
+
+    #[test]
+    fn test_skip_limit_pipeline_early_exit() {
+        // OOM FIX: [{"$skip": 10}, {"$limit": 5}] should only materialize 5 docs
+        let docs: Vec<Value> = (0..1000).map(|i| json!({"i": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([{"$skip": 10}, {"$limit": 5}])).unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 100,
+            ..Default::default()
+        };
+
+        let result = pipeline
+            .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
+            .unwrap();
+
+        assert_eq!(result.len(), 5);
+        // Verify we skipped 10 and got next 5
+        assert_eq!(result[0]["i"], 10);
+        assert_eq!(result[4]["i"], 14);
+    }
+
+    #[test]
+    fn test_empty_pipeline_rejected() {
+        // Empty pipeline is rejected at parse time
+        let result = Pipeline::from_json(&json!([]));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("empty"), "Expected empty error, got: {}", err);
+    }
+
+    #[test]
+    fn test_project_only_pipeline_respects_limit() {
+        // OOM FIX: Simple pipeline without $group should respect doc limit
+        let docs: Vec<Value> = (0..100).map(|i| json!({"i": i, "extra": "data"})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([{"$project": {"i": 1}}])).unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 50, // Lower than doc count
+            ..Default::default()
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        // Should fail because 100 docs > 50 limit
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeded") && err.contains("limit"),
+            "Expected limit error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_limit_with_sort_loads_all() {
+        // When $sort comes before $limit, we MUST load all docs for correct sort
+        // (Top-K optimization handles this efficiently, but we can't use early exit)
+        let docs: Vec<Value> = (0..100).map(|i| json!({"i": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([{"$sort": {"i": -1}}, {"$limit": 5}])).unwrap();
+
+        let limits = AggregationLimits {
+            max_docs_without_match: 1000, // High enough to allow all docs
+            ..Default::default()
+        };
+
+        let result = pipeline
+            .execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
+            .unwrap();
+
+        assert_eq!(result.len(), 5);
+        // Verify we got top 5 by descending order
+        assert_eq!(result[0]["i"], 99);
+        assert_eq!(result[4]["i"], 95);
     }
 
     // ========== Top-K Optimization tests ==========
@@ -820,19 +924,66 @@ mod tests {
         // Even with tiny budget, should have minimum limits
         let limits = AggregationLimits::with_memory_budget(1); // 1 MB - very small
 
-        assert!(limits.max_docs_without_match >= 10_000);
+        assert!(limits.max_docs_without_match >= 1_000);
         assert!(limits.max_memory_mb >= 64);
-        assert!(limits.max_group_count >= 5_000);
+        assert!(limits.max_group_count >= 500);
     }
 
     #[test]
-    fn test_with_memory_budget_caps_maximum() {
-        // Very large budget should be capped
-        let limits = AggregationLimits::with_memory_budget(100_000); // 100 GB
+    fn test_with_memory_budget_scales_large_budgets() {
+        // Large budgets should continue scaling (no 4GB cap)
+        let gb4 = AggregationLimits::with_memory_budget(4096); // 4 GB
+        let gb16 = AggregationLimits::with_memory_budget(16384); // 16 GB
+        let gb64 = AggregationLimits::with_memory_budget(65536); // 64 GB
 
-        // Scale factor is capped at 4.0, so limits shouldn't be astronomical
-        assert!(limits.max_docs_without_match <= 1_000_000);
-        assert!(limits.max_group_count <= 500_000);
+        // 16GB should have ~4x the limits of 4GB
+        assert!(
+            gb16.max_docs_without_match > gb4.max_docs_without_match * 3,
+            "16GB ({}) should be ~4x of 4GB ({})",
+            gb16.max_docs_without_match,
+            gb4.max_docs_without_match
+        );
+        assert!(
+            gb16.max_group_count > gb4.max_group_count * 3,
+            "16GB groups ({}) should be ~4x of 4GB ({})",
+            gb16.max_group_count,
+            gb4.max_group_count
+        );
+
+        // 64GB should have ~4x the limits of 16GB
+        assert!(
+            gb64.max_docs_without_match > gb16.max_docs_without_match * 3,
+            "64GB ({}) should be ~4x of 16GB ({})",
+            gb64.max_docs_without_match,
+            gb16.max_docs_without_match
+        );
+
+        // Memory budget is preserved (no capping)
+        assert_eq!(gb4.max_memory_mb, 4096);
+        assert_eq!(gb16.max_memory_mb, 16384);
+        assert_eq!(gb64.max_memory_mb, 65536);
+    }
+
+    #[test]
+    fn test_with_memory_budget_exact_values() {
+        // Test specific expected values at known budget points
+        // 1GB = 1024MB → scale_factor = 1.0 → base limits
+        let gb1 = AggregationLimits::with_memory_budget(1024);
+        assert_eq!(gb1.max_docs_without_match, 10_000);
+        assert_eq!(gb1.max_group_count, 5_000);
+        assert_eq!(gb1.max_memory_mb, 1024);
+
+        // 4GB = 4096MB → scale_factor = 4.0 → 4x base limits
+        let gb4 = AggregationLimits::with_memory_budget(4096);
+        assert_eq!(gb4.max_docs_without_match, 40_000);
+        assert_eq!(gb4.max_group_count, 20_000);
+        assert_eq!(gb4.max_memory_mb, 4096);
+
+        // 16GB = 16384MB → scale_factor = 16.0 → 16x base limits
+        let gb16 = AggregationLimits::with_memory_budget(16384);
+        assert_eq!(gb16.max_docs_without_match, 160_000);
+        assert_eq!(gb16.max_group_count, 80_000);
+        assert_eq!(gb16.max_memory_mb, 16384);
     }
 
     #[test]
@@ -882,15 +1033,17 @@ mod tests {
 
         // Low memory profile
         let low = AggregationLimits::with_memory_budget(128);
-        assert!(low.max_docs_without_match <= 50_000);
+        assert_eq!(low.max_docs_without_match, 1_250);
 
         // Standard profile
         let standard = AggregationLimits::with_memory_budget(512);
-        assert!(standard.max_docs_without_match >= 50_000);
-        assert!(standard.max_docs_without_match <= 150_000);
+        assert_eq!(standard.max_docs_without_match, 5_000);
 
         // High memory profile
         let high = AggregationLimits::with_memory_budget(2048);
-        assert!(high.max_docs_without_match >= 150_000);
+        assert_eq!(high.max_docs_without_match, 20_000);
+
+        assert!(low.max_docs_without_match < standard.max_docs_without_match);
+        assert!(standard.max_docs_without_match < high.max_docs_without_match);
     }
 }
