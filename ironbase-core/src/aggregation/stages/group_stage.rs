@@ -218,6 +218,12 @@ impl GroupStage {
         let mut doc_count: usize = 0;
         let mut last_group_check: usize = 0;
 
+        // OOM FIX (2026-01): Adaptive check interval based on limit
+        // For small limits (e.g., 100), check every ~10 new groups
+        // For large limits (e.g., 50K), check every ~1000 docs
+        // This prevents overshooting small limits while avoiding overhead for large ones
+        let check_interval = (limits.max_group_count / 10).clamp(1, 1000);
+
         for doc_result in docs {
             let doc = doc_result?;
             doc_count += 1;
@@ -247,10 +253,10 @@ impl GroupStage {
                 }
             }
 
-            // MEMORY SAFETY: Check group count periodically
-            // Only check when a new group is added and we've processed at least 1000 more docs
-            if is_new_group && doc_count - last_group_check >= 1000 {
-                last_group_check = doc_count;
+            // MEMORY SAFETY: Check group count when new group is added
+            // Uses adaptive interval to balance overhead vs responsiveness
+            if is_new_group && groups.len() - last_group_check >= check_interval {
+                last_group_check = groups.len();
 
                 if groups.len() > limits.max_group_count {
                     return Err(IronBaseError::AggregationError(format!(

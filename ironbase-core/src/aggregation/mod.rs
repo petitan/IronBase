@@ -411,8 +411,10 @@ mod tests {
     #[test]
     fn test_aggregation_limits_low_memory() {
         let limits = AggregationLimits::low_memory();
-        assert_eq!(limits.max_docs_without_match, 10_000);
-        assert_eq!(limits.max_group_count, 5_000);
+        // OOM FIX (2026-01): low_memory() is now truly conservative
+        assert_eq!(limits.max_docs_without_match, 1_000); // Was 10K - same as default!
+        assert_eq!(limits.max_docs_with_match, 5_000); // New: limits even with $match
+        assert_eq!(limits.max_group_count, 500); // Was 5K
         assert_eq!(limits.max_memory_mb, 128);
     }
 
@@ -1225,6 +1227,96 @@ mod tests {
             err.contains("exceeded document limit"),
             "Expected doc limit error, got: {}",
             err
+        );
+    }
+
+    #[test]
+    fn test_bugfix_small_group_limit_respected() {
+        // BUG: Group count check only every 1000 docs
+        // If max_group_count=100, could create 1000+ groups before first check
+        // FIX: Adaptive check interval = max(1, limit/10)
+
+        // Create docs that each have unique group key
+        let docs: Vec<Value> = (0..200).map(|i| json!({"key": i})).collect();
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": "$key", "count": {"$sum": 1}}}
+        ]))
+        .unwrap();
+
+        // Set small group limit
+        let limits = AggregationLimits {
+            max_docs_without_match: 10000,
+            max_group_count: 50, // Small limit - should fail quickly
+            ..Default::default()
+        };
+
+        let result = pipeline.execute_streaming_with_limits(docs.into_iter().map(Ok), limits);
+
+        // Should fail with group limit exceeded
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("exceeded group limit") || err.contains("unique groups"),
+            "Expected group limit error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_bugfix_low_memory_is_conservative() {
+        // BUG: low_memory() used same limits as default (10K docs)
+        // FIX: low_memory() now uses 1K docs, 500 groups
+
+        let default = AggregationLimits::default();
+        let low = AggregationLimits::low_memory();
+
+        // low_memory should be significantly lower than default
+        assert!(
+            low.max_docs_without_match < default.max_docs_without_match,
+            "low_memory ({}) should have fewer docs than default ({})",
+            low.max_docs_without_match,
+            default.max_docs_without_match
+        );
+        assert!(
+            low.max_group_count < default.max_group_count,
+            "low_memory ({}) should have fewer groups than default ({})",
+            low.max_group_count,
+            default.max_group_count
+        );
+        assert!(
+            low.max_docs_with_match < default.max_docs_with_match,
+            "low_memory ({}) should have fewer docs with match than default ({})",
+            low.max_docs_with_match,
+            default.max_docs_with_match
+        );
+    }
+
+    #[test]
+    fn test_bugfix_max_docs_with_match_scales_down() {
+        // BUG: max_docs_with_match had minimum 10K, too high for low memory
+        // FIX: minimum reduced to 2K, and low_memory() uses 5K
+
+        // low_memory() should have lower limit than default
+        let low = AggregationLimits::low_memory();
+        let default = AggregationLimits::default();
+
+        assert!(
+            low.max_docs_with_match < default.max_docs_with_match,
+            "low_memory max_docs_with_match ({}) should be < default ({})",
+            low.max_docs_with_match,
+            default.max_docs_with_match
+        );
+
+        // low_memory() should have 5K (not 100K like before)
+        assert_eq!(low.max_docs_with_match, 5_000);
+
+        // With memory budget, minimum is 2K (enforced)
+        let tiny = AggregationLimits::with_memory_budget(32);
+        assert!(
+            tiny.max_docs_with_match >= 2_000,
+            "Should respect minimum of 2K, got {}",
+            tiny.max_docs_with_match
         );
     }
 }

@@ -131,7 +131,12 @@ impl Pipeline {
         if self.stages.is_empty() {
             // OOM FIX (2026-01): Apply document limit even for empty pipeline
             // Previously collected ALL documents without limit!
-            let doc_limit = limits.max_docs_without_match;
+            // Respect has_leading_match: if $match was extracted, use higher limit
+            let doc_limit = if self.has_leading_match {
+                limits.max_docs_with_match
+            } else {
+                limits.max_docs_without_match
+            };
             let mut results = Vec::new();
             for doc_result in docs {
                 let doc = doc_result?;
@@ -292,6 +297,9 @@ impl Pipeline {
     /// 2. Output 0 or 1 document per input ($match filters, $project transforms)
     ///
     /// NOT streamable: $sort (needs all), $unwind (1→N), $group (handled separately)
+    ///
+    /// OOM FIX (2026-01): Stages are now applied in original order.
+    /// Previously [$match, $project, $match] would run as [$match, $match, $project].
     fn apply_streamable_stages<'a, I>(
         &'a self,
         docs: I,
@@ -300,46 +308,53 @@ impl Pipeline {
     where
         I: Iterator<Item = Result<Value>> + 'a,
     {
-        // Collect all leading streamable stages
-        let mut match_stages: Vec<&MatchStage> = Vec::new();
-        let mut project_stages: Vec<&ProjectStage> = Vec::new();
+        // Collect all leading streamable stages IN ORDER
+        // OOM FIX (2026-01): Preserve order instead of grouping by type
+        enum StreamableStage<'b> {
+            Match(&'b MatchStage),
+            Project(&'b ProjectStage),
+        }
+
+        let mut stages: Vec<StreamableStage> = Vec::new();
 
         loop {
             match stage_iter.peek() {
                 Some(Stage::Match(match_stage)) => {
-                    match_stages.push(match_stage);
+                    stages.push(StreamableStage::Match(match_stage));
                     stage_iter.next();
                 }
                 Some(Stage::Project(project_stage)) => {
-                    project_stages.push(project_stage);
+                    stages.push(StreamableStage::Project(project_stage));
                     stage_iter.next();
                 }
                 _ => break, // Non-streamable stage or end
             }
         }
 
-        if match_stages.is_empty() && project_stages.is_empty() {
+        if stages.is_empty() {
             return Box::new(docs);
         }
 
-        // Create streaming iterator that applies all filters and projections
+        // Create streaming iterator that applies stages IN ORDER
         Box::new(docs.filter_map(move |doc_result| {
             match doc_result {
                 Ok(mut doc) => {
-                    // Apply all $match filters first
-                    for match_stage in &match_stages {
-                        match match_stage.matches(&doc) {
-                            Ok(true) => {}                 // Continue checking other match stages
-                            Ok(false) => return None,      // Filtered out
-                            Err(e) => return Some(Err(e)), // Propagate error
-                        }
-                    }
-
-                    // Apply all $project transformations
-                    for project_stage in &project_stages {
-                        match project_stage.project_one(&doc) {
-                            Ok(projected) => doc = projected,
-                            Err(e) => return Some(Err(e)),
+                    // Apply stages in original pipeline order
+                    for stage in &stages {
+                        match stage {
+                            StreamableStage::Match(match_stage) => {
+                                match match_stage.matches(&doc) {
+                                    Ok(true) => {}            // Continue
+                                    Ok(false) => return None, // Filtered out
+                                    Err(e) => return Some(Err(e)),
+                                }
+                            }
+                            StreamableStage::Project(project_stage) => {
+                                match project_stage.project_one(&doc) {
+                                    Ok(projected) => doc = projected,
+                                    Err(e) => return Some(Err(e)),
+                                }
+                            }
                         }
                     }
 
