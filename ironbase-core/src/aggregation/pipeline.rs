@@ -129,8 +129,23 @@ impl Pipeline {
         I: Iterator<Item = Result<Value>>,
     {
         if self.stages.is_empty() {
-            // Collect all if no stages
-            return docs.collect();
+            // OOM FIX (2026-01): Apply document limit even for empty pipeline
+            // Previously collected ALL documents without limit!
+            let doc_limit = limits.max_docs_without_match;
+            let mut results = Vec::new();
+            for doc_result in docs {
+                let doc = doc_result?;
+                results.push(doc);
+                if results.len() > doc_limit {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "Empty pipeline exceeded document limit: {} documents. \
+                         Add pipeline stages or use find() instead. Limit: {}",
+                        results.len(),
+                        doc_limit
+                    )));
+                }
+            }
+            return Ok(results);
         }
 
         let mut stage_iter = self.stages.iter().peekable();
@@ -175,34 +190,77 @@ impl Pipeline {
         });
 
         // Phase 2: Check for $group stage (main optimization target)
-        let materialized = if let Some(Stage::Group(group_stage)) = stage_iter.peek() {
-            // Pass limits to group stage for cardinality checking
-            let result = group_stage.execute_streaming_with_limits(counted_iter, limits)?;
-            stage_iter.next(); // consume the $group stage
-            result
-        } else {
-            // No $group - materialize streamed results with limit check
-            let mut results = Vec::new();
-            for doc_result in counted_iter {
-                let doc = doc_result?;
-                results.push(doc);
+        // Collect remaining stages first to enable early limit detection
+        let remaining_stages: Vec<&Stage> = stage_iter.collect();
 
-                // Final limit check
-                if results.len() > doc_limit {
-                    return Err(IronBaseError::AggregationError(format!(
-                        "Aggregation exceeded document limit: {} documents without $match. \
-                         Add a $match stage to filter documents. Limit: {}",
-                        results.len(),
-                        doc_limit
-                    )));
+        let (materialized, stages_consumed) =
+            if let Some(Stage::Group(group_stage)) = remaining_stages.first() {
+                // Pass limits to group stage for cardinality checking
+                let result = group_stage.execute_streaming_with_limits(counted_iter, limits)?;
+                (result, 1) // consumed 1 stage ($group)
+            } else {
+                // No $group - check for early $limit/$skip optimization
+                // OOM FIX (2026-01): Apply $limit during streaming, not after materialization
+                let early_limit = Self::detect_early_limit(remaining_stages.iter().copied());
+
+                // CRITICAL: User's $limit MUST NOT bypass doc_limit protection!
+                // If user specifies $limit: 1_000_000 but doc_limit is 10K, use 10K.
+                let effective_limit = match early_limit {
+                    Some((skip, user_limit, stages)) => {
+                        // The effective limit includes skip count + materialized docs
+                        // e.g., $skip: 100, $limit: 50 → we need 150 docs total from source
+                        let total_needed = skip.saturating_add(user_limit);
+                        let safe_limit = total_needed.min(doc_limit);
+                        Some((
+                            skip,
+                            user_limit.min(safe_limit.saturating_sub(skip)),
+                            stages,
+                        ))
+                    }
+                    None => None,
+                };
+
+                let mut results = Vec::new();
+                let mut skipped = 0;
+                let mut total_processed = 0usize;
+
+                for doc_result in counted_iter {
+                    let doc = doc_result?;
+                    total_processed += 1;
+
+                    // Always check doc_limit, regardless of early limit
+                    if total_processed > doc_limit {
+                        return Err(IronBaseError::AggregationError(format!(
+                            "Aggregation exceeded document limit: {} documents processed. \
+                             Add a $match stage to filter documents. Limit: {}",
+                            total_processed, doc_limit
+                        )));
+                    }
+
+                    // Early termination if we have enough docs (OOM FIX)
+                    if let Some((skip, limit, _)) = effective_limit {
+                        // Skip documents first (MongoDB semantics)
+                        if skipped < skip {
+                            skipped += 1;
+                            continue; // Skip without materializing
+                        }
+                        // Check if we have enough documents
+                        if results.len() >= limit {
+                            break; // EARLY EXIT - don't load more!
+                        }
+                    }
+
+                    results.push(doc);
                 }
-            }
-            results
-        };
+
+                let consumed = effective_limit.map(|(_, _, c)| c).unwrap_or(0);
+                (results, consumed)
+            };
 
         // Phase 3: Execute remaining stages on materialized results
-        // Apply Top-K optimization if $sort → $limit pattern detected
-        let remaining_stages: Vec<&Stage> = stage_iter.collect();
+        // Skip stages that were already applied during Phase 2
+        let remaining_stages: Vec<&Stage> =
+            remaining_stages.into_iter().skip(stages_consumed).collect();
         let opt = analyze_pipeline(
             &remaining_stages
                 .iter()
@@ -220,7 +278,8 @@ impl Pipeline {
                     continue;
                 }
             }
-            docs = stage.execute(docs)?;
+            // Use execute_with_limits to pass limits to stages that need them (e.g., $unwind)
+            docs = stage.execute_with_limits(docs, limits)?;
         }
 
         Ok(docs)
@@ -296,6 +355,41 @@ impl Pipeline {
     pub fn stages(&self) -> &[Stage] {
         &self.stages
     }
+
+    /// Detect if remaining stages start with $skip/$limit that can be applied early
+    /// during materialization to prevent loading all documents.
+    ///
+    /// Returns (skip_count, limit_count, stages_to_remove) if early limit is applicable.
+    /// The stages_to_remove is how many leading $skip/$limit stages were consumed.
+    ///
+    /// Example: [$skip: 10, $limit: 5] → (10, 5, 2)
+    /// Example: [$limit: 5] → (0, 5, 1)
+    /// Example: [$sort, $limit: 5] → None (can't apply early, $sort needs all docs)
+    fn detect_early_limit<'a, I>(stages: I) -> Option<(usize, usize, usize)>
+    where
+        I: Iterator<Item = &'a Stage>,
+    {
+        let mut skip = 0;
+        let mut limit = None;
+        let mut stages_consumed = 0;
+
+        for stage in stages {
+            match stage {
+                Stage::Skip(s) => {
+                    skip += s.skip;
+                    stages_consumed += 1;
+                }
+                Stage::Limit(l) => {
+                    limit = Some(l.limit);
+                    stages_consumed += 1;
+                    break; // $limit terminates early detection
+                }
+                _ => break, // Non-streamable stage encountered, stop
+            }
+        }
+
+        limit.map(|l| (skip, l, stages_consumed))
+    }
 }
 
 impl Stage {
@@ -340,6 +434,20 @@ impl Stage {
             Stage::Limit(stage) => stage.execute(docs),
             Stage::Skip(stage) => stage.execute(docs),
             Stage::Unwind(stage) => stage.execute(docs),
+        }
+    }
+
+    /// Execute this stage with explicit limits
+    /// Currently only affects $unwind (uses max_unwind_output from limits)
+    pub(crate) fn execute_with_limits(
+        &self,
+        docs: Vec<Value>,
+        limits: AggregationLimits,
+    ) -> Result<Vec<Value>> {
+        match self {
+            Stage::Unwind(stage) => stage.execute_with_limit(docs, limits.max_unwind_output),
+            // Other stages don't currently use limits in execute (they stream or have own limits)
+            _ => self.execute(docs),
         }
     }
 }

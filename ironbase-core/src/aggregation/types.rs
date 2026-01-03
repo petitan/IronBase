@@ -66,7 +66,10 @@ pub struct AggregationLimits {
 impl Default for AggregationLimits {
     fn default() -> Self {
         Self {
-            max_docs_without_match: 100_000,
+            // OOM FIX (2026-01): Reduced from 100K to 10K
+            // 10K docs × 100KB avg = ~1GB max memory - safe for most systems
+            // Use aggregate_auto() or explicit $match for larger collections
+            max_docs_without_match: 10_000,
             max_docs_with_match: 1_000_000,
             max_group_count: 50_000,
             max_push_elements: 100_000,
@@ -85,14 +88,14 @@ impl AggregationLimits {
     /// - Scales doc/group limits proportionally
     /// - Falls back to `low_memory()` if detection fails
     ///
-    /// # Scaling table
-    /// | Available RAM | max_memory_mb | max_docs | max_groups |
-    /// |---------------|---------------|----------|------------|
-    /// | < 512 MB      | 64            | 10K      | 5K         |
-    /// | 512MB - 2GB   | 128           | 50K      | 25K        |
-    /// | 2GB - 8GB     | 256           | 100K     | 50K        |
-    /// | 8GB - 32GB    | 512           | 250K     | 100K       |
-    /// | > 32GB        | 1024          | 500K     | 250K       |
+    /// # Scaling table (OOM FIX 2026-01: reduced base from 100K to 10K)
+    /// | Available RAM | max_memory_mb | max_docs_without_match | max_groups |
+    /// |---------------|---------------|------------------------|------------|
+    /// | < 512 MB      | 64            | 1K                     | 500        |
+    /// | 512MB - 2GB   | 128           | 5K                     | 2.5K       |
+    /// | 2GB - 8GB     | 256           | 10K                    | 5K         |
+    /// | 8GB - 32GB    | 512           | 25K                    | 10K        |
+    /// | > 32GB        | 1024          | 50K                    | 25K        |
     ///
     /// # Example
     /// ```rust,ignore
@@ -126,14 +129,16 @@ impl AggregationLimits {
 
         Self {
             // Document limits scale with memory
-            max_docs_without_match: ((100_000.0 * scale_factor) as usize).max(10_000),
-            max_docs_with_match: ((1_000_000.0 * scale_factor) as usize).max(100_000),
+            // OOM FIX (2026-01): Reduced base from 100K to 10K
+            // Even with 8GB RAM, 100K docs × 100KB = 10GB > RAM!
+            max_docs_without_match: ((10_000.0 * scale_factor) as usize).max(1_000),
+            max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(10_000),
 
-            // Group/accumulator limits
-            max_group_count: ((50_000.0 * scale_factor) as usize).max(5_000),
-            max_push_elements: ((100_000.0 * scale_factor) as usize).max(10_000),
-            max_addtoset_elements: ((100_000.0 * scale_factor) as usize).max(10_000),
-            max_unwind_output: ((1_000_000.0 * scale_factor) as usize).max(100_000),
+            // Group/accumulator limits (also reduced proportionally)
+            max_group_count: ((5_000.0 * scale_factor) as usize).max(500),
+            max_push_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
+            max_addtoset_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
+            max_unwind_output: ((100_000.0 * scale_factor) as usize).max(10_000),
 
             // Memory limit
             max_memory_mb,
@@ -145,8 +150,17 @@ impl AggregationLimits {
     /// Scales all limits proportionally to the given memory budget.
     /// Use this when you want precise control over memory usage.
     ///
+    /// # Scaling table
+    /// | Budget     | max_docs_without_match | max_groups |
+    /// |------------|------------------------|------------|
+    /// | 64 MB      | 1K (minimum)           | 500        |
+    /// | 256 MB     | 2.5K                   | 1.25K      |
+    /// | 1 GB       | 10K                    | 5K         |
+    /// | 4 GB       | 40K                    | 20K        |
+    /// | 16 GB      | 160K                   | 80K        |
+    ///
     /// # Arguments
-    /// * `memory_mb` - Maximum memory to use in megabytes (min: 64)
+    /// * `memory_mb` - Maximum memory to use in megabytes (min: 64, no upper limit)
     ///
     /// # Example
     /// ```rust,ignore
@@ -155,19 +169,27 @@ impl AggregationLimits {
     /// // Limit aggregation to 256 MB
     /// let limits = AggregationLimits::with_memory_budget(256);
     /// collection.aggregate_with_limits(&pipeline, limits)?;
+    ///
+    /// // Large memory budget (16 GB) for heavy aggregations
+    /// let limits = AggregationLimits::with_memory_budget(16384);
     /// ```
     pub fn with_memory_budget(memory_mb: usize) -> Self {
-        // Scale relative to 512MB baseline
-        let scale = (memory_mb as f64 / 512.0).clamp(0.25, 4.0);
+        // Minimum 64MB, no upper limit (allow large memory systems to scale)
+        let effective_budget = memory_mb.max(64);
+
+        // Scale factor: 1.0 at 1GB budget, proportionally more/less for other values
+        // This means at 1GB budget, you get the "base" limits (10K docs, 5K groups)
+        // At 4GB → 4x limits, at 16GB → 16x limits
+        let scale_factor = (effective_budget as f64 / 1024.0).max(0.1);
 
         Self {
-            max_docs_without_match: ((100_000.0 * scale) as usize).max(10_000),
-            max_docs_with_match: ((1_000_000.0 * scale) as usize).max(100_000),
-            max_group_count: ((50_000.0 * scale) as usize).max(5_000),
-            max_push_elements: ((100_000.0 * scale) as usize).max(10_000),
-            max_addtoset_elements: ((100_000.0 * scale) as usize).max(10_000),
-            max_unwind_output: ((1_000_000.0 * scale) as usize).max(100_000),
-            max_memory_mb: memory_mb.max(64),
+            max_docs_without_match: ((10_000.0 * scale_factor) as usize).max(1_000),
+            max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(10_000),
+            max_group_count: ((5_000.0 * scale_factor) as usize).max(500),
+            max_push_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
+            max_addtoset_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
+            max_unwind_output: ((100_000.0 * scale_factor) as usize).max(10_000),
+            max_memory_mb: effective_budget,
         }
     }
 
