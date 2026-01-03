@@ -1,6 +1,7 @@
 // src/aggregation/stages/unwind_stage.rs
 // $unwind stage implementation
 
+use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::types::UnwindStage;
 use crate::error::{IronBaseError, Result};
 use crate::value_utils::{get_nested_value, set_nested_value};
@@ -169,6 +170,100 @@ impl UnwindStage {
                             output_count, max_output
                         )));
                     }
+                    if let Some(ref index_field) = self.include_array_index {
+                        let mut new_doc = doc.clone();
+                        set_nested_value(
+                            &mut new_doc,
+                            index_field,
+                            Value::Number(serde_json::Number::from(0)),
+                        );
+                        results.push(new_doc);
+                    } else {
+                        results.push(doc);
+                    }
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Execute $unwind with centralized context for limit tracking
+    ///
+    /// Uses AggregationLimitContext for:
+    /// - Unwind output count tracking (increment_unwind)
+    /// - Consistent error messages
+    ///
+    /// This method integrates with the unified limit system introduced in 2026-01.
+    #[allow(dead_code)] // Will be used in pipeline.rs integration
+    pub(crate) fn execute_with_context_impl(
+        &self,
+        docs: Vec<Value>,
+        ctx: &AggregationLimitContext,
+    ) -> Result<Vec<Value>> {
+        let mut results = Vec::new();
+
+        for doc in docs {
+            let array_value = get_nested_value(&doc, &self.path);
+
+            match array_value {
+                Some(Value::Array(arr)) if !arr.is_empty() => {
+                    // Check limit via context BEFORE processing array
+                    let arr_len = arr.len();
+
+                    // try_reserve for this batch
+                    results.try_reserve(arr_len).map_err(|_| {
+                        IronBaseError::OutOfMemory(format!(
+                            "$unwind failed to allocate memory for {} elements at path '{}'",
+                            arr_len, self.path
+                        ))
+                    })?;
+
+                    for (index, element) in arr.iter().enumerate() {
+                        let mut new_doc = doc.clone();
+
+                        set_nested_value(&mut new_doc, &self.path, element.clone());
+
+                        if let Some(ref index_field) = self.include_array_index {
+                            set_nested_value(
+                                &mut new_doc,
+                                index_field,
+                                Value::Number(serde_json::Number::from(index)),
+                            );
+                        }
+
+                        results.push(new_doc);
+                    }
+
+                    // Increment unwind counter in context (batch increment)
+                    ctx.increment_unwind(arr_len)?;
+                }
+                Some(Value::Array(_)) => {
+                    // Empty array
+                    if self.preserve_null_and_empty_arrays {
+                        ctx.increment_unwind(1)?;
+                        let mut new_doc = doc.clone();
+                        set_nested_value(&mut new_doc, &self.path, Value::Null);
+                        results.push(new_doc);
+                    }
+                }
+                None => {
+                    if self.preserve_null_and_empty_arrays {
+                        ctx.increment_unwind(1)?;
+                        let mut new_doc = doc.clone();
+                        set_nested_value(&mut new_doc, &self.path, Value::Null);
+                        results.push(new_doc);
+                    }
+                }
+                Some(Value::Null) => {
+                    if self.preserve_null_and_empty_arrays {
+                        ctx.increment_unwind(1)?;
+                        results.push(doc);
+                    }
+                }
+                Some(_) => {
+                    // Non-array value - treat as single element
+                    ctx.increment_unwind(1)?;
                     if let Some(ref index_field) = self.include_array_index {
                         let mut new_doc = doc.clone();
                         set_nested_value(
