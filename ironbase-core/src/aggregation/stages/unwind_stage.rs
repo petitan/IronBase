@@ -208,10 +208,14 @@ impl UnwindStage {
 
             match array_value {
                 Some(Value::Array(arr)) if !arr.is_empty() => {
-                    // Check limit via context BEFORE processing array
                     let arr_len = arr.len();
 
-                    // try_reserve for this batch
+                    // CRITICAL FIX (2026-01): Check limit BEFORE any allocation!
+                    // OLD (BAD): push → increment → fail = memory already allocated
+                    // NEW (GOOD): check → try_reserve → push = fail fast before alloc
+                    ctx.check_unwind_would_exceed(arr_len)?;
+
+                    // try_reserve for this batch (after limit check passes)
                     results.try_reserve(arr_len).map_err(|_| {
                         IronBaseError::OutOfMemory(format!(
                             "$unwind failed to allocate memory for {} elements at path '{}'",
@@ -235,7 +239,7 @@ impl UnwindStage {
                         results.push(new_doc);
                     }
 
-                    // Increment unwind counter in context (batch increment)
+                    // Increment counter AFTER successful processing
                     ctx.increment_unwind(arr_len)?;
                 }
                 Some(Value::Array(_)) => {

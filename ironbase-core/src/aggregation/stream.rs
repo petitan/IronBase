@@ -155,51 +155,59 @@ where
 /// // remaining_idx points to the first $group/$sort/$unwind stage
 /// ```
 #[allow(dead_code)] // Phase 2: will be used in pipeline.rs
-pub fn chain_streamable_stages<I>(
+pub fn chain_streamable_stages<'a, I>(
     docs: I,
-    stages: &[Stage],
+    stages: &'a [Stage],
     ctx: AggregationLimitContext,
-) -> (Box<dyn Iterator<Item = Result<Value>> + '_>, usize)
+) -> (Box<dyn Iterator<Item = Result<Value>> + 'a>, usize)
 where
-    I: Iterator<Item = Result<Value>> + 'static,
+    I: Iterator<Item = Result<Value>> + 'a,
 {
-    let mut iter: Box<dyn Iterator<Item = Result<Value>>> = Box::new(docs);
+    enum StreamableStage<'b> {
+        Match(&'b MatchStage),
+        Project(&'b ProjectStage),
+    }
+
+    let mut collected: Vec<StreamableStage> = Vec::new();
     let mut consumed = 0;
-    let mut has_match = false;
 
     for stage in stages {
         match stage {
             Stage::Match(m) => {
-                // $match includes counting internally
-                iter = Box::new(MatchIterator::new(iter, m.clone(), ctx.clone()));
+                collected.push(StreamableStage::Match(m));
                 consumed += 1;
-                has_match = true;
             }
             Stage::Project(p) => {
-                // If no $match before $project, add counting first
-                if !has_match && consumed == 0 {
-                    iter = Box::new(CountingIterator::new(iter, ctx.clone()));
-                }
-                iter = Box::new(ProjectIterator::new(iter, p.clone()));
+                collected.push(StreamableStage::Project(p));
                 consumed += 1;
             }
-            // Non-streamable stages stop the chain
-            _ => {
-                // If no streamable stages and no $match, add counting
-                if !has_match && consumed == 0 {
-                    iter = Box::new(CountingIterator::new(iter, ctx.clone()));
-                }
-                break;
-            }
+            _ => break,
         }
     }
 
-    // If we processed all stages and none were $match, ensure counting
-    if !has_match && consumed > 0 {
-        // Already processed via $project path above
-    } else if !has_match && consumed == 0 && stages.is_empty() {
-        // Empty stages - add counting
-        iter = Box::new(CountingIterator::new(iter, ctx));
+    if collected.is_empty() {
+        return (Box::new(CountingIterator::new(docs, ctx)), 0);
+    }
+
+    let has_match_stage = collected
+        .iter()
+        .any(|s| matches!(s, StreamableStage::Match(_)));
+
+    let mut iter: Box<dyn Iterator<Item = Result<Value>> + 'a> = if has_match_stage {
+        Box::new(docs)
+    } else {
+        Box::new(CountingIterator::new(docs, ctx.clone()))
+    };
+
+    for stage in collected {
+        match stage {
+            StreamableStage::Match(m) => {
+                iter = Box::new(MatchIterator::new(iter, m.clone(), ctx.clone()));
+            }
+            StreamableStage::Project(p) => {
+                iter = Box::new(ProjectIterator::new(iter, p.clone()));
+            }
+        }
     }
 
     (iter, consumed)
@@ -209,12 +217,9 @@ where
 ///
 /// Use this when there's no leading $match to ensure document limits are enforced.
 #[allow(dead_code)] // Phase 2: will be used in pipeline.rs
-pub fn with_counting<I>(
-    docs: I,
-    ctx: AggregationLimitContext,
-) -> impl Iterator<Item = Result<Value>>
+pub fn with_counting<'a, I>(docs: I, ctx: AggregationLimitContext) -> CountingIterator<I>
 where
-    I: Iterator<Item = Result<Value>>,
+    I: Iterator<Item = Result<Value>> + 'a,
 {
     CountingIterator::new(docs, ctx)
 }

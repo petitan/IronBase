@@ -2027,102 +2027,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         pipeline_json: &Value,
         limits: crate::aggregation::AggregationLimits,
     ) -> Result<Vec<Value>> {
-        self.check_not_closed()?;
-        use crate::aggregation::Pipeline;
-
-        // Parse pipeline
-        let mut pipeline = Pipeline::from_json(pipeline_json)?;
-
-        // INDEX OPTIMIZATION (2024-12):
-        // If the first stage is $match, extract it and use indexed find_streaming()
-        // instead of scanning all documents.
-        //
-        // Benefit: 10-1000x speedup for selective aggregations
-        // Example: $match on indexed field reduces 49K docs to 1K before $group
-        let match_query = pipeline.extract_leading_match();
-
-        // MEMORY SAFETY (2026-01):
-        // Track if we had a leading $match - this affects document limits
-        let had_match = match_query.is_some();
-        pipeline.set_has_leading_match(had_match);
-
-        let query = match_query.unwrap_or_else(|| serde_json::json!({}));
-
-        log_debug!(
-            "aggregate: using query {:?} for initial document selection (has_match: {})",
-            query,
-            had_match
-        );
-
-        // INDEX-BASED $GROUP OPTIMIZATION (2026-01):
-        // When there's NO leading $match and the first stage is $group with:
-        // - Single field group key: {"_id": "$field"}
-        // - All accumulators are $sum with constant (counting)
-        // - Single-field index exists on the group key
-        // We can compute results directly from index entries without loading ANY documents!
-        //
-        // Performance: 78K emails (39GB) → ~50MB index scan = 100-1000x faster
-        if !had_match {
-            if let Some(group_stage) = pipeline.peek_leading_group() {
-                let indexes = self.indexes.read();
-                if let Some(mut indexed_result) =
-                    group_stage.try_index_based_execute(&indexes, limits)
-                {
-                    log_debug!(
-                        "aggregate: used index-based $group optimization ({} groups)",
-                        indexed_result.len()
-                    );
-                    drop(indexes); // Release lock before pipeline execution
-
-                    // Remove the $group stage since we already executed it
-                    pipeline.remove_leading_group();
-
-                    // Execute remaining stages ($sort, $limit, etc.) on indexed results
-                    // Apply Top-K optimization if $sort → $limit pattern detected
-                    use crate::aggregation::optimizer::analyze_pipeline;
-                    let opt = analyze_pipeline(&pipeline.stages);
-
-                    for (i, stage) in pipeline.stages.iter().enumerate() {
-                        use crate::aggregation::Stage;
-                        if let Stage::Sort(sort_stage) = stage {
-                            if opt.sort_stage_index == Some(i) && opt.sort_limit_hint.is_some() {
-                                indexed_result = sort_stage
-                                    .execute_with_limit_hint(indexed_result, opt.sort_limit_hint)?;
-                                continue;
-                            }
-                        }
-                        indexed_result = stage.execute(indexed_result)?;
-                    }
-
-                    return Ok(indexed_result);
-                }
-            }
-        }
-
-        // STREAMING OPTIMIZATION (2024-12):
-        // Use cursor-based document loading to avoid loading all docs into memory.
-        //
-        // Memory comparison for 650K emails grouped by sender:
-        // - OLD (find + execute): 650K × 800 bytes = ~500MB loaded upfront
-        // - NEW (streaming): ~0MB for docs (processed one at a time) + ~640KB for groups
-        //
-        // The streaming pipeline:
-        // 1. Uses find_streaming() with $match query (uses index if available!)
-        // 2. Streams docs through remaining stages ($group, etc.)
-        // 3. Materializes for final stages ($sort, $limit, etc.)
-
-        // Get streaming cursor - uses index if match_query has indexed field
-        let mut cursor = self.find_streaming(&query)?;
-
-        // Create iterator that yields Result<Value> from cursor
-        let doc_iter = std::iter::from_fn(move || match cursor.next() {
-            Ok(Some(doc)) => Some(Ok(doc)),
-            Ok(None) => None,
-            Err(e) => Some(Err(e)),
-        });
-
-        // Execute remaining pipeline stages with streaming and limits
-        pipeline.execute_streaming_with_limits(doc_iter, limits)
+        let ctx = crate::aggregation::AggregationLimitContext::new(limits);
+        self.aggregate_with_context_internal(pipeline_json, &ctx)
     }
 
     /// Run aggregation with automatic memory-based limits
@@ -2179,6 +2085,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         pipeline_json: &Value,
         ctx: &crate::aggregation::AggregationLimitContext,
     ) -> Result<Vec<Value>> {
+        self.aggregate_with_context_internal(pipeline_json, ctx)
+    }
+
+    fn aggregate_with_context_internal(
+        &self,
+        pipeline_json: &Value,
+        ctx: &crate::aggregation::AggregationLimitContext,
+    ) -> Result<Vec<Value>> {
         self.check_not_closed()?;
         use crate::aggregation::Pipeline;
 
@@ -2190,7 +2104,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let had_match = match_query.is_some();
         pipeline.set_has_leading_match(had_match);
 
-        // Set context flag BEFORE any processing
+        // Inform context so it can pick correct doc limit bucket
         ctx.set_leading_match(had_match);
 
         let query = match_query.unwrap_or_else(|| serde_json::json!({}));
@@ -2202,13 +2116,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         );
 
         // INDEX-BASED $GROUP OPTIMIZATION
-        // NOTE: Index path uses ctx.increment_index_entries() for limit checking
+        // Uses context for both entry counting and group cardinality checks
         if !had_match {
             if let Some(group_stage) = pipeline.peek_leading_group() {
                 let indexes = self.indexes.read();
-                if let Some(mut indexed_result) =
-                    group_stage.try_index_based_execute_with_context(&indexes, ctx)
-                {
+                ctx.enter_streaming_group();
+                let indexed_opt = group_stage.try_index_based_execute_with_context(&indexes, ctx);
+                if let Some(mut indexed_result) = indexed_opt {
+                    ctx.exit_streaming_group(indexed_result.len());
                     log_debug!(
                         "aggregate_with_context: index-based $group ({} groups)",
                         indexed_result.len()
@@ -2217,28 +2132,39 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     pipeline.remove_leading_group();
 
-                    // Execute remaining stages with context
-                    for stage in pipeline.stages.iter() {
+                    use crate::aggregation::optimizer::analyze_pipeline;
+                    let opt = analyze_pipeline(&pipeline.stages);
+
+                    for (i, stage) in pipeline.stages.iter().enumerate() {
+                        use crate::aggregation::Stage;
+                        if let Stage::Sort(sort_stage) = stage {
+                            if opt.sort_stage_index == Some(i) && opt.sort_limit_hint.is_some() {
+                                indexed_result = sort_stage
+                                    .execute_with_limit_hint(indexed_result, opt.sort_limit_hint)?;
+                                continue;
+                            }
+                        }
                         indexed_result = stage.execute_with_context(indexed_result, ctx)?;
                     }
 
                     return Ok(indexed_result);
+                } else {
+                    ctx.exit_streaming_group(0);
                 }
             }
         }
 
         // STREAMING EXECUTION with context
-        // Collect documents first due to lifetime constraints (cursor borrows self)
-        // The pipeline.execute_with_context handles all limit checking via context
+        // Get streaming cursor - uses index if match_query has indexed field
         let mut cursor = self.find_streaming(&query)?;
-        let mut docs: Vec<Result<Value>> = Vec::new();
+        let doc_iter = std::iter::from_fn(move || match cursor.next() {
+            Ok(Some(doc)) => Some(Ok(doc)),
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        });
 
-        while let Ok(Some(doc)) = cursor.next() {
-            docs.push(Ok(doc));
-        }
-
-        // Execute pipeline with context - all limit checking happens inside
-        pipeline.execute_with_context(docs.into_iter(), ctx)
+        // Execute pipeline with streaming iterator and centralized limits
+        pipeline.execute_with_context(doc_iter, ctx)
     }
 
     // ========== TRANSACTION OPERATIONS ==========

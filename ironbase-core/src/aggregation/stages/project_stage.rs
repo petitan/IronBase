@@ -6,7 +6,7 @@ use crate::aggregation::types::{
     ReduceInExpr,
 };
 use crate::error::{IronBaseError, Result};
-use crate::value_utils::get_nested_value;
+use crate::value_utils::{get_nested_value, set_nested_value};
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -46,6 +46,26 @@ impl ProjectStage {
                 };
 
                 fields.insert(field.clone(), project_field);
+            }
+
+            // MongoDB validation: Cannot mix include and exclude (except _id)
+            // e.g., {"name": 1, "age": 0} is invalid (unless "age" is "_id")
+            let has_include = fields.iter().any(|(_, f)| {
+                matches!(
+                    f,
+                    ProjectField::Include | ProjectField::Rename(_) | ProjectField::Expression(_)
+                )
+            });
+            let has_non_id_exclude = fields
+                .iter()
+                .any(|(k, f)| matches!(f, ProjectField::Exclude) && k != "_id");
+
+            if has_include && has_non_id_exclude {
+                return Err(IronBaseError::AggregationError(
+                    "Cannot mix inclusion and exclusion in $project (except for _id). \
+                     Use either {field: 1} for inclusion or {field: 0} for exclusion."
+                        .to_string(),
+                ));
             }
 
             Ok(ProjectStage { fields })
@@ -407,26 +427,49 @@ impl ProjectStage {
             let include_mode = has_inclusions && !has_non_id_exclusions;
 
             if include_mode {
+                // MongoDB behavior: In include mode, _id is automatically included
+                // UNLESS explicitly excluded with {"_id": 0}
+                let id_explicitly_excluded = self
+                    .fields
+                    .get("_id")
+                    .map(|f| matches!(f, ProjectField::Exclude))
+                    .unwrap_or(false);
+
+                if !id_explicitly_excluded {
+                    // Auto-include _id from source document
+                    if let Some(id_value) = obj.get("_id") {
+                        result.insert("_id".to_string(), id_value.clone());
+                    }
+                }
+
+                // Build result as Value for nested field support
+                let mut result_value = Value::Object(result);
+
                 for (field, action) in &self.fields {
                     match action {
                         ProjectField::Include => {
                             if let Some(value) = get_nested_value(doc, field) {
-                                result.insert(field.clone(), value.clone());
+                                // MongoDB behavior: dot-notation creates nested structure
+                                // e.g., {"user.name": 1} → {user: {name: ...}}
+                                set_nested_value(&mut result_value, field, value.clone());
                             }
                         }
                         ProjectField::Rename(source) => {
                             let source_field = source.trim_start_matches('$');
                             if let Some(value) = get_nested_value(doc, source_field) {
-                                result.insert(field.clone(), value.clone());
+                                // Target field also supports dot-notation
+                                set_nested_value(&mut result_value, field, value.clone());
                             }
                         }
                         ProjectField::Expression(expr) => {
                             let value = Self::evaluate_expression(expr, doc);
-                            result.insert(field.clone(), value);
+                            set_nested_value(&mut result_value, field, value);
                         }
                         ProjectField::Exclude => {}
                     }
                 }
+
+                return Ok(result_value);
             } else {
                 for (field, value) in obj {
                     if let Some(action) = self.fields.get(field) {
@@ -815,5 +858,92 @@ mod tests {
         let result = stage.execute(vec![doc]).unwrap();
 
         assert_eq!(result[0]["total"], Value::Null);
+    }
+
+    // ========== MongoDB Compatibility Tests ==========
+
+    #[test]
+    fn test_project_include_mode_auto_includes_id() {
+        // MongoDB behavior: _id is automatically included in include mode
+        let stage = ProjectStage::from_json(&json!({
+            "name": 1
+        }))
+        .unwrap();
+
+        let doc = json!({"_id": 42, "name": "Alice", "age": 30});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        // Should have both _id and name
+        assert_eq!(result[0]["_id"], json!(42));
+        assert_eq!(result[0]["name"], json!("Alice"));
+        assert!(result[0].get("age").is_none());
+    }
+
+    #[test]
+    fn test_project_include_mode_explicit_exclude_id() {
+        // MongoDB behavior: _id can be explicitly excluded with {"_id": 0}
+        let stage = ProjectStage::from_json(&json!({
+            "_id": 0,
+            "name": 1
+        }))
+        .unwrap();
+
+        let doc = json!({"_id": 42, "name": "Alice", "age": 30});
+        let result = stage.execute(vec![doc]).unwrap();
+
+        // Should have only name (no _id)
+        assert!(result[0].get("_id").is_none());
+        assert_eq!(result[0]["name"], json!("Alice"));
+    }
+
+    #[test]
+    fn test_project_dot_notation_creates_nested_structure() {
+        // MongoDB behavior: {"user.name": 1} → {user: {name: ...}}
+        let stage = ProjectStage::from_json(&json!({
+            "user.name": 1,
+            "user.email": 1
+        }))
+        .unwrap();
+
+        let doc = json!({
+            "_id": 1,
+            "user": {
+                "name": "Alice",
+                "email": "alice@example.com",
+                "password": "secret"
+            }
+        });
+        let result = stage.execute(vec![doc]).unwrap();
+
+        // Should create nested structure
+        assert_eq!(result[0]["_id"], json!(1)); // auto-included
+        assert_eq!(result[0]["user"]["name"], json!("Alice"));
+        assert_eq!(result[0]["user"]["email"], json!("alice@example.com"));
+        assert!(result[0]["user"].get("password").is_none());
+    }
+
+    #[test]
+    fn test_project_mixed_include_exclude_rejected() {
+        // MongoDB behavior: Cannot mix include and exclude (except _id)
+        let result = ProjectStage::from_json(&json!({
+            "name": 1,
+            "age": 0  // This is invalid - mixing include and exclude
+        }));
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("mix"), "Error should mention mixing: {}", err);
+    }
+
+    #[test]
+    fn test_project_id_exclude_with_include_is_valid() {
+        // MongoDB behavior: _id: 0 is allowed with other includes
+        let result = ProjectStage::from_json(&json!({
+            "_id": 0,
+            "name": 1,
+            "age": 1
+        }));
+
+        assert!(result.is_ok(), "Should allow _id: 0 with includes");
     }
 }
