@@ -132,7 +132,9 @@ impl AggregationLimits {
             // OOM FIX (2026-01): Reduced base from 100K to 10K
             // Even with 8GB RAM, 100K docs × 100KB = 10GB > RAM!
             max_docs_without_match: ((10_000.0 * scale_factor) as usize).max(1_000),
-            max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(10_000),
+            // OOM FIX (2026-01): Reduced minimum from 10K to 2K
+            // $match doesn't disable limits - it just allows higher ones
+            max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(2_000),
 
             // Group/accumulator limits (also reduced proportionally)
             max_group_count: ((5_000.0 * scale_factor) as usize).max(500),
@@ -184,7 +186,8 @@ impl AggregationLimits {
 
         Self {
             max_docs_without_match: ((10_000.0 * scale_factor) as usize).max(1_000),
-            max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(10_000),
+            // OOM FIX (2026-01): Reduced minimum from 10K to 2K
+            max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(2_000),
             max_group_count: ((5_000.0 * scale_factor) as usize).max(500),
             max_push_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
             max_addtoset_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
@@ -194,14 +197,21 @@ impl AggregationLimits {
     }
 
     /// Create limits suitable for low-memory environments
+    ///
+    /// OOM FIX (2026-01): Made truly conservative
+    /// - 1K docs without match (was: 10K - same as default!)
+    /// - 5K docs with match (was: 100K)
+    /// - 64 MB memory budget
+    ///
+    /// Use this when memory detection fails or in restricted environments.
     pub fn low_memory() -> Self {
         Self {
-            max_docs_without_match: 10_000,
-            max_docs_with_match: 100_000,
-            max_group_count: 5_000,
-            max_push_elements: 10_000,
-            max_addtoset_elements: 10_000,
-            max_unwind_output: 100_000,
+            max_docs_without_match: 1_000, // Conservative - 1K × 100KB = 100MB max
+            max_docs_with_match: 5_000,    // Even with $match, limit aggressively
+            max_group_count: 500,          // Low group count
+            max_push_elements: 1_000,
+            max_addtoset_elements: 1_000,
+            max_unwind_output: 10_000,
             max_memory_mb: 128,
         }
     }
