@@ -2046,10 +2046,52 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         ctx: &crate::aggregation::AggregationLimitContext,
     ) -> Result<Vec<Value>> {
         self.check_not_closed()?;
+        use crate::aggregation::optimizer::{analyze_pipeline, FastPath};
         use crate::aggregation::Pipeline;
 
         // Parse pipeline
         let mut pipeline = Pipeline::from_json(pipeline_json)?;
+
+        // =========================================================================
+        // FAST PATH OPTIMIZATION (Phase 1)
+        // Check for simple patterns that can bypass full pipeline execution
+        // =========================================================================
+        let opt = analyze_pipeline(pipeline.stages());
+
+        if let Some(fast_path) = opt.fast_path {
+            match fast_path {
+                FastPath::CountOnly {
+                    filter,
+                    output_field,
+                    multiplier,
+                } => {
+                    // Use count_documents() instead of full scan - O(1) for unfiltered!
+                    let query = filter.unwrap_or_else(|| serde_json::json!({}));
+                    let count = self.count_documents(&query)?;
+                    let result_count = (count as i64) * multiplier;
+
+                    log_debug!(
+                        "aggregate FAST PATH: CountOnly ({} docs, multiplier {})",
+                        count,
+                        multiplier
+                    );
+
+                    return Ok(vec![serde_json::json!({
+                        "_id": null,
+                        output_field: result_count
+                    })]);
+                }
+                FastPath::CountByField { .. } => {
+                    // CountByField optimization is handled by the existing index-based
+                    // $group execution path below (try_index_based_execute_with_context).
+                    // Fall through to regular execution which already handles this case.
+                }
+            }
+        }
+
+        // =========================================================================
+        // REGULAR EXECUTION PATH
+        // =========================================================================
 
         // Extract leading $match for index optimization
         let match_query = pipeline.extract_leading_match();

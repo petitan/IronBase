@@ -176,7 +176,7 @@
 pub mod context;
 mod helpers;
 pub mod memory_info;
-pub(crate) mod optimizer;
+pub mod optimizer;
 mod pipeline;
 pub mod profiles;
 mod stages;
@@ -190,6 +190,9 @@ pub use memory_info::{get_available_memory_bytes, get_total_memory_bytes};
 pub use types::AggregationLimits;
 pub use types::Pipeline;
 pub use types::Stage;
+
+// Re-export optimizer types for fast path execution
+pub use optimizer::{analyze_pipeline, FastPath, PipelineOptimization};
 
 // Re-export context and profiles (Phase 2: will be used in pipeline.rs)
 #[allow(unused_imports)]
