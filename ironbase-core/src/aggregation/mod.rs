@@ -173,11 +173,14 @@
 //! - [`stages`] - Egyedi stage implementációk
 //! - [`helpers`] - Segédfüggvények (dot notation, mező kinyerés)
 
+pub mod context;
 mod helpers;
 pub mod memory_info;
 pub(crate) mod optimizer;
 mod pipeline;
+pub mod profiles;
 mod stages;
+pub mod stream;
 mod types;
 
 // Re-export public types
@@ -187,6 +190,12 @@ pub use memory_info::{get_available_memory_bytes, get_total_memory_bytes};
 pub use types::AggregationLimits;
 pub use types::Pipeline;
 pub use types::Stage;
+
+// Re-export context and profiles (Phase 2: will be used in pipeline.rs)
+#[allow(unused_imports)]
+pub use context::AggregationLimitContext;
+#[allow(unused_imports)]
+pub use profiles::{limits_from_system, limits_from_tier, MemoryTier};
 
 #[cfg(test)]
 mod tests {
