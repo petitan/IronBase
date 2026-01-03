@@ -246,9 +246,11 @@ Always use $limit in pipelines:
 
 ### ⚡ Index-Based Count (When Eligible)
 For counting by field, index-based optimization is only available when:
-- `$group` uses a simple field `_id` (e.g. `"$category"`)\n+- Accumulators are only `$sum: 1`\n+- A B+ tree index exists on the group field
+- `$group` uses a simple field `_id` (e.g. `"$category"`)
+- Accumulators are only `$sum: 1`
+- A B+ tree index exists on the group field
 
-When eligible, skipping unnecessary `$match` stages can help the optimizer use the index path:
+When eligible, skipping unnecessary `$match` stages (like `$exists` filters) can help the optimizer use the index path:
 ```json
 // FAST (index path when eligible)
 [{"$group": {"_id": "$category", "count": {"$sum": 1}}}, {"$sort": {"count": -1}}, {"$limit": 10}]
@@ -258,12 +260,12 @@ When eligible, skipping unnecessary `$match` stages can help the optimizer use t
 ```
 
 ### Memory Limits
-Aggregation has built-in OOM protection:
-- Max 100K docs without $match
-- Max 50K unique groups
-- Max 512 MB memory
+Aggregation has built-in OOM protection with limits that can scale by memory tier:
+- Default max docs without $match: ~10,000
+- Default max docs with $match: ~1,000,000
+- Default max unique groups: ~50,000
 
-If limit errors occur: add $match filter, use lower-cardinality group key, or reduce scope.
+Exact limits can vary by memory profile. If limit errors occur: add $match filters, use lower-cardinality group keys, or reduce scope.
 
 ## Quick Reference
 
@@ -1162,9 +1164,8 @@ Use the `schema_set` tool to enforce document structure.
 - `uniqueItems`: No duplicates
 
 ## Tools
-- `schema_set`: Set/update schema
-- `schema_get`: View current schema
-- `schema_delete`: Remove validation"#, collection, collection)
+- `schema_set`: Set/update schema (use `null` to remove validation)
+- `schema_get`: View current schema"#, collection, collection)
                 }
             }
         ]
@@ -1191,13 +1192,13 @@ fn get_index_optimization_prompt(arguments: &Value) -> Value {
 
 ### Single-Field Index
 ```json
-// create_index tool
+// index_create tool
 {{"collection": "{}", "field": "email", "unique": true}}
 ```
 
 ### Compound Index (multiple fields)
 ```json
-// create_compound_index tool
+// index_create tool
 {{"collection": "{}", "fields": ["country", "city", "created_at"]}}
 ```
 
@@ -1229,27 +1230,29 @@ fn get_index_optimization_prompt(arguments: &Value) -> Value {
 
 ## Checking Index Usage
 
-Use the `explain` parameter to see query plan:
+Use the `explain` tool to see query plan:
 ```json
-{{"collection": "{}", "query": {{"status": "active"}}, "explain": true}}
+// explain tool
+{{"collection": "{}", "query": {{"status": "active"}}}}
 ```
 
 ## Index Hints
 
 Force specific index usage:
 ```json
+// find_with_hint tool
 {{"collection": "{}", "query": {{}}, "hint": "status_1"}}
 ```
 
 ## Listing Indexes
 ```json
-// list_indexes tool
+// index_list tool
 {{"collection": "{}"}}
 ```
 
 ## Dropping Indexes
 ```json
-// drop_index tool
+// index_drop tool
 {{"collection": "{}", "index_name": "email_1"}}
 ```
 
@@ -1752,11 +1755,14 @@ Pre-computed index for high-performance searches. Returns similarity scores.
 
 **Response includes similarity scores:**
 ```json
-[
-  {{"_id": 1, "{field}": "John", "_similarity": 0.95}},
-  {{"_id": 2, "{field}": "Jon", "_similarity": 0.87}},
-  {{"_id": 3, "{field}": "Johnny", "_similarity": 0.82}}
-]
+{{
+  "results": [
+    {{"document": {{"_id": 1, "{field}": "John"}}, "score": 0.95}},
+    {{"document": {{"_id": 2, "{field}": "Jon"}}, "score": 0.87}},
+    {{"document": {{"_id": 3, "{field}": "Johnny"}}, "score": 0.82}}
+  ],
+  "count": 3
+}}
 ```
 
 ## Algorithms Comparison
@@ -1935,7 +1941,7 @@ Optional parameters:
       "matched_tokens": ["databas", "optim"]
     }}
   ],
-  "total_matches": 42
+  "count": 1
 }}
 ```
 

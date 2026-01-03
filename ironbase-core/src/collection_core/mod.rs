@@ -2904,6 +2904,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             doc_ids.reverse();
         }
 
+        // Deduplicate multikey index hits while preserving scan order.
+        let mut seen_doc_ids = HashSet::new();
+        doc_ids.retain(|doc_id| seen_doc_ids.insert(doc_id.clone()));
+
         // Apply skip/limit while verifying query
         let mut results = Vec::new();
         let mut skipped = 0usize;
