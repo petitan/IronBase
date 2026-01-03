@@ -76,6 +76,7 @@ pub mod traits; // NEW: Storage trait definitions
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
+use crate::log_error;
 use crate::transaction::{Transaction, TransactionId};
 use crate::wal::WriteAheadLog;
 use fs2::FileExt;
@@ -342,6 +343,7 @@ pub struct StorageEngine {
     file_path: String,
     wal: WriteAheadLog,
     metadata_dirty: bool,
+    metadata_snapshot_pending: bool,
     /// Separate lock file to allow other processes to read the DB during backup
     /// On Windows, file locks are mandatory and prevent ALL access including reads
     lock_file: File,
@@ -516,6 +518,7 @@ impl StorageEngine {
             file_path: path_str,
             wal,
             metadata_dirty: false,
+            metadata_snapshot_pending: false,
             lock_file,
             wal_ops_since_clear: 0,
             was_clean_shutdown: was_clean,
@@ -536,6 +539,7 @@ impl StorageEngine {
             // CRITICAL: Flush to persist recovered metadata and fix corrupt header on disk
             eprintln!("[INFO] Persisting recovered metadata to fix corrupt header");
             storage.flush_metadata()?;
+            storage.metadata_snapshot_pending = false;
             storage.file.sync_all()?;
         }
 
@@ -555,8 +559,7 @@ impl StorageEngine {
                             storage.header.data_end_offset, recovered_offset
                         );
                         storage.header.data_end_offset = recovered_offset;
-                        // Mark metadata dirty so it gets persisted
-                        storage.metadata_dirty = true;
+                        storage.mark_metadata_dirty()?;
                     }
                     Err(e) => {
                         return Err(IronBaseError::Corruption(format!(
@@ -599,9 +602,8 @@ impl StorageEngine {
         self.collections.insert(name.to_string(), meta);
         self.header.collection_count += 1;
 
-        // CRITICAL FIX: Flush metadata to persist collection creation
-        // Without this, collection could be lost on crash (bug found 2024-12-26)
-        // Performance note: adds ~1ms per collection creation, but ensures durability
+        // Mark metadata dirty and flush to persist new collection
+        self.mark_metadata_dirty()?;
         self.flush()?;
 
         Ok(())
@@ -616,8 +618,8 @@ impl StorageEngine {
         self.collections.remove(name);
         self.header.collection_count -= 1;
 
-        // Flush metadata with proper convergence
-        self.flush_metadata()?;
+        self.mark_metadata_dirty()?;
+        self.flush()?;
 
         Ok(())
     }
@@ -638,9 +640,8 @@ impl StorageEngine {
         self.collections.get_mut(name)
     }
 
-    /// Log current metadata state to WAL for crash recovery
-    /// This must be called BEFORE flush_metadata() to ensure recoverability
-    fn log_metadata_to_wal(&mut self) -> Result<()> {
+    /// Write a metadata snapshot to the WAL for crash recovery
+    fn write_metadata_snapshot(&mut self) -> Result<()> {
         use crate::wal::{WALEntry, WALEntryType};
 
         let metadata_entry = MetadataWALEntry {
@@ -663,19 +664,34 @@ impl StorageEngine {
         Ok(())
     }
 
+    /// Ensure a metadata snapshot exists in WAL (idempotent)
+    fn ensure_metadata_snapshot(&mut self) -> Result<()> {
+        if self.metadata_snapshot_pending {
+            return Ok(());
+        }
+        self.write_metadata_snapshot()?;
+        self.metadata_snapshot_pending = true;
+        Ok(())
+    }
+
+    /// Mark metadata as dirty and schedule a WAL snapshot
+    fn mark_metadata_dirty(&mut self) -> Result<()> {
+        self.metadata_dirty = true;
+        self.ensure_metadata_snapshot()
+    }
+
     /// Flush changes to disk (including metadata)
     /// Uses WAL to ensure crash-safe metadata persistence
     pub fn flush(&mut self) -> Result<()> {
-        // 1. Log metadata to WAL FIRST (ensures recoverability on crash)
-        self.log_metadata_to_wal()?;
+        if self.metadata_dirty {
+            self.ensure_metadata_snapshot()?;
+        }
 
-        // 2. Flush metadata to disk (can be interrupted - WAL has backup)
-        // Note: flush_metadata() already calls file.sync_all() internally
+        // Flush metadata to disk (WAL snapshot already contains latest state)
         self.flush_metadata()?;
+        self.metadata_snapshot_pending = false;
 
-        // 3. Clear WAL AFTER metadata is safely on disk
-        // This prevents WAL from growing indefinitely in long-running processes
-        // PERF: Only clear every N operations to reduce fsync overhead
+        // Clear WAL periodically after successful metadata flush
         self.wal_ops_since_clear += 1;
         if self.wal_ops_since_clear >= 100 {
             self.wal.clear()?;
@@ -703,7 +719,11 @@ impl StorageEngine {
         let wal_ops_cleared = self.wal_ops_since_clear;
 
         // First flush metadata to ensure document_catalog is persisted
+        if self.metadata_dirty {
+            self.ensure_metadata_snapshot()?;
+        }
         self.flush_metadata()?;
+        self.metadata_snapshot_pending = false;
 
         // Then clear the WAL (all operations already in main file)
         self.wal.clear()?;
@@ -769,6 +789,7 @@ impl StorageEngine {
 
             // Write corrected metadata to file
             self.flush_metadata()?;
+            self.metadata_snapshot_pending = false;
             self.file.sync_all()?;
 
             // Clear WAL after successful recovery
@@ -797,7 +818,9 @@ impl StorageEngine {
         if file_len <= HEADER_SIZE {
             self.header = Header::default();
             self.collections.clear();
+            self.mark_metadata_dirty()?;
             self.flush_metadata()?;
+            self.metadata_snapshot_pending = false;
             self.file.sync_all()?;
             return Ok(());
         }
@@ -911,7 +934,9 @@ impl StorageEngine {
         self.header.collection_count = self.collections.len() as u32;
 
         // Write corrected metadata
+        self.mark_metadata_dirty()?;
         self.flush_metadata()?;
+        self.metadata_snapshot_pending = false;
         self.file.sync_all()?;
 
         eprintln!(
@@ -965,8 +990,8 @@ impl StorageEngine {
             self.header.version = 4;
         }
         self.header.clean_shutdown = true;
-        self.flush_metadata()?;
-        self.file.sync_all()?;
+        self.mark_metadata_dirty()?;
+        self.flush()?;
         Ok(())
     }
 
@@ -1187,7 +1212,11 @@ impl StorageEngine {
         // FIX: flush_metadata() updates header with current data_end_offset,
         // ensuring crash recovery always finds valid metadata.
         if sync_file {
+            if self.metadata_dirty {
+                self.ensure_metadata_snapshot()?;
+            }
             self.flush_metadata()?;
+            self.metadata_snapshot_pending = false;
             // Note: flush_metadata() includes sync_all(), no extra sync needed
         }
 
@@ -1444,6 +1473,8 @@ impl StorageEngine {
 
         // Clear WAL after successful recovery
         self.wal.clear()?;
+        self.metadata_snapshot_pending = false;
+        self.wal_ops_since_clear = 0;
 
         Ok((recovered, all_index_changes))
     }
@@ -1591,7 +1622,7 @@ impl StorageEngine {
         }
 
         // Mark metadata as dirty so it gets flushed
-        self.metadata_dirty = true;
+        self.mark_metadata_dirty()?;
 
         Ok(())
     }
@@ -1733,7 +1764,12 @@ impl Storage for StorageEngine {
                 let dec = (-delta) as u64;
                 meta.live_document_count = meta.live_document_count.saturating_sub(dec);
             }
-            self.metadata_dirty = true;
+            if let Err(err) = self.mark_metadata_dirty() {
+                log_error!(
+                    "Failed to schedule metadata snapshot after live_count change: {}",
+                    err
+                );
+            }
         }
     }
 
@@ -2422,7 +2458,7 @@ mod tests {
             }
 
             // Log metadata to WAL (simulating pre-crash state)
-            storage.log_metadata_to_wal().unwrap();
+            storage.write_metadata_snapshot().unwrap();
             // Don't call flush() - simulate crash after WAL write but before file flush
         }
 

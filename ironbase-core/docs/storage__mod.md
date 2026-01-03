@@ -11,7 +11,7 @@ Nincs dokumentált információ.
 
 ## Tervezési döntések és invariánsok
 - **Atomicitási garancia**: A tranzakció commit 9-lépéses atomi művelet
-- **WAL-metadata sorrend**: `log_metadata_to_wal()` hívása kötelező a `flush_metadata()` előtt a helyreállíthatóság érdekében
+- **WAL-metadata sorrend**: metadata módosítás után azonnal WAL-snapshot készül (`write_metadata_snapshot()`), mielőtt `flush_metadata()` a fájlba írna
 - **Checkpoint kritikus szabály**: `flush_metadata()` hívása kötelező a WAL törlése előtt
 - **Index atomicitás gyengesége**: Az index fájlok nem atomikusan kerülnek commitálásra (weak atomicity)
 - **POSIX rename garancia**: A temp → final átnevezés atomicitását a POSIX rename() biztosítja
