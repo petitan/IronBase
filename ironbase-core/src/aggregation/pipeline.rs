@@ -11,7 +11,9 @@
 // When $sort is followed by $limit K, we pass the limit hint to SortStage
 // for O(k) memory instead of O(n). See optimizer module.
 
+use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::optimizer::analyze_pipeline;
+use crate::aggregation::stream::{chain_streamable_stages, with_counting};
 use crate::aggregation::types::{
     AggregationLimits, GroupStage, LimitStage, MatchStage, Pipeline, ProjectStage, SkipStage,
     SortStage, Stage, UnwindStage,
@@ -285,6 +287,120 @@ impl Pipeline {
             }
             // Use execute_with_limits to pass limits to stages that need them (e.g., $unwind)
             docs = stage.execute_with_limits(docs, limits)?;
+        }
+
+        Ok(docs)
+    }
+
+    /// Execute pipeline with centralized context for limit tracking
+    ///
+    /// This is the preferred method for executing pipelines with the unified
+    /// limit tracking system (2026-01 refactoring).
+    ///
+    /// # Design
+    /// Uses `AggregationLimitContext` for:
+    /// - Document count tracking (with/without $match distinction)
+    /// - Group count tracking in $group stage
+    /// - Per-group $push/$addToSet limits
+    /// - $unwind output limits
+    ///
+    /// # Memory Efficiency
+    /// - Streamable stages ($match, $project) are chained as iterators
+    /// - Documents are processed one at a time until materialization is needed
+    /// - Top-K optimization for $sort + $limit patterns
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let limits = AggregationLimits::from_system_memory();
+    /// let ctx = AggregationLimitContext::new(limits);
+    /// ctx.set_leading_match(pipeline.has_leading_match);
+    ///
+    /// let results = pipeline.execute_with_context(docs, &ctx)?;
+    /// ```
+    #[allow(dead_code)] // Will be used in collection_core integration
+    pub fn execute_with_context<I>(
+        &self,
+        docs: I,
+        ctx: &AggregationLimitContext,
+    ) -> Result<Vec<Value>>
+    where
+        I: Iterator<Item = Result<Value>> + 'static,
+    {
+        // Set leading match flag in context
+        ctx.set_leading_match(self.has_leading_match);
+
+        if self.stages.is_empty() {
+            // Empty pipeline - just collect with limit checking
+            let iter = with_counting(docs, ctx.clone());
+            return iter.collect();
+        }
+
+        // Phase 1: Chain streamable stages ($match, $project) as iterators
+        let (streaming_iter, consumed) = chain_streamable_stages(docs, &self.stages, ctx.clone());
+
+        // Remaining stages after streamable prefix
+        let remaining_stages = &self.stages[consumed..];
+
+        if remaining_stages.is_empty() {
+            // All stages were streamable - collect results
+            return streaming_iter.collect();
+        }
+
+        // Phase 2: Handle $group stage specially (streaming accumulators)
+        let (materialized, group_consumed) =
+            if let Some(Stage::Group(group_stage)) = remaining_stages.first() {
+                // Use context-aware execution for $group
+                let docs_vec: Vec<Value> = streaming_iter.collect::<Result<Vec<_>>>()?;
+                let result = group_stage.execute_with_context_impl(docs_vec, ctx)?;
+                (result, 1)
+            } else {
+                // No $group - check for early $limit/$skip
+                let early_limit = Self::detect_early_limit(remaining_stages.iter());
+
+                if let Some((skip, limit, stages_to_skip)) = early_limit {
+                    // Apply $skip/$limit during materialization
+                    let mut results = Vec::new();
+                    let mut skipped = 0;
+
+                    for doc_result in streaming_iter {
+                        let doc = doc_result?;
+
+                        if skipped < skip {
+                            skipped += 1;
+                            continue;
+                        }
+
+                        if results.len() >= limit {
+                            break; // Early termination
+                        }
+
+                        results.push(doc);
+                    }
+
+                    (results, stages_to_skip)
+                } else {
+                    // No early limit - materialize all
+                    let docs_vec: Vec<Value> = streaming_iter.collect::<Result<Vec<_>>>()?;
+                    (docs_vec, 0)
+                }
+            };
+
+        // Phase 3: Execute remaining stages with context
+        let remaining_stages = &remaining_stages[group_consumed..];
+        let opt = analyze_pipeline(remaining_stages);
+
+        let mut docs = materialized;
+        for (i, stage) in remaining_stages.iter().enumerate() {
+            // Check for Top-K optimization on $sort
+            if let Stage::Sort(sort_stage) = stage {
+                if opt.sort_stage_index == Some(i) && opt.sort_limit_hint.is_some() {
+                    docs = sort_stage.execute_with_limit_hint(docs, opt.sort_limit_hint)?;
+                    continue;
+                }
+            }
+
+            // Use context-aware execution
+            docs = stage.execute_with_context(docs, ctx)?;
         }
 
         Ok(docs)

@@ -2150,6 +2150,107 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.aggregate_with_limits(pipeline_json, limits)
     }
 
+    /// Run aggregation with centralized context for limit tracking
+    ///
+    /// This method uses the new `AggregationLimitContext` system (2026-01 refactoring)
+    /// for unified limit tracking across all pipeline stages.
+    ///
+    /// # Advantages over `aggregate_with_limits`
+    /// - Centralized limit tracking (no scattered limit checks)
+    /// - Per-group $push/$addToSet tracking
+    /// - Consistent error messages across all stages
+    /// - Uses streaming iterator adapters for $match/$project
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::aggregation::{AggregationLimits, AggregationLimitContext};
+    ///
+    /// let limits = AggregationLimits::from_system_memory();
+    /// let ctx = AggregationLimitContext::new(limits);
+    /// let results = collection.aggregate_with_context(&pipeline, &ctx)?;
+    ///
+    /// // After execution, you can inspect context state:
+    /// println!("Documents processed: {}", ctx.docs_processed());
+    /// println!("Groups created: {}", ctx.groups_created());
+    /// ```
+    #[allow(dead_code)] // New API - will be used by clients
+    pub fn aggregate_with_context(
+        &self,
+        pipeline_json: &Value,
+        ctx: &crate::aggregation::AggregationLimitContext,
+    ) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
+        use crate::aggregation::Pipeline;
+
+        // Parse pipeline
+        let mut pipeline = Pipeline::from_json(pipeline_json)?;
+
+        // Extract leading $match for index optimization
+        let match_query = pipeline.extract_leading_match();
+        let had_match = match_query.is_some();
+        pipeline.set_has_leading_match(had_match);
+
+        let query = match_query.unwrap_or_else(|| serde_json::json!({}));
+
+        log_debug!(
+            "aggregate_with_context: query {:?} (has_match: {})",
+            query,
+            had_match
+        );
+
+        // INDEX-BASED $GROUP OPTIMIZATION
+        if !had_match {
+            if let Some(group_stage) = pipeline.peek_leading_group() {
+                let indexes = self.indexes.read();
+                if let Some(mut indexed_result) =
+                    group_stage.try_index_based_execute(&indexes, ctx.limits())
+                {
+                    log_debug!(
+                        "aggregate_with_context: index-based $group ({} groups)",
+                        indexed_result.len()
+                    );
+                    drop(indexes);
+
+                    pipeline.remove_leading_group();
+
+                    // Execute remaining stages with context
+                    for stage in pipeline.stages.iter() {
+                        indexed_result = stage.execute_with_context(indexed_result, ctx)?;
+                    }
+
+                    return Ok(indexed_result);
+                }
+            }
+        }
+
+        // STREAMING EXECUTION with context
+        // Note: We collect documents into a Vec because execute_with_context requires 'static iterator
+        // The streaming optimization happens inside the pipeline via chain_streamable_stages
+        let mut cursor = self.find_streaming(&query)?;
+        let mut docs: Vec<Result<Value>> = Vec::new();
+        let max_docs = if had_match {
+            ctx.limits().max_docs_with_match
+        } else {
+            ctx.limits().max_docs_without_match
+        };
+
+        while let Ok(Some(doc)) = cursor.next() {
+            docs.push(Ok(doc));
+
+            // Check document limit early to fail fast
+            if docs.len() > max_docs {
+                return Err(crate::error::IronBaseError::AggregationError(format!(
+                    "Document collection exceeded limit: {} documents (limit: {})",
+                    docs.len(),
+                    max_docs
+                )));
+            }
+        }
+
+        // Execute pipeline with context
+        pipeline.execute_with_context(docs.into_iter(), ctx)
+    }
+
     // ========== TRANSACTION OPERATIONS ==========
 
     /// Insert one document within a transaction
