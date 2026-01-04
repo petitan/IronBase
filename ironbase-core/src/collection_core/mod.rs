@@ -2871,6 +2871,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         vec![]
                     }
                 }
+                QueryPlan::RegexPrefixScan {
+                    ref index_name,
+                    ref prefix,
+                    ..
+                } => {
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let start = IndexKey::String(prefix.clone());
+                        let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                        let mode = RangeQueryMode::Scan {
+                            skip: 0,
+                            limit: None,
+                            order: ScanOrder::Asc,
+                        };
+                        index
+                            .range_query(&start, &end, true, true, mode)
+                            .unwrap_docs()
+                    } else {
+                        vec![]
+                    }
+                }
                 QueryPlan::SparseIndexScan { ref index_name, .. } => {
                     // Sparse index scan: return ALL doc_ids in the index
                     // Since sparse indexes only contain documents where the field exists,
@@ -2897,6 +2917,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let uses_index_sort = match (&plan, sort_field) {
             (QueryPlan::IndexScan { ref field, .. }, Some(sf)) if field == sf => true,
             (QueryPlan::IndexRangeScan { ref field, .. }, Some(sf)) if field == sf => true,
+            (QueryPlan::RegexPrefixScan { ref field, .. }, Some(sf)) if field == sf => true,
             _ => false,
         };
 
