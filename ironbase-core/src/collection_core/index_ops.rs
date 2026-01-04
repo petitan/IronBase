@@ -8,7 +8,7 @@ use crate::index::{IndexKey, IndexMetadata};
 use crate::query::Query;
 use crate::query_planner::QueryPlanner;
 use crate::storage::{RawStorage, Storage};
-use crate::value_utils::get_nested_value;
+use crate::value_utils::{get_nested_value, path_crosses_array};
 
 use super::index_persistence::persist_index_to_disk;
 use super::CollectionCore;
@@ -109,10 +109,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
         let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
         let mut total_scanned: usize = 0;
+        let mut multikey_seen = false;
         let fields_clone = fields.clone();
         let collection_name = self.name.clone();
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
             for (doc_id, doc) in batch_docs {
+                if !multikey_seen
+                    && fields_clone
+                        .iter()
+                        .any(|field| path_crosses_array(&doc, field))
+                {
+                    multikey_seen = true;
+                }
                 // Replicate extract_key logic inline to avoid holding index lock
                 let keys: Vec<IndexKey> = fields_clone
                     .iter()
@@ -155,6 +163,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut indexes = self.indexes.write();
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
             index.build_from_sorted(entries, unique)?;
+            if multikey_seen {
+                index.metadata.multikey = true;
+            }
         }
         drop(indexes); // Release index lock
 
@@ -194,6 +205,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     fields: fields.clone(),
                     unique,
                     sparse: false,
+                    multikey: false,
                     num_keys: 0,
                     tree_height: 1,
                     root_offset,
@@ -244,10 +256,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
         let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
         let mut total_scanned: usize = 0;
+        let mut multikey_seen = false;
         let field_clone = field.clone();
         let collection_name = self.name.clone();
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
             for (doc_id, doc) in batch_docs {
+                if !multikey_seen && path_crosses_array(&doc, &field_clone) {
+                    multikey_seen = true;
+                }
                 if let Some(field_value) = get_nested_value(&doc, &field_clone) {
                     entries.push((IndexKey::from(field_value), doc_id));
                 }
@@ -285,6 +301,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut indexes = self.indexes.write();
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
             index.build_from_sorted(entries, unique)?;
+            if multikey_seen {
+                index.metadata.multikey = true;
+            }
         }
         drop(indexes); // Release index lock
 
@@ -324,6 +343,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     fields: vec![field.clone()], // Single-field index
                     unique,
                     sparse: false,
+                    multikey: false,
                     num_keys: 0,
                     tree_height: 1,
                     root_offset,

@@ -413,16 +413,39 @@ impl QueryPlanner {
             return None;
         }
 
+        if let (Some('('), Some('?')) = (chars.peek().copied(), chars.clone().nth(1)) {
+            return None;
+        }
+
         let mut prefix = String::new();
         let mut exact = true;
         while let Some(ch) = chars.next() {
             if ch == '\\' {
-                if let Some(escaped) = chars.next() {
+                let escaped = chars.next()?;
+                if matches!(
+                    escaped,
+                    '.' | '*'
+                        | '+'
+                        | '?'
+                        | '('
+                        | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '|'
+                        | '^'
+                        | '$'
+                        | '\\'
+                ) {
                     prefix.push(escaped);
                     continue;
-                } else {
-                    break;
                 }
+                return None;
+            }
+
+            if ch == '(' && matches!(chars.peek(), Some('?')) {
+                return None;
             }
 
             if matches!(

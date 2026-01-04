@@ -477,6 +477,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 fields: vec!["_id".to_string()],
                 unique: true,
                 sparse: false,
+                multikey: false,
                 num_keys: 0, // Will be synced on load
                 tree_height: 1,
                 root_offset: 0,

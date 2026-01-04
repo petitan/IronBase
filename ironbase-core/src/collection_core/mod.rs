@@ -1189,6 +1189,32 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         return self.adjust_count_for_tombstones(raw_count);
                     }
                 }
+                QueryPlan::RegexPrefixScan {
+                    ref index_name,
+                    ref prefix,
+                    exact,
+                    ..
+                } => {
+                    // Only use index count when exact=true (pure prefix, no regex verification needed)
+                    if *exact {
+                        if let Some(index) = indexes.get_btree_index(index_name) {
+                            let start = IndexKey::String(prefix.clone());
+                            let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+
+                            // Use range_query with Count mode - O(1) memory!
+                            let result =
+                                index.range_query(&start, &end, true, true, RangeQueryMode::Count);
+
+                            let raw_count = match result {
+                                RangeQueryResult::Count(c) => c,
+                                _ => unreachable!("Count mode always returns Count"),
+                            };
+                            drop(indexes);
+
+                            return self.adjust_count_for_tombstones(raw_count);
+                        }
+                    }
+                }
                 _ => {}
             }
 
@@ -2816,6 +2842,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         skip: usize,
         limit: Option<usize>,
     ) -> Result<(Vec<DocumentId>, bool)> {
+        let mut index_limit_applied = false;
         let mut doc_ids = {
             let indexes = self.indexes.read();
             match plan {
@@ -2878,14 +2905,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     ref field,
                     ..
                 } => {
-                    let can_apply_limit =
-                        exact && Self::is_simple_regex_query(parsed_query.to_json(), field);
-                    let (scan_skip, scan_limit) = if can_apply_limit {
-                        (skip, limit)
-                    } else {
-                        (0, None)
-                    };
                     if let Some(index) = indexes.get_btree_index(index_name) {
+                        let can_apply_limit = exact
+                            && !index.metadata.multikey
+                            && Self::is_simple_regex_query(parsed_query.to_json(), field);
+                        let (scan_skip, scan_limit) = if can_apply_limit {
+                            index_limit_applied = true;
+                            (skip, limit)
+                        } else {
+                            (0, None)
+                        };
                         let start = IndexKey::String(prefix.clone());
                         let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
                         let mode = RangeQueryMode::Scan {
@@ -2945,7 +2974,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             exact, ref field, ..
         } = plan
         {
-            if exact && Self::is_simple_regex_query(parsed_query.to_json(), field) {
+            if index_limit_applied
+                && exact
+                && Self::is_simple_regex_query(parsed_query.to_json(), field)
+            {
                 (0, None)
             } else {
                 (skip, limit)

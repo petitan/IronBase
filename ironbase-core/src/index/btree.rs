@@ -195,6 +195,8 @@ pub struct IndexMetadata {
     pub fields: Vec<String>,
     pub unique: bool,
     pub sparse: bool,
+    #[serde(default)]
+    pub multikey: bool,
     pub num_keys: u64,
     pub tree_height: u32,
     #[serde(default)]
@@ -232,6 +234,7 @@ impl BPlusTree {
                 fields: vec![field], // Single-field index
                 unique,
                 sparse,
+                multikey: false,
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
@@ -278,6 +281,7 @@ impl BPlusTree {
                 fields,               // All fields for compound key
                 unique,
                 sparse,
+                multikey: false,
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
