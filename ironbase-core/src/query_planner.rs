@@ -40,6 +40,8 @@ pub enum QueryPlan {
         field: String,
         prefix: String,
         exact: bool,
+        /// If true, uses case-insensitive index with lowercased prefix
+        case_insensitive: bool,
     },
 
     /// Multi-regex prefix scan for $in with regex patterns
@@ -399,7 +401,34 @@ impl QueryPlanner {
                     continue;
                 }
 
-                let (prefix, exact) = Self::extract_regex_prefix(pattern)?;
+                let (prefix, exact, ci) = Self::extract_regex_prefix(pattern)?;
+
+                // For case-insensitive regex, try to find a CI index
+                if ci {
+                    // Look for case-insensitive index: {collection}_{field}_ci
+                    let ci_index_suffix = format!("{}_ci", field);
+                    if let Some(idx_info) = index_fields
+                        .iter()
+                        .find(|info| info.index_name.ends_with(&ci_index_suffix))
+                    {
+                        if !idx_info.is_compound {
+                            return Some((
+                                field.clone(),
+                                QueryPlan::RegexPrefixScan {
+                                    index_name: idx_info.index_name.clone(),
+                                    field: field.clone(),
+                                    prefix: prefix.to_lowercase(), // Lowercase for CI index
+                                    exact,
+                                    case_insensitive: true,
+                                },
+                            ));
+                        }
+                    }
+                    // No CI index found - fall through to try regular index
+                    // (but this will be a collection scan since CI regex needs CI index)
+                    continue;
+                }
+
                 let (index_name, is_compound) = Self::find_index_for_field_v2(field, index_fields)?;
                 if is_compound {
                     continue;
@@ -412,6 +441,7 @@ impl QueryPlanner {
                         field: field.clone(),
                         prefix,
                         exact,
+                        case_insensitive: false,
                     },
                 ));
             }
@@ -467,10 +497,10 @@ impl QueryPlanner {
                         return None; // Options present, fallback
                     }
 
-                    // Extract prefix - must be exact (no trailing regex)
+                    // Extract prefix - must be exact (no trailing regex) and not CI
                     match Self::extract_regex_prefix(pattern) {
-                        Some((prefix, true)) => prefixes.push(prefix), // Only exact prefixes
-                        _ => return None, // Not an exact prefix, fallback
+                        Some((prefix, true, false)) => prefixes.push(prefix), // Only exact, non-CI prefixes
+                        _ => return None, // Not an exact prefix or is CI, fallback
                     }
                 }
 
@@ -489,15 +519,26 @@ impl QueryPlanner {
         None
     }
 
-    /// Extract literal prefix from a regex like "^prefix".
+    /// Extract literal prefix from a regex like "^prefix" or "(?i)^prefix".
     ///
+    /// Returns (prefix, exact, case_insensitive).
     /// Stops at the first unescaped regex meta character.
-    fn extract_regex_prefix(pattern: &str) -> Option<(String, bool)> {
-        let mut chars = pattern.chars().peekable();
+    fn extract_regex_prefix(pattern: &str) -> Option<(String, bool, bool)> {
+        let mut remaining = pattern;
+        let mut case_insensitive = false;
+
+        // Check for (?i) prefix (case-insensitive flag)
+        if remaining.starts_with("(?i)") {
+            case_insensitive = true;
+            remaining = &remaining[4..];
+        }
+
+        let mut chars = remaining.chars().peekable();
         if chars.next()? != '^' {
             return None;
         }
 
+        // Reject other inline modifiers like (?m), (?s), etc.
         if let (Some('('), Some('?')) = (chars.peek().copied(), chars.clone().nth(1)) {
             return None;
         }
@@ -550,7 +591,7 @@ impl QueryPlanner {
             if chars.peek().is_some() {
                 exact = false;
             }
-            Some((prefix, exact))
+            Some((prefix, exact, case_insensitive))
         }
     }
 
@@ -624,16 +665,18 @@ impl QueryPlanner {
                     ref index_name,
                     ref prefix,
                     exact,
+                    case_insensitive,
                     ..
                 } => {
                     json!({
-                        "queryPlan": "RegexPrefixScan",
+                        "queryPlan": if case_insensitive { "CIRegexPrefixScan" } else { "RegexPrefixScan" },
                         "indexUsed": index_name,
                         "field": field,
                         "stage": "FETCH_WITH_INDEX",
-                        "indexType": "regex_prefix",
+                        "indexType": if case_insensitive { "ci_regex_prefix" } else { "regex_prefix" },
                         "prefix": prefix,
                         "exact": exact,
+                        "caseInsensitive": case_insensitive,
                         "estimatedCost": "O(log n + k)",
                     })
                 }
@@ -733,16 +776,18 @@ impl QueryPlanner {
                     ref index_name,
                     ref prefix,
                     exact,
+                    case_insensitive,
                     ..
                 } => {
                     json!({
-                        "queryPlan": "RegexPrefixScan",
+                        "queryPlan": if case_insensitive { "CIRegexPrefixScan" } else { "RegexPrefixScan" },
                         "indexUsed": index_name,
                         "field": field,
                         "stage": "FETCH_WITH_INDEX",
-                        "indexType": "regex_prefix",
+                        "indexType": if case_insensitive { "ci_regex_prefix" } else { "regex_prefix" },
                         "prefix": prefix,
                         "exact": exact,
+                        "caseInsensitive": case_insensitive,
                         "estimatedCost": "O(log n + k)",
                     })
                 }
@@ -1012,6 +1057,131 @@ mod tests {
                 "$in": [
                     {"$regex": "^Alice"},
                     {"$regex": "^Bob", "$options": "i"}
+                ]
+            }
+        });
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_name".to_string(),
+            prefix_field: "name".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+        }];
+
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_regex_prefix_with_case_insensitive() {
+        // Case-insensitive regex prefix with exact match
+        let result = QueryPlanner::extract_regex_prefix("(?i)^Hello$");
+        assert!(result.is_some());
+        let (prefix, exact, ci) = result.unwrap();
+        assert_eq!(prefix, "Hello");
+        assert!(exact); // $ at end means exact
+        assert!(ci);
+    }
+
+    #[test]
+    fn test_extract_regex_prefix_with_case_insensitive_non_exact() {
+        // Case-insensitive regex prefix without $ (non-exact)
+        let result = QueryPlanner::extract_regex_prefix("(?i)^Hello");
+        assert!(result.is_some());
+        let (prefix, exact, ci) = result.unwrap();
+        assert_eq!(prefix, "Hello");
+        assert!(exact); // No trailing regex metachar = exact prefix
+        assert!(ci);
+    }
+
+    #[test]
+    fn test_extract_regex_prefix_case_sensitive() {
+        // Regular case-sensitive prefix (exact because nothing follows)
+        let result = QueryPlanner::extract_regex_prefix("^Hello");
+        assert!(result.is_some());
+        let (prefix, exact, ci) = result.unwrap();
+        assert_eq!(prefix, "Hello");
+        assert!(exact); // No trailing regex metachar = exact prefix
+        assert!(!ci);
+    }
+
+    #[test]
+    fn test_extract_regex_prefix_with_trailing_regex() {
+        // Regex with trailing pattern (non-exact)
+        let result = QueryPlanner::extract_regex_prefix("^Hello.*");
+        assert!(result.is_some());
+        let (prefix, exact, ci) = result.unwrap();
+        assert_eq!(prefix, "Hello");
+        assert!(!exact); // .* follows = non-exact
+        assert!(!ci);
+    }
+
+    #[test]
+    fn test_ci_regex_with_ci_index() {
+        // Case-insensitive regex should use CI index when available
+        let query = json!({"email": {"$regex": "(?i)^john"}} );
+        let index_fields = vec![
+            IndexPrefixInfo {
+                index_name: "users_email".to_string(),
+                prefix_field: "email".to_string(),
+                is_compound: false,
+                num_fields: 1,
+                sparse: false,
+            },
+            IndexPrefixInfo {
+                index_name: "users_email_ci".to_string(),
+                prefix_field: "email".to_string(),
+                is_compound: false,
+                num_fields: 1,
+                sparse: true, // CI indexes are sparse
+            },
+        ];
+
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(result.is_some());
+
+        let (field, plan) = result.unwrap();
+        assert_eq!(field, "email");
+        match plan {
+            QueryPlan::RegexPrefixScan {
+                index_name,
+                prefix,
+                case_insensitive,
+                ..
+            } => {
+                assert_eq!(index_name, "users_email_ci");
+                assert_eq!(prefix, "john"); // Lowercased
+                assert!(case_insensitive);
+            }
+            _ => panic!("Expected RegexPrefixScan"),
+        }
+    }
+
+    #[test]
+    fn test_ci_regex_without_ci_index_fallback() {
+        // Case-insensitive regex without CI index should fallback to collection scan
+        let query = json!({"email": {"$regex": "(?i)^john"}} );
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_email".to_string(),
+            prefix_field: "email".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+        }];
+
+        // No CI index available - should return None (collection scan)
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_multi_regex_with_ci_not_optimized() {
+        // $in with case-insensitive regex should not be optimized (for simplicity)
+        let query = json!({
+            "name": {
+                "$in": [
+                    {"$regex": "(?i)^Alice"},
+                    {"$regex": "^Bob"}
                 ]
             }
         });

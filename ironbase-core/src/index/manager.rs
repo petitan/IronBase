@@ -121,6 +121,32 @@ impl IndexManager {
         Ok(())
     }
 
+    /// Create case-insensitive B+ tree index (single field)
+    ///
+    /// String values are lowercased before indexing for case-insensitive matching.
+    ///
+    /// # Arguments
+    /// * `name` - Index name (typically "{collection}_{field}_ci")
+    /// * `field` - Field to index
+    /// * `unique` - Whether values must be unique (after lowercasing)
+    pub fn create_btree_index_ci(
+        &mut self,
+        name: String,
+        field: String,
+        unique: bool,
+    ) -> Result<()> {
+        if self.btree_indexes.contains_key(&name) {
+            return Err(IronBaseError::IndexError(format!(
+                "Index already exists: {}",
+                name
+            )));
+        }
+
+        let tree = BPlusTree::new_ci(name.clone(), field, unique);
+        self.btree_indexes.insert(name, tree);
+        Ok(())
+    }
+
     /// Create compound B+ tree index (multiple fields)
     ///
     /// # Arguments

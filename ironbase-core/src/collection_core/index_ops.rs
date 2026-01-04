@@ -438,6 +438,179 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(index_name)
     }
 
+    /// Create a case-insensitive B+ tree index on a field
+    ///
+    /// String values are lowercased before indexing, allowing case-insensitive
+    /// queries using `$regex` with `(?i)` prefix.
+    ///
+    /// # Arguments
+    /// * `field` - Field to index
+    /// * `unique` - Whether lowercased values must be unique
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// collection.create_ci_index("email".to_string(), true)?;
+    /// // Now queries like {"email": {"$regex": "(?i)^john"}} will use this index
+    /// ```
+    pub fn create_ci_index(&self, field: String, unique: bool) -> Result<String> {
+        self.check_not_closed()?;
+        let index_name = format!("{}_{}_ci", self.name, field);
+
+        tracing::info!(
+            collection = %self.name,
+            field = %field,
+            index_name = %index_name,
+            unique = unique,
+            "Starting case-insensitive index creation"
+        );
+
+        let mut indexes = self.indexes.write();
+        indexes.create_btree_index_ci(index_name.clone(), field.clone(), unique)?;
+
+        // Release index lock before batch scanning
+        drop(indexes);
+
+        // Collect (key, doc_id) pairs in batches - lowercase strings for CI
+        const INDEX_BUILD_BATCH_SIZE: usize = 1000;
+        const PROGRESS_LOG_INTERVAL: usize = 10000;
+        let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let mut total_scanned: usize = 0;
+        let mut multikey_seen = false;
+        let field_clone = field.clone();
+        let collection_name = self.name.clone();
+
+        self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            for (doc_id, doc) in batch_docs {
+                if !multikey_seen && path_crosses_array(&doc, &field_clone) {
+                    multikey_seen = true;
+                }
+                let values = get_all_nested_values(&doc, &field_clone);
+                if values.is_empty() {
+                    // CI index is always sparse - skip missing values
+                    total_scanned += 1;
+                    continue;
+                } else {
+                    let mut seen = std::collections::HashSet::new();
+                    for value in values {
+                        // Lowercase string values for case-insensitive matching
+                        let index_key = match value {
+                            Value::String(s) => IndexKey::String(s.to_lowercase()),
+                            other => IndexKey::from(other),
+                        };
+                        if !seen.insert(index_key.clone()) {
+                            continue;
+                        }
+                        // Skip nulls - CI indexes are implicitly sparse
+                        if !IndexManager::is_key_all_null(&index_key) {
+                            entries.push((index_key, doc_id.clone()));
+                        }
+                    }
+                }
+                total_scanned += 1;
+            }
+            if total_scanned % PROGRESS_LOG_INTERVAL == 0 {
+                tracing::info!(
+                    collection = %collection_name,
+                    scanned = total_scanned,
+                    indexed = entries.len(),
+                    "CI index build progress: scanning documents"
+                );
+            }
+            Ok(())
+        })?;
+
+        tracing::info!(
+            collection = %self.name,
+            total_scanned = total_scanned,
+            entries_to_index = entries.len(),
+            "Document scan complete, starting sort"
+        );
+
+        // Sort by key - O(n log n)
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+        tracing::info!(
+            collection = %self.name,
+            entries = entries.len(),
+            "Sort complete, building B+ tree"
+        );
+
+        // Re-acquire write lock and build index from sorted entries
+        let mut indexes = self.indexes.write();
+        if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+            index.build_from_sorted(entries, unique)?;
+            if multikey_seen {
+                index.metadata.multikey = true;
+            }
+        }
+        drop(indexes);
+
+        tracing::info!(
+            collection = %self.name,
+            "B+ tree built, persisting to disk"
+        );
+
+        // PERSIST index data to .idx file
+        let root_offset = {
+            let storage = self.storage.read();
+            let db_file_path = storage.get_file_path().to_string();
+            drop(storage);
+
+            if !db_file_path.is_empty() {
+                let mut indexes = self.indexes.write();
+                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
+                    persist_index_to_disk(&db_file_path, &index_name, |file| {
+                        index.save_to_file(file)
+                    })?;
+                    index.metadata.root_offset
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // Persist metadata
+        {
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                let index_meta = self
+                    .indexes
+                    .read()
+                    .get_btree_index(&index_name)
+                    .map(|index| {
+                        let mut meta = index.metadata.clone();
+                        meta.root_offset = root_offset;
+                        meta
+                    })
+                    .unwrap_or_else(|| IndexMetadata {
+                        name: index_name.clone(),
+                        field: field.clone(),
+                        fields: vec![field.clone()],
+                        unique,
+                        sparse: true, // CI indexes are implicitly sparse
+                        multikey: multikey_seen,
+                        case_insensitive: true,
+                        num_keys: 0,
+                        tree_height: 1,
+                        root_offset,
+                    });
+
+                meta.indexes.push(index_meta);
+                storage.flush()?;
+            }
+        }
+
+        tracing::info!(
+            collection = %self.name,
+            index_name = %index_name,
+            "Case-insensitive index creation complete"
+        );
+
+        Ok(index_name)
+    }
+
     /// Drop an index
     pub fn drop_index(&self, index_name: &str) -> Result<()> {
         self.check_not_closed()?;
