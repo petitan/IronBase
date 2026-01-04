@@ -1058,9 +1058,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             )?;
             return Ok(FindCursor::new(self, doc_ids));
         }
+        let has_catalog = storage
+            .get_collection_meta(&self.name)
+            .map(|meta| !meta.document_catalog.is_empty())
+            .unwrap_or(false);
         drop(storage);
 
         if QueryPlanner::extract_logical_clauses(query_json).is_some() {
+            if has_catalog {
+                let (doc_ids, _) = self.collect_doc_ids_with_options(
+                    query_json, None, None, false, 0, None, true, 0, None,
+                )?;
+                return Ok(FindCursor::new(self, doc_ids));
+            }
             return FindCursor::new_scan(self, query_json);
         }
 
@@ -1075,6 +1085,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if let Some(cursor) = FindCursor::new_index_scan_from_plan(self, query_json, plan)? {
                 return Ok(cursor);
             }
+        }
+
+        if has_catalog {
+            let (doc_ids, _) = self.collect_doc_ids_with_options(
+                query_json, None, None, false, 0, None, true, 0, None,
+            )?;
+            return Ok(FindCursor::new(self, doc_ids));
         }
 
         FindCursor::new_scan(self, query_json)

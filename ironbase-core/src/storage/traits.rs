@@ -283,6 +283,12 @@ pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
 
     /// Get metadata offset (start of metadata section)
     fn metadata_offset(&self) -> u64;
+
+    /// Get metadata size in bytes
+    fn metadata_size(&self) -> u64;
+
+    /// Get end offset of data region (next writable position)
+    fn data_end_offset(&self) -> u64;
 }
 
 // ============================================================================
