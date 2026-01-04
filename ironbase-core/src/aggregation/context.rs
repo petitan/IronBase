@@ -11,6 +11,7 @@ use crate::error::{IronBaseError, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 /// Centralized limit tracker for aggregation pipelines
 ///
@@ -65,6 +66,9 @@ struct ContextInner {
 
     // Flag: streaming to $group (disables doc limit - docs not collected)
     streaming_to_group: bool,
+
+    // Optional deadline for cooperative cancellation
+    deadline: Option<Instant>,
 }
 
 #[allow(dead_code)] // Phase 2: methods will be used in pipeline.rs
@@ -82,6 +86,7 @@ impl AggregationLimitContext {
                 has_leading_match: false,
                 early_limit: None,
                 streaming_to_group: false,
+                deadline: None,
             })),
         }
     }
@@ -98,6 +103,29 @@ impl AggregationLimitContext {
     /// Set has_leading_match flag (mutable version)
     pub fn set_leading_match(&self, has_match: bool) {
         self.inner.borrow_mut().has_leading_match = has_match;
+    }
+
+    /// Set a deadline for cooperative cancellation
+    pub fn with_deadline(self, deadline: Instant) -> Self {
+        self.inner.borrow_mut().deadline = Some(deadline);
+        self
+    }
+
+    /// Set or clear deadline (mutable version)
+    pub fn set_deadline(&self, deadline: Option<Instant>) {
+        self.inner.borrow_mut().deadline = deadline;
+    }
+
+    /// Check if the deadline has been exceeded
+    fn check_deadline(&self) -> Result<()> {
+        if let Some(deadline) = self.inner.borrow().deadline {
+            if Instant::now() >= deadline {
+                return Err(IronBaseError::AggregationError(
+                    "Aggregation timed out (deadline exceeded).".to_string(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Enter streaming-to-group mode (doc limit temporarily disabled)
@@ -120,6 +148,7 @@ impl AggregationLimitContext {
     /// IMPORTANT: Returns Ok immediately if streaming_to_group is true,
     /// because docs are not being collected into memory.
     pub fn check_doc_limit(&self) -> Result<()> {
+        self.check_deadline()?;
         let inner = self.inner.borrow();
 
         // Skip limit check in streaming-to-group mode
@@ -167,6 +196,7 @@ impl AggregationLimitContext {
 
     /// Check if group count is within limit
     pub fn check_group_limit(&self) -> Result<()> {
+        self.check_deadline()?;
         let inner = self.inner.borrow();
         if inner.groups_created > inner.limits.max_group_count {
             return Err(IronBaseError::AggregationError(format!(
@@ -186,6 +216,7 @@ impl AggregationLimitContext {
     /// Returns Ok if group was already registered or limit not exceeded.
     /// Returns Err if new group would exceed limit.
     pub fn register_new_group(&self, group_hash: u64) -> Result<()> {
+        self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
 
         // Check if group already exists
@@ -218,6 +249,7 @@ impl AggregationLimitContext {
 
     /// Check if $push count for a group is within limit
     pub fn check_push_limit(&self, group_hash: u64) -> Result<()> {
+        self.check_deadline()?;
         let inner = self.inner.borrow();
         if let Some((push_count, _)) = inner.group_counters.get(&group_hash) {
             if *push_count >= inner.limits.max_push_elements {
@@ -233,6 +265,7 @@ impl AggregationLimitContext {
 
     /// Increment $push counter for a group
     pub fn increment_push(&self, group_hash: u64) -> Result<()> {
+        self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
         let limit = inner.limits.max_push_elements;
 
@@ -263,6 +296,7 @@ impl AggregationLimitContext {
 
     /// Check if $addToSet count for a group is within limit
     pub fn check_addtoset_limit(&self, group_hash: u64) -> Result<()> {
+        self.check_deadline()?;
         let inner = self.inner.borrow();
         if let Some((_, addtoset_count)) = inner.group_counters.get(&group_hash) {
             if *addtoset_count >= inner.limits.max_addtoset_elements {
@@ -278,6 +312,7 @@ impl AggregationLimitContext {
 
     /// Increment $addToSet counter for a group
     pub fn increment_addtoset(&self, group_hash: u64) -> Result<()> {
+        self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
         let limit = inner.limits.max_addtoset_elements;
 
@@ -308,6 +343,7 @@ impl AggregationLimitContext {
 
     /// Check if $unwind output count is within limit
     pub fn check_unwind_limit(&self) -> Result<()> {
+        self.check_deadline()?;
         let inner = self.inner.borrow();
         if inner.unwind_outputs > inner.limits.max_unwind_output {
             return Err(IronBaseError::AggregationError(format!(
@@ -324,6 +360,7 @@ impl AggregationLimitContext {
     /// Call this BEFORE allocating memory for the unwind results.
     /// This prevents OOM by failing before the allocation, not after.
     pub fn check_unwind_would_exceed(&self, count: usize) -> Result<()> {
+        self.check_deadline()?;
         let inner = self.inner.borrow();
         let new_total = inner.unwind_outputs.saturating_add(count);
         if new_total > inner.limits.max_unwind_output {
@@ -338,6 +375,7 @@ impl AggregationLimitContext {
 
     /// Increment $unwind output counter
     pub fn increment_unwind(&self, count: usize) -> Result<()> {
+        self.check_deadline()?;
         {
             let mut inner = self.inner.borrow_mut();
             inner.unwind_outputs += count;
@@ -357,6 +395,7 @@ impl AggregationLimitContext {
     /// Used by index-based $group optimization. The limit is the same
     /// as document limit since each index entry corresponds to a document.
     pub fn increment_index_entries(&self, count: usize) -> Result<()> {
+        self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
         inner.index_entries_scanned += count;
 

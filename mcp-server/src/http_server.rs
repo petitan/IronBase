@@ -6,6 +6,7 @@ use crate::acl::{AclManager, CallerContext};
 use crate::{shutdown, ApiKeyCache, IronBaseAdapter, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Default max body size: 1 GB
 const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024 * 1024;
@@ -597,19 +598,24 @@ async fn run_http_server_internal(
 
         // Run potentially blocking operations in spawn_blocking with timeout
         // This prevents long-running operations (like index creation) from blocking the async runtime
-        let result = tokio::time::timeout(tool_timeout, async move {
-            tokio::task::spawn_blocking(move || {
-                handle_request(
-                    &request,
-                    &state_clone.service,
-                    &state_clone.initialized_clients,
-                    api_key.as_deref(),
-                    Some(remote_addr),
-                )
-            })
-            .await
-        })
-        .await;
+        let mut handle = tokio::task::spawn_blocking(move || {
+            handle_request(
+                &request,
+                &state_clone.service,
+                &state_clone.initialized_clients,
+                api_key.as_deref(),
+                Some(remote_addr),
+                tool_timeout,
+            )
+        });
+
+        let result = tokio::select! {
+            join_result = &mut handle => Ok(join_result),
+            _ = tokio::time::sleep(tool_timeout) => {
+                handle.abort();
+                Err(())
+            }
+        };
 
         let elapsed = request_start.elapsed();
 
@@ -652,7 +658,7 @@ async fn run_http_server_internal(
                 let error_response = create_error_response(-32603, &error_msg, request_id);
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
             }
-            Err(_timeout_elapsed) => {
+            Err(_) => {
                 // Timeout - operation took too long
                 let timeout_secs = tool_timeout.as_secs();
                 let error_msg = format!(
@@ -962,6 +968,7 @@ fn handle_request(
     initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
     api_key: Option<&str>,
     remote_addr: Option<std::net::SocketAddr>,
+    tool_timeout: std::time::Duration,
 ) -> Option<McpResponse> {
     use crate::{
         get_prompt_content, get_prompts_list, get_resources_list, get_tools_list_filtered,
@@ -1044,7 +1051,8 @@ fn handle_request(
 
             // Create service context
             let caller = CallerContext::new(remote_addr, api_key.map(|s| s.to_string()));
-            let ctx = ServiceContext::new(caller, is_initialized);
+            let deadline = Some(Instant::now() + tool_timeout);
+            let ctx = ServiceContext::new(caller, is_initialized, deadline);
 
             // Create tool request
             let tool_request = ToolRequest::new(&params.name, arguments);

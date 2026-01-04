@@ -5,6 +5,8 @@
 //! See `HEAVY_OP_SEMAPHORE` for configuration.
 
 use crate::error::Result;
+use crate::request_deadline;
+use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -136,9 +138,9 @@ pub struct IronBaseAdapter {
     db_path: RwLock<std::path::PathBuf>,
     /// In-memory document counts for fast stats() without lock contention
     collection_stats: CollectionStats,
-    /// Semaphore to limit concurrent heavy operations (aggregate without $match)
-    /// This prevents OOM when multiple full-collection scans run simultaneously
-    heavy_op_semaphore: Arc<Semaphore>,
+    /// Per-collection semaphore to limit concurrent heavy operations
+    /// This prevents OOM while avoiding cross-collection throttling.
+    heavy_op_semaphores: RwLock<HashMap<String, Arc<Semaphore>>>,
 }
 
 /// Scripts collection name
@@ -305,11 +307,22 @@ impl IronBaseAdapter {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
             collection_stats: CollectionStats::new(),
-            heavy_op_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HEAVY_OPS)),
+            heavy_op_semaphores: RwLock::new(HashMap::new()),
         };
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
         Ok(adapter)
+    }
+
+    fn heavy_semaphore_for(&self, collection: &str) -> Arc<Semaphore> {
+        if let Some(sem) = self.heavy_op_semaphores.read().get(collection) {
+            return Arc::clone(sem);
+        }
+
+        let mut map = self.heavy_op_semaphores.write();
+        map.entry(collection.to_string())
+            .or_insert_with(|| Arc::new(Semaphore::new(MAX_CONCURRENT_HEAVY_OPS)))
+            .clone()
     }
 
     /// Ensure system collections exist with correct flags and schemas
@@ -929,8 +942,12 @@ impl IronBaseAdapter {
         let coll = db.get_collection(collection)?;
         // Convert Vec<Value> to Value::Array
         let pipeline_value = Value::Array(pipeline);
-        // Use aggregate_auto() for dynamic memory limits based on system RAM
-        let results = coll.aggregate_auto(&pipeline_value)?;
+        // Use centralized limits + cooperative deadline (if any)
+        let mut ctx = AggregationLimitContext::new(AggregationLimits::from_system_memory());
+        if let Some(deadline) = request_deadline::current_deadline() {
+            ctx = ctx.with_deadline(deadline);
+        }
+        let results = coll.aggregate_with_context(&pipeline_value, &ctx)?;
         Ok(results)
     }
 
@@ -955,9 +972,10 @@ impl IronBaseAdapter {
 
         if is_heavy {
             // Try to acquire semaphore with timeout
+            let sem = self.heavy_semaphore_for(collection);
             let permit = tokio::time::timeout(
                 std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
-                self.heavy_op_semaphore.acquire(),
+                sem.acquire(),
             )
             .await;
 
