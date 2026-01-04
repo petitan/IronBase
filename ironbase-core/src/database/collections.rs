@@ -478,6 +478,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 unique: true,
                 sparse: false,
                 multikey: false,
+                case_insensitive: false,
                 num_keys: 0, // Will be synced on load
                 tree_height: 1,
                 root_offset: 0,
