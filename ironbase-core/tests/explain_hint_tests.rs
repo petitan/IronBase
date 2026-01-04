@@ -19,10 +19,16 @@ fn test_explain_with_index() {
     // Explain equality query - should use index
     let plan = collection.explain(&json!({"age": 25})).unwrap();
 
-    assert_eq!(plan.get("queryPlan").unwrap(), "IndexScan");
-    assert_eq!(plan.get("indexUsed").unwrap(), "users_age");
-    assert_eq!(plan.get("stage").unwrap(), "FETCH_WITH_INDEX");
-    assert_eq!(plan.get("indexType").unwrap(), "equality");
+    // New explain format: chosenPlan contains the selected plan details
+    let chosen = plan.get("chosenPlan").unwrap();
+    assert_eq!(chosen.get("queryPlan").unwrap(), "IndexScan");
+    assert_eq!(chosen.get("indexUsed").unwrap(), "users_age");
+    assert_eq!(chosen.get("stage").unwrap(), "FETCH_WITH_INDEX");
+    assert_eq!(chosen.get("indexType").unwrap(), "equality");
+
+    // New fields
+    assert!(plan.get("candidates").is_some());
+    assert!(plan.get("selectionReason").is_some());
 }
 
 #[test]
@@ -48,13 +54,15 @@ fn test_explain_range_query() {
         }))
         .unwrap();
 
-    assert_eq!(plan.get("queryPlan").unwrap(), "IndexRangeScan");
-    assert_eq!(plan.get("indexUsed").unwrap(), "products_price");
-    assert_eq!(plan.get("stage").unwrap(), "FETCH_WITH_INDEX");
-    assert_eq!(plan.get("indexType").unwrap(), "range");
+    // New explain format: chosenPlan contains the selected plan details
+    let chosen = plan.get("chosenPlan").unwrap();
+    assert_eq!(chosen.get("queryPlan").unwrap(), "IndexRangeScan");
+    assert_eq!(chosen.get("indexUsed").unwrap(), "products_price");
+    assert_eq!(chosen.get("stage").unwrap(), "FETCH_WITH_INDEX");
+    assert_eq!(chosen.get("indexType").unwrap(), "range");
 
     // Verify range details
-    let range = plan.get("range").unwrap();
+    let range = chosen.get("range").unwrap();
     assert_eq!(range.get("inclusiveStart").unwrap(), true);
     assert_eq!(range.get("inclusiveEnd").unwrap(), false);
 }
@@ -71,10 +79,15 @@ fn test_explain_without_index() {
     // Explain query - should use CollectionScan
     let plan = collection.explain(&json!({"name": "Alice"})).unwrap();
 
-    assert_eq!(plan.get("queryPlan").unwrap(), "CollectionScan");
-    assert_eq!(plan.get("indexUsed").unwrap(), &json!(null));
-    assert_eq!(plan.get("stage").unwrap(), "FULL_SCAN");
-    assert_eq!(plan.get("estimatedCost").unwrap(), "O(n)");
+    // New explain format: chosenPlan contains the selected plan details
+    let chosen = plan.get("chosenPlan").unwrap();
+    assert_eq!(chosen.get("queryPlan").unwrap(), "CollectionScan");
+    assert_eq!(chosen.get("indexUsed").unwrap(), &json!(null));
+    assert_eq!(chosen.get("stage").unwrap(), "FULL_SCAN");
+    assert_eq!(chosen.get("estimatedCost").unwrap(), "O(n)");
+
+    // Empty candidates when no index available
+    assert_eq!(plan.get("candidateCount").unwrap(), 0);
 }
 
 #[test]
@@ -209,10 +222,11 @@ fn test_explain_and_hint_consistency() {
 
     let query = json!({"age": 5});
 
-    // 1. Explain should show it will use index
+    // 1. Explain should show it will use index (new format)
     let plan = collection.explain(&query).unwrap();
-    assert_eq!(plan.get("queryPlan").unwrap(), "IndexScan");
-    assert_eq!(plan.get("indexUsed").unwrap(), "users_age");
+    let chosen = plan.get("chosenPlan").unwrap();
+    assert_eq!(chosen.get("queryPlan").unwrap(), "IndexScan");
+    assert_eq!(chosen.get("indexUsed").unwrap(), "users_age");
 
     // 2. Normal find (auto index selection)
     let results_auto = collection.find(&query).unwrap();
