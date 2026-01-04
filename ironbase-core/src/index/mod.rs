@@ -66,7 +66,8 @@ pub mod traits;
 
 // Re-export main types for convenience
 pub use btree::{
-    BPlusTree, IndexMetadata, RangeQueryMode, RangeQueryResult, ScanOrder, NODE_PAGE_SIZE,
+    BPlusTree, IndexMetadata, IndexStats, RangeQueryMode, RangeQueryResult, ScanOrder,
+    NODE_PAGE_SIZE,
 };
 pub use fuzzy::{FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata};
 pub use key::{IndexKey, IndexPrefixInfo, OrderedFloat};

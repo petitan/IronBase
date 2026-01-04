@@ -307,10 +307,11 @@ impl IndexManager {
                 is_compound,
                 num_fields,
                 sparse: index.metadata.sparse,
+                distinct_count: index.metadata.stats.distinct_count,
             });
         }
 
-        // Legacy indexes are single-field only (never sparse)
+        // Legacy indexes are single-field only (never sparse, no stats)
         for (name, index) in &self.legacy_indexes {
             result.push(IndexPrefixInfo {
                 index_name: name.clone(),
@@ -318,6 +319,7 @@ impl IndexManager {
                 is_compound: false,
                 num_fields: 1,
                 sparse: false,
+                distinct_count: 0, // No stats for legacy indexes
             });
         }
 

@@ -4,7 +4,7 @@
 use serde_json::Value;
 
 use crate::error::{IronBaseError, Result};
-use crate::index::{IndexKey, IndexManager, IndexMetadata};
+use crate::index::{IndexKey, IndexManager, IndexMetadata, IndexStats};
 use crate::query::Query;
 use crate::query_planner::QueryPlanner;
 use crate::storage::{RawStorage, Storage};
@@ -251,6 +251,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         num_keys: 0,
                         tree_height: 1,
                         root_offset,
+                        stats: IndexStats::default(),
                     });
 
                 meta.indexes.push(index_meta);
@@ -422,6 +423,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         num_keys: 0,
                         tree_height: 1,
                         root_offset,
+                        stats: IndexStats::default(),
                     });
 
                 meta.indexes.push(index_meta);
@@ -595,6 +597,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         num_keys: 0,
                         tree_height: 1,
                         root_offset,
+                        stats: IndexStats::default(),
                     });
 
                 meta.indexes.push(index_meta);

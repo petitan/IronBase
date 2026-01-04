@@ -482,6 +482,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 num_keys: 0, // Will be synced on load
                 tree_height: 1,
                 root_offset: 0,
+                stats: crate::index::IndexStats::default(),
             };
             if let Some(loaded_tree) =
                 crate::collection_core::try_load_index_from_file(&db_path, &id_meta)
