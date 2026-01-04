@@ -22,12 +22,12 @@ if max_value != () && min_value != () {
 }
 
 // Execute query
-let results = db_find(collection, query);
+let result = db_find(collection, query);
 
 // Return results with metadata
 #{
     collection: collection,
     query: query,
-    result_count: results.len(),
-    results: results
+    result_count: result.documents.len(),
+    results: result.documents
 }

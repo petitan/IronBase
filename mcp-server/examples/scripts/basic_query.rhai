@@ -2,17 +2,17 @@
 // Find all documents in a collection with optional filtering
 
 // Simple find - get all users
-let all_users = db_find("users", #{});
+let all_users = db_find("users", #{}).documents;
 print(`Found ${all_users.len()} total users`);
 
 // Find with filter - active users only
-let active_users = db_find("users", #{ status: "active" });
+let active_users = db_find("users", #{ status: "active" }).documents;
 print(`Found ${active_users.len()} active users`);
 
 // Find with comparison operators
 let adult_users = db_find("users", #{
     age: #{ "$gte": 18 }
-});
+}).documents;
 print(`Found ${adult_users.len()} adult users`);
 
 // Return the results
