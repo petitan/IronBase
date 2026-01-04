@@ -787,6 +787,12 @@ impl Collection {
             for (key, value) in proj.iter() {
                 let field: String = key.extract()?;
                 let action: i32 = value.extract()?;
+                if action != 0 && action != 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {}",
+                        field, action
+                    )));
+                }
                 projection_map.insert(field, action);
             }
             options.projection = Some(projection_map);
@@ -851,6 +857,12 @@ impl Collection {
             for (key, value) in proj.iter() {
                 let field: String = key.extract()?;
                 let action: i32 = value.extract()?;
+                if action != 0 && action != 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {}",
+                        field, action
+                    )));
+                }
                 projection_map.insert(field, action);
             }
             options.projection = Some(projection_map);

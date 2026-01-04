@@ -554,8 +554,11 @@ impl QueryPlanner {
                 }
 
                 if let Value::Object(ref cond_map) = conditions {
-                    // Check for $exists: true
+                    // Check for $exists: true, but only if it's the sole operator
                     if let Some(Value::Bool(true)) = cond_map.get("$exists") {
+                        if cond_map.keys().any(|k| k != "$exists") {
+                            continue;
+                        }
                         // Look for a sparse index on this field
                         if let Some(info) = index_fields
                             .iter()
@@ -1005,6 +1008,44 @@ impl QueryPlanner {
         index_fields: &[IndexPrefixInfo],
     ) -> Value {
         use serde_json::json;
+
+        if let Some((logical_op, clauses)) = Self::extract_logical_clauses(query_json) {
+            let mut total_candidates = 0usize;
+            let clauses_json: Vec<Value> = clauses
+                .iter()
+                .map(|clause| {
+                    let candidates = Self::collect_candidates(clause, index_fields);
+                    total_candidates += candidates.len();
+                    let chosen = Self::select_best_candidate(candidates.clone());
+                    let chosen_plan = chosen
+                        .as_ref()
+                        .map(|c| Self::plan_to_json(&c.plan, &c.field));
+                    json!({
+                        "clause": clause,
+                        "chosenPlan": chosen_plan,
+                        "selectionReason": chosen.as_ref().map(|c| c.reason.clone()),
+                        "candidates": candidates.iter().map(Self::candidate_to_json).collect::<Vec<_>>(),
+                    })
+                })
+                .collect();
+
+            let operator = match logical_op {
+                LogicalOperator::And => "$and",
+                LogicalOperator::Or => "$or",
+                LogicalOperator::Nor => "$nor",
+            };
+
+            return json!({
+                "chosenPlan": {
+                    "queryPlan": "LogicalIndexScan",
+                    "operator": operator,
+                    "clauseCount": clauses.len(),
+                },
+                "selectionReason": "Logical operator planning",
+                "clauses": clauses_json,
+                "candidateCount": total_candidates,
+            });
+        }
 
         // Collect all candidates for explain output
         let candidates = Self::collect_candidates(query_json, index_fields);

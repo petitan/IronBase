@@ -342,7 +342,20 @@ pub extern "C" fn ironbase_find_with_options(
         let mut projection_map = HashMap::new();
         for (k, v) in proj {
             if let Some(n) = v.as_i64() {
+                if n != 0 && n != 1 {
+                    set_last_error(&format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {}",
+                        k, n
+                    ));
+                    return ptr::null_mut();
+                }
                 projection_map.insert(k.clone(), n as i32);
+            } else {
+                set_last_error(&format!(
+                    "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                    k, v
+                ));
+                return ptr::null_mut();
             }
         }
         find_options.projection = Some(projection_map);

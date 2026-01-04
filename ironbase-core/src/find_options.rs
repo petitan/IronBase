@@ -220,6 +220,13 @@ pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Resul
         return Ok(doc.clone());
     }
 
+    if let Some((field, value)) = projection.iter().find(|(_, &v)| v != 0 && v != 1) {
+        return Err(IronBaseError::InvalidQuery(format!(
+            "Invalid projection value for '{}': expected 0 or 1, got {}",
+            field, value
+        )));
+    }
+
     // Detect mode
     let has_inclusions = projection.values().any(|&v| v == 1);
     let has_non_id_exclusions = projection

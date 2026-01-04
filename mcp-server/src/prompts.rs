@@ -1328,7 +1328,7 @@ Rhai is a lightweight scripting language for server-side operations. Scripts can
 
 | Function | Description | Example |
 |----------|-------------|---------|
-| `db_find(coll, query)` | Find documents | `db_find("users", #{age: #{`$gt`: 18}})` |
+| `db_find(coll, query)` | Find documents | `db_find("users", #{age: #{`$gt`: 18}})` → `#{documents: [...], count: n}` |
 | `db_find_one(coll, query)` | Find single document (or null) | `db_find_one("users", #{name: "Alice"})` |
 | `db_find_one_result(coll, query)` | Find with explicit result type | Returns `#{found: bool, doc: ..., error: ...}` |
 | `db_insert_one(coll, doc)` | Insert document | `db_insert_one("users", #{name: "Bob"})` |
@@ -1358,7 +1358,7 @@ Rhai is a lightweight scripting language for server-side operations. Scripts can
 | `db_create_fuzzy_index(coll, field, algo, threshold)` | Create fuzzy index | `db_create_fuzzy_index("users", "name", "jaro_winkler", 0.8)` |
 | `db_fuzzy_search(coll, field, query, threshold)` | Fuzzy text search | `db_fuzzy_search("users", "name", "john", 0.7)` |
 | `db_create_fulltext_index(coll, field, lang)` | Create fulltext index | `db_create_fulltext_index("articles", "content", "english")` |
-| `db_fulltext_search(coll, field, query, options)` | Fulltext search with options | `db_fulltext_search("articles", "content", "database", #{{limit: 10, min_score: 0.2}})` |
+| `db_fulltext_search(coll, field, query, options)` | Fulltext search with options | `db_fulltext_search("articles", "content", "database", #{limit: 10, min_score: 0.2})` |
 
 ## Helper Functions
 
@@ -1423,7 +1423,8 @@ let map = #{a: 1, b: 2};  // Object map (use #{ } for maps!)
 Use backticks for operators starting with `$`:
 ```rhai
 let query = #{age: #{`$gt`: 18, `$lt`: 65}};
-let docs = db_find("users", query);
+let result = db_find("users", query);
+let docs = result.documents;
 ```
 
 ### Control Flow
@@ -2056,7 +2057,7 @@ db_create_fulltext_index("articles", "content", "{language}");
 // Search
 let results = db_fulltext_search("articles", "content", "query", #{{limit: 10}});
 for r in results {{
-    print(r.doc.title + " (score: " + r.score + ")");
+    print(r.document.title + " (score: " + r.score + ")");
 }}
 ```
 

@@ -1790,7 +1790,7 @@ fn test_script_run_db_operations() {
                 // Find all
                 let products = db_find("products", #{});
 
-                #{ count: count, product_count: products.len() }
+                #{ count: count, product_count: products.documents.len() }
             "#
         }),
         &adapter,

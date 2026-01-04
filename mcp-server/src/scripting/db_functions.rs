@@ -16,13 +16,57 @@ use std::sync::Arc;
 use super::conversion::{dynamic_to_json, json_to_dynamic, map_to_json};
 use super::limits::{ScriptLimits, ABSOLUTE_MAX_FIND_DOCUMENTS};
 
+fn projection_from_dynamic(value: &Dynamic) -> Result<Option<HashMap<String, i32>>, String> {
+    let proj_json = dynamic_to_json(value);
+    if proj_json.is_null() {
+        return Ok(None);
+    }
+    let obj = proj_json.as_object().ok_or_else(|| {
+        "projection must be an object like {\"field\": 1} or {\"field\": 0}".to_string()
+    })?;
+    let mut projection = HashMap::new();
+    for (key, val) in obj {
+        let entry = if let Some(i) = val.as_i64() {
+            if i != 0 && i != 1 {
+                return Err(format!(
+                    "Invalid projection value for '{}': expected 0 or 1, got {}",
+                    key, i
+                ));
+            }
+            i as i32
+        } else if let Some(f) = val.as_f64() {
+            if f == 0.0 {
+                0
+            } else if f == 1.0 {
+                1
+            } else {
+                return Err(format!(
+                    "Invalid projection value for '{}': expected 0 or 1, got {}",
+                    key, f
+                ));
+            }
+        } else {
+            return Err(format!(
+                "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                key, val
+            ));
+        };
+        projection.insert(key.clone(), entry);
+    }
+    if projection.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(projection))
+    }
+}
+
 /// Register all database functions into a Rhai engine.
 ///
 /// # Functions Registered
 ///
 /// ## Read Operations
-/// - `db_find(collection, query)` - Find documents (with default limit)
-/// - `db_find(collection, query, options)` - Find with options
+/// - `db_find(collection, query)` - Find documents (returns documents + count)
+/// - `db_find(collection, query, options)` - Find with options (returns documents + count + total)
 /// - `db_find_one(collection, query)` - Find single document
 /// - `db_find_one_result(collection, query)` - Find with explicit result type
 /// - `db_count(collection, query)` - Count documents
@@ -83,7 +127,7 @@ fn register_read_functions(
     let max_find_documents = limits.max_find_documents;
     let default_limit = max_find_documents.min(ABSOLUTE_MAX_FIND_DOCUMENTS);
 
-    // db_find(collection, query) -> array of documents
+    // db_find(collection, query) -> #{documents: [...], count: int}
     // SECURITY: Always applies default limit to prevent OOM
     let adapter_find = adapter.clone();
     engine.register_fn("db_find", move |collection: &str, query: Map| -> Dynamic {
@@ -97,18 +141,22 @@ fn register_read_functions(
 
         match adapter_find.find(collection, query_json, options) {
             Ok(result) => {
+                let count = result.documents.len() as i64;
                 let docs: Vec<Dynamic> = result
                     .documents
                     .into_iter()
                     .map(|d| json_to_dynamic(&d))
                     .collect();
-                Dynamic::from(docs)
+                let mut map = Map::new();
+                map.insert("documents".into(), Dynamic::from(docs));
+                map.insert("count".into(), Dynamic::from(count));
+                Dynamic::from(map)
             }
             Err(e) => Dynamic::from(format!("Error: {}", e)),
         }
     });
 
-    // db_find(collection, query, options) -> array of documents
+    // db_find(collection, query, options) -> #{documents: [...], count: int, total?: int}
     // Options: { limit: int, skip: int, sort: { field: 1|-1 }, projection: { field: 1|0 } }
     let adapter_find_opts = adapter.clone();
     engine.register_fn(
@@ -157,9 +205,12 @@ fn register_read_functions(
 
             // Parse projection: { field: 1 } or { field: 0 }
             if let Some(proj_val) = options.get("projection") {
-                let proj_json = dynamic_to_json(proj_val);
-                if proj_json.is_object() {
-                    find_options.projection = Some(proj_json);
+                match projection_from_dynamic(proj_val) {
+                    Ok(Some(projection)) => {
+                        find_options.projection = Some(serde_json::json!(projection));
+                    }
+                    Ok(None) => {}
+                    Err(message) => return Dynamic::from(format!("Error: {}", message)),
                 }
             }
 
@@ -171,14 +222,21 @@ fn register_read_functions(
             }
 
             match adapter_find_opts.find(collection, query_json, find_options) {
-                Ok(result) => {
-                    let docs: Vec<Dynamic> = result
-                        .documents
-                        .into_iter()
-                        .map(|d| json_to_dynamic(&d))
-                        .collect();
-                    Dynamic::from(docs)
+            Ok(result) => {
+                let count = result.documents.len() as i64;
+                let docs: Vec<Dynamic> = result
+                    .documents
+                    .into_iter()
+                    .map(|d| json_to_dynamic(&d))
+                    .collect();
+                let mut map = Map::new();
+                map.insert("documents".into(), Dynamic::from(docs));
+                map.insert("count".into(), Dynamic::from(count));
+                if let Some(total) = result.total {
+                    map.insert("total".into(), Dynamic::from(total as i64));
                 }
+                Dynamic::from(map)
+            }
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
             }
         },
@@ -492,27 +550,6 @@ fn register_search_functions(
     adapter: Arc<IronBaseAdapter>,
     limits: &ScriptLimits,
 ) {
-    fn projection_from_dynamic(value: &Dynamic) -> Option<HashMap<String, i32>> {
-        let proj_json = dynamic_to_json(value);
-        let obj = proj_json.as_object()?;
-        let mut projection = HashMap::new();
-        for (key, val) in obj {
-            let entry = if let Some(i) = val.as_i64() {
-                i as i32
-            } else if let Some(b) = val.as_bool() {
-                if b { 1 } else { 0 }
-            } else {
-                continue;
-            };
-            projection.insert(key.clone(), entry);
-        }
-        if projection.is_empty() {
-            None
-        } else {
-            Some(projection)
-        }
-    }
-
     // db_create_fuzzy_index(collection, field, algorithm, threshold) -> index_name
     let adapter_fzidx = adapter.clone();
     engine.register_fn(
@@ -525,7 +562,7 @@ fn register_search_functions(
         },
     );
 
-    // db_fuzzy_search(collection, field, query, threshold) -> array of {doc, score}
+    // db_fuzzy_search(collection, field, query, threshold) -> array of {document, score}
     let adapter_fzsrch = adapter.clone();
     engine.register_fn(
         "db_fuzzy_search",
@@ -536,7 +573,7 @@ fn register_search_functions(
                         .into_iter()
                         .map(|(doc, score)| {
                             let mut map = Map::new();
-                            map.insert("doc".into(), json_to_dynamic(&doc));
+                            map.insert("document".into(), json_to_dynamic(&doc));
                             map.insert("score".into(), Dynamic::from(score));
                             Dynamic::from(map)
                         })
@@ -560,7 +597,7 @@ fn register_search_functions(
         },
     );
 
-    // db_fulltext_search(collection, field, query, options) -> array of {doc, score, tokens}
+    // db_fulltext_search(collection, field, query, options) -> array of {document, score, matched_tokens}
     let max_find_documents = limits.max_find_documents;
     let default_limit = max_find_documents.min(ABSOLUTE_MAX_FIND_DOCUMENTS);
     let adapter_ftsrch = adapter;
@@ -595,7 +632,10 @@ fn register_search_functions(
             }
 
             if let Some(proj_val) = options.get("projection") {
-                projection = projection_from_dynamic(proj_val);
+                match projection_from_dynamic(proj_val) {
+                    Ok(parsed) => projection = parsed,
+                    Err(message) => return Dynamic::from(format!("Error: {}", message)),
+                }
             }
 
             let effective_limit = requested_limit
@@ -614,11 +654,11 @@ fn register_search_functions(
                         .into_iter()
                         .map(|(doc, score, tokens)| {
                             let mut map = Map::new();
-                            map.insert("doc".into(), json_to_dynamic(&doc));
+                            map.insert("document".into(), json_to_dynamic(&doc));
                             map.insert("score".into(), Dynamic::from(score));
                             let token_dyn: Vec<Dynamic> =
                                 tokens.into_iter().map(Dynamic::from).collect();
-                            map.insert("tokens".into(), Dynamic::from(token_dyn));
+                            map.insert("matched_tokens".into(), Dynamic::from(token_dyn));
                             Dynamic::from(map)
                         })
                         .collect();
