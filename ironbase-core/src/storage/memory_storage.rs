@@ -138,7 +138,9 @@ impl Storage for MemoryStorage {
         self.next_offset += 1;
 
         // Store in catalog for compatibility
-        meta.document_catalog.insert(doc_id, offset);
+        meta.document_catalog.insert(doc_id.clone(), offset);
+        meta.document_order.retain(|id| id != &doc_id);
+        meta.document_order.push(doc_id);
 
         Ok(offset)
     }
@@ -205,6 +207,7 @@ impl Storage for MemoryStorage {
             index_offset: 256, // Synthetic
             last_id: 0,
             document_catalog: HashMap::new(),
+            document_order: Vec::new(),
             indexes: Vec::new(),
             fuzzy_indexes: Vec::new(),
             fulltext_indexes: Vec::new(),
@@ -322,6 +325,8 @@ impl RawStorage for MemoryStorage {
         // Update catalog in metadata
         if let Some(meta) = self.metadata.get_mut(collection) {
             meta.document_catalog.insert(doc_id.clone(), offset);
+            meta.document_order.retain(|id| id != doc_id);
+            meta.document_order.push(doc_id.clone());
             meta.document_count += 1;
         }
 

@@ -76,6 +76,74 @@ where
     deserializer.deserialize_seq(CatalogVisitor)
 }
 
+pub mod vec {
+    use super::*;
+    use serde::de::{SeqAccess, Visitor};
+    use serde::ser::SerializeSeq;
+
+    /// Serialize Vec<DocumentId> as array of [type_tag, value] tuples
+    pub fn serialize<S>(ids: &Vec<DocumentId>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut seq = serializer.serialize_seq(Some(ids.len()))?;
+        for doc_id in ids {
+            let entry: (&str, String) = match doc_id {
+                DocumentId::Int(i) => ("i", i.to_string()),
+                DocumentId::String(s) => ("s", s.clone()),
+                DocumentId::ObjectId(oid) => ("o", oid.clone()),
+            };
+            seq.serialize_element(&entry)?;
+        }
+        seq.end()
+    }
+
+    /// Deserialize array of [type_tag, value] tuples back to Vec<DocumentId>
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<DocumentId>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IdVecVisitor;
+
+        impl<'de> Visitor<'de> for IdVecVisitor {
+            type Value = Vec<DocumentId>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("an array of [type_tag, value] tuples")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                let mut ids = Vec::new();
+                while let Some((type_tag, value_str)) = seq.next_element::<(String, String)>()? {
+                    let doc_id = match type_tag.as_str() {
+                        "i" => {
+                            let val = value_str.parse::<i64>().map_err(|e| {
+                                serde::de::Error::custom(format!("Invalid Int value: {}", e))
+                            })?;
+                            DocumentId::Int(val)
+                        }
+                        "s" => DocumentId::String(value_str),
+                        "o" => DocumentId::ObjectId(value_str),
+                        _ => {
+                            return Err(serde::de::Error::custom(format!(
+                                "Unknown type tag: {}",
+                                type_tag
+                            )))
+                        }
+                    };
+                    ids.push(doc_id);
+                }
+                Ok(ids)
+            }
+        }
+
+        deserializer.deserialize_seq(IdVecVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,5 +440,30 @@ mod tests {
 
         assert_eq!(original, restored);
         assert_eq!(restored.catalog.len(), 3);
+    }
+
+    #[derive(Debug, Serialize, Deserialize, PartialEq)]
+    struct TestIdVec {
+        #[serde(
+            serialize_with = "vec::serialize",
+            deserialize_with = "vec::deserialize"
+        )]
+        ids: Vec<DocumentId>,
+    }
+
+    #[test]
+    fn test_id_vec_roundtrip() {
+        let original = TestIdVec {
+            ids: vec![
+                DocumentId::Int(1),
+                DocumentId::String("abc".to_string()),
+                DocumentId::ObjectId("507f1f77bcf86cd799439011".to_string()),
+            ],
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: TestIdVec = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(original, restored);
     }
 }
