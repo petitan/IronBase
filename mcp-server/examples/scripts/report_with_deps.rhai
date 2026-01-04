@@ -3,7 +3,7 @@
 // This script uses functions from helper_utils
 
 // Fetch all completed orders
-let orders = db_find("orders", #{ status: "completed" });
+let orders = db_find("orders", #{ status: "completed" }).documents;
 print(`Processing ${orders.len()} completed orders...`);
 
 // Calculate totals using helper functions

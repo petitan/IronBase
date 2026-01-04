@@ -318,7 +318,7 @@ The MCP server includes a powerful stored scripts feature using Rhai scripting l
     "name": "script_save",
     "arguments": {
       "name": "calculate_total",
-      "code": "let sum = 0; for item in db_find(\"orders\", #{}) { sum += item.amount; } sum",
+      "code": "let sum = 0; for item in db_find(\"orders\", #{}).documents { sum += item.amount; } sum",
       "description": "Calculate total order amount",
       "tags": ["utility", "finance"],
       "dependencies": []
@@ -466,7 +466,7 @@ Scripts have access to these database functions:
 
 | Function | Description |
 |----------|-------------|
-| `db_find(collection, query)` | Find documents matching query |
+| `db_find(collection, query)` | Find documents matching query (returns `#{documents: [...], count: n}`) |
 | `db_find_one(collection, query)` | Find first matching document |
 | `db_insert_one(collection, document)` | Insert a document |
 | `db_update_one(collection, filter, update)` | Update first matching document |
@@ -497,7 +497,8 @@ Scripts have access to these database functions:
 ### Basic Query
 ```rhai
 // Find all active users
-let users = db_find("users", #{ status: "active" });
+let result = db_find("users", #{ status: "active" });
+let users = result.documents;
 print(`Found ${users.len()} active users`);
 users
 ```
@@ -507,9 +508,10 @@ users
 // Script that accepts parameters
 let min_age = params.min_age;
 let max_age = params.max_age;
-db_find("users", #{
+let result = db_find("users", #{
     age: #{ "$gte": min_age, "$lte": max_age }
-})
+});
+result.documents
 ```
 
 ### Data Aggregation
@@ -545,7 +547,7 @@ fn safe_divide(a, b) {
 ### Report with Dependencies
 ```rhai
 // Depends on: helper_utils
-let orders = db_find("orders", #{ status: "completed" });
+let orders = db_find("orders", #{ status: "completed" }).documents;
 let total = 0;
 for order in orders {
     total += order.amount;
