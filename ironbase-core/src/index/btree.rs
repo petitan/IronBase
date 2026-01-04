@@ -197,6 +197,9 @@ pub struct IndexMetadata {
     pub sparse: bool,
     #[serde(default)]
     pub multikey: bool,
+    /// If true, string values are stored lowercased for case-insensitive matching
+    #[serde(default)]
+    pub case_insensitive: bool,
     pub num_keys: u64,
     pub tree_height: u32,
     #[serde(default)]
@@ -235,6 +238,7 @@ impl BPlusTree {
                 unique,
                 sparse,
                 multikey: false,
+                case_insensitive: false,
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
@@ -282,6 +286,7 @@ impl BPlusTree {
                 unique,
                 sparse,
                 multikey: false,
+                case_insensitive: false,
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
