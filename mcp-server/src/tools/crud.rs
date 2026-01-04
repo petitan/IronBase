@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::helpers::{
     get_array, get_object, get_string, parse_limit, parse_projection, parse_skip, parse_sort,
-    validate_collection_name,
+    validate_collection_name, MAX_QUERY_LIMIT,
 };
 
 /// Dispatch CRUD tool calls
@@ -58,10 +58,11 @@ fn handle_find(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
         .unwrap_or(false);
     let projection = parse_projection(&params)?;
     let projection_value = projection.map(|proj| json!(proj));
+    let limit = parse_limit(&params).or(Some(MAX_QUERY_LIMIT));
     let options = FindOptions {
         projection: projection_value,
         sort: parse_sort(&params),
-        limit: parse_limit(&params),
+        limit,
         skip: parse_skip(&params),
         include_total,
     };

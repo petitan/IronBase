@@ -222,21 +222,21 @@ fn register_read_functions(
             }
 
             match adapter_find_opts.find(collection, query_json, find_options) {
-            Ok(result) => {
-                let count = result.documents.len() as i64;
-                let docs: Vec<Dynamic> = result
-                    .documents
-                    .into_iter()
-                    .map(|d| json_to_dynamic(&d))
-                    .collect();
-                let mut map = Map::new();
-                map.insert("documents".into(), Dynamic::from(docs));
-                map.insert("count".into(), Dynamic::from(count));
-                if let Some(total) = result.total {
-                    map.insert("total".into(), Dynamic::from(total as i64));
+                Ok(result) => {
+                    let count = result.documents.len() as i64;
+                    let docs: Vec<Dynamic> = result
+                        .documents
+                        .into_iter()
+                        .map(|d| json_to_dynamic(&d))
+                        .collect();
+                    let mut map = Map::new();
+                    map.insert("documents".into(), Dynamic::from(docs));
+                    map.insert("count".into(), Dynamic::from(count));
+                    if let Some(total) = result.total {
+                        map.insert("total".into(), Dynamic::from(total as i64));
+                    }
+                    Dynamic::from(map)
                 }
-                Dynamic::from(map)
-            }
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
             }
         },

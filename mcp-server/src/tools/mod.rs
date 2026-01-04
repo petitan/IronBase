@@ -164,7 +164,10 @@ fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -
             if has_sort && !has_limit {
                 // Check collection size
                 if let Some(collection) = params.get("collection").and_then(|c| c.as_str()) {
-                    if let Ok(count) = adapter.count_documents(collection, json!({})) {
+                    let count = adapter
+                        .collection_count_cached(collection)
+                        .or_else(|| adapter.count_documents(collection, json!({})).ok());
+                    if let Some(count) = count {
                         if count as usize > MAX_UNINDEXED_SORT_DOCS {
                             // Extract sort field name from sort parameter
                             // Format: [["field", 1]] or [["field", -1]]
@@ -216,7 +219,10 @@ fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -
 
                 if has_sort && !has_limit {
                     if let Some(collection) = params.get("collection").and_then(|c| c.as_str()) {
-                        if let Ok(count) = adapter.count_documents(collection, json!({})) {
+                        let count = adapter
+                            .collection_count_cached(collection)
+                            .or_else(|| adapter.count_documents(collection, json!({})).ok());
+                        if let Some(count) = count {
                             if count as usize > MAX_UNINDEXED_SORT_DOCS {
                                 return Err(McpError::OperationTooLarge(format!(
                                     "Aggregation with $sort on {} documents without $limit could cause memory issues. \
@@ -437,7 +443,7 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "find",
                 "title": "Find Documents",
-                "description": "Find documents matching a query. Use count_documents FIRST, then use 'limit' and 'projection' to avoid context overflow!",
+                "description": "Find documents matching a query. Default limit is 10,000 if omitted. Use count_documents FIRST, then use 'limit' and 'projection' to avoid context overflow!",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -450,7 +456,7 @@ fn get_all_tools_json() -> Value {
                                 { "type": "object" }
                             ]
                         },
-                        "limit": { "type": "integer", "description": "Maximum number of documents to return" },
+                        "limit": { "type": "integer", "description": "Maximum number of documents to return (default: 10,000)" },
                         "skip": { "type": "integer", "description": "Number of documents to skip" },
                         "include_total": { "type": "boolean", "description": "If true, also return total count of matching documents", "default": false }
                     },
@@ -706,7 +712,7 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "find_with_hint",
                 "title": "Find with Index Hint",
-                "description": "Find documents using a specific index",
+                "description": "Find documents using a specific index. Default limit is 10,000 if omitted.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -720,7 +726,7 @@ fn get_all_tools_json() -> Value {
                                 { "type": "object" }
                             ]
                         },
-                        "limit": { "type": "integer", "description": "Maximum number of documents" },
+                        "limit": { "type": "integer", "description": "Maximum number of documents (default: 10,000)" },
                         "skip": { "type": "integer", "description": "Number of documents to skip" }
                     },
                     "required": ["collection", "hint"]

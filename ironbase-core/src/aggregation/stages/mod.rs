@@ -2,6 +2,7 @@
 // Individual stage implementations with context-aware execution
 
 mod accumulator;
+mod count_stage;
 mod group_stage;
 mod limit_stage;
 mod match_stage;
@@ -12,7 +13,8 @@ mod unwind_stage;
 
 use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::types::{
-    GroupStage, LimitStage, MatchStage, ProjectStage, SkipStage, SortStage, Stage, UnwindStage,
+    CountStage, GroupStage, LimitStage, MatchStage, ProjectStage, SkipStage, SortStage, Stage,
+    UnwindStage,
 };
 use crate::error::Result;
 use serde_json::Value;
@@ -72,6 +74,7 @@ impl Stage {
             Stage::Match(s) => s.execute_with_context(docs, ctx),
             Stage::Project(s) => s.execute_with_context(docs, ctx),
             Stage::Group(s) => s.execute_with_context(docs, ctx),
+            Stage::Count(s) => s.execute_with_context(docs, ctx),
             Stage::Sort(s) => s.execute_with_context(docs, ctx),
             Stage::Limit(s) => s.execute_with_context(docs, ctx),
             Stage::Skip(s) => s.execute_with_context(docs, ctx),
@@ -115,6 +118,17 @@ impl StageExecutor for GroupStage {
     ) -> Result<Vec<Value>> {
         // Use context for group/push/addtoset limit tracking
         self.execute_with_context_impl(docs, ctx)
+    }
+}
+
+impl StageExecutor for CountStage {
+    fn execute_with_context(
+        &self,
+        docs: Vec<Value>,
+        _ctx: &AggregationLimitContext,
+    ) -> Result<Vec<Value>> {
+        // Count stage only needs the number of documents
+        self.execute(docs)
     }
 }
 

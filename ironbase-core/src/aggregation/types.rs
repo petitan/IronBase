@@ -285,6 +285,7 @@ pub enum Stage {
     Match(MatchStage),
     Project(ProjectStage),
     Group(GroupStage),
+    Count(CountStage),
     Sort(SortStage),
     Limit(LimitStage),
     Skip(SkipStage),
@@ -301,6 +302,12 @@ pub struct MatchStage {
 #[derive(Debug, Clone)]
 pub struct ProjectStage {
     pub(crate) fields: HashMap<String, ProjectField>,
+}
+
+/// $count stage - count documents and output as a single field
+#[derive(Debug, Clone)]
+pub struct CountStage {
+    pub(crate) field: String,
 }
 
 #[derive(Debug, Clone)]

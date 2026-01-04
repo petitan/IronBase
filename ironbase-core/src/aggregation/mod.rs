@@ -350,6 +350,39 @@ mod tests {
         }
     }
 
+    // ========== $count tests ==========
+
+    #[test]
+    fn test_count_stage() {
+        let docs = vec![
+            json!({"name": "Alice"}),
+            json!({"name": "Bob"}),
+            json!({"name": "Charlie"}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([{"$count": "total"}])).unwrap();
+        let results = pipeline.execute(docs).unwrap();
+        assert_eq!(results, vec![json!({"total": 3})]);
+    }
+
+    #[test]
+    fn test_count_stage_with_match() {
+        let docs = vec![
+            json!({"name": "Alice", "age": 30}),
+            json!({"name": "Bob", "age": 25}),
+            json!({"name": "Charlie", "age": 35}),
+        ];
+
+        let pipeline = Pipeline::from_json(&json!([
+            {"$match": {"age": {"$gte": 30}}},
+            {"$count": "n"}
+        ]))
+        .unwrap();
+
+        let results = pipeline.execute(docs).unwrap();
+        assert_eq!(results, vec![json!({"n": 2})]);
+    }
+
     // ========== $project tests ==========
 
     #[test]

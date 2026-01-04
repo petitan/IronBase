@@ -4,7 +4,6 @@ use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
 use ironbase_core::find_options::{apply_projection, apply_sort};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::helpers::{
@@ -142,7 +141,7 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
     let query = get_string(&params, "query")?;
     let threshold = parse_threshold(&params)?;
     let algorithm = params.get("algorithm").and_then(|v| v.as_str());
-    let limit = parse_limit(&params);
+    let limit = parse_limit(&params).or(Some(MAX_QUERY_LIMIT));
     let projection = parse_projection(&params)?;
 
     // Use the real fuzzy search with index
@@ -158,16 +157,16 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
         .into_iter()
         .map(|(doc, score)| {
             let projected_doc = if let Some(ref proj) = projection {
-                apply_projection(&doc, proj).unwrap_or(doc)
+                apply_projection(&doc, proj).map_err(|e| McpError::InvalidParams(e.to_string()))
             } else {
-                doc
-            };
-            json!({
+                Ok(doc)
+            }?;
+            Ok(json!({
                 "document": projected_doc,
                 "score": score
-            })
+            }))
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     Ok(json!({"results": documents, "count": documents.len()}))
 }
@@ -182,49 +181,7 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     let min_score = params.get("min_score").and_then(|v| v.as_f64());
 
     // Parse projection with validation
-    let projection: Option<HashMap<String, i32>> =
-        if let Some(proj_value) = params.get("projection") {
-            if proj_value.is_null() {
-                None
-            } else if let Some(obj) = proj_value.as_object() {
-                let mut map = HashMap::new();
-                for (k, v) in obj {
-                    let int_val = if let Some(i) = v.as_i64() {
-                        if i != 0 && i != 1 {
-                            return Err(McpError::InvalidParams(format!(
-                                "Invalid projection value for '{}': expected 0 or 1, got {}",
-                                k, i
-                            )));
-                        }
-                        i as i32
-                    } else if let Some(f) = v.as_f64() {
-                        if f == 0.0 {
-                            0
-                        } else if f == 1.0 {
-                            1
-                        } else {
-                            return Err(McpError::InvalidParams(format!(
-                                "Invalid projection value for '{}': expected 0 or 1, got {}",
-                                k, f
-                            )));
-                        }
-                    } else {
-                        return Err(McpError::InvalidParams(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                            k, v
-                        )));
-                    };
-                    map.insert(k.clone(), int_val);
-                }
-                Some(map)
-            } else {
-                return Err(McpError::InvalidParams(
-                    "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
-                ));
-            }
-        } else {
-            None
-        };
+    let projection = parse_projection(&params)?;
 
     let options = FulltextSearchOptions {
         limit,

@@ -243,7 +243,7 @@ pub use self::cursor::FindCursor;
 /// Default capacity for the LRU query cache
 const QUERY_CACHE_CAPACITY: usize = 1000;
 
-// OOM protection: try_reserve() dynamically checks available memory (jemalloc-aware)
+// OOM protection: try_reserve() fails fast on allocation pressure
 
 /// Threshold for logging a warning about large document loads
 const LARGE_QUERY_WARNING_THRESHOLD: usize = 10_000;
@@ -940,7 +940,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Load documents with progress logging for very large sets
-        // Use try_reserve to detect OOM before it happens (especially important with jemalloc)
+        // Use try_reserve to detect OOM before it happens
         let mut docs = Vec::new();
         docs.try_reserve(doc_count).map_err(|e| {
             IronBaseError::InvalidQuery(format!(
@@ -1512,7 +1512,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
 
         // Collect distinct values - stream documents one by one
-        // OOM PROTECTION: Use try_reserve for dynamic memory checking (jemalloc-aware)
+        // OOM PROTECTION: Use try_reserve for dynamic memory checking
         // PERF: Use value_hash (u64) instead of canonical_json_string (String) for 10-50x faster dedup
         let mut seen_hashes: HashSet<u64> = HashSet::new();
         let mut distinct_values = Vec::new();
@@ -2148,6 +2148,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     filter,
                     output_field,
                     multiplier,
+                    include_id,
                 } => {
                     // Use count_documents() instead of full scan - O(1) for unfiltered!
                     let query = filter.unwrap_or_else(|| serde_json::json!({}));
@@ -2160,10 +2161,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         multiplier
                     );
 
-                    return Ok(vec![serde_json::json!({
-                        "_id": null,
-                        output_field: result_count
-                    })]);
+                    let mut doc = serde_json::json!({ output_field: result_count });
+                    if include_id {
+                        if let Some(obj) = doc.as_object_mut() {
+                            obj.insert("_id".to_string(), serde_json::Value::Null);
+                        }
+                    }
+                    return Ok(vec![doc]);
                 }
                 FastPath::CountByField { .. } => {
                     // CountByField optimization is handled by the existing index-based

@@ -15,8 +15,8 @@ use crate::aggregation::context::AggregationLimitContext;
 use crate::aggregation::optimizer::analyze_pipeline;
 use crate::aggregation::stream::{chain_streamable_stages, with_counting};
 use crate::aggregation::types::{
-    AggregationLimits, GroupStage, LimitStage, MatchStage, Pipeline, ProjectStage, SkipStage,
-    SortStage, Stage, UnwindStage,
+    AggregationLimits, CountStage, GroupStage, LimitStage, MatchStage, Pipeline, ProjectStage,
+    SkipStage, SortStage, Stage, UnwindStage,
 };
 use crate::error::{IronBaseError, Result};
 use serde_json::Value;
@@ -205,6 +205,14 @@ impl Pipeline {
                 // Pass limits to group stage for cardinality checking
                 let result = group_stage.execute_streaming_with_limits(counted_iter, limits)?;
                 (result, 1) // consumed 1 stage ($group)
+            } else if let Some(Stage::Count(count_stage)) = remaining_stages.first() {
+                let mut count: i64 = 0;
+                for doc_result in counted_iter {
+                    doc_result?;
+                    count += 1;
+                }
+                let result = vec![serde_json::json!({ count_stage.field.clone(): count })];
+                (result, 1) // consumed 1 stage ($count)
             } else {
                 // No $group - check for early $limit/$skip optimization
                 // OOM FIX (2026-01): Apply $limit during streaming, not after materialization
@@ -382,6 +390,16 @@ impl Pipeline {
                     }
                 };
                 (result, 1)
+            } else if let Some(Stage::Count(count_stage)) = remaining_stages.first() {
+                let mut count: i64 = 0;
+                for doc_result in streaming_iter {
+                    doc_result?;
+                    count += 1;
+                }
+                (
+                    vec![serde_json::json!({ count_stage.field.clone(): count })],
+                    1,
+                )
             } else {
                 // No $group - check for early $limit/$skip
                 let early_limit = Self::detect_early_limit(remaining_stages.iter());
@@ -506,8 +524,8 @@ impl Pipeline {
                     continue;
                 }
                 // MATERIALIZING stages block limit detection
-                // $group/$sort/$unwind need ALL documents first
-                Stage::Group(_) | Stage::Sort(_) | Stage::Unwind(_) => {
+                // $group/$count/$sort/$unwind need ALL documents first
+                Stage::Group(_) | Stage::Count(_) | Stage::Sort(_) | Stage::Unwind(_) => {
                     break; // Stop searching - limit after these can't be applied early
                 }
             }
@@ -650,6 +668,7 @@ impl Stage {
                 "$match" => Ok(Stage::Match(MatchStage::from_json(stage_spec)?)),
                 "$project" => Ok(Stage::Project(ProjectStage::from_json(stage_spec)?)),
                 "$group" => Ok(Stage::Group(GroupStage::from_json(stage_spec)?)),
+                "$count" => Ok(Stage::Count(CountStage::from_json(stage_spec)?)),
                 "$sort" => Ok(Stage::Sort(SortStage::from_json(stage_spec)?)),
                 "$limit" => Ok(Stage::Limit(LimitStage::from_json(stage_spec)?)),
                 "$skip" => Ok(Stage::Skip(SkipStage::from_json(stage_spec)?)),
@@ -672,6 +691,7 @@ impl Stage {
             Stage::Match(stage) => stage.execute(docs),
             Stage::Project(stage) => stage.execute(docs),
             Stage::Group(stage) => stage.execute(docs),
+            Stage::Count(stage) => stage.execute(docs),
             Stage::Sort(stage) => stage.execute(docs),
             Stage::Limit(stage) => stage.execute(docs),
             Stage::Skip(stage) => stage.execute(docs),

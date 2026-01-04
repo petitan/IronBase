@@ -36,6 +36,11 @@ impl CollectionStats {
         self.counts.read().get(collection).copied().unwrap_or(0)
     }
 
+    /// Get document count if tracked (returns None if not found)
+    fn get_if_present(&self, collection: &str) -> Option<u64> {
+        self.counts.read().get(collection).copied()
+    }
+
     /// Set document count for a collection
     fn set(&self, collection: &str, count: u64) {
         self.counts.write().insert(collection.to_string(), count);
@@ -583,6 +588,11 @@ impl IronBaseAdapter {
         })
     }
 
+    /// Get cached document count if available (no DB scan)
+    pub fn collection_count_cached(&self, collection: &str) -> Option<u64> {
+        self.collection_stats.get_if_present(collection)
+    }
+
     /// Get current database path
     pub fn get_db_path(&self) -> String {
         self.db_path.read().display().to_string()
@@ -892,12 +902,18 @@ impl IronBaseAdapter {
     // Aggregation
     // ============================================================
 
-    /// Check if a pipeline has a leading $match stage
-    /// Used to determine if this is a "heavy" operation that needs throttling
+    /// Check if a pipeline has a leading non-empty $match stage
+    /// Used to determine if this is a "heavy" operation that needs throttling.
+    /// Note: This does not verify index usage.
     fn has_leading_match(pipeline: &[Value]) -> bool {
         if let Some(first_stage) = pipeline.first() {
             if let Some(obj) = first_stage.as_object() {
-                return obj.contains_key("$match");
+                if let Some(match_value) = obj.get("$match") {
+                    return match_value
+                        .as_object()
+                        .map(|m| !m.is_empty())
+                        .unwrap_or(false);
+                }
             }
         }
         false
@@ -924,7 +940,7 @@ impl IronBaseAdapter {
     /// prevent OOM when multiple full-collection scans run simultaneously.
     ///
     /// # Throttling Rules
-    /// - Pipelines WITH `$match` as first stage: No throttling (indexed/filtered)
+    /// - Pipelines WITH non-empty `$match` as first stage: No throttling (may still scan)
     /// - Pipelines WITHOUT `$match`: Limited to MAX_CONCURRENT_HEAVY_OPS concurrent
     ///
     /// # Errors
@@ -983,8 +999,8 @@ impl IronBaseAdapter {
         }
     }
 
-    /// Execute aggregation pipeline (sync version, uses throttling internally)
-    /// Wraps aggregate_async in a blocking call for backwards compatibility
+    /// Execute aggregation pipeline (sync version)
+    /// Uses throttling when called inside a tokio runtime, otherwise runs directly.
     pub fn aggregate(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
         // Check if we're in a tokio runtime
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
