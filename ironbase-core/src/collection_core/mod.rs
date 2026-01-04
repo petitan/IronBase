@@ -192,7 +192,7 @@ use crate::error::{IronBaseError, Result};
 use crate::index::{IndexKey, IndexManager, RangeQueryMode, ScanOrder};
 use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
-use crate::query_planner::{QueryPlan, QueryPlanner};
+use crate::query_planner::{LogicalOperator, QueryPlan, QueryPlanner};
 use crate::storage::{RawStorage, Storage};
 use crate::{log_debug, log_error, log_trace, log_warn};
 
@@ -2809,6 +2809,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let field = self.extract_field_from_index_name(hint_name);
             Some(self.create_plan_for_hint(query_json, hint_name, &field)?)
         } else {
+            if let Some((logical_op, clauses)) = QueryPlanner::extract_logical_clauses(query_json) {
+                if let Some(result) = self.collect_doc_ids_for_logical_operator(
+                    &parsed_query,
+                    logical_op,
+                    &clauses,
+                    sort_field,
+                    sort_desc,
+                    skip,
+                    limit,
+                )? {
+                    return Ok(result);
+                }
+            }
             // FIX #20: Use compound-index-aware query planning
             // This ensures compound indexes are used for prefix field queries with range scans
             let indexes = self.indexes.read();
@@ -3080,6 +3093,152 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         Ok((results, uses_index_sort))
+    }
+
+    fn collect_doc_ids_for_logical_operator(
+        &self,
+        parsed_query: &Query,
+        logical_op: LogicalOperator,
+        clauses: &[Value],
+        sort_field: Option<&str>,
+        sort_desc: bool,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Result<Option<(Vec<DocumentId>, bool)>> {
+        let indexes = self.indexes.read();
+        let index_fields = indexes.list_indexes_with_compound_info();
+        drop(indexes);
+
+        let mut clause_plans = Vec::new();
+        for clause in clauses {
+            let clause_query = Query::from_json(clause)?;
+            let plan_opt =
+                QueryPlanner::analyze_query_with_fields(clause, &index_fields).map(|(_, p)| p);
+            clause_plans.push((clause_query, plan_opt));
+        }
+
+        let candidate_ids = match logical_op {
+            LogicalOperator::And => {
+                let mut indexed_sets: Vec<Vec<DocumentId>> = Vec::new();
+                for (clause_query, plan_opt) in &clause_plans {
+                    if let Some(plan) = plan_opt.clone() {
+                        let (ids, _) = self.collect_doc_ids_from_plan(
+                            clause_query,
+                            plan,
+                            None,
+                            false,
+                            0,
+                            None,
+                        )?;
+                        indexed_sets.push(ids);
+                    }
+                }
+
+                if indexed_sets.is_empty() {
+                    return Ok(None);
+                }
+
+                indexed_sets.sort_by_key(|ids| ids.len());
+                let mut base = indexed_sets.remove(0);
+                for other in indexed_sets {
+                    let other_set: HashSet<_> = other.into_iter().collect();
+                    base.retain(|id| other_set.contains(id));
+                    if base.is_empty() {
+                        break;
+                    }
+                }
+                base
+            }
+            LogicalOperator::Or => {
+                let mut seen = HashSet::new();
+                let mut union = Vec::new();
+                for (clause_query, plan_opt) in &clause_plans {
+                    let ids = if let Some(plan) = plan_opt.clone() {
+                        let (ids, _) = self.collect_doc_ids_from_plan(
+                            clause_query,
+                            plan,
+                            None,
+                            false,
+                            0,
+                            None,
+                        )?;
+                        ids
+                    } else {
+                        self.scan_documents_with_early_termination(clause_query, 0, None)?
+                    };
+                    for id in ids {
+                        if seen.insert(id.clone()) {
+                            union.push(id);
+                        }
+                    }
+                }
+                union
+            }
+            LogicalOperator::Nor => {
+                let mut excluded = HashSet::new();
+                for (clause_query, plan_opt) in &clause_plans {
+                    let ids = if let Some(plan) = plan_opt.clone() {
+                        let (ids, _) = self.collect_doc_ids_from_plan(
+                            clause_query,
+                            plan,
+                            None,
+                            false,
+                            0,
+                            None,
+                        )?;
+                        ids
+                    } else {
+                        self.scan_documents_with_early_termination(clause_query, 0, None)?
+                    };
+                    for id in ids {
+                        excluded.insert(id);
+                    }
+                }
+                let all_ids = self.scan_documents_with_early_termination(&Query::new(), 0, None)?;
+                all_ids
+                    .into_iter()
+                    .filter(|id| !excluded.contains(id))
+                    .collect()
+            }
+        };
+
+        let filtered = self.filter_doc_ids_by_query(parsed_query, candidate_ids, skip, limit)?;
+        let _ = (sort_field, sort_desc);
+        Ok(Some((filtered, false)))
+    }
+
+    fn filter_doc_ids_by_query(
+        &self,
+        parsed_query: &Query,
+        doc_ids: Vec<DocumentId>,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Result<Vec<DocumentId>> {
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+
+        for doc_id in doc_ids {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
+
+                if parsed_query.matches(&document)? {
+                    if skipped < skip {
+                        skipped += 1;
+                        continue;
+                    }
+
+                    results.push(doc_id.clone());
+                    if let Some(limit_count) = limit {
+                        if limit_count > 0 && results.len() >= limit_count {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     fn query_matches_all(query_json: &Value) -> bool {
