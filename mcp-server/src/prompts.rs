@@ -2056,7 +2056,7 @@ db_create_fulltext_index("articles", "content", "{language}");
 // Search
 let results = db_fulltext_search("articles", "content", "query", #{{limit: 10}});
 for r in results {{
-    print(r.document.title + " (score: " + r.score + ")");
+    print(r.doc.title + " (score: " + r.score + ")");
 }}
 ```
 
