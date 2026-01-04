@@ -4,11 +4,11 @@
 use serde_json::Value;
 
 use crate::error::{IronBaseError, Result};
-use crate::index::{IndexKey, IndexMetadata};
+use crate::index::{IndexKey, IndexManager, IndexMetadata};
 use crate::query::Query;
 use crate::query_planner::QueryPlanner;
 use crate::storage::{RawStorage, Storage};
-use crate::value_utils::{get_nested_value, path_crosses_array};
+use crate::value_utils::{get_all_nested_values, path_crosses_array};
 
 use super::index_persistence::persist_index_to_disk;
 use super::CollectionCore;
@@ -121,16 +121,48 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 {
                     multikey_seen = true;
                 }
-                // Replicate extract_key logic inline to avoid holding index lock
-                let keys: Vec<IndexKey> = fields_clone
-                    .iter()
-                    .map(|field| {
-                        get_nested_value(&doc, field)
-                            .map(IndexKey::from)
-                            .unwrap_or(IndexKey::Null)
-                    })
-                    .collect();
-                entries.push((IndexKey::Compound(keys), doc_id));
+                // Replicate extract_keys logic inline to avoid holding index lock
+                let mut field_values: Vec<Vec<IndexKey>> = Vec::with_capacity(fields_clone.len());
+                let mut missing_field = false;
+                for field in &fields_clone {
+                    let values = get_all_nested_values(&doc, field);
+                    if values.is_empty() {
+                        missing_field = true;
+                        field_values.push(vec![IndexKey::Null]);
+                    } else {
+                        field_values.push(values.into_iter().map(IndexKey::from).collect());
+                    }
+                }
+                if sparse && missing_field {
+                    total_scanned += 1;
+                    continue;
+                }
+
+                let mut combinations: Vec<Vec<IndexKey>> = vec![Vec::new()];
+                for values in field_values {
+                    let mut next = Vec::new();
+                    for prefix in &combinations {
+                        for value in &values {
+                            let mut key = prefix.clone();
+                            key.push(value.clone());
+                            next.push(key);
+                        }
+                    }
+                    combinations = next;
+                }
+
+                let mut seen = std::collections::HashSet::new();
+                for keys in combinations {
+                    let index_key = IndexKey::Compound(keys);
+                    if !seen.insert(index_key.clone()) {
+                        continue;
+                    }
+                    let is_null = IndexManager::is_key_all_null(&index_key);
+                    let should_index = !is_null || (unique && !sparse);
+                    if should_index {
+                        entries.push((index_key, doc_id.clone()));
+                    }
+                }
                 total_scanned += 1;
             }
             // Log progress every PROGRESS_LOG_INTERVAL documents
@@ -199,17 +231,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         {
             let mut storage = self.storage.write();
             if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
-                let index_meta = IndexMetadata {
-                    name: index_name.clone(),
-                    field: fields[0].clone(), // Primary field for backward compat
-                    fields: fields.clone(),
-                    unique,
-                    sparse: false,
-                    multikey: false,
-                    num_keys: 0,
-                    tree_height: 1,
-                    root_offset,
-                };
+                let index_meta = self
+                    .indexes
+                    .read()
+                    .get_btree_index(&index_name)
+                    .map(|index| {
+                        let mut meta = index.metadata.clone();
+                        meta.root_offset = root_offset;
+                        meta
+                    })
+                    .unwrap_or_else(|| IndexMetadata {
+                        name: index_name.clone(),
+                        field: fields[0].clone(), // Primary field for backward compat
+                        fields: fields.clone(),
+                        unique,
+                        sparse,
+                        multikey: multikey_seen,
+                        num_keys: 0,
+                        tree_height: 1,
+                        root_offset,
+                    });
 
                 meta.indexes.push(index_meta);
                 storage.flush()?;
@@ -264,8 +305,31 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 if !multikey_seen && path_crosses_array(&doc, &field_clone) {
                     multikey_seen = true;
                 }
-                if let Some(field_value) = get_nested_value(&doc, &field_clone) {
-                    entries.push((IndexKey::from(field_value), doc_id));
+                let values = get_all_nested_values(&doc, &field_clone);
+                if values.is_empty() {
+                    if sparse {
+                        total_scanned += 1;
+                        continue;
+                    }
+                    let index_key = IndexKey::Null;
+                    let should_index =
+                        !IndexManager::is_key_all_null(&index_key) || (unique && !sparse);
+                    if should_index {
+                        entries.push((index_key, doc_id.clone()));
+                    }
+                } else {
+                    let mut seen = std::collections::HashSet::new();
+                    for value in values {
+                        let index_key = IndexKey::from(value);
+                        if !seen.insert(index_key.clone()) {
+                            continue;
+                        }
+                        let should_index =
+                            !IndexManager::is_key_all_null(&index_key) || (unique && !sparse);
+                        if should_index {
+                            entries.push((index_key, doc_id.clone()));
+                        }
+                    }
                 }
                 total_scanned += 1;
             }
@@ -337,17 +401,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         {
             let mut storage = self.storage.write();
             if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
-                let index_meta = IndexMetadata {
-                    name: index_name.clone(),
-                    field: field.clone(),
-                    fields: vec![field.clone()], // Single-field index
-                    unique,
-                    sparse: false,
-                    multikey: false,
-                    num_keys: 0,
-                    tree_height: 1,
-                    root_offset,
-                };
+                let index_meta = self
+                    .indexes
+                    .read()
+                    .get_btree_index(&index_name)
+                    .map(|index| {
+                        let mut meta = index.metadata.clone();
+                        meta.root_offset = root_offset;
+                        meta
+                    })
+                    .unwrap_or_else(|| IndexMetadata {
+                        name: index_name.clone(),
+                        field: field.clone(),
+                        fields: vec![field.clone()], // Single-field index
+                        unique,
+                        sparse,
+                        multikey: multikey_seen,
+                        num_keys: 0,
+                        tree_height: 1,
+                        root_offset,
+                    });
 
                 meta.indexes.push(index_meta);
                 storage.flush()?;
