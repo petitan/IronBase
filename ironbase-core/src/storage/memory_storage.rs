@@ -433,6 +433,10 @@ impl RawStorage for MemoryStorage {
     fn file_len(&self) -> Result<u64> {
         Ok(self.raw_data.len() as u64)
     }
+
+    fn metadata_offset(&self) -> u64 {
+        self.raw_data.len() as u64
+    }
 }
 
 // ============================================================================

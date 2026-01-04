@@ -1157,6 +1157,99 @@ impl BPlusTree {
         results
     }
 
+    /// Internal: Scan ascending with key+doc_id pairs and early termination
+    fn scan_asc_pairs_internal(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Vec<(IndexKey, DocumentId)> {
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+        let limit_count = limit.unwrap_or(usize::MAX);
+
+        fn scan_asc_pairs(
+            node: &BTreeNode,
+            start: &IndexKey,
+            end: &IndexKey,
+            inclusive_start: bool,
+            inclusive_end: bool,
+            results: &mut Vec<(IndexKey, DocumentId)>,
+            skipped: &mut usize,
+            skip: usize,
+            limit_count: usize,
+        ) -> bool {
+            match node {
+                BTreeNode::Leaf(leaf) => {
+                    let start_idx = if inclusive_start {
+                        leaf.keys.partition_point(|k| k < start)
+                    } else {
+                        leaf.keys.partition_point(|k| k <= start)
+                    };
+                    let end_idx = if inclusive_end {
+                        leaf.keys.partition_point(|k| k <= end)
+                    } else {
+                        leaf.keys.partition_point(|k| k < end)
+                    };
+
+                    for idx in start_idx..end_idx {
+                        if *skipped < skip {
+                            *skipped += 1;
+                            continue;
+                        }
+                        if results.len() >= limit_count {
+                            return true;
+                        }
+                        if idx < leaf.document_ids.len() {
+                            results.push((leaf.keys[idx].clone(), leaf.document_ids[idx].clone()));
+                        }
+                    }
+                    false
+                }
+                BTreeNode::Internal(internal) => {
+                    for (i, child) in internal.children.iter().enumerate() {
+                        let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
+                        let child_max_might_match =
+                            i >= internal.keys.len() || &internal.keys[i] >= start;
+                        if child_min_might_match
+                            && child_max_might_match
+                            && scan_asc_pairs(
+                                child,
+                                start,
+                                end,
+                                inclusive_start,
+                                inclusive_end,
+                                results,
+                                skipped,
+                                skip,
+                                limit_count,
+                            )
+                        {
+                            return true;
+                        }
+                    }
+                    false
+                }
+            }
+        }
+
+        scan_asc_pairs(
+            &self.root,
+            start,
+            end,
+            inclusive_start,
+            inclusive_end,
+            &mut results,
+            &mut skipped,
+            skip,
+            limit_count,
+        );
+        results
+    }
+
     /// Internal: Scan descending with skip/limit and early termination
     fn scan_desc_internal(
         &self,
@@ -1212,6 +1305,77 @@ impl BPlusTree {
         }
 
         results
+    }
+
+    /// Internal: Scan descending with key+doc_id pairs and early termination
+    fn scan_desc_pairs_internal(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        skip: usize,
+        limit: Option<usize>,
+    ) -> Vec<(IndexKey, DocumentId)> {
+        let mut all_leaves: Vec<&LeafNode> = Vec::new();
+        fn collect_leaves<'a>(node: &'a BTreeNode, leaves: &mut Vec<&'a LeafNode>) {
+            match node {
+                BTreeNode::Leaf(leaf) => leaves.push(leaf),
+                BTreeNode::Internal(internal) => {
+                    for child in &internal.children {
+                        collect_leaves(child, leaves);
+                    }
+                }
+            }
+        }
+        collect_leaves(&self.root, &mut all_leaves);
+
+        let mut results = Vec::new();
+        let mut skipped = 0usize;
+        let limit_count = limit.unwrap_or(usize::MAX);
+
+        for leaf in all_leaves.into_iter().rev() {
+            for idx in (0..leaf.keys.len()).rev() {
+                let key = &leaf.keys[idx];
+                if key < start || key > end {
+                    continue;
+                }
+                if skipped < skip {
+                    skipped += 1;
+                    continue;
+                }
+                if idx < leaf.document_ids.len() {
+                    results.push((key.clone(), leaf.document_ids[idx].clone()));
+                }
+                if results.len() >= limit_count {
+                    return results;
+                }
+            }
+        }
+
+        results
+    }
+
+    /// Range scan that returns (key, doc_id) pairs for resumable streaming.
+    pub fn range_query_pairs(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
+        skip: usize,
+        limit: Option<usize>,
+        order: ScanOrder,
+    ) -> Vec<(IndexKey, DocumentId)> {
+        match order {
+            ScanOrder::Asc => self.scan_asc_pairs_internal(
+                start,
+                end,
+                inclusive_start,
+                inclusive_end,
+                skip,
+                limit,
+            ),
+            ScanOrder::Desc => self.scan_desc_pairs_internal(start, end, skip, limit),
+        }
     }
 
     /// Build range bounds for compound index prefix query

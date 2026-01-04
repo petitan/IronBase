@@ -1,10 +1,14 @@
 // FindCursor - Memory-efficient iterator for large result sets
 
 use serde_json::Value;
+use std::collections::HashSet;
 
-use crate::document::DocumentId;
-use crate::error::Result;
-use crate::storage::{RawStorage, Storage};
+use crate::document::{Document, DocumentId};
+use crate::error::{IronBaseError, Result};
+use crate::index::{IndexKey, ScanOrder};
+use crate::query::Query;
+use crate::query_planner::QueryPlan;
+use crate::storage::{RawStorage, Storage, HEADER_SIZE};
 
 use super::CollectionCore;
 
@@ -39,10 +43,44 @@ const DEFAULT_CURSOR_BATCH_SIZE: usize = 100;
 ///     Ok(())  // Return Err to stop iteration
 /// })?;
 /// ```
+struct IndexBatchState {
+    index_name: String,
+    range_start: IndexKey,
+    range_end: IndexKey,
+    inclusive_start: bool,
+    inclusive_end: bool,
+    order: ScanOrder,
+    current_start: IndexKey,
+    current_skip: usize,
+    buffer: Vec<DocumentId>,
+    buffer_pos: usize,
+    yielded: usize,
+    exhausted: bool,
+    multikey: bool,
+    seen: Option<HashSet<DocumentId>>,
+}
+
+enum FindCursorMode {
+    DocIds {
+        doc_ids: Vec<DocumentId>,
+        position: usize,
+    },
+    IndexScan {
+        query: Query,
+        state: IndexBatchState,
+    },
+    Scan {
+        collection_name: String,
+        query: Query,
+        offset: u64,
+        data_end: u64,
+        yielded: usize,
+    },
+}
+
 pub struct FindCursor<'a, S: Storage + RawStorage> {
     collection: &'a CollectionCore<S>,
-    doc_ids: Vec<DocumentId>,
-    position: usize,
+    mode: FindCursorMode,
     /// Default batch size for chunk operations
     batch_size: usize,
 }
@@ -52,9 +90,155 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
     pub(crate) fn new(collection: &'a CollectionCore<S>, doc_ids: Vec<DocumentId>) -> Self {
         FindCursor {
             collection,
-            doc_ids,
-            position: 0,
+            mode: FindCursorMode::DocIds {
+                doc_ids,
+                position: 0,
+            },
             batch_size: DEFAULT_CURSOR_BATCH_SIZE,
+        }
+    }
+
+    pub(crate) fn new_index_scan(
+        collection: &'a CollectionCore<S>,
+        query_json: &Value,
+        index_name: String,
+        range_start: IndexKey,
+        range_end: IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
+    ) -> Result<Self> {
+        let query = Query::from_json(query_json)?;
+        let (multikey, seen) = {
+            let indexes = collection.indexes.read();
+            let multikey = indexes
+                .get_btree_index(&index_name)
+                .map(|index| index.metadata.multikey)
+                .unwrap_or(false);
+            (multikey, if multikey { Some(HashSet::new()) } else { None })
+        };
+
+        Ok(FindCursor {
+            collection,
+            mode: FindCursorMode::IndexScan {
+                query,
+                state: IndexBatchState {
+                    index_name,
+                    range_start: range_start.clone(),
+                    range_end: range_end.clone(),
+                    inclusive_start,
+                    inclusive_end,
+                    order: ScanOrder::Asc,
+                    current_start: range_start,
+                    current_skip: 0,
+                    buffer: Vec::new(),
+                    buffer_pos: 0,
+                    yielded: 0,
+                    exhausted: false,
+                    multikey,
+                    seen,
+                },
+            },
+            batch_size: DEFAULT_CURSOR_BATCH_SIZE,
+        })
+    }
+
+    /// Create a new streaming cursor that scans storage sequentially.
+    pub(crate) fn new_scan(collection: &'a CollectionCore<S>, query_json: &Value) -> Result<Self> {
+        let query = Query::from_json(query_json)?;
+        let storage = collection.storage.read();
+        if storage.get_file_path().is_empty() {
+            drop(storage);
+            let (doc_ids, _) = collection.collect_doc_ids_with_options(
+                query_json, None, None, false, 0, None, true, 0, None,
+            )?;
+            return Ok(FindCursor::new(collection, doc_ids));
+        }
+        let file_len = storage.file_len()?;
+        let mut data_end = storage.metadata_offset();
+        if data_end < HEADER_SIZE || data_end > file_len {
+            data_end = file_len;
+        }
+        drop(storage);
+
+        Ok(FindCursor {
+            collection,
+            mode: FindCursorMode::Scan {
+                collection_name: collection.name.clone(),
+                query,
+                offset: HEADER_SIZE,
+                data_end,
+                yielded: 0,
+            },
+            batch_size: DEFAULT_CURSOR_BATCH_SIZE,
+        })
+    }
+
+    pub(crate) fn new_index_scan_from_plan(
+        collection: &'a CollectionCore<S>,
+        query_json: &Value,
+        plan: QueryPlan,
+    ) -> Result<Option<Self>> {
+        match plan {
+            QueryPlan::IndexScan {
+                index_name,
+                key,
+                is_compound,
+                ..
+            } => {
+                let (start, end) = if is_compound {
+                    let indexes = collection.indexes.read();
+                    let Some(index) = indexes.get_btree_index(&index_name) else {
+                        return Ok(None);
+                    };
+                    index.build_prefix_range(key.clone())
+                } else {
+                    (key.clone(), key.clone())
+                };
+                Ok(Some(FindCursor::new_index_scan(
+                    collection, query_json, index_name, start, end, true, true,
+                )?))
+            }
+            QueryPlan::IndexRangeScan {
+                index_name,
+                start,
+                end,
+                inclusive_start,
+                inclusive_end,
+                ..
+            } => {
+                let default_start = IndexKey::Null;
+                let default_end = IndexKey::MaxKey;
+                let start_key = start.unwrap_or(default_start);
+                let end_key = end.unwrap_or(default_end);
+                Ok(Some(FindCursor::new_index_scan(
+                    collection,
+                    query_json,
+                    index_name,
+                    start_key,
+                    end_key,
+                    inclusive_start,
+                    inclusive_end,
+                )?))
+            }
+            QueryPlan::RegexPrefixScan {
+                index_name, prefix, ..
+            } => {
+                let start = IndexKey::String(prefix.clone());
+                let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                Ok(Some(FindCursor::new_index_scan(
+                    collection, query_json, index_name, start, end, true, true,
+                )?))
+            }
+            QueryPlan::SparseIndexScan { index_name, .. } => Ok(Some(FindCursor::new_index_scan(
+                collection,
+                query_json,
+                index_name,
+                IndexKey::Null,
+                IndexKey::MaxKey,
+                true,
+                true,
+            )?)),
+            QueryPlan::MultiRegexPrefixScan { .. } => Ok(None),
         }
     }
 
@@ -67,35 +251,137 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
     /// Fetch the next document, or None if exhausted
     /// Uses iterative loop instead of recursion to avoid stack overflow with many tombstones
     pub fn next(&mut self) -> Result<Option<Value>> {
-        loop {
-            if self.position >= self.doc_ids.len() {
-                return Ok(None);
-            }
+        let batch_size = self.batch_size;
+        let collection = self.collection;
 
-            let doc_id = &self.doc_ids[self.position];
-            self.position += 1;
+        match &mut self.mode {
+            FindCursorMode::DocIds { doc_ids, position } => loop {
+                if *position >= doc_ids.len() {
+                    return Ok(None);
+                }
 
-            match self.collection.read_document_by_id(doc_id)? {
-                Some(doc) => return Ok(Some(doc)),
-                None => continue, // Skip tombstones, continue to next
-            }
+                let doc_id = &doc_ids[*position];
+                *position += 1;
+
+                match self.collection.read_document_by_id(doc_id)? {
+                    Some(doc) => return Ok(Some(doc)),
+                    None => continue, // Skip tombstones, continue to next
+                }
+            },
+            FindCursorMode::IndexScan { query, state } => loop {
+                if state.exhausted {
+                    return Ok(None);
+                }
+                if state.buffer_pos >= state.buffer.len() {
+                    Self::fill_index_buffer(collection, batch_size, state)?;
+                    if state.exhausted {
+                        return Ok(None);
+                    }
+                    if state.buffer.is_empty() {
+                        continue;
+                    }
+                }
+
+                let doc_id = state.buffer[state.buffer_pos].clone();
+                state.buffer_pos += 1;
+
+                if state.multikey {
+                    if let Some(seen) = state.seen.as_mut() {
+                        if !seen.insert(doc_id.clone()) {
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(doc) = self.collection.read_document_by_id(&doc_id)? {
+                    let document = Document::from_value(&doc)?;
+                    if query.matches(&document)? {
+                        state.yielded += 1;
+                        return Ok(Some(doc));
+                    }
+                }
+            },
+            FindCursorMode::Scan {
+                collection_name,
+                query,
+                offset,
+                data_end,
+                yielded,
+            } => loop {
+                if *offset >= *data_end {
+                    return Ok(None);
+                }
+
+                let current_offset = *offset;
+                let data = {
+                    let storage = self.collection.storage.read();
+                    storage.read_data_at(current_offset)?
+                };
+                *offset = current_offset + 4 + data.len() as u64;
+
+                let doc: Value = serde_json::from_slice(&data).map_err(|e| {
+                    IronBaseError::Corruption(format!(
+                        "Failed to parse document at offset {}: {}",
+                        current_offset, e
+                    ))
+                })?;
+
+                if doc
+                    .get("_tombstone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+
+                if doc.get("_collection").and_then(|v| v.as_str()) != Some(collection_name.as_str())
+                {
+                    continue;
+                }
+
+                let doc_id = match doc.get("_id") {
+                    Some(id_val) => match serde_json::from_value::<DocumentId>(id_val.clone()) {
+                        Ok(id) => id,
+                        Err(_) => continue,
+                    },
+                    None => continue,
+                };
+
+                let offset_matches = {
+                    let storage = self.collection.storage.read();
+                    let meta = storage
+                        .get_collection_meta(collection_name)
+                        .ok_or_else(|| {
+                            IronBaseError::CollectionNotFound(collection_name.clone())
+                        })?;
+                    meta.document_catalog
+                        .get(&doc_id)
+                        .copied()
+                        .unwrap_or(u64::MAX)
+                        == current_offset
+                };
+                if !offset_matches {
+                    continue;
+                }
+
+                let document = Document::from_value(&doc)?;
+                if query.matches(&document)? {
+                    *yielded += 1;
+                    return Ok(Some(doc));
+                }
+            },
         }
     }
 
     /// Fetch the next chunk of documents (up to `chunk_size`)
     pub fn next_chunk(&mut self, chunk_size: usize) -> Result<Vec<Value>> {
-        if self.position >= self.doc_ids.len() {
-            return Ok(Vec::new());
-        }
-
-        let end = (self.position + chunk_size).min(self.doc_ids.len());
-        let mut results = Vec::with_capacity(end - self.position);
-        for doc_id in &self.doc_ids[self.position..end] {
-            if let Some(doc) = self.collection.read_document_by_id(doc_id)? {
-                results.push(doc);
+        let mut results = Vec::with_capacity(chunk_size);
+        for _ in 0..chunk_size {
+            match self.next()? {
+                Some(doc) => results.push(doc),
+                None => break,
             }
         }
-        self.position = end;
         Ok(results)
     }
 
@@ -106,32 +392,89 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
 
     /// Remaining documents in the cursor
     pub fn remaining(&self) -> usize {
-        self.doc_ids.len().saturating_sub(self.position)
+        match &self.mode {
+            FindCursorMode::DocIds { doc_ids, position } => doc_ids.len().saturating_sub(*position),
+            FindCursorMode::IndexScan { .. } => 0,
+            FindCursorMode::Scan { .. } => 0,
+        }
     }
 
     /// Total document count
     pub fn total(&self) -> usize {
-        self.doc_ids.len()
+        match &self.mode {
+            FindCursorMode::DocIds { doc_ids, .. } => doc_ids.len(),
+            FindCursorMode::IndexScan { .. } => 0,
+            FindCursorMode::Scan { .. } => 0,
+        }
     }
 
     /// Current position in the cursor
     pub fn position(&self) -> usize {
-        self.position
+        match &self.mode {
+            FindCursorMode::DocIds { position, .. } => *position,
+            FindCursorMode::IndexScan { state, .. } => state.yielded,
+            FindCursorMode::Scan { yielded, .. } => *yielded,
+        }
     }
 
     /// Check if cursor is exhausted
     pub fn is_finished(&self) -> bool {
-        self.position >= self.doc_ids.len()
+        match &self.mode {
+            FindCursorMode::DocIds { doc_ids, position } => *position >= doc_ids.len(),
+            FindCursorMode::IndexScan { state, .. } => state.exhausted,
+            FindCursorMode::Scan {
+                offset, data_end, ..
+            } => *offset >= *data_end,
+        }
     }
 
     /// Reset cursor to the beginning
     pub fn rewind(&mut self) {
-        self.position = 0;
+        match &mut self.mode {
+            FindCursorMode::DocIds { position, .. } => {
+                *position = 0;
+            }
+            FindCursorMode::IndexScan { state, .. } => {
+                state.current_start = state.range_start.clone();
+                state.current_skip = 0;
+                state.buffer.clear();
+                state.buffer_pos = 0;
+                state.yielded = 0;
+                state.exhausted = false;
+                if let Some(seen) = state.seen.as_mut() {
+                    seen.clear();
+                }
+            }
+            FindCursorMode::Scan {
+                offset, yielded, ..
+            } => {
+                *offset = HEADER_SIZE;
+                *yielded = 0;
+            }
+        }
     }
 
     /// Skip the next N documents
     pub fn skip(&mut self, n: usize) {
-        self.position = (self.position + n).min(self.doc_ids.len());
+        match &mut self.mode {
+            FindCursorMode::DocIds { doc_ids, position } => {
+                *position = (*position + n).min(doc_ids.len());
+            }
+            FindCursorMode::IndexScan { .. } => {
+                for _ in 0..n {
+                    if self.next().ok().flatten().is_none() {
+                        break;
+                    }
+                }
+            }
+            FindCursorMode::Scan { .. } => {
+                for _ in 0..n {
+                    if self.next().ok().flatten().is_none() {
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Process each document with a closure
@@ -168,5 +511,63 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
             }
         }
         Ok(results)
+    }
+
+    fn fill_index_buffer(
+        collection: &CollectionCore<S>,
+        batch_size: usize,
+        state: &mut IndexBatchState,
+    ) -> Result<()> {
+        if state.exhausted {
+            return Ok(());
+        }
+
+        let batch = {
+            let indexes = collection.indexes.read();
+            let Some(index) = indexes.get_btree_index(&state.index_name) else {
+                state.exhausted = true;
+                return Ok(());
+            };
+            index.range_query_pairs(
+                &state.current_start,
+                &state.range_end,
+                state.inclusive_start,
+                state.inclusive_end,
+                state.current_skip,
+                Some(batch_size),
+                state.order,
+            )
+        };
+
+        if batch.is_empty() {
+            state.exhausted = true;
+            return Ok(());
+        }
+
+        state.buffer.clear();
+        state.buffer_pos = 0;
+        for (_, doc_id) in &batch {
+            state.buffer.push(doc_id.clone());
+        }
+
+        let last_key = batch.last().unwrap().0.clone();
+        let mut last_key_count = 0usize;
+        for (key, _) in batch.iter().rev() {
+            if *key == last_key {
+                last_key_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        if state.current_start == last_key {
+            state.current_skip += last_key_count;
+        } else {
+            state.current_skip = last_key_count;
+        }
+        state.current_start = last_key;
+        state.inclusive_start = true;
+
+        Ok(())
     }
 }

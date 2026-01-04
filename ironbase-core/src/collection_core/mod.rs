@@ -1050,9 +1050,34 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// ```
     pub fn find_streaming(&self, query_json: &Value) -> Result<FindCursor<'_, S>> {
         self.check_not_closed()?;
-        let (doc_ids, _) = self
-            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
-        Ok(FindCursor::new(self, doc_ids))
+        let storage = self.storage.read();
+        if storage.get_file_path().is_empty() {
+            drop(storage);
+            let (doc_ids, _) = self.collect_doc_ids_with_options(
+                query_json, None, None, false, 0, None, true, 0, None,
+            )?;
+            return Ok(FindCursor::new(self, doc_ids));
+        }
+        drop(storage);
+
+        if QueryPlanner::extract_logical_clauses(query_json).is_some() {
+            return FindCursor::new_scan(self, query_json);
+        }
+
+        let index_fields = {
+            let indexes = self.indexes.read();
+            indexes.list_indexes_with_compound_info()
+        };
+
+        if let Some((_field, plan)) =
+            QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
+        {
+            if let Some(cursor) = FindCursor::new_index_scan_from_plan(self, query_json, plan)? {
+                return Ok(cursor);
+            }
+        }
+
+        FindCursor::new_scan(self, query_json)
     }
 
     /// Find one document matching query
