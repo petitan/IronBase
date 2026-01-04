@@ -246,6 +246,39 @@ impl BPlusTree {
         }
     }
 
+    /// Create new case-insensitive B+ tree index (single field)
+    ///
+    /// String values are stored lowercased for case-insensitive matching.
+    /// Non-string values are stored as-is.
+    ///
+    /// # Arguments
+    /// * `name` - Index name (should end with "_ci" by convention)
+    /// * `field` - Field to index
+    /// * `unique` - Whether values must be unique (case-insensitively)
+    pub fn new_ci(name: String, field: String, unique: bool) -> Self {
+        let root = Box::new(BTreeNode::Leaf(LeafNode {
+            keys: Vec::new(),
+            document_ids: Vec::new(),
+            next_leaf_offset: 0,
+        }));
+
+        BPlusTree {
+            root,
+            metadata: IndexMetadata {
+                name,
+                field: field.clone(),
+                fields: vec![field],
+                unique,
+                sparse: false,
+                multikey: false,
+                case_insensitive: true,
+                num_keys: 0,
+                tree_height: 1,
+                root_offset: 0,
+            },
+        }
+    }
+
     /// Create new compound B+ tree index (multiple fields)
     ///
     /// # Arguments
@@ -306,7 +339,11 @@ impl BPlusTree {
     }
 
     /// Extract all keys for a document (supports multi-key indexes on arrays)
+    ///
+    /// For case-insensitive indexes, string values are lowercased.
     pub fn extract_keys(&self, doc: &serde_json::Value) -> Vec<IndexKey> {
+        let ci = self.metadata.case_insensitive;
+
         if self.metadata.is_compound() {
             let field_values: Vec<Vec<IndexKey>> = self
                 .metadata
@@ -317,7 +354,10 @@ impl BPlusTree {
                     if values.is_empty() {
                         vec![IndexKey::Null]
                     } else {
-                        values.into_iter().map(IndexKey::from).collect()
+                        values
+                            .into_iter()
+                            .map(|v| Self::value_to_key(v, ci))
+                            .collect()
                     }
                 })
                 .collect();
@@ -341,9 +381,22 @@ impl BPlusTree {
             if values.is_empty() {
                 vec![IndexKey::Null]
             } else {
-                values.into_iter().map(IndexKey::from).collect()
+                values
+                    .into_iter()
+                    .map(|v| Self::value_to_key(v, ci))
+                    .collect()
             }
         }
+    }
+
+    /// Convert JSON value to IndexKey, optionally lowercasing strings for CI indexes
+    fn value_to_key(value: &serde_json::Value, case_insensitive: bool) -> IndexKey {
+        if case_insensitive {
+            if let serde_json::Value::String(s) = value {
+                return IndexKey::String(s.to_lowercase());
+            }
+        }
+        IndexKey::from(value.clone())
     }
 
     /// Search for a key in the index
