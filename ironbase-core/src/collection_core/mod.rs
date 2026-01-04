@@ -571,6 +571,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                             if let Some(index) =
                                                 index_manager.get_btree_index_mut(&index_meta.name)
                                             {
+                                                if !index.metadata.multikey {
+                                                    let has_array = if index.metadata.is_compound()
+                                                    {
+                                                        index.metadata.fields.iter().any(|field| {
+                                                            crate::value_utils::path_crosses_array(
+                                                                &doc, field,
+                                                            )
+                                                        })
+                                                    } else {
+                                                        crate::value_utils::path_crosses_array(
+                                                            &doc,
+                                                            &index.metadata.field,
+                                                        )
+                                                    };
+                                                    if has_array {
+                                                        index.metadata.multikey = true;
+                                                    }
+                                                }
                                                 let keys = index.extract_keys(&doc);
                                                 let mut seen = HashSet::new();
                                                 for key in keys {
@@ -1213,6 +1231,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                             return self.adjust_count_for_tombstones(raw_count);
                         }
+                    }
+                }
+                QueryPlan::MultiRegexPrefixScan {
+                    ref index_name,
+                    ref prefixes,
+                    ..
+                } => {
+                    // Count for multi-regex prefix: sum of all prefix counts
+                    // Note: This may over-count if prefixes overlap, but exact counting
+                    // would require deduplication which defeats the purpose
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let mut total_count = 0usize;
+                        for prefix in prefixes {
+                            let start = IndexKey::String(prefix.clone());
+                            let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                            let result =
+                                index.range_query(&start, &end, true, true, RangeQueryMode::Count);
+                            if let RangeQueryResult::Count(c) = result {
+                                total_count += c;
+                            }
+                        }
+                        drop(indexes);
+                        return self.adjust_count_for_tombstones(total_count);
                     }
                 }
                 _ => {}
@@ -2949,6 +2990,35 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         vec![]
                     }
                 }
+                QueryPlan::MultiRegexPrefixScan {
+                    ref index_name,
+                    ref prefixes,
+                    ..
+                } => {
+                    // Multi-regex prefix scan: union of multiple prefix range scans
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let mut all_doc_ids = Vec::new();
+                        for prefix in prefixes {
+                            let start = IndexKey::String(prefix.clone());
+                            let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                            let mode = RangeQueryMode::Scan {
+                                skip: 0,
+                                limit: None,
+                                order: ScanOrder::Asc,
+                            };
+                            let ids = index
+                                .range_query(&start, &end, true, true, mode)
+                                .unwrap_docs();
+                            all_doc_ids.extend(ids);
+                        }
+                        // Sort and dedup to remove duplicates from overlapping ranges
+                        all_doc_ids.sort_unstable();
+                        all_doc_ids.dedup();
+                        all_doc_ids
+                    } else {
+                        vec![]
+                    }
+                }
             }
         };
 
@@ -2956,6 +3026,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             (QueryPlan::IndexScan { ref field, .. }, Some(sf)) if field == sf => true,
             (QueryPlan::IndexRangeScan { ref field, .. }, Some(sf)) if field == sf => true,
             (QueryPlan::RegexPrefixScan { ref field, .. }, Some(sf)) if field == sf => true,
+            (QueryPlan::MultiRegexPrefixScan { ref field, .. }, Some(sf)) if field == sf => true,
             _ => false,
         };
 

@@ -53,7 +53,7 @@ use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
 use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
 use crate::log_error;
-use crate::value_utils::{get_nested_value, path_crosses_array};
+use crate::value_utils::{get_all_nested_values, get_nested_value, path_crosses_array};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -611,6 +611,16 @@ impl IndexManager {
                         index.metadata.fields.join(", ")
                     )));
                 }
+                if index.metadata.sparse
+                    && index.metadata.is_compound()
+                    && index
+                        .metadata
+                        .fields
+                        .iter()
+                        .any(|field| get_all_nested_values(doc, field).is_empty())
+                {
+                    continue;
+                }
 
                 let keys = index.extract_keys(doc);
                 let mut seen = HashSet::new();
@@ -710,6 +720,16 @@ impl IndexManager {
             }
 
             if let Some(index) = self.btree_indexes.get_mut(&index_name) {
+                if index.metadata.sparse
+                    && index.metadata.is_compound()
+                    && index
+                        .metadata
+                        .fields
+                        .iter()
+                        .any(|field| get_all_nested_values(doc, field).is_empty())
+                {
+                    continue;
+                }
                 let keys = index.extract_keys(doc);
                 let mut seen = HashSet::new();
                 for index_key in keys {

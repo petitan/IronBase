@@ -41,6 +41,14 @@ pub enum QueryPlan {
         prefix: String,
         exact: bool,
     },
+
+    /// Multi-regex prefix scan for $in with regex patterns
+    /// e.g., { field: { $in: [{"$regex": "^A"}, {"$regex": "^B"}] } }
+    MultiRegexPrefixScan {
+        index_name: String,
+        field: String,
+        prefixes: Vec<String>,
+    },
 }
 
 /// Query planner - analyzes queries and selects optimal execution plan
@@ -73,12 +81,12 @@ impl QueryPlanner {
             }
 
             // Simple equality query: { "field": value }
-            if let Some((field, value)) = map.iter().next() {
+            for (field, value) in map {
                 // Skip if value contains operators (like {"age": {"$gt": 5}})
                 if let Value::Object(ref val_map) = value {
                     if val_map.keys().any(|k| k.starts_with('$')) {
                         // Already handled by range query analysis above
-                        return None;
+                        continue;
                     }
                 }
 
@@ -220,6 +228,11 @@ impl QueryPlanner {
                 return Some((field, plan));
             }
 
+            // Multi-regex $in optimization: { field: { $in: [{"$regex": "^A"}, ...] } }
+            if let Some((field, plan)) = Self::analyze_in_with_regex(query_json, index_fields) {
+                return Some((field, plan));
+            }
+
             // Then try range query analysis
             if let Some((field, plan)) = Self::analyze_range_query_v2(query_json, index_fields) {
                 return Some((field, plan));
@@ -231,11 +244,11 @@ impl QueryPlanner {
             }
 
             // Simple equality query: { "field": value }
-            if let Some((field, value)) = map.iter().next() {
+            for (field, value) in map {
                 // Skip if value contains operators (like {"age": {"$gt": 5}})
                 if let Value::Object(ref val_map) = value {
                     if val_map.keys().any(|k| k.starts_with('$')) {
-                        return None;
+                        continue;
                     }
                 }
 
@@ -315,8 +328,11 @@ impl QueryPlanner {
 
                     if has_gt || has_gte || has_lt || has_lte {
                         // Compound-index-aware field matching (we only need the index name for range queries)
-                        let (index_name, _is_compound) =
+                        let (index_name, is_compound) =
                             Self::find_index_for_field_v2(field, index_fields)?;
+                        if is_compound {
+                            continue;
+                        }
 
                         let start = if has_gte {
                             cond_map.get("$gte").map(IndexKey::from)
@@ -396,6 +412,75 @@ impl QueryPlanner {
                         field: field.clone(),
                         prefix,
                         exact,
+                    },
+                ));
+            }
+        }
+
+        None
+    }
+
+    /// Analyze query for $in with regex patterns: { field: { $in: [{"$regex": "^A"}, ...] } }
+    ///
+    /// Returns MultiRegexPrefixScan if ALL values in $in are optimizable regex prefixes.
+    /// Falls back to None if any value is not an anchored regex prefix.
+    fn analyze_in_with_regex(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+    ) -> Option<(String, QueryPlan)> {
+        if let Value::Object(ref map) = query_json {
+            for (field, conditions) in map {
+                if field.starts_with('$') {
+                    continue;
+                }
+
+                let cond_map = match conditions.as_object() {
+                    Some(obj) => obj,
+                    None => continue,
+                };
+
+                // Look for $in operator
+                let in_array = match cond_map.get("$in") {
+                    Some(Value::Array(arr)) if !arr.is_empty() => arr,
+                    _ => continue,
+                };
+
+                // Check if we have an index on this field
+                let (index_name, is_compound) = Self::find_index_for_field_v2(field, index_fields)?;
+                if is_compound {
+                    continue; // Don't optimize compound indexes for now
+                }
+
+                // Try to extract prefix from each value in $in
+                let mut prefixes = Vec::with_capacity(in_array.len());
+                for val in in_array {
+                    // Each value must be an object with $regex
+                    let val_map = val.as_object()?;
+                    let pattern = val_map.get("$regex").and_then(|v| v.as_str())?;
+
+                    // Check for $options - only allow empty options
+                    let options = val_map
+                        .get("$options")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    if !options.is_empty() {
+                        return None; // Options present, fallback
+                    }
+
+                    // Extract prefix - must be exact (no trailing regex)
+                    match Self::extract_regex_prefix(pattern) {
+                        Some((prefix, true)) => prefixes.push(prefix), // Only exact prefixes
+                        _ => return None, // Not an exact prefix, fallback
+                    }
+                }
+
+                // All values are optimizable regex prefixes!
+                return Some((
+                    field.clone(),
+                    QueryPlan::MultiRegexPrefixScan {
+                        index_name,
+                        field: field.clone(),
+                        prefixes,
                     },
                 ));
             }
@@ -552,6 +637,22 @@ impl QueryPlanner {
                         "estimatedCost": "O(log n + k)",
                     })
                 }
+                // MultiRegexPrefixScan is unreachable in deprecated analyze_query
+                QueryPlan::MultiRegexPrefixScan {
+                    ref index_name,
+                    ref prefixes,
+                    ..
+                } => {
+                    json!({
+                        "queryPlan": "MultiRegexPrefixScan",
+                        "indexUsed": index_name,
+                        "field": field,
+                        "stage": "FETCH_WITH_INDEX",
+                        "indexType": "multi_regex_prefix",
+                        "prefixes": prefixes,
+                        "estimatedCost": "O(k * (log n + m))",
+                    })
+                }
             }
         } else {
             // No index available
@@ -643,6 +744,22 @@ impl QueryPlanner {
                         "prefix": prefix,
                         "exact": exact,
                         "estimatedCost": "O(log n + k)",
+                    })
+                }
+                QueryPlan::MultiRegexPrefixScan {
+                    ref index_name,
+                    ref prefixes,
+                    ..
+                } => {
+                    json!({
+                        "queryPlan": "MultiRegexPrefixScan",
+                        "indexUsed": index_name,
+                        "field": field,
+                        "stage": "FETCH_WITH_INDEX",
+                        "indexType": "multi_regex_prefix",
+                        "prefixes": prefixes,
+                        "prefixCount": prefixes.len(),
+                        "estimatedCost": "O(k * (log n + m))",
                     })
                 }
             }
@@ -800,6 +917,113 @@ mod tests {
 
         // Complex queries not yet supported
         let result = QueryPlanner::analyze_query(&query, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_multi_regex_prefix_in_query() {
+        // Test: { field: { $in: [{"$regex": "^A"}, {"$regex": "^B"}] } }
+        let query = json!({
+            "name": {
+                "$in": [
+                    {"$regex": "^Alice"},
+                    {"$regex": "^Bob"},
+                    {"$regex": "^Charlie"}
+                ]
+            }
+        });
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_name".to_string(),
+            prefix_field: "name".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+        }];
+
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(result.is_some());
+
+        let (field, plan) = result.unwrap();
+        assert_eq!(field, "name");
+        match plan {
+            QueryPlan::MultiRegexPrefixScan {
+                index_name,
+                prefixes,
+                ..
+            } => {
+                assert_eq!(index_name, "users_name");
+                assert_eq!(prefixes, vec!["Alice", "Bob", "Charlie"]);
+            }
+            _ => panic!("Expected MultiRegexPrefixScan"),
+        }
+    }
+
+    #[test]
+    fn test_multi_regex_prefix_mixed_values_not_optimized() {
+        // If $in contains non-regex values, don't optimize
+        let query = json!({
+            "name": {
+                "$in": [
+                    {"$regex": "^Alice"},
+                    "Bob"  // Plain string, not regex
+                ]
+            }
+        });
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_name".to_string(),
+            prefix_field: "name".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+        }];
+
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_multi_regex_prefix_non_anchored_not_optimized() {
+        // If any regex is not anchored, don't optimize
+        let query = json!({
+            "name": {
+                "$in": [
+                    {"$regex": "^Alice"},
+                    {"$regex": "Bob"}  // Not anchored
+                ]
+            }
+        });
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_name".to_string(),
+            prefix_field: "name".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+        }];
+
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_multi_regex_prefix_with_options_not_optimized() {
+        // If any regex has $options, don't optimize
+        let query = json!({
+            "name": {
+                "$in": [
+                    {"$regex": "^Alice"},
+                    {"$regex": "^Bob", "$options": "i"}
+                ]
+            }
+        });
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_name".to_string(),
+            prefix_field: "name".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+        }];
+
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
         assert!(result.is_none());
     }
 }
