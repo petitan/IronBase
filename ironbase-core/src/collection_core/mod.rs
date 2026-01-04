@@ -2167,7 +2167,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             obj.insert("_id".to_string(), serde_json::Value::Null);
                         }
                     }
-                    return Ok(vec![doc]);
+                    let mut docs = vec![doc];
+
+                    let stages = pipeline.stages();
+                    let group_idx =
+                        if matches!(stages.first(), Some(crate::aggregation::Stage::Match(_))) {
+                            1
+                        } else {
+                            0
+                        };
+                    let remaining = stages.get(group_idx + 1..).unwrap_or(&[]);
+                    if !remaining.is_empty() {
+                        for stage in remaining {
+                            docs = stage.execute(docs)?;
+                        }
+                    }
+
+                    return Ok(docs);
                 }
                 FastPath::CountByField { .. } => {
                     // CountByField optimization is handled by the existing index-based

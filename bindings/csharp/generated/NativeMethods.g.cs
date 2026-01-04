@@ -312,7 +312,7 @@ namespace IronBase.Interop
         internal static extern int ironbase_insert_many(CollectionHandle* handle, byte* documents_json, byte** out_result);
 
         /// <summary>
-        ///  Find documents
+        ///  Find documents (default limit: 10,000 if no options)
         ///
         ///  # Parameters
         ///  - `handle`: The collection handle
@@ -341,6 +341,7 @@ namespace IronBase.Interop
 
         /// <summary>
         ///  Find documents with options (projection, sort, limit, skip)
+        ///  If limit is omitted, defaults to 10,000.
         ///
         ///  # Parameters
         ///  - `handle`: The collection handle

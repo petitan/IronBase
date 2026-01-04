@@ -108,6 +108,8 @@ pub struct RecoveredIndexChange {
 }
 
 pub const HEADER_SIZE: u64 = 256; // Fixed header size
+/// Maximum document size in bytes (safety limit)
+pub(crate) const MAX_DOCUMENT_SIZE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Database file header
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -858,7 +860,7 @@ impl StorageEngine {
             let len = u32::from_le_bytes(len_bytes) as usize;
 
             // Validate length - reasonable limits
-            if len == 0 || len > 64 * 1024 * 1024 || offset + 4 + (len as u64) > file_len {
+            if len == 0 || len > MAX_DOCUMENT_SIZE_BYTES || offset + 4 + (len as u64) > file_len {
                 // Hit metadata section or corrupted data - stop scanning
                 break;
             }

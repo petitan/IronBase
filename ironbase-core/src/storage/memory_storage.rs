@@ -225,6 +225,14 @@ impl Storage for MemoryStorage {
         self.collections.remove(name);
         self.metadata.remove(name);
 
+        // Release unused capacity after large drops.
+        if self.collections.len() <= self.collections.capacity() / 4 {
+            self.collections.shrink_to_fit();
+        }
+        if self.metadata.len() <= self.metadata.capacity() / 4 {
+            self.metadata.shrink_to_fit();
+        }
+
         Ok(())
     }
 

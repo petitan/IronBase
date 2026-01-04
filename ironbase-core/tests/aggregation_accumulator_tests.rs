@@ -794,6 +794,30 @@ fn test_streaming_aggregation_nested_field_grouping() {
     assert_eq!(alice_count, 3);
 }
 
+/// Fast-path should still apply post-group stages (e.g., $project)
+#[test]
+fn test_count_fastpath_applies_post_stages() {
+    use ironbase_core::{storage::MemoryStorage, DatabaseCore};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    for i in 0..5 {
+        let mut doc = HashMap::new();
+        doc.insert("value".to_string(), json!(i));
+        db.insert_one("items", doc).unwrap();
+    }
+
+    let coll = db.collection("items").unwrap();
+    let results = coll
+        .aggregate(&json!([
+            {"$group": {"_id": null, "total": {"$sum": 1}}},
+            {"$project": {"total": 1, "_id": 0}}
+        ]))
+        .unwrap();
+
+    assert_eq!(results, vec![json!({"total": 5})]);
+}
+
 /// BUG TEST: $first should return null if first document has missing field
 /// Not skip to the second document's value
 #[test]
