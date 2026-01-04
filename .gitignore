@@ -21,6 +21,8 @@ build/
 *.mlite.lock
 *.wal
 *.idx
+*.mlite.backup
+*.mlite.backup_fix
 
 # Debug files
 debug_*.py
