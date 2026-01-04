@@ -4,6 +4,8 @@
 use crate::index::{IndexKey, IndexPrefixInfo};
 use serde_json::Value;
 
+const DEFAULT_DOC_ESTIMATE: u64 = 1000;
+
 /// Parsed regex prefix information
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegexPrefixInfo {
@@ -57,10 +59,10 @@ impl CandidatePlan {
         }
     }
 
-    /// Create a candidate with default cost (1.0) and auto-generated reason
+    /// Create a candidate with default cost and auto-generated reason
     pub fn with_default_cost(plan: QueryPlan, field: String, index_name: &str) -> Self {
         let reason = format!("Index {} on field {}", index_name, field);
-        Self::new(plan, field, 1.0, reason)
+        Self::new(plan, field, DEFAULT_DOC_ESTIMATE as f64, reason)
     }
 
     /// Create a candidate with selectivity-based cost
@@ -72,7 +74,8 @@ impl CandidatePlan {
         distinct_count: u64,
         total_docs: u64,
     ) -> Self {
-        let estimated_cost = if distinct_count > 0 && total_docs > 0 {
+        let total_docs = total_docs.max(DEFAULT_DOC_ESTIMATE);
+        let estimated_cost = if distinct_count > 0 {
             // Selectivity = 1 / distinct_count
             // Estimated rows = total_docs / distinct_count
             // Cost = estimated rows (lower is better)
@@ -391,7 +394,7 @@ impl QueryPlanner {
                     field,
                     &info.index_name,
                     info.distinct_count,
-                    1000, // Default estimate if unknown
+                    DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
                 ));
             } else {
                 candidates.push(CandidatePlan::with_default_cost(
@@ -423,9 +426,9 @@ impl QueryPlanner {
                     _ => 1,
                 };
                 let base_cost = if info.distinct_count > 0 {
-                    1000.0 / info.distinct_count as f64
+                    (DEFAULT_DOC_ESTIMATE as f64) / info.distinct_count as f64
                 } else {
-                    1.0
+                    DEFAULT_DOC_ESTIMATE as f64
                 };
                 candidates.push(CandidatePlan::new(
                     plan,
@@ -456,7 +459,7 @@ impl QueryPlanner {
                     field,
                     &info.index_name,
                     info.distinct_count,
-                    1000, // Default estimate if unknown
+                    DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
                 ));
             }
         }
@@ -497,7 +500,7 @@ impl QueryPlanner {
                         field.clone(),
                         &info.index_name,
                         info.distinct_count,
-                        1000, // Default estimate if unknown
+                        DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
                     ));
                 }
             }
@@ -1610,7 +1613,7 @@ mod tests {
 
         let candidate = CandidatePlan::with_default_cost(plan, "field".to_string(), "test_idx");
 
-        assert_eq!(candidate.estimated_cost, 1.0);
+        assert_eq!(candidate.estimated_cost, DEFAULT_DOC_ESTIMATE as f64);
         assert!(candidate.reason.contains("test_idx"));
     }
 
