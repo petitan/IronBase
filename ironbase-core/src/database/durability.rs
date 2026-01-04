@@ -317,7 +317,8 @@ impl DatabaseCore<StorageEngine> {
 
         // 4. Clear buffers
         batch.clear();
-        doc_buffer.clear();
+        let previous_bytes = doc_buffer.memory_bytes;
+        doc_buffer.clear_and_shrink_if_large(previous_bytes);
 
         // 5. Sync storage file (one fsync per batch - key optimization)
         drop(batch);

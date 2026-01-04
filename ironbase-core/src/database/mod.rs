@@ -109,6 +109,21 @@ impl BatchDocBuffer {
         self.memory_bytes = 0;
     }
 
+    /// Shrink internal buffers to release memory back to the allocator.
+    pub fn shrink_to_fit(&mut self) {
+        self.inserts.shrink_to_fit();
+        self.updates.shrink_to_fit();
+        self.deletes.shrink_to_fit();
+    }
+
+    /// Clear buffers and optionally shrink if recent usage was high.
+    pub fn clear_and_shrink_if_large(&mut self, previous_bytes: usize) {
+        self.clear();
+        if previous_bytes >= MAX_BATCH_MEMORY_BYTES {
+            self.shrink_to_fit();
+        }
+    }
+
     /// Add a prepared insert to the buffer
     pub fn add_insert(&mut self, collection: String, prepared: InsertOnePrepared) {
         // Estimate memory usage (rough approximation)

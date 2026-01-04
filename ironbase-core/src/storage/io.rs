@@ -71,6 +71,14 @@ impl StorageEngine {
                 offset
             )));
         }
+        if len > super::MAX_DOCUMENT_SIZE_BYTES {
+            return Err(IronBaseError::Corruption(format!(
+                "Document at offset {} exceeds max size: {} bytes (limit: {})",
+                offset,
+                len,
+                super::MAX_DOCUMENT_SIZE_BYTES
+            )));
+        }
 
         // Validate we can read the full document
         if offset + 4 + (len as u64) > file_len {
@@ -131,6 +139,14 @@ impl StorageEngine {
                 offset
             )));
         }
+        if len > super::MAX_DOCUMENT_SIZE_BYTES {
+            return Err(IronBaseError::Corruption(format!(
+                "Document at offset {} exceeds max size: {} bytes (limit: {})",
+                offset,
+                len,
+                super::MAX_DOCUMENT_SIZE_BYTES
+            )));
+        }
 
         if offset + 4 + (len as u64) > file_len {
             return Err(IronBaseError::Corruption(format!(
@@ -177,6 +193,14 @@ impl StorageEngine {
             return Err(IronBaseError::Corruption(format!(
                 "Document at offset {} has zero length",
                 offset
+            )));
+        }
+        if len > super::MAX_DOCUMENT_SIZE_BYTES {
+            return Err(IronBaseError::Corruption(format!(
+                "Document at offset {} exceeds max size: {} bytes (limit: {})",
+                offset,
+                len,
+                super::MAX_DOCUMENT_SIZE_BYTES
             )));
         }
 
@@ -419,8 +443,8 @@ impl StorageEngine {
 
         let doc_len = u32::from_le_bytes(len_bytes) as u64;
 
-        // Sanity check: doc_len should be reasonable (< 16MB)
-        if doc_len > 16 * 1024 * 1024 {
+        // Sanity check: doc_len should be reasonable
+        if doc_len > super::MAX_DOCUMENT_SIZE_BYTES as u64 {
             return Err(IronBaseError::Corruption(format!(
                 "Suspiciously large document size: {} bytes at offset {}",
                 doc_len, max_doc_offset

@@ -119,6 +119,14 @@ impl QueryCache {
                 cache.pop(&hash);
             }
         }
+
+        // If cache is fully empty, drop internal allocations.
+        if cache.is_empty() && coll_index.is_empty() {
+            let non_zero_capacity =
+                NonZeroUsize::new(self.capacity).unwrap_or(NonZeroUsize::new(1000).unwrap());
+            *cache = LruCache::new(non_zero_capacity);
+            *coll_index = HashMap::new();
+        }
     }
 
     /// Get cache statistics

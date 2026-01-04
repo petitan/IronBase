@@ -129,7 +129,7 @@ impl StorageEngine {
         let doc_len = u32::from_le_bytes(len_bytes) as u64;
 
         // Sanity check
-        if doc_len > 16 * 1024 * 1024 {
+        if doc_len > super::MAX_DOCUMENT_SIZE_BYTES as u64 {
             return Err(IronBaseError::Corruption(format!(
                 "Migration: suspiciously large document size: {} bytes",
                 doc_len
@@ -325,7 +325,7 @@ impl StorageEngine {
                 }
 
                 // Additional sanity check: doc_len should be reasonable (< 16MB)
-                if doc_len > 16 * 1024 * 1024 {
+                if doc_len > super::MAX_DOCUMENT_SIZE_BYTES as u64 {
                     return Err(IronBaseError::Corruption(format!(
                         "Suspiciously large document size: {} bytes at offset {}",
                         doc_len, max_doc_offset

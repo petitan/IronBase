@@ -72,7 +72,7 @@ pub enum GroupIdKind {
 /// Simplified accumulator representation for optimization
 #[derive(Debug, Clone, PartialEq)]
 pub enum AccumulatorKind {
-    Count,            // $sum: 1
+    Count(i64),       // $sum: constant
     SumField(String), // $sum: "$field"
     AvgField(String),
     MinField(String),
@@ -87,7 +87,7 @@ pub enum AccumulatorKind {
 impl AccumulatorKind {
     /// Check if this accumulator is count-compatible (can be done with count query)
     pub fn is_count_only(&self) -> bool {
-        matches!(self, AccumulatorKind::Count)
+        matches!(self, AccumulatorKind::Count(_))
     }
 
     /// Check if this accumulator can use index min/max optimization
@@ -126,8 +126,7 @@ impl GroupShape {
             .iter()
             .map(|(name, acc)| {
                 let kind = match acc {
-                    Accumulator::Sum(SumExpression::Constant(1)) => AccumulatorKind::Count,
-                    Accumulator::Sum(SumExpression::Constant(_)) => AccumulatorKind::Count, // Still count-ish
+                    Accumulator::Sum(SumExpression::Constant(n)) => AccumulatorKind::Count(*n),
                     Accumulator::Sum(SumExpression::Field(f)) => {
                         AccumulatorKind::SumField(f.clone())
                     }
@@ -352,16 +351,15 @@ fn detect_count_only_pattern(stages: &[Stage]) -> Option<FastPath> {
     let shape = GroupShape::from_group_stage(group);
 
     // Check for CountOnly eligibility
-    if shape.is_count_only() {
-        // Must have exactly one accumulator for simple count
-        if let Some((output_field, AccumulatorKind::Count)) = shape.accumulators.first() {
-            // Check that no other stages exist after $group (or only $limit/skip/project)
+    if shape.is_count_only() && shape.accumulators.len() == 1 {
+        if let Some((output_field, AccumulatorKind::Count(multiplier))) = shape.accumulators.first()
+        {
             let remaining = &stages[group_idx + 1..];
             if remaining.is_empty() || are_post_group_stages_simple(remaining) {
                 return Some(FastPath::CountOnly {
                     filter,
                     output_field: output_field.clone(),
-                    multiplier: 1,
+                    multiplier: *multiplier,
                     include_id: true,
                 });
             }
@@ -673,6 +671,23 @@ mod tests {
             assert!(!include_id);
         } else {
             panic!("Expected CountOnly fast path for $count");
+        }
+    }
+
+    #[test]
+    fn test_detect_count_only_with_multiplier() {
+        let pipeline = Pipeline::from_json(&json!([
+            {"$group": {"_id": null, "total": {"$sum": 2}}}
+        ]))
+        .unwrap();
+
+        let opt = analyze_pipeline(pipeline.stages());
+        assert!(opt.fast_path.is_some());
+
+        if let Some(FastPath::CountOnly { multiplier, .. }) = opt.fast_path {
+            assert_eq!(multiplier, 2);
+        } else {
+            panic!("Expected CountOnly fast path with multiplier");
         }
     }
 
