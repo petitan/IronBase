@@ -4,6 +4,91 @@
 use crate::index::{IndexKey, IndexPrefixInfo};
 use serde_json::Value;
 
+/// Parsed regex prefix information
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegexPrefixInfo {
+    /// The extracted literal prefix
+    pub prefix: String,
+    /// True if the regex is just the prefix (no trailing wildcards)
+    pub exact: bool,
+    /// True if the regex has (?i) flag
+    pub case_insensitive: bool,
+}
+
+impl RegexPrefixInfo {
+    /// Check if this regex prefix can be optimized with a standard index
+    #[allow(dead_code)]
+    pub fn is_optimizable(&self) -> bool {
+        !self.prefix.is_empty() && !self.case_insensitive
+    }
+
+    /// Check if this regex prefix can be optimized for $in (must be exact and non-CI)
+    pub fn is_optimizable_for_in(&self) -> bool {
+        !self.prefix.is_empty() && self.exact && !self.case_insensitive
+    }
+}
+
+/// A candidate query plan with cost estimation for planner selection
+#[derive(Debug, Clone)]
+pub struct CandidatePlan {
+    /// The query plan
+    pub plan: QueryPlan,
+    /// The field this plan operates on
+    pub field: String,
+    /// Estimated cost (lower is better) - based on selectivity heuristics
+    pub estimated_cost: f64,
+    /// Human-readable reason for this plan (for explain/debug)
+    pub reason: String,
+}
+
+impl CandidatePlan {
+    /// Create a new candidate plan with computed cost
+    pub fn new(
+        plan: QueryPlan,
+        field: String,
+        estimated_cost: f64,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            plan,
+            field,
+            estimated_cost,
+            reason: reason.into(),
+        }
+    }
+
+    /// Create a candidate with default cost (1.0) and auto-generated reason
+    pub fn with_default_cost(plan: QueryPlan, field: String, index_name: &str) -> Self {
+        let reason = format!("Index {} on field {}", index_name, field);
+        Self::new(plan, field, 1.0, reason)
+    }
+
+    /// Create a candidate with selectivity-based cost
+    /// Lower distinct_count = higher selectivity = lower cost
+    pub fn with_selectivity(
+        plan: QueryPlan,
+        field: String,
+        index_name: &str,
+        distinct_count: u64,
+        total_docs: u64,
+    ) -> Self {
+        let estimated_cost = if distinct_count > 0 && total_docs > 0 {
+            // Selectivity = 1 / distinct_count
+            // Estimated rows = total_docs / distinct_count
+            // Cost = estimated rows (lower is better)
+            (total_docs as f64) / (distinct_count as f64)
+        } else {
+            // Unknown selectivity - use default high cost
+            total_docs as f64
+        };
+        let reason = format!(
+            "Index {} on field {} (distinct: {}, est. rows: {:.0})",
+            index_name, field, distinct_count, estimated_cost
+        );
+        Self::new(plan, field, estimated_cost, reason)
+    }
+}
+
 /// Query plan - describes how to execute a query
 /// NOTE: CollectionScan variant was removed - analyze_query() returns None for full scan,
 /// and explain_query() handles None case by generating "CollectionScan" JSON directly.
@@ -218,59 +303,205 @@ impl QueryPlanner {
         query_json: &Value,
         index_fields: &[IndexPrefixInfo],
     ) -> Option<(String, QueryPlan)> {
-        // Check for simple equality query: { "field": value }
+        // Collect all candidate plans
+        let candidates = Self::collect_candidates(query_json, index_fields);
+
+        // Select best candidate (lowest cost)
+        Self::select_best_candidate(candidates).map(|c| (c.field, c.plan))
+    }
+
+    /// Collect all candidate query plans for a given query
+    ///
+    /// Returns a list of all applicable index plans, each with estimated cost.
+    /// This enables the planner to choose the best plan based on selectivity.
+    pub fn collect_candidates(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+    ) -> Vec<CandidatePlan> {
+        let mut candidates = Vec::new();
+
         if let Value::Object(ref map) = query_json {
-            // First check for $exists: true with sparse index optimization
-            if let Some((field, plan)) = Self::analyze_exists_query(query_json, index_fields) {
-                return Some((field, plan));
-            }
-
-            // Regex prefix optimization: { field: { $regex: "^prefix" } }
-            if let Some((field, plan)) = Self::analyze_regex_query(query_json, index_fields) {
-                return Some((field, plan));
-            }
-
-            // Multi-regex $in optimization: { field: { $in: [{"$regex": "^A"}, ...] } }
-            if let Some((field, plan)) = Self::analyze_in_with_regex(query_json, index_fields) {
-                return Some((field, plan));
-            }
-
-            // Then try range query analysis
-            if let Some((field, plan)) = Self::analyze_range_query_v2(query_json, index_fields) {
-                return Some((field, plan));
-            }
-
-            // Skip logical operators like $and, $or, $nor
+            // Skip logical operators at root level - not optimizable yet
             if map.keys().any(|k| k.starts_with('$')) {
-                return None;
+                return candidates;
             }
 
-            // Simple equality query: { "field": value }
+            // Collect candidates from each analyzer
+            Self::collect_exists_candidates(query_json, index_fields, &mut candidates);
+            Self::collect_regex_candidates(query_json, index_fields, &mut candidates);
+            Self::collect_in_regex_candidates(query_json, index_fields, &mut candidates);
+            Self::collect_range_candidates(query_json, index_fields, &mut candidates);
+            Self::collect_equality_candidates(query_json, index_fields, &mut candidates);
+        }
+
+        candidates
+    }
+
+    /// Select the best candidate based on estimated cost
+    ///
+    /// Returns the candidate with the lowest estimated cost, or None if empty.
+    pub fn select_best_candidate(candidates: Vec<CandidatePlan>) -> Option<CandidatePlan> {
+        candidates.into_iter().min_by(|a, b| {
+            a.estimated_cost
+                .partial_cmp(&b.estimated_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
+    /// Collect candidates from $exists: true queries (sparse index optimization)
+    fn collect_exists_candidates(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+        candidates: &mut Vec<CandidatePlan>,
+    ) {
+        if let Some((field, plan)) = Self::analyze_exists_query(query_json, index_fields) {
+            // Sparse index scan is very efficient - low cost
+            if let Some(info) = index_fields
+                .iter()
+                .find(|i| i.prefix_field == field && i.sparse)
+            {
+                candidates.push(CandidatePlan::new(
+                    plan,
+                    field,
+                    100.0, // Sparse scan cost (moderate, depends on sparsity)
+                    format!("Sparse index {} for $exists:true", info.index_name),
+                ));
+            }
+        }
+    }
+
+    /// Collect candidates from regex prefix queries
+    fn collect_regex_candidates(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+        candidates: &mut Vec<CandidatePlan>,
+    ) {
+        if let Some((field, plan)) = Self::analyze_regex_query(query_json, index_fields) {
+            // Find the index info for selectivity
+            let info = index_fields.iter().find(|i| {
+                i.prefix_field == field &&
+                !i.is_compound &&
+                // Match the index used in the plan
+                matches!(&plan, QueryPlan::RegexPrefixScan { index_name, .. } if i.index_name == *index_name)
+            });
+
+            if let Some(info) = info {
+                candidates.push(CandidatePlan::with_selectivity(
+                    plan,
+                    field,
+                    &info.index_name,
+                    info.distinct_count,
+                    1000, // Default estimate if unknown
+                ));
+            } else {
+                candidates.push(CandidatePlan::with_default_cost(
+                    plan.clone(),
+                    field.clone(),
+                    match &plan {
+                        QueryPlan::RegexPrefixScan { index_name, .. } => index_name,
+                        _ => "unknown",
+                    },
+                ));
+            }
+        }
+    }
+
+    /// Collect candidates from $in with regex patterns
+    fn collect_in_regex_candidates(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+        candidates: &mut Vec<CandidatePlan>,
+    ) {
+        if let Some((field, plan)) = Self::analyze_in_with_regex(query_json, index_fields) {
+            if let Some(info) = index_fields
+                .iter()
+                .find(|i| i.prefix_field == field && !i.is_compound)
+            {
+                // Multi-regex scan cost depends on number of prefixes
+                let prefix_count = match &plan {
+                    QueryPlan::MultiRegexPrefixScan { prefixes, .. } => prefixes.len(),
+                    _ => 1,
+                };
+                let base_cost = if info.distinct_count > 0 {
+                    1000.0 / info.distinct_count as f64
+                } else {
+                    1.0
+                };
+                candidates.push(CandidatePlan::new(
+                    plan,
+                    field,
+                    base_cost * prefix_count as f64,
+                    format!(
+                        "Multi-regex on {} ({} prefixes)",
+                        info.index_name, prefix_count
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Collect candidates from range queries ($gt, $gte, $lt, $lte)
+    fn collect_range_candidates(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+        candidates: &mut Vec<CandidatePlan>,
+    ) {
+        if let Some((field, plan)) = Self::analyze_range_query_v2(query_json, index_fields) {
+            if let Some(info) = index_fields
+                .iter()
+                .find(|i| i.prefix_field == field && !i.is_compound)
+            {
+                candidates.push(CandidatePlan::with_selectivity(
+                    plan,
+                    field,
+                    &info.index_name,
+                    info.distinct_count,
+                    1000, // Default estimate if unknown
+                ));
+            }
+        }
+    }
+
+    /// Collect candidates from equality queries
+    fn collect_equality_candidates(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+        candidates: &mut Vec<CandidatePlan>,
+    ) {
+        if let Value::Object(ref map) = query_json {
             for (field, value) in map {
-                // Skip if value contains operators (like {"age": {"$gt": 5}})
+                // Skip operator fields
+                if field.starts_with('$') {
+                    continue;
+                }
+
+                // Skip if value contains operators
                 if let Value::Object(ref val_map) = value {
                     if val_map.keys().any(|k| k.starts_with('$')) {
                         continue;
                     }
                 }
 
-                // Check if we have an index on this field (compound-aware!)
-                let (index_name, is_compound) = Self::find_index_for_field_v2(field, index_fields)?;
-
-                let key = IndexKey::from(value);
-                return Some((
-                    field.clone(),
-                    QueryPlan::IndexScan {
-                        index_name,
+                // Find ALL matching indexes for this field (not just first)
+                for info in index_fields.iter().filter(|i| i.prefix_field == *field) {
+                    let key = IndexKey::from(value);
+                    let plan = QueryPlan::IndexScan {
+                        index_name: info.index_name.clone(),
                         field: field.clone(),
                         key,
-                        is_compound,
-                    },
-                ));
+                        is_compound: info.is_compound,
+                    };
+
+                    candidates.push(CandidatePlan::with_selectivity(
+                        plan,
+                        field.clone(),
+                        &info.index_name,
+                        info.distinct_count,
+                        1000, // Default estimate if unknown
+                    ));
+                }
             }
         }
-
-        None
     }
 
     /// Analyze query for $exists: true with sparse index optimization
@@ -391,25 +622,18 @@ impl QueryPlanner {
                 };
 
                 let pattern = cond_map.get("$regex")?.as_str()?;
-                let options = cond_map
-                    .get("$options")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let options = cond_map.get("$options").and_then(|v| v.as_str());
 
-                // Only allow index optimization when no options are set.
-                if !options.is_empty() {
-                    continue;
-                }
-
-                let (prefix, exact, ci) = Self::extract_regex_prefix(pattern)?;
+                // Use unified parse_regex_prefix (handles options validation)
+                let info = Self::parse_regex_prefix(pattern, options)?;
 
                 // For case-insensitive regex, try to find a CI index
-                if ci {
+                if info.case_insensitive {
                     // Look for case-insensitive index: {collection}_{field}_ci
                     let ci_index_suffix = format!("{}_ci", field);
                     if let Some(idx_info) = index_fields
                         .iter()
-                        .find(|info| info.index_name.ends_with(&ci_index_suffix))
+                        .find(|i| i.index_name.ends_with(&ci_index_suffix))
                     {
                         if !idx_info.is_compound {
                             return Some((
@@ -417,15 +641,14 @@ impl QueryPlanner {
                                 QueryPlan::RegexPrefixScan {
                                     index_name: idx_info.index_name.clone(),
                                     field: field.clone(),
-                                    prefix: prefix.to_lowercase(), // Lowercase for CI index
-                                    exact,
+                                    prefix: info.prefix.to_lowercase(), // Lowercase for CI index
+                                    exact: info.exact,
                                     case_insensitive: true,
                                 },
                             ));
                         }
                     }
-                    // No CI index found - fall through to try regular index
-                    // (but this will be a collection scan since CI regex needs CI index)
+                    // No CI index found - fallback to collection scan
                     continue;
                 }
 
@@ -439,8 +662,8 @@ impl QueryPlanner {
                     QueryPlan::RegexPrefixScan {
                         index_name,
                         field: field.clone(),
-                        prefix,
-                        exact,
+                        prefix: info.prefix,
+                        exact: info.exact,
                         case_insensitive: false,
                     },
                 ));
@@ -481,27 +704,23 @@ impl QueryPlanner {
                     continue; // Don't optimize compound indexes for now
                 }
 
-                // Try to extract prefix from each value in $in
+                // Try to extract prefix from each value in $in using unified helper
                 let mut prefixes = Vec::with_capacity(in_array.len());
                 for val in in_array {
                     // Each value must be an object with $regex
                     let val_map = val.as_object()?;
                     let pattern = val_map.get("$regex").and_then(|v| v.as_str())?;
+                    let options = val_map.get("$options").and_then(|v| v.as_str());
 
-                    // Check for $options - only allow empty options
-                    let options = val_map
-                        .get("$options")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    if !options.is_empty() {
-                        return None; // Options present, fallback
+                    // Use unified parse_regex_prefix (handles options validation)
+                    let info = Self::parse_regex_prefix(pattern, options)?;
+
+                    // Must be optimizable for $in (exact and non-CI)
+                    if !info.is_optimizable_for_in() {
+                        return None;
                     }
 
-                    // Extract prefix - must be exact (no trailing regex) and not CI
-                    match Self::extract_regex_prefix(pattern) {
-                        Some((prefix, true, false)) => prefixes.push(prefix), // Only exact, non-CI prefixes
-                        _ => return None, // Not an exact prefix or is CI, fallback
-                    }
+                    prefixes.push(info.prefix);
                 }
 
                 // All values are optimizable regex prefixes!
@@ -519,11 +738,31 @@ impl QueryPlanner {
         None
     }
 
+    /// Parse a regex pattern with options and extract prefix information.
+    ///
+    /// This is the unified entry point for regex prefix extraction.
+    /// Returns None if the pattern cannot be optimized (no anchor, has $options, etc.)
+    ///
+    /// # Arguments
+    /// * `pattern` - The regex pattern string
+    /// * `options` - Optional $options string (if present, optimization is disabled)
+    pub fn parse_regex_prefix(pattern: &str, options: Option<&str>) -> Option<RegexPrefixInfo> {
+        // Reject if $options is set (cannot optimize)
+        if let Some(opts) = options {
+            if !opts.is_empty() {
+                return None;
+            }
+        }
+
+        // Delegate to the internal extraction
+        Self::extract_regex_prefix_internal(pattern)
+    }
+
     /// Extract literal prefix from a regex like "^prefix" or "(?i)^prefix".
     ///
-    /// Returns (prefix, exact, case_insensitive).
+    /// Returns RegexPrefixInfo with (prefix, exact, case_insensitive).
     /// Stops at the first unescaped regex meta character.
-    fn extract_regex_prefix(pattern: &str) -> Option<(String, bool, bool)> {
+    fn extract_regex_prefix_internal(pattern: &str) -> Option<RegexPrefixInfo> {
         let mut remaining = pattern;
         let mut case_insensitive = false;
 
@@ -578,7 +817,8 @@ impl QueryPlanner {
                 ch,
                 '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$'
             ) {
-                exact = ch == '$' && chars.peek().is_none();
+                // Any regex meta means we cannot treat this as a pure prefix match.
+                exact = false;
                 break;
             }
 
@@ -591,8 +831,19 @@ impl QueryPlanner {
             if chars.peek().is_some() {
                 exact = false;
             }
-            Some((prefix, exact, case_insensitive))
+            Some(RegexPrefixInfo {
+                prefix,
+                exact,
+                case_insensitive,
+            })
         }
+    }
+
+    /// Legacy wrapper - converts RegexPrefixInfo to tuple for backward compat
+    #[allow(dead_code)]
+    fn extract_regex_prefix(pattern: &str) -> Option<(String, bool, bool)> {
+        Self::extract_regex_prefix_internal(pattern)
+            .map(|info| (info.prefix, info.exact, info.case_insensitive))
     }
 
     /// Create a query plan description for explain output
@@ -713,112 +964,149 @@ impl QueryPlanner {
     /// Create a query plan description for explain output (v2 - compound index aware)
     ///
     /// Uses the new compound-index-aware query analysis for accurate explain output.
+    /// Returns the chosen plan along with all evaluated candidates.
     pub fn explain_query_with_fields(
         query_json: &Value,
         index_fields: &[IndexPrefixInfo],
     ) -> Value {
         use serde_json::json;
 
-        if let Some((field, plan)) = Self::analyze_query_with_fields(query_json, index_fields) {
-            // Index-based plan
-            match plan {
-                QueryPlan::IndexScan {
-                    ref index_name,
-                    ref key,
-                    is_compound,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": if is_compound { "CompoundIndexScan" } else { "IndexScan" },
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": if is_compound { "compound_prefix" } else { "equality" },
-                        "searchKey": format!("{:?}", key),
-                        "estimatedCost": "O(log n)",
-                    })
-                }
-                QueryPlan::IndexRangeScan {
-                    ref index_name,
-                    ref start,
-                    ref end,
-                    inclusive_start,
-                    inclusive_end,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": "IndexRangeScan",
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": "range",
-                        "range": {
-                            "start": format!("{:?}", start),
-                            "end": format!("{:?}", end),
-                            "inclusiveStart": inclusive_start,
-                            "inclusiveEnd": inclusive_end,
-                        },
-                        "estimatedCost": "O(log n + k)",
-                    })
-                }
-                QueryPlan::SparseIndexScan { ref index_name, .. } => {
-                    json!({
-                        "queryPlan": "SparseIndexScan",
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_SPARSE_INDEX",
-                        "indexType": "sparse_exists",
-                        "description": "Returns all doc_ids from sparse index (field exists)",
-                        "estimatedCost": "O(k)",
-                    })
-                }
-                QueryPlan::RegexPrefixScan {
-                    ref index_name,
-                    ref prefix,
-                    exact,
-                    case_insensitive,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": if case_insensitive { "CIRegexPrefixScan" } else { "RegexPrefixScan" },
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": if case_insensitive { "ci_regex_prefix" } else { "regex_prefix" },
-                        "prefix": prefix,
-                        "exact": exact,
-                        "caseInsensitive": case_insensitive,
-                        "estimatedCost": "O(log n + k)",
-                    })
-                }
-                QueryPlan::MultiRegexPrefixScan {
-                    ref index_name,
-                    ref prefixes,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": "MultiRegexPrefixScan",
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": "multi_regex_prefix",
-                        "prefixes": prefixes,
-                        "prefixCount": prefixes.len(),
-                        "estimatedCost": "O(k * (log n + m))",
-                    })
-                }
-            }
+        // Collect all candidates for explain output
+        let candidates = Self::collect_candidates(query_json, index_fields);
+        let candidates_json: Vec<Value> = candidates.iter().map(Self::candidate_to_json).collect();
+
+        // Select best candidate
+        if let Some(best) = Self::select_best_candidate(candidates) {
+            let chosen_plan = Self::plan_to_json(&best.plan, &best.field);
+
+            json!({
+                "chosenPlan": chosen_plan,
+                "selectionReason": best.reason,
+                "estimatedRows": best.estimated_cost,
+                "candidates": candidates_json,
+                "candidateCount": candidates_json.len(),
+            })
         } else {
             // No index available
             let available: Vec<&str> = index_fields.iter().map(|i| i.index_name.as_str()).collect();
             json!({
-                "queryPlan": "CollectionScan",
-                "indexUsed": null,
-                "stage": "FULL_SCAN",
-                "reason": "No suitable index found for query",
-                "estimatedCost": "O(n)",
+                "chosenPlan": {
+                    "queryPlan": "CollectionScan",
+                    "indexUsed": null,
+                    "stage": "FULL_SCAN",
+                    "estimatedCost": "O(n)",
+                },
+                "selectionReason": "No suitable index found for query",
+                "candidates": [],
+                "candidateCount": 0,
                 "availableIndexes": available,
             })
+        }
+    }
+
+    /// Convert a CandidatePlan to JSON for explain output
+    fn candidate_to_json(candidate: &CandidatePlan) -> Value {
+        use serde_json::json;
+
+        let plan_json = Self::plan_to_json(&candidate.plan, &candidate.field);
+        json!({
+            "plan": plan_json,
+            "field": candidate.field,
+            "estimatedRows": candidate.estimated_cost,
+            "reason": candidate.reason,
+        })
+    }
+
+    /// Convert a QueryPlan to JSON for explain output
+    fn plan_to_json(plan: &QueryPlan, field: &str) -> Value {
+        use serde_json::json;
+
+        match plan {
+            QueryPlan::IndexScan {
+                ref index_name,
+                ref key,
+                is_compound,
+                ..
+            } => {
+                json!({
+                    "queryPlan": if *is_compound { "CompoundIndexScan" } else { "IndexScan" },
+                    "indexUsed": index_name,
+                    "field": field,
+                    "stage": "FETCH_WITH_INDEX",
+                    "indexType": if *is_compound { "compound_prefix" } else { "equality" },
+                    "searchKey": format!("{:?}", key),
+                    "estimatedCost": "O(log n)",
+                })
+            }
+            QueryPlan::IndexRangeScan {
+                ref index_name,
+                ref start,
+                ref end,
+                inclusive_start,
+                inclusive_end,
+                ..
+            } => {
+                json!({
+                    "queryPlan": "IndexRangeScan",
+                    "indexUsed": index_name,
+                    "field": field,
+                    "stage": "FETCH_WITH_INDEX",
+                    "indexType": "range",
+                    "range": {
+                        "start": format!("{:?}", start),
+                        "end": format!("{:?}", end),
+                        "inclusiveStart": inclusive_start,
+                        "inclusiveEnd": inclusive_end,
+                    },
+                    "estimatedCost": "O(log n + k)",
+                })
+            }
+            QueryPlan::SparseIndexScan { ref index_name, .. } => {
+                json!({
+                    "queryPlan": "SparseIndexScan",
+                    "indexUsed": index_name,
+                    "field": field,
+                    "stage": "FETCH_WITH_SPARSE_INDEX",
+                    "indexType": "sparse_exists",
+                    "description": "Returns all doc_ids from sparse index (field exists)",
+                    "estimatedCost": "O(k)",
+                })
+            }
+            QueryPlan::RegexPrefixScan {
+                ref index_name,
+                ref prefix,
+                exact,
+                case_insensitive,
+                ..
+            } => {
+                json!({
+                    "queryPlan": if *case_insensitive { "CIRegexPrefixScan" } else { "RegexPrefixScan" },
+                    "indexUsed": index_name,
+                    "field": field,
+                    "stage": "FETCH_WITH_INDEX",
+                    "indexType": if *case_insensitive { "ci_regex_prefix" } else { "regex_prefix" },
+                    "prefix": prefix,
+                    "exact": exact,
+                    "caseInsensitive": case_insensitive,
+                    "estimatedCost": "O(log n + k)",
+                })
+            }
+            QueryPlan::MultiRegexPrefixScan {
+                ref index_name,
+                ref prefixes,
+                ..
+            } => {
+                json!({
+                    "queryPlan": "MultiRegexPrefixScan",
+                    "indexUsed": index_name,
+                    "field": field,
+                    "stage": "FETCH_WITH_INDEX",
+                    "indexType": "multi_regex_prefix",
+                    "prefixes": prefixes,
+                    "prefixCount": prefixes.len(),
+                    "estimatedCost": "O(k * (log n + m))",
+                })
+            }
         }
     }
 }
@@ -1086,7 +1374,7 @@ mod tests {
         assert!(result.is_some());
         let (prefix, exact, ci) = result.unwrap();
         assert_eq!(prefix, "Hello");
-        assert!(exact); // $ at end means exact
+        assert!(!exact); // Trailing $ means not a pure prefix match
         assert!(ci);
     }
 
@@ -1206,5 +1494,255 @@ mod tests {
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_collect_candidates_multiple_indexes() {
+        // Test that multiple indexes on same field are collected as candidates
+        let query = json!({"status": "active"});
+        let index_fields = vec![
+            IndexPrefixInfo {
+                index_name: "orders_status".to_string(),
+                prefix_field: "status".to_string(),
+                is_compound: false,
+                num_fields: 1,
+                sparse: false,
+                distinct_count: 5, // Low distinct = high selectivity
+            },
+            IndexPrefixInfo {
+                index_name: "orders_status_date".to_string(),
+                prefix_field: "status".to_string(),
+                is_compound: true,
+                num_fields: 2,
+                sparse: false,
+                distinct_count: 100, // Higher distinct
+            },
+        ];
+
+        let candidates = QueryPlanner::collect_candidates(&query, &index_fields);
+        assert_eq!(candidates.len(), 2);
+
+        // Verify both indexes are in candidates
+        let names: Vec<_> = candidates
+            .iter()
+            .map(|c| match &c.plan {
+                QueryPlan::IndexScan { index_name, .. } => index_name.as_str(),
+                _ => "",
+            })
+            .collect();
+        assert!(names.contains(&"orders_status"));
+        assert!(names.contains(&"orders_status_date"));
+    }
+
+    #[test]
+    fn test_select_best_candidate_by_selectivity() {
+        // Test selectivity-based selection
+        // Higher distinct_count = fewer rows per value = BETTER for equality queries
+        // Cost = total_docs / distinct_count (estimated matching rows)
+        let query = json!({"category": "electronics"});
+        let index_fields = vec![
+            IndexPrefixInfo {
+                index_name: "products_category".to_string(),
+                prefix_field: "category".to_string(),
+                is_compound: false,
+                num_fields: 1,
+                sparse: false,
+                distinct_count: 10, // Low distinct = ~100 rows per value = higher cost
+            },
+            IndexPrefixInfo {
+                index_name: "products_category_brand".to_string(),
+                prefix_field: "category".to_string(),
+                is_compound: true,
+                num_fields: 2,
+                sparse: false,
+                distinct_count: 1000, // High distinct = ~1 row per value = lower cost
+            },
+        ];
+
+        let candidates = QueryPlanner::collect_candidates(&query, &index_fields);
+        let best = QueryPlanner::select_best_candidate(candidates);
+
+        assert!(best.is_some());
+        let best = best.unwrap();
+        assert_eq!(best.field, "category");
+
+        // The compound index with HIGHER distinct_count should win (lower estimated rows)
+        match best.plan {
+            QueryPlan::IndexScan { index_name, .. } => {
+                assert_eq!(index_name, "products_category_brand");
+            }
+            _ => panic!("Expected IndexScan"),
+        }
+    }
+
+    #[test]
+    fn test_candidate_plan_cost_calculation() {
+        let plan = QueryPlan::IndexScan {
+            index_name: "test_idx".to_string(),
+            field: "field".to_string(),
+            key: IndexKey::Int(1),
+            is_compound: false,
+        };
+
+        // Test with_selectivity cost calculation
+        let candidate = CandidatePlan::with_selectivity(
+            plan.clone(),
+            "field".to_string(),
+            "test_idx",
+            10,   // distinct_count
+            1000, // total_docs
+        );
+
+        // Cost should be total_docs / distinct_count = 1000 / 10 = 100
+        assert!((candidate.estimated_cost - 100.0).abs() < 0.001);
+        assert!(candidate.reason.contains("distinct: 10"));
+        assert!(candidate.reason.contains("est. rows: 100"));
+    }
+
+    #[test]
+    fn test_candidate_plan_default_cost() {
+        let plan = QueryPlan::IndexScan {
+            index_name: "test_idx".to_string(),
+            field: "field".to_string(),
+            key: IndexKey::Int(1),
+            is_compound: false,
+        };
+
+        let candidate = CandidatePlan::with_default_cost(plan, "field".to_string(), "test_idx");
+
+        assert_eq!(candidate.estimated_cost, 1.0);
+        assert!(candidate.reason.contains("test_idx"));
+    }
+
+    #[test]
+    fn test_explain_with_candidates() {
+        // Test the new explain format with candidates
+        let query = json!({"status": "active"});
+        let index_fields = vec![
+            IndexPrefixInfo {
+                index_name: "orders_status".to_string(),
+                prefix_field: "status".to_string(),
+                is_compound: false,
+                num_fields: 1,
+                sparse: false,
+                distinct_count: 5,
+            },
+            IndexPrefixInfo {
+                index_name: "orders_status_date".to_string(),
+                prefix_field: "status".to_string(),
+                is_compound: true,
+                num_fields: 2,
+                sparse: false,
+                distinct_count: 100,
+            },
+        ];
+
+        let explain = QueryPlanner::explain_query_with_fields(&query, &index_fields);
+
+        // Check new explain format
+        assert!(explain.get("chosenPlan").is_some());
+        assert!(explain.get("selectionReason").is_some());
+        assert!(explain.get("estimatedRows").is_some());
+        assert!(explain.get("candidates").is_some());
+        assert!(explain.get("candidateCount").is_some());
+
+        // Should have 2 candidates
+        assert_eq!(explain["candidateCount"], 2);
+
+        // Candidates should be an array
+        let candidates = explain["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 2);
+
+        // Each candidate should have required fields
+        for candidate in candidates {
+            assert!(candidate.get("plan").is_some());
+            assert!(candidate.get("field").is_some());
+            assert!(candidate.get("estimatedRows").is_some());
+            assert!(candidate.get("reason").is_some());
+        }
+    }
+
+    #[test]
+    fn test_explain_collection_scan_no_candidates() {
+        // Test explain when no index is available
+        let query = json!({"unknownField": "value"});
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "orders_status".to_string(),
+            prefix_field: "status".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 5,
+        }];
+
+        let explain = QueryPlanner::explain_query_with_fields(&query, &index_fields);
+
+        // Check collection scan explain
+        assert!(explain.get("chosenPlan").is_some());
+        assert_eq!(explain["chosenPlan"]["queryPlan"], "CollectionScan");
+        assert_eq!(explain["candidateCount"], 0);
+        assert!(explain.get("availableIndexes").is_some());
+    }
+
+    #[test]
+    fn test_parse_regex_prefix_basic() {
+        // Basic prefix extraction
+        let info = QueryPlanner::parse_regex_prefix("^Hello", None).unwrap();
+        assert_eq!(info.prefix, "Hello");
+        assert!(info.exact);
+        assert!(!info.case_insensitive);
+    }
+
+    #[test]
+    fn test_parse_regex_prefix_with_options_rejected() {
+        // $options should be rejected
+        let result = QueryPlanner::parse_regex_prefix("^Hello", Some("i"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_regex_prefix_empty_options_ok() {
+        // Empty $options should be allowed
+        let info = QueryPlanner::parse_regex_prefix("^Hello", Some("")).unwrap();
+        assert_eq!(info.prefix, "Hello");
+    }
+
+    #[test]
+    fn test_parse_regex_prefix_case_insensitive() {
+        // (?i) flag
+        let info = QueryPlanner::parse_regex_prefix("(?i)^World", None).unwrap();
+        assert_eq!(info.prefix, "World");
+        assert!(info.exact);
+        assert!(info.case_insensitive);
+    }
+
+    #[test]
+    fn test_regex_prefix_info_is_optimizable() {
+        // Regular prefix - optimizable
+        let info = RegexPrefixInfo {
+            prefix: "test".to_string(),
+            exact: true,
+            case_insensitive: false,
+        };
+        assert!(info.is_optimizable());
+        assert!(info.is_optimizable_for_in());
+
+        // CI prefix - not optimizable for standard index
+        let ci_info = RegexPrefixInfo {
+            prefix: "test".to_string(),
+            exact: true,
+            case_insensitive: true,
+        };
+        assert!(!ci_info.is_optimizable());
+        assert!(!ci_info.is_optimizable_for_in());
+
+        // Non-exact prefix - not optimizable for $in
+        let non_exact = RegexPrefixInfo {
+            prefix: "test".to_string(),
+            exact: false,
+            case_insensitive: false,
+        };
+        assert!(non_exact.is_optimizable());
+        assert!(!non_exact.is_optimizable_for_in());
     }
 }

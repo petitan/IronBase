@@ -1334,9 +1334,13 @@ fn test_explain() {
     db.insert_one(&coll_name, doc).unwrap();
 
     let plan = collection.explain(&json!({"age": 25})).unwrap();
-    // Plan is a JSON value containing "queryPlan" key
+    // Plan is a JSON value with new explain format
     assert!(plan.is_object());
-    assert!(plan.get("queryPlan").is_some());
+    // New format: chosenPlan contains queryPlan, candidates lists all evaluated plans
+    assert!(plan.get("chosenPlan").is_some());
+    assert!(plan["chosenPlan"].get("queryPlan").is_some());
+    assert!(plan.get("candidates").is_some());
+    assert!(plan.get("selectionReason").is_some());
 }
 
 #[test]

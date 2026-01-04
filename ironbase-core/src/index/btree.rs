@@ -326,7 +326,7 @@ impl BPlusTree {
                 field: field.clone(),
                 fields: vec![field],
                 unique,
-                sparse: false,
+                sparse: true,
                 multikey: false,
                 case_insensitive: true,
                 num_keys: 0,
