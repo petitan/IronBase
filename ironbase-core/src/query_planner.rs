@@ -17,6 +17,13 @@ pub struct RegexPrefixInfo {
     pub case_insensitive: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalOperator {
+    And,
+    Or,
+    Nor,
+}
+
 impl RegexPrefixInfo {
     /// Check if this regex prefix can be optimized with a standard index
     #[allow(dead_code)]
@@ -145,6 +152,31 @@ pub enum QueryPlan {
 pub struct QueryPlanner;
 
 impl QueryPlanner {
+    /// Extract top-level logical operator and its clauses if present.
+    ///
+    /// Only matches when the query contains a single top-level logical operator.
+    pub fn extract_logical_clauses(query_json: &Value) -> Option<(LogicalOperator, Vec<Value>)> {
+        let obj = query_json.as_object()?;
+        if obj.len() != 1 {
+            return None;
+        }
+
+        let (op, clauses) = if let Some(Value::Array(clauses)) = obj.get("$and") {
+            (LogicalOperator::And, clauses)
+        } else if let Some(Value::Array(clauses)) = obj.get("$or") {
+            (LogicalOperator::Or, clauses)
+        } else if let Some(Value::Array(clauses)) = obj.get("$nor") {
+            (LogicalOperator::Nor, clauses)
+        } else {
+            return None;
+        };
+
+        if clauses.is_empty() {
+            return None;
+        }
+
+        Some((op, clauses.clone()))
+    }
     /// Analyze a query and determine if an index can be used
     /// Returns (field_name, QueryPlan) if an index opportunity is found
     ///
