@@ -10,6 +10,7 @@
 
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
 use rhai::{Dynamic, Engine, Map};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::conversion::{dynamic_to_json, json_to_dynamic, map_to_json};
@@ -47,7 +48,7 @@ use super::limits::{ScriptLimits, ABSOLUTE_MAX_FIND_DOCUMENTS};
 /// - `db_create_fuzzy_index(collection, field, algorithm, threshold)` - Create fuzzy index
 /// - `db_fuzzy_search(collection, field, query, threshold)` - Fuzzy search
 /// - `db_create_fulltext_index(collection, field, language)` - Create fulltext index
-/// - `db_fulltext_search(collection, field, query, limit)` - Fulltext search
+/// - `db_fulltext_search(collection, field, query, options)` - Fulltext search with options
 ///
 /// # Arguments
 ///
@@ -491,6 +492,27 @@ fn register_search_functions(
     adapter: Arc<IronBaseAdapter>,
     limits: &ScriptLimits,
 ) {
+    fn projection_from_dynamic(value: &Dynamic) -> Option<HashMap<String, i32>> {
+        let proj_json = dynamic_to_json(value);
+        let obj = proj_json.as_object()?;
+        let mut projection = HashMap::new();
+        for (key, val) in obj {
+            let entry = if let Some(i) = val.as_i64() {
+                i as i32
+            } else if let Some(b) = val.as_bool() {
+                if b { 1 } else { 0 }
+            } else {
+                continue;
+            };
+            projection.insert(key.clone(), entry);
+        }
+        if projection.is_empty() {
+            None
+        } else {
+            Some(projection)
+        }
+    }
+
     // db_create_fuzzy_index(collection, field, algorithm, threshold) -> index_name
     let adapter_fzidx = adapter.clone();
     engine.register_fn(
@@ -538,27 +560,54 @@ fn register_search_functions(
         },
     );
 
-    // db_fulltext_search(collection, field, query, limit) -> array of {doc, score, tokens}
+    // db_fulltext_search(collection, field, query, options) -> array of {doc, score, tokens}
     let max_find_documents = limits.max_find_documents;
     let default_limit = max_find_documents.min(ABSOLUTE_MAX_FIND_DOCUMENTS);
     let adapter_ftsrch = adapter;
     engine.register_fn(
         "db_fulltext_search",
-        move |collection: &str, field: &str, query: &str, limit: i64| -> Dynamic {
-            let requested_limit = if limit > 0 {
-                limit as usize
-            } else {
-                default_limit
-            };
+        move |collection: &str, field: &str, query: &str, options: Map| -> Dynamic {
+            let mut requested_limit = default_limit;
+            let mut skip = None;
+            let mut min_score = None;
+            let mut projection = None;
+
+            if let Some(limit_val) = options.get("limit") {
+                if let Ok(limit) = limit_val.as_int() {
+                    if limit > 0 {
+                        requested_limit = limit as usize;
+                    }
+                }
+            }
+
+            if let Some(skip_val) = options.get("skip") {
+                if let Ok(skip_val) = skip_val.as_int() {
+                    if skip_val > 0 {
+                        skip = Some(skip_val as usize);
+                    }
+                }
+            }
+
+            if let Some(score_val) = options.get("min_score") {
+                if let Ok(score) = score_val.as_float() {
+                    min_score = Some(score);
+                }
+            }
+
+            if let Some(proj_val) = options.get("projection") {
+                projection = projection_from_dynamic(proj_val);
+            }
+
             let effective_limit = requested_limit
                 .min(max_find_documents)
                 .min(ABSOLUTE_MAX_FIND_DOCUMENTS);
             let options = FulltextSearchOptions {
                 limit: Some(effective_limit),
-                skip: None,
-                min_score: None,
-                projection: None,
+                skip,
+                min_score,
+                projection,
             };
+
             match adapter_ftsrch.fulltext_search(collection, field, query, options) {
                 Ok(results) => {
                     let result: Vec<Dynamic> = results
