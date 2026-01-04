@@ -588,6 +588,20 @@ impl IndexManager {
             }
 
             if let Some(index) = self.btree_indexes.get_mut(&index_name) {
+                if !index.metadata.multikey {
+                    let has_array = if index.metadata.is_compound() {
+                        index
+                            .metadata
+                            .fields
+                            .iter()
+                            .any(|field| path_crosses_array(doc, field))
+                    } else {
+                        path_crosses_array(doc, &index.metadata.field)
+                    };
+                    if has_array {
+                        index.metadata.multikey = true;
+                    }
+                }
                 if index.metadata.is_compound()
                     && Self::count_compound_array_fields(doc, &index.metadata.fields) > 1
                 {
