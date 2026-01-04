@@ -154,9 +154,46 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
             return Ok(FindCursor::new(collection, doc_ids));
         }
         let file_len = storage.file_len()?;
-        let mut data_end = storage.metadata_offset();
-        if data_end < HEADER_SIZE || data_end > file_len {
-            data_end = file_len;
+        let mut metadata_offset = storage.metadata_offset();
+        let metadata_size = storage.metadata_size();
+        let data_end_offset = storage.data_end_offset();
+        if metadata_offset == 0 && metadata_size > 0 && data_end_offset >= metadata_size {
+            metadata_offset = data_end_offset - metadata_size;
+        }
+        let needs_catalog_fallback = metadata_size == 0 && data_end_offset > HEADER_SIZE;
+        if needs_catalog_fallback {
+            drop(storage);
+            let (doc_ids, _) = collection.collect_doc_ids_with_options(
+                query_json, None, None, false, 0, None, true, 0, None,
+            )?;
+            return Ok(FindCursor::new(collection, doc_ids));
+        }
+        let mut start_offset = HEADER_SIZE;
+        let mut data_end = file_len;
+
+        if metadata_offset >= HEADER_SIZE && metadata_offset <= file_len && metadata_size > 0 {
+            if metadata_offset == HEADER_SIZE && data_end_offset > metadata_offset + metadata_size {
+                // Metadata is at the beginning; documents are after metadata.
+                start_offset = metadata_offset + metadata_size;
+                data_end = data_end_offset.min(file_len);
+            } else {
+                // Metadata is at EOF; documents end at metadata_offset.
+                data_end = metadata_offset;
+            }
+        }
+
+        if let Some(meta) = storage.get_collection_meta(&collection.name) {
+            if let (Some(min_offset), Some(max_offset)) = (
+                meta.document_catalog.values().min().copied(),
+                meta.document_catalog.values().max().copied(),
+            ) {
+                if min_offset > start_offset {
+                    start_offset = min_offset;
+                }
+                if let Ok(bytes) = storage.read_data_at(max_offset) {
+                    data_end = max_offset + 4 + bytes.len() as u64;
+                }
+            }
         }
         drop(storage);
 
@@ -165,7 +202,7 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
             mode: FindCursorMode::Scan {
                 collection_name: collection.name.clone(),
                 query,
-                offset: HEADER_SIZE,
+                offset: start_offset,
                 data_end,
                 yielded: 0,
             },

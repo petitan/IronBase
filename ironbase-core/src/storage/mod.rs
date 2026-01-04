@@ -1556,15 +1556,38 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // CRITICAL FIX: Determine document region end boundary
-        // Documents are stored between HEADER_SIZE and metadata_offset.
-        // If metadata_offset is valid (> HEADER_SIZE), use it as the boundary.
-        // Otherwise, scan to file_len (for legacy files or first-time setup).
-        let scan_end = if self.header.metadata_offset > HEADER_SIZE {
-            self.header.metadata_offset
-        } else {
-            file_len
-        };
+        // CRITICAL FIX: Determine document region boundaries
+        // Documents are stored between HEADER_SIZE and metadata_offset (EOF layout),
+        // or after metadata when metadata is at the beginning (startup layout).
+        let mut scan_start = HEADER_SIZE;
+        let mut scan_end = file_len;
+        let mut metadata_offset = self.header.metadata_offset;
+
+        if metadata_offset == 0 && self.header.metadata_size > 0 {
+            let inferred = self
+                .header
+                .data_end_offset
+                .saturating_sub(self.header.metadata_size);
+            if inferred >= HEADER_SIZE && inferred <= file_len {
+                metadata_offset = inferred;
+            }
+        }
+
+        if metadata_offset >= HEADER_SIZE
+            && metadata_offset <= file_len
+            && self.header.metadata_size > 0
+        {
+            if metadata_offset == HEADER_SIZE
+                && self.header.data_end_offset > metadata_offset + self.header.metadata_size
+            {
+                // Metadata is at the beginning; documents are after metadata.
+                scan_start = metadata_offset + self.header.metadata_size;
+                scan_end = self.header.data_end_offset.min(file_len);
+            } else {
+                // Metadata is at EOF; documents end at metadata_offset.
+                scan_end = metadata_offset;
+            }
+        }
 
         // Clear existing catalogs and reset counts
         for meta in self.collections.values_mut() {
@@ -1576,7 +1599,7 @@ impl StorageEngine {
 
         // Scan all documents from HEADER_SIZE (256 bytes) to metadata_offset (or file_len)
         // CRITICAL: Documents are ONLY valid in the range [HEADER_SIZE, metadata_offset)
-        let mut offset = HEADER_SIZE;
+        let mut offset = scan_start;
         let mut max_ids_by_collection: HashMap<String, u64> = HashMap::new();
 
         while offset + 4 < scan_end {
@@ -1890,6 +1913,14 @@ impl RawStorage for StorageEngine {
 
     fn metadata_offset(&self) -> u64 {
         self.header.metadata_offset
+    }
+
+    fn metadata_size(&self) -> u64 {
+        self.header.metadata_size
+    }
+
+    fn data_end_offset(&self) -> u64 {
+        self.header.data_end_offset
     }
 }
 
