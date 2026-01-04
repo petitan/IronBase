@@ -280,6 +280,9 @@ pub(crate) trait RawStorage: Storage + sealed_raw::SealedRawStorage {
     /// Total file size in bytes
     #[allow(dead_code)] // Used by compaction internally
     fn file_len(&self) -> Result<u64>;
+
+    /// Get metadata offset (start of metadata section)
+    fn metadata_offset(&self) -> u64;
 }
 
 // ============================================================================

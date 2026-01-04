@@ -1847,6 +1847,10 @@ impl RawStorage for StorageEngine {
     fn file_len(&self) -> Result<u64> {
         StorageEngine::file_len(self)
     }
+
+    fn metadata_offset(&self) -> u64 {
+        self.header.metadata_offset
+    }
 }
 
 #[cfg(test)]

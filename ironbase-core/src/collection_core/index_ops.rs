@@ -104,15 +104,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         indexes.create_compound_index(index_name.clone(), fields.clone(), unique, sparse)?;
         drop(indexes); // Release index lock before batch scanning
 
-        // Collect (compound_key, doc_id) pairs in batches - full documents are NOT kept in memory
+        // Insert entries in batches to avoid full materialization (memory-safe).
         const INDEX_BUILD_BATCH_SIZE: usize = 1000; // Increased for better throughput
         const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
-        let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let mut indexed_entries: usize = 0;
         let mut total_scanned: usize = 0;
         let mut multikey_seen = false;
         let fields_clone = fields.clone();
         let collection_name = self.name.clone();
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            let mut indexes = self.indexes.write();
+            let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
+                IronBaseError::IndexError(format!("Index '{}' not found", index_name))
+            })?;
             for (doc_id, doc) in batch_docs {
                 if !multikey_seen
                     && fields_clone
@@ -160,7 +164,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let is_null = IndexManager::is_key_all_null(&index_key);
                     let should_index = !is_null || (unique && !sparse);
                     if should_index {
-                        entries.push((index_key, doc_id.clone()));
+                        index.insert(index_key, doc_id.clone())?;
+                        indexed_entries += 1;
                     }
                 }
                 total_scanned += 1;
@@ -170,6 +175,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 tracing::info!(
                     collection = %collection_name,
                     scanned = total_scanned,
+                    indexed = indexed_entries,
                     "Compound index build progress: scanning documents"
                 );
             }
@@ -179,22 +185,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         tracing::info!(
             collection = %self.name,
             total_scanned = total_scanned,
-            "Document scan complete, starting sort"
+            indexed = indexed_entries,
+            "Document scan complete, setting index metadata"
         );
 
-        // Sort by key - O(n log n)
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        tracing::info!(
-            collection = %self.name,
-            entries = entries.len(),
-            "Sort complete, building B+ tree"
-        );
-
-        // Build index from sorted entries - O(n)
+        // Update metadata after streaming index build.
         let mut indexes = self.indexes.write();
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-            index.build_from_sorted(entries, unique)?;
             if multikey_seen {
                 index.metadata.multikey = true;
             }
@@ -293,16 +290,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Release index lock before batch scanning
         drop(indexes);
 
-        // Collect (key, doc_id) pairs in batches - full documents are NOT kept in memory
-        // Only the small pairs accumulate, reducing memory from O(total_doc_size) to O(num_docs * pair_size)
+        // Insert index entries in batches to avoid full materialization.
         const INDEX_BUILD_BATCH_SIZE: usize = 1000; // Increased for better throughput
         const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
-        let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let mut indexed_entries: usize = 0;
         let mut total_scanned: usize = 0;
         let mut multikey_seen = false;
         let field_clone = field.clone();
         let collection_name = self.name.clone();
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            let mut indexes = self.indexes.write();
+            let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
+                IronBaseError::IndexError(format!("Index '{}' not found", index_name))
+            })?;
             for (doc_id, doc) in batch_docs {
                 if !multikey_seen && path_crosses_array(&doc, &field_clone) {
                     multikey_seen = true;
@@ -317,7 +317,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let should_index =
                         !IndexManager::is_key_all_null(&index_key) || (unique && !sparse);
                     if should_index {
-                        entries.push((index_key, doc_id.clone()));
+                        index.insert(index_key, doc_id.clone())?;
+                        indexed_entries += 1;
                     }
                 } else {
                     let mut seen = std::collections::HashSet::new();
@@ -329,7 +330,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         let should_index =
                             !IndexManager::is_key_all_null(&index_key) || (unique && !sparse);
                         if should_index {
-                            entries.push((index_key, doc_id.clone()));
+                            index.insert(index_key, doc_id.clone())?;
+                            indexed_entries += 1;
                         }
                     }
                 }
@@ -340,7 +342,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 tracing::info!(
                     collection = %collection_name,
                     scanned = total_scanned,
-                    indexed = entries.len(),
+                    indexed = indexed_entries,
                     "Index build progress: scanning documents"
                 );
             }
@@ -350,23 +352,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         tracing::info!(
             collection = %self.name,
             total_scanned = total_scanned,
-            entries_to_index = entries.len(),
-            "Document scan complete, starting sort"
+            indexed = indexed_entries,
+            "Document scan complete, setting index metadata"
         );
 
-        // Sort by key - O(n log n)
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        tracing::info!(
-            collection = %self.name,
-            entries = entries.len(),
-            "Sort complete, building B+ tree"
-        );
-
-        // Re-acquire write lock and build index from sorted entries - O(n)
+        // Update metadata after streaming index build.
         let mut indexes = self.indexes.write();
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-            index.build_from_sorted(entries, unique)?;
             if multikey_seen {
                 index.metadata.multikey = true;
             }
@@ -472,16 +464,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Release index lock before batch scanning
         drop(indexes);
 
-        // Collect (key, doc_id) pairs in batches - lowercase strings for CI
+        // Insert index entries in batches - lowercase strings for CI.
         const INDEX_BUILD_BATCH_SIZE: usize = 1000;
         const PROGRESS_LOG_INTERVAL: usize = 10000;
-        let mut entries: Vec<(IndexKey, crate::document::DocumentId)> = Vec::new();
+        let mut indexed_entries: usize = 0;
         let mut total_scanned: usize = 0;
         let mut multikey_seen = false;
         let field_clone = field.clone();
         let collection_name = self.name.clone();
 
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
+            let mut indexes = self.indexes.write();
+            let index = indexes.get_btree_index_mut(&index_name).ok_or_else(|| {
+                IronBaseError::IndexError(format!("Index '{}' not found", index_name))
+            })?;
             for (doc_id, doc) in batch_docs {
                 if !multikey_seen && path_crosses_array(&doc, &field_clone) {
                     multikey_seen = true;
@@ -504,7 +500,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         }
                         // Skip nulls - CI indexes are implicitly sparse
                         if !IndexManager::is_key_all_null(&index_key) {
-                            entries.push((index_key, doc_id.clone()));
+                            index.insert(index_key, doc_id.clone())?;
+                            indexed_entries += 1;
                         }
                     }
                 }
@@ -514,7 +511,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 tracing::info!(
                     collection = %collection_name,
                     scanned = total_scanned,
-                    indexed = entries.len(),
+                    indexed = indexed_entries,
                     "CI index build progress: scanning documents"
                 );
             }
@@ -524,23 +521,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         tracing::info!(
             collection = %self.name,
             total_scanned = total_scanned,
-            entries_to_index = entries.len(),
-            "Document scan complete, starting sort"
+            indexed = indexed_entries,
+            "Document scan complete, setting index metadata"
         );
 
-        // Sort by key - O(n log n)
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        tracing::info!(
-            collection = %self.name,
-            entries = entries.len(),
-            "Sort complete, building B+ tree"
-        );
-
-        // Re-acquire write lock and build index from sorted entries
+        // Update metadata after streaming index build.
         let mut indexes = self.indexes.write();
         if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-            index.build_from_sorted(entries, unique)?;
             if multikey_seen {
                 index.metadata.multikey = true;
             }
