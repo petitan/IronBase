@@ -2874,14 +2874,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 QueryPlan::RegexPrefixScan {
                     ref index_name,
                     ref prefix,
+                    exact,
+                    ref field,
                     ..
                 } => {
+                    let can_apply_limit =
+                        exact && Self::is_simple_regex_query(parsed_query.to_json(), field);
+                    let (scan_skip, scan_limit) = if can_apply_limit {
+                        (skip, limit)
+                    } else {
+                        (0, None)
+                    };
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         let start = IndexKey::String(prefix.clone());
                         let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
                         let mode = RangeQueryMode::Scan {
-                            skip: 0,
-                            limit: None,
+                            skip: scan_skip,
+                            limit: scan_limit,
                             order: ScanOrder::Asc,
                         };
                         index
@@ -2932,6 +2941,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Apply skip/limit while verifying query
         let mut results = Vec::new();
         let mut skipped = 0usize;
+        let (match_skip, match_limit) = if let QueryPlan::RegexPrefixScan {
+            exact, ref field, ..
+        } = plan
+        {
+            if exact && Self::is_simple_regex_query(parsed_query.to_json(), field) {
+                (0, None)
+            } else {
+                (skip, limit)
+            }
+        } else {
+            (skip, limit)
+        };
 
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
@@ -2939,14 +2960,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 let document = Document::from_json(&doc_json_str)?;
 
                 if parsed_query.matches(&document)? {
-                    if skipped < skip {
+                    if skipped < match_skip {
                         skipped += 1;
                         continue;
                     }
 
                     results.push(doc_id.clone());
                     // MongoDB compatibility: limit(0) means "no limit"
-                    if let Some(limit_count) = limit {
+                    if let Some(limit_count) = match_limit {
                         if limit_count > 0 && results.len() >= limit_count {
                             break;
                         }
@@ -2964,6 +2985,39 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             Value::Object(map) => map.is_empty(),
             _ => false,
         }
+    }
+
+    fn is_simple_regex_query(query_json: &Value, field: &str) -> bool {
+        let map = match query_json {
+            Value::Object(map) => map,
+            _ => return false,
+        };
+        if map.len() != 1 {
+            return false;
+        }
+        let value = match map.get(field) {
+            Some(v) => v,
+            None => return false,
+        };
+        let cond = match value.as_object() {
+            Some(obj) => obj,
+            None => return false,
+        };
+
+        let has_regex = cond.get("$regex").and_then(|v| v.as_str()).is_some();
+        if !has_regex {
+            return false;
+        }
+
+        let options_ok = match cond.get("$options").and_then(|v| v.as_str()) {
+            Some(opts) => opts.is_empty(),
+            None => true,
+        };
+        if !options_ok {
+            return false;
+        }
+
+        cond.len() == if cond.contains_key("$options") { 2 } else { 1 }
     }
 
     fn extract_id_query(query_json: &Value) -> Option<DocumentId> {
