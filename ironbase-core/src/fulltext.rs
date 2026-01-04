@@ -1204,71 +1204,76 @@ impl FulltextIndex {
             self.open_storage_file_rw()?;
         }
 
-        // Step 1: Collect all token data BEFORE we start writing
-        // This avoids borrow checker issues with read_token_entry during file writes
-        let mut all_tokens: HashMap<String, Vec<TokenEntry>> = HashMap::new();
-
-        // IMPORTANT: Memory entries (new) take priority over disk entries (old)
-        // Add memory entries FIRST (they have accurate/updated TF values)
-        for (token, entries) in &self.inverted_index {
-            all_tokens.insert(token.clone(), entries.clone());
-        }
-
-        // Add tokens from disk (if in lazy mode with existing token_offsets)
-        // Only add doc_ids that are NOT already in memory (to preserve updated TF)
+        // Step 1: Build a sorted token list without materializing all postings.
+        let mut tokens: Vec<String> = self.inverted_index.keys().cloned().collect();
         if self.lazy_mode {
-            for (token, (offset, _count)) in &self.token_offsets {
-                // Read using appropriate format based on file_version
-                let disk_entries = if self.file_version >= FTIDX_VERSION_V3 {
-                    self.read_token_entry_v3(*offset).ok()
-                } else {
-                    // V2 format: convert HashSet to Vec<TokenEntry> with TF=1
-                    self.read_token_entry(*offset)
-                        .ok()
-                        .map(|doc_ids| doc_ids.into_iter().map(|id| (id, 1u32)).collect())
-                };
-                if let Some(disk_entries) = disk_entries {
-                    let merged = all_tokens.entry(token.clone()).or_default();
-                    // Only add disk entries for doc_ids NOT already in memory AND not deleted
-                    let existing_doc_ids: std::collections::HashSet<_> =
-                        merged.iter().map(|(id, _)| id.clone()).collect();
-                    for (doc_id, tf) in disk_entries {
-                        if !existing_doc_ids.contains(&doc_id)
-                            && !self.deleted_doc_ids.contains(&doc_id)
-                        {
-                            merged.push((doc_id, tf));
-                        }
-                    }
-                }
-            }
+            tokens.extend(self.token_offsets.keys().cloned());
         }
-
-        // Step 2: Now start writing - get file handle
-        let file = self.file_handle.as_mut().unwrap();
-        file.flush()?;
+        tokens.sort();
+        tokens.dedup();
 
         // Write doc_tokens offset table (as Vec to preserve DocumentId type)
         let offsets_offset = self.write_offset;
         let offsets_vec: Vec<(&DocumentId, &u64)> = self.doc_tokens_offsets.iter().collect();
         let offsets_bytes = serde_json::to_vec(&offsets_vec)?;
-        file.seek(SeekFrom::Start(offsets_offset))?;
-        file.write_all(&offsets_bytes)?;
+        {
+            let file = self.file_handle.as_mut().unwrap();
+            file.flush()?;
+            file.seek(SeekFrom::Start(offsets_offset))?;
+            file.write_all(&offsets_bytes)?;
+        }
 
         // V3: Write each token entry with TF embedded and build token_offsets table
         let token_entries_offset = offsets_offset + offsets_bytes.len() as u64;
         let mut current_offset = token_entries_offset;
         let mut new_token_offsets: HashMap<String, (u64, u32)> = HashMap::new();
 
-        for (token, entries) in &all_tokens {
+        for token in &tokens {
+            let mut entries: Vec<TokenEntry> = Vec::new();
+
+            if let Some(mem_entries) = self.inverted_index.get(token) {
+                entries.extend(mem_entries.iter().cloned());
+            }
+
+            if self.lazy_mode {
+                if let Some((offset, _count)) = self.token_offsets.get(token) {
+                    let disk_entries = if self.file_version >= FTIDX_VERSION_V3 {
+                        self.read_token_entry_v3(*offset).ok()
+                    } else {
+                        self.read_token_entry(*offset)
+                            .ok()
+                            .map(|doc_ids| doc_ids.into_iter().map(|id| (id, 1u32)).collect())
+                    };
+                    if let Some(disk_entries) = disk_entries {
+                        let existing_doc_ids: std::collections::HashSet<_> =
+                            entries.iter().map(|(id, _)| id.clone()).collect();
+                        for (doc_id, tf) in disk_entries {
+                            if !existing_doc_ids.contains(&doc_id)
+                                && !self.deleted_doc_ids.contains(&doc_id)
+                            {
+                                entries.push((doc_id, tf));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if entries.is_empty() {
+                continue;
+            }
+
             // Write token entry with TF (V3 format)
             let token_bytes = token.as_bytes();
-            let entries_bytes = serde_json::to_vec(entries)?;
+            let entries_bytes = serde_json::to_vec(&entries)?;
 
-            file.seek(SeekFrom::Start(current_offset))?;
-            file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
-            file.write_all(token_bytes)?;
-            file.write_all(&(entries_bytes.len() as u32).to_le_bytes())?;
-            file.write_all(&entries_bytes)?;
+            {
+                let file = self.file_handle.as_mut().unwrap();
+                file.seek(SeekFrom::Start(current_offset))?;
+                file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
+                file.write_all(token_bytes)?;
+                file.write_all(&(entries_bytes.len() as u32).to_le_bytes())?;
+                file.write_all(&entries_bytes)?;
+            }
 
             new_token_offsets.insert(token.clone(), (current_offset, entries.len() as u32));
             current_offset += 4 + token_bytes.len() as u64 + 4 + entries_bytes.len() as u64;
@@ -1278,8 +1283,11 @@ impl FulltextIndex {
         let token_offsets_offset = current_offset;
         let token_offsets_vec: Vec<(&String, &(u64, u32))> = new_token_offsets.iter().collect();
         let token_offsets_bytes = serde_json::to_vec(&token_offsets_vec)?;
-        file.seek(SeekFrom::Start(token_offsets_offset))?;
-        file.write_all(&token_offsets_bytes)?;
+        {
+            let file = self.file_handle.as_mut().unwrap();
+            file.seek(SeekFrom::Start(token_offsets_offset))?;
+            file.write_all(&token_offsets_bytes)?;
+        }
 
         // Write metadata (name, field, options)
         let metadata_offset = token_offsets_offset + token_offsets_bytes.len() as u64;
@@ -1289,19 +1297,25 @@ impl FulltextIndex {
             options: self.options.clone(),
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
-        file.write_all(&metadata_bytes)?;
+        {
+            let file = self.file_handle.as_mut().unwrap();
+            file.write_all(&metadata_bytes)?;
+        }
 
         // Update V3 header with final offsets
-        file.seek(SeekFrom::Start(8))?; // After magic
-        file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
-        file.write_all(&(self.doc_tokens_offsets.len() as u64).to_le_bytes())?;
-        file.write_all(&offsets_offset.to_le_bytes())?;
-        file.write_all(&token_entries_offset.to_le_bytes())?;
-        file.write_all(&token_offsets_offset.to_le_bytes())?;
-        file.write_all(&metadata_offset.to_le_bytes())?;
+        {
+            let file = self.file_handle.as_mut().unwrap();
+            file.seek(SeekFrom::Start(8))?; // After magic
+            file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
+            file.write_all(&(self.doc_tokens_offsets.len() as u64).to_le_bytes())?;
+            file.write_all(&offsets_offset.to_le_bytes())?;
+            file.write_all(&token_entries_offset.to_le_bytes())?;
+            file.write_all(&token_offsets_offset.to_le_bytes())?;
+            file.write_all(&metadata_offset.to_le_bytes())?;
 
-        file.flush()?;
-        file.sync_all()?;
+            file.flush()?;
+            file.sync_all()?;
+        }
 
         // Step 3: Switch to lazy mode with V3 format
         self.write_offset = metadata_offset + metadata_bytes.len() as u64;
