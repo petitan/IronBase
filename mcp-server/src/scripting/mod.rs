@@ -37,7 +37,7 @@
 //! - **Timeout**: Default 60 seconds
 //! - **Result size**: Max 10 MB
 //! - **Log size**: Max 1 MB total, 64 KB per entry
-//! - **Query limit**: Max 10,000 documents per db_find()
+//! - **Query limit**: Default 10,000 documents per db_find(), dynamic up to 500,000, absolute max 1,000,000
 //!
 //! # Example
 //!

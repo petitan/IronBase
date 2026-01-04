@@ -5,8 +5,8 @@
 // Can be installed as a system service on Windows (Service), Linux (systemd), and macOS (launchd).
 
 // Use jemalloc on Unix for better memory management
-// - Background thread for automatic memory return to OS
 // - Better fragmentation handling for large allocations
+// - Optional background threads for faster memory return to OS (when enabled via MALLOC_CONF)
 #[cfg(unix)]
 use tikv_jemallocator::Jemalloc;
 

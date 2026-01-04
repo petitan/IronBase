@@ -15,6 +15,8 @@ use crate::error::{
 };
 use crate::handles::{validate_coll_handle, CollHandle};
 
+const DEFAULT_FIND_LIMIT: usize = 10_000;
+
 // ============== INSERT ==============
 
 /// Insert one document
@@ -172,7 +174,7 @@ pub extern "C" fn ironbase_insert_many(
 
 // ============== FIND ==============
 
-/// Find documents
+/// Find documents (default limit: 10,000 if no options)
 ///
 /// # Parameters
 /// - `handle`: The collection handle
@@ -209,8 +211,10 @@ pub extern "C" fn ironbase_find(handle: CollHandle, query_json: *const c_char) -
         }
     };
 
-    // Use db.find for FFI consistency (same CollectionCore as write ops)
-    match coll.db.find(&coll.name, &query) {
+    // Use collection find_with_options for default limit handling
+    let mut find_options = ironbase_core::find_options::FindOptions::new();
+    find_options.limit = Some(DEFAULT_FIND_LIMIT);
+    match coll.inner.find_with_options(&query, find_options) {
         Ok(docs) => match serde_json::to_string(&docs) {
             Ok(json) => string_to_c_str(&json),
             Err(e) => {
@@ -280,6 +284,7 @@ pub extern "C" fn ironbase_find_one(handle: CollHandle, query_json: *const c_cha
 }
 
 /// Find documents with options (projection, sort, limit, skip)
+/// If limit is omitted, defaults to 10,000.
 ///
 /// # Parameters
 /// - `handle`: The collection handle
@@ -377,10 +382,12 @@ pub extern "C" fn ironbase_find_with_options(
         }
     }
 
-    find_options.limit = options
+    let limit = options
         .get("limit")
         .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
+        .map(|n| n as usize)
+        .or(Some(DEFAULT_FIND_LIMIT));
+    find_options.limit = limit;
     find_options.skip = options
         .get("skip")
         .and_then(|v| v.as_u64())

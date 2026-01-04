@@ -918,10 +918,7 @@ struct ServerInfo {
     version: String,
 }
 
-fn client_identity(
-    api_key: Option<&str>,
-    remote_addr: Option<std::net::SocketAddr>,
-) -> String {
+fn client_identity(api_key: Option<&str>, remote_addr: Option<std::net::SocketAddr>) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 

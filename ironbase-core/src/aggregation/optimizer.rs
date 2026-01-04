@@ -257,6 +257,8 @@ pub enum FastPath {
         output_field: String,
         /// Constant multiplier (e.g., 2 for {"$sum": 2})
         multiplier: i64,
+        /// Whether to include `_id: null` in the output document
+        include_id: bool,
     },
     /// Use index-based counting per unique value
     CountByField {
@@ -326,6 +328,19 @@ fn detect_count_only_pattern(stages: &[Stage]) -> Option<FastPath> {
         group_idx = 1;
     }
 
+    // Check for $count stage (optional leading $match)
+    if let Some(Stage::Count(count_stage)) = stages.get(group_idx) {
+        let remaining = &stages[group_idx + 1..];
+        if remaining.is_empty() {
+            return Some(FastPath::CountOnly {
+                filter,
+                output_field: count_stage.field.clone(),
+                multiplier: 1,
+                include_id: false,
+            });
+        }
+    }
+
     // Check if next stage is $group
     let group_stage = stages.get(group_idx)?;
     let group = match group_stage {
@@ -347,6 +362,7 @@ fn detect_count_only_pattern(stages: &[Stage]) -> Option<FastPath> {
                     filter,
                     output_field: output_field.clone(),
                     multiplier: 1,
+                    include_id: true,
                 });
             }
         }
@@ -601,11 +617,13 @@ mod tests {
             filter,
             output_field,
             multiplier,
+            include_id,
         }) = opt.fast_path
         {
             assert!(filter.is_none());
             assert_eq!(output_field, "total");
             assert_eq!(multiplier, 1);
+            assert!(include_id);
         } else {
             panic!("Expected CountOnly fast path");
         }
@@ -632,6 +650,29 @@ mod tests {
             assert_eq!(output_field, "count");
         } else {
             panic!("Expected CountOnly fast path");
+        }
+    }
+
+    #[test]
+    fn test_detect_count_stage() {
+        let pipeline = Pipeline::from_json(&json!([
+            {"$count": "total"}
+        ]))
+        .unwrap();
+
+        let opt = analyze_pipeline(pipeline.stages());
+        assert!(opt.fast_path.is_some());
+
+        if let Some(FastPath::CountOnly {
+            output_field,
+            include_id,
+            ..
+        }) = opt.fast_path
+        {
+            assert_eq!(output_field, "total");
+            assert!(!include_id);
+        } else {
+            panic!("Expected CountOnly fast path for $count");
         }
     }
 

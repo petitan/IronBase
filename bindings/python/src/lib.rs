@@ -12,6 +12,8 @@ use ironbase_core::{
     DurabilityMode, StorageEngine,
 };
 
+const DEFAULT_FIND_LIMIT: usize = 10_000;
+
 /// Database wrapper enum to support both file and memory storage
 #[derive(Clone)]
 enum DatabaseWrapper {
@@ -762,7 +764,7 @@ impl Collection {
         Ok(result_dict)
     }
 
-    /// Find documents with options
+    /// Find documents with options (default limit: 10,000 if not provided)
     #[pyo3(signature = (query=None, projection=None, sort=None, limit=None, skip=None))]
     fn find<'py>(
         &self,
@@ -809,7 +811,7 @@ impl Collection {
             options.sort = Some(sort_vec);
         }
 
-        options.limit = limit;
+        options.limit = limit.or(Some(DEFAULT_FIND_LIMIT));
         options.skip = skip;
 
         let results = self
@@ -826,7 +828,7 @@ impl Collection {
         Ok(py_list)
     }
 
-    /// Find documents with total count for pagination.
+    /// Find documents with total count for pagination (default limit: 10,000 if not provided).
     ///
     /// Returns a dict with 'documents' (list) and 'total' (int).
     ///
@@ -879,7 +881,7 @@ impl Collection {
             options.sort = Some(sort_vec);
         }
 
-        options.limit = limit;
+        options.limit = limit.or(Some(DEFAULT_FIND_LIMIT));
         options.skip = skip;
 
         let result = self
