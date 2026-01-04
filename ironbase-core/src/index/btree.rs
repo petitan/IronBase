@@ -183,6 +183,59 @@ pub struct BPlusTree {
     pub metadata: IndexMetadata,
 }
 
+/// Index statistics for selectivity estimation
+///
+/// Used by query planner to select the best index when multiple indexes
+/// could satisfy a query.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexStats {
+    /// Estimated number of unique values (distinct count)
+    /// Higher values mean lower selectivity
+    #[serde(default)]
+    pub distinct_count: u64,
+
+    /// Number of NULL/missing values in the index
+    #[serde(default)]
+    pub null_count: u64,
+
+    /// Ratio of documents with multikey arrays (0.0-1.0)
+    /// Higher values indicate more multikey overhead
+    #[serde(default)]
+    pub multikey_ratio: f32,
+
+    /// Unix timestamp of last statistics update
+    #[serde(default)]
+    pub last_analyzed: u64,
+
+    /// Sampling rate used for statistics (0.0-1.0)
+    /// 1.0 means full scan, 0.1 means 10% sample
+    #[serde(default)]
+    pub sample_rate: f32,
+}
+
+impl IndexStats {
+    /// Calculate selectivity estimate (fraction of docs that match a single value)
+    ///
+    /// Lower selectivity = better index for this query
+    /// Returns 1.0 if no statistics available (worst case assumption)
+    pub fn selectivity(&self, total_docs: u64) -> f64 {
+        if self.distinct_count == 0 || total_docs == 0 {
+            return 1.0; // No stats - assume full scan
+        }
+        // Selectivity = 1 / distinct_count
+        // Estimated rows for equality = total_docs / distinct_count
+        1.0 / self.distinct_count as f64
+    }
+
+    /// Estimate number of documents for an equality query
+    pub fn estimate_rows(&self, total_docs: u64) -> u64 {
+        if self.distinct_count == 0 {
+            return total_docs;
+        }
+        (total_docs / self.distinct_count).max(1)
+    }
+}
+
 /// Index metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMetadata {
@@ -204,6 +257,9 @@ pub struct IndexMetadata {
     pub tree_height: u32,
     #[serde(default)]
     pub root_offset: u64, // File offset to root node (0 = in-memory only)
+    /// Statistics for query planning
+    #[serde(default)]
+    pub stats: IndexStats,
 }
 
 impl IndexMetadata {
@@ -242,6 +298,7 @@ impl BPlusTree {
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
+                stats: IndexStats::default(),
             },
         }
     }
@@ -275,6 +332,7 @@ impl BPlusTree {
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
+                stats: IndexStats::default(),
             },
         }
     }
@@ -323,6 +381,7 @@ impl BPlusTree {
                 num_keys: 0,
                 tree_height: 1,
                 root_offset: 0,
+                stats: IndexStats::default(),
             },
         }
     }
@@ -631,10 +690,30 @@ impl BPlusTree {
         entries: Vec<(IndexKey, DocumentId)>,
         check_unique: bool,
     ) -> Result<()> {
+        // Collect stats while building: count distinct keys and nulls
+        let mut distinct_count: u64 = 0;
+        let mut null_count: u64 = 0;
+        let mut last_key: Option<&IndexKey> = None;
+
         // Check unique constraint if required - O(n) scan for adjacent duplicates
-        if check_unique && entries.len() > 1 {
-            for i in 0..entries.len() - 1 {
-                if entries[i].0 == entries[i + 1].0 {
+        // Also collect distinct count in the same pass
+        if !entries.is_empty() {
+            for i in 0..entries.len() {
+                let current_key = &entries[i].0;
+
+                // Count distinct keys (since sorted, just check if different from prev)
+                if last_key != Some(current_key) {
+                    distinct_count += 1;
+                    last_key = Some(current_key);
+                }
+
+                // Count nulls
+                if matches!(current_key, IndexKey::Null) {
+                    null_count += 1;
+                }
+
+                // Check unique constraint
+                if check_unique && i > 0 && entries[i - 1].0 == entries[i].0 {
                     return Err(IronBaseError::IndexError(format!(
                         "Duplicate key: {:?} (unique index)",
                         entries[i].0
@@ -648,6 +727,15 @@ impl BPlusTree {
         for (key, doc_id) in entries {
             self.insert_unchecked(key, doc_id)?;
         }
+
+        // Update statistics
+        self.metadata.stats.distinct_count = distinct_count;
+        self.metadata.stats.null_count = null_count;
+        self.metadata.stats.last_analyzed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.metadata.stats.sample_rate = 1.0; // Full scan during build
 
         Ok(())
     }

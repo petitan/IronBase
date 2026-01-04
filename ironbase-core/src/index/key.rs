@@ -176,4 +176,6 @@ pub struct IndexPrefixInfo {
     pub num_fields: usize,
     /// Whether this is a sparse index (only indexes documents where the field exists)
     pub sparse: bool,
+    /// Estimated distinct key count for selectivity (0 = unknown)
+    pub distinct_count: u64,
 }

@@ -894,6 +894,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -925,6 +926,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -940,6 +942,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -983,6 +986,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1020,6 +1024,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1043,6 +1048,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1066,6 +1072,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1127,6 +1134,7 @@ mod tests {
                 is_compound: false,
                 num_fields: 1,
                 sparse: false,
+                distinct_count: 0,
             },
             IndexPrefixInfo {
                 index_name: "users_email_ci".to_string(),
@@ -1134,6 +1142,7 @@ mod tests {
                 is_compound: false,
                 num_fields: 1,
                 sparse: true, // CI indexes are sparse
+                distinct_count: 0,
             },
         ];
 
@@ -1167,6 +1176,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         // No CI index available - should return None (collection scan)
@@ -1191,6 +1201,7 @@ mod tests {
             is_compound: false,
             num_fields: 1,
             sparse: false,
+            distinct_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
