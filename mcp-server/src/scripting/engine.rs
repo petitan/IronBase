@@ -413,7 +413,7 @@ mod tests {
                 let doc = #{ name: "Alice", age: 30 };
                 let id = db_insert_one("users", doc);
                 let found = db_find("users", #{});
-                found.len()
+                found.documents.len()
             "#,
                 None,
             )

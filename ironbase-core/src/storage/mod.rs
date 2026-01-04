@@ -128,8 +128,22 @@ pub struct Header {
 
     // Explicit data end tracking (version 3+)
     // This prevents SeekFrom::End(0) corruption when metadata is at file end
+    //
+    // # INVARIANT - DO NOT MODIFY DIRECTLY!
+    //
+    // This field must ALWAYS be updated via HeaderWriter methods:
+    // - HeaderWriter::advance_after_write() - after document write
+    // - HeaderWriter::set_after_metadata() - after metadata flush
+    // - write_compaction_header() - during compaction
+    //
+    // Direct modification (e.g., `header.data_end_offset = x`) WILL cause:
+    // - Sparse holes in the file
+    // - Metadata corruption
+    // - Data overwrite bugs
+    //
+    // Historical note: 7+ critical bugs were caused by incorrect manual updates.
     #[serde(default)]
-    pub data_end_offset: u64, // End of document data section (where next document should be written)
+    pub data_end_offset: u64,
 
     // Clean shutdown flag (version 4+)
     // If true, indexes can be trusted from .idx files without rebuild

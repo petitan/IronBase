@@ -1145,6 +1145,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let indexes = self.indexes.read();
         let index_fields = indexes.list_indexes_with_compound_info();
 
+        if let Some((logical_op, clauses)) = QueryPlanner::extract_logical_clauses(query_json) {
+            drop(indexes);
+            let parsed_query = Query::from_json(query_json)?;
+            if let Some((doc_ids, _)) = self.collect_doc_ids_for_logical_operator(
+                &parsed_query,
+                logical_op,
+                &clauses,
+                None,
+                false,
+                0,
+                None,
+            )? {
+                return Ok(doc_ids.len() as u64);
+            }
+            return self.count_with_scan(query_json);
+        }
+
         if let Some((_, plan)) = QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
         {
             match &plan {

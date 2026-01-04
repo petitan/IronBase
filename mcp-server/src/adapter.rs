@@ -755,14 +755,48 @@ impl IronBaseAdapter {
         let coll = db.get_collection(collection)?;
 
         // Convert to IronBase FindOptions - now uses core's include_total
+        let projection = if let Some(proj) = options.projection.as_ref() {
+            let obj = proj.as_object().ok_or_else(|| {
+                crate::error::McpError::InvalidParams(
+                    "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
+                )
+            })?;
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                let val = if let Some(i) = v.as_i64() {
+                    if i != 0 && i != 1 {
+                        return Err(crate::error::McpError::InvalidParams(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, i
+                        )));
+                    }
+                    i as i32
+                } else if let Some(f) = v.as_f64() {
+                    if f == 0.0 {
+                        0
+                    } else if f == 1.0 {
+                        1
+                    } else {
+                        return Err(crate::error::McpError::InvalidParams(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, f
+                        )));
+                    }
+                } else {
+                    return Err(crate::error::McpError::InvalidParams(format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                        k, v
+                    )));
+                };
+                map.insert(k.clone(), val);
+            }
+            Some(map)
+        } else {
+            None
+        };
+
         let ironbase_options = ironbase_core::FindOptions {
-            projection: options.projection.as_ref().and_then(|p| {
-                p.as_object().map(|obj| {
-                    obj.iter()
-                        .map(|(k, v)| (k.clone(), v.as_i64().unwrap_or(1) as i32))
-                        .collect()
-                })
-            }),
+            projection,
             // Sort already parsed by tools.rs - None means O(1) skip/limit
             sort: options.sort,
             limit: options.limit,

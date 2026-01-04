@@ -56,8 +56,10 @@ fn handle_find(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
         .get("include_total")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let projection = parse_projection(&params)?;
+    let projection_value = projection.map(|proj| json!(proj));
     let options = FindOptions {
-        projection: params.get("projection").cloned(),
+        projection: projection_value,
         sort: parse_sort(&params),
         limit: parse_limit(&params),
         skip: parse_skip(&params),
