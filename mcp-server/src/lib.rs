@@ -11,6 +11,7 @@ pub mod http_server;
 pub mod listener;
 pub mod monitoring;
 pub mod prompts;
+pub mod request_deadline;
 pub mod resources;
 pub mod scripting;
 pub mod service;

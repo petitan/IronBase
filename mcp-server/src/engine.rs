@@ -13,11 +13,13 @@ use crate::acl::{
 };
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
+use crate::request_deadline;
 use crate::scripting::LimitsManager;
 use crate::tools::dispatch_tool;
 use crate::ServerInfo;
 use serde_json::Value;
 use std::sync::Arc;
+use std::time::Instant;
 
 // ============================================================================
 // Service Context - Protocol-independent request context
@@ -30,14 +32,17 @@ pub struct ServiceContext {
     pub caller: CallerContext,
     /// Whether the server is initialized (MCP lifecycle)
     pub is_initialized: bool,
+    /// Deadline for cooperative cancellation (if set)
+    pub deadline: Option<Instant>,
 }
 
 impl ServiceContext {
     /// Create a new service context
-    pub fn new(caller: CallerContext, is_initialized: bool) -> Self {
+    pub fn new(caller: CallerContext, is_initialized: bool, deadline: Option<Instant>) -> Self {
         Self {
             caller,
             is_initialized,
+            deadline,
         }
     }
 
@@ -46,6 +51,7 @@ impl ServiceContext {
         Self {
             caller: CallerContext::localhost(),
             is_initialized: true,
+            deadline: None,
         }
     }
 }
@@ -191,6 +197,7 @@ impl IronBaseService {
         }
 
         // 4. Execute the tool (ACL was just verified - minimal TOCTOU window)
+        let _deadline_guard = request_deadline::set_deadline(ctx.deadline);
         match dispatch_tool(
             &request.name,
             request.arguments.clone(),
