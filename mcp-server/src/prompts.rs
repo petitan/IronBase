@@ -1358,7 +1358,7 @@ Rhai is a lightweight scripting language for server-side operations. Scripts can
 | `db_create_fuzzy_index(coll, field, algo, threshold)` | Create fuzzy index | `db_create_fuzzy_index("users", "name", "jaro_winkler", 0.8)` |
 | `db_fuzzy_search(coll, field, query, threshold)` | Fuzzy text search | `db_fuzzy_search("users", "name", "john", 0.7)` |
 | `db_create_fulltext_index(coll, field, lang)` | Create fulltext index | `db_create_fulltext_index("articles", "content", "english")` |
-| `db_fulltext_search(coll, field, query, limit)` | Fulltext search with TF-IDF | `db_fulltext_search("articles", "content", "database", 10)` |
+| `db_fulltext_search(coll, field, query, options)` | Fulltext search with options | `db_fulltext_search("articles", "content", "database", #{{limit: 10, min_score: 0.2}})` |
 
 ## Helper Functions
 
@@ -2054,7 +2054,7 @@ Exclude large fields:
 db_create_fulltext_index("articles", "content", "{language}");
 
 // Search
-let results = db_fulltext_search("articles", "content", "query", 10);
+let results = db_fulltext_search("articles", "content", "query", #{{limit: 10}});
 for r in results {{
     print(r.document.title + " (score: " + r.score + ")");
 }}
