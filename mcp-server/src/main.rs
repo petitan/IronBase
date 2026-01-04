@@ -476,6 +476,9 @@ fn handle_request(
 
             match dispatch_tool(&params.name, arguments, adapter, None, None) {
                 Ok(result) => {
+                    if is_notification {
+                        return None;
+                    }
                     let response = serde_json::json!({
                         "content": [{
                             "type": "text",
@@ -484,7 +487,12 @@ fn handle_request(
                     });
                     Some(create_success_response(response, request.id.clone()))
                 }
-                Err(e) => Some(create_tool_error_response(e, request.id.clone())),
+                Err(e) => {
+                    if is_notification {
+                        return None;
+                    }
+                    Some(create_tool_error_response(e, request.id.clone()))
+                }
             }
         }
 

@@ -1060,6 +1060,9 @@ fn handle_request(
             // Execute via service layer (handles auth, ACL, dispatch)
             match service.execute_tool(&ctx, &tool_request) {
                 crate::ToolResult::Success(result) => {
+                    if is_notification {
+                        return None;
+                    }
                     let response = serde_json::json!({
                         "content": [{
                             "type": "text",
@@ -1069,6 +1072,9 @@ fn handle_request(
                     Some(create_success_response(response, request.id.clone()))
                 }
                 crate::ToolResult::Error { code, message } => {
+                    if is_notification {
+                        return None;
+                    }
                     let response = serde_json::json!({
                         "content": [{
                             "type": "text",
@@ -1084,6 +1090,9 @@ fn handle_request(
                     }
                 }
                 crate::ToolResult::AccessDenied(msg) => {
+                    if is_notification {
+                        return None;
+                    }
                     let response = serde_json::json!({
                         "content": [{
                             "type": "text",
