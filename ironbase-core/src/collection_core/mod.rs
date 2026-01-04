@@ -2591,23 +2591,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     where
         F: FnMut(usize, HashMap<DocumentId, Value>) -> Result<()>,
     {
-        // Step 1: Get all document offsets (hold lock briefly)
-        let sorted_offsets: Vec<(DocumentId, u64)> = {
+        // Step 1: Capture stable document order (hold lock briefly)
+        let ordered_ids: Vec<DocumentId> = {
             let storage = self.storage.read();
             let meta = storage
                 .get_collection_meta(&self.name)
                 .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-            let mut offsets: Vec<(DocumentId, u64)> = meta
-                .document_catalog
-                .iter()
-                .map(|(id, &offset)| (id.clone(), offset))
-                .collect();
-            // Sort by offset for sequential disk reads
-            offsets.sort_by_key(|(_, offset)| *offset);
-            offsets
+            if !meta.document_order.is_empty() {
+                meta.document_order.clone()
+            } else {
+                let mut offsets: Vec<(DocumentId, u64)> = meta
+                    .document_catalog
+                    .iter()
+                    .map(|(id, &offset)| (id.clone(), offset))
+                    .collect();
+                offsets.sort_by_key(|(_, offset)| *offset);
+                offsets.into_iter().map(|(id, _)| id).collect()
+            }
         }; // storage lock released here
 
-        let total_docs = sorted_offsets.len();
+        let total_docs = ordered_ids.len();
         let mut processed = 0;
         let mut batch_num = 0;
 
@@ -2615,17 +2618,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // CRITICAL FIX: Use read lock + read_data_at (positioned read) instead of
         // write lock + read_data. This allows concurrent reads during index building
         // and prevents deadlock with concurrent batch inserts.
-        for chunk in sorted_offsets.chunks(batch_size) {
+        for chunk in ordered_ids.chunks(batch_size) {
             // Read raw bytes from disk using positioned read (no file position change)
             let raw_batch: Vec<(DocumentId, Vec<u8>)> = {
                 let storage = self.storage.read(); // READ lock instead of WRITE lock
+                let meta = storage
+                    .get_collection_meta(&self.name)
+                    .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
                 chunk
                     .iter()
-                    .filter_map(|(doc_id, offset)| {
-                        storage
-                            .read_data_at(*offset)  // pread - no position change
-                            .ok()
-                            .map(|bytes| (doc_id.clone(), bytes))
+                    .filter_map(|doc_id| {
+                        meta.document_catalog.get(doc_id).and_then(|offset| {
+                            storage
+                                .read_data_at(*offset) // pread - no position change
+                                .ok()
+                                .map(|bytes| (doc_id.clone(), bytes))
+                        })
                     })
                     .collect()
             }; // storage lock released here

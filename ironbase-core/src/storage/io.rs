@@ -267,6 +267,8 @@ impl StorageEngine {
             .ok_or_else(|| IronBaseError::CollectionNotFound(collection.to_string()))?;
 
         meta.document_catalog.insert(doc_id.clone(), write_offset);
+        meta.document_order.retain(|id| id != doc_id);
+        meta.document_order.push(doc_id.clone());
         meta.document_count += 1;
 
         Ok(write_offset)
@@ -339,6 +341,8 @@ impl StorageEngine {
 
         // Update catalog with new offset
         meta.document_catalog.insert(doc_id.clone(), write_offset);
+        meta.document_order.retain(|id| id != doc_id);
+        meta.document_order.push(doc_id.clone());
 
         // Update document_count (total writes)
         meta.document_count += 1;
@@ -413,6 +417,7 @@ impl StorageEngine {
 
         // Remove from catalog
         if meta.document_catalog.remove(doc_id).is_some() {
+            meta.document_order.retain(|id| id != doc_id);
             // Decrement live count only if document existed
             if meta.live_document_count > 0 {
                 meta.live_document_count -= 1;

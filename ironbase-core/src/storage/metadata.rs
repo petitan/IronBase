@@ -468,6 +468,7 @@ mod tests {
             index_offset: 0,
             last_id: 0,
             document_catalog: HashMap::new(),
+            document_order: Vec::new(),
             indexes: Vec::new(),
             fuzzy_indexes: Vec::new(),
             fulltext_indexes: Vec::new(),
@@ -476,6 +477,8 @@ mod tests {
         };
         meta.document_catalog.insert(DocumentId::Int(1), 1000);
         meta.document_catalog.insert(DocumentId::Int(2), 2000);
+        meta.document_order.push(DocumentId::Int(1));
+        meta.document_order.push(DocumentId::Int(2));
         meta
     }
 

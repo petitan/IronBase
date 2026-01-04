@@ -888,16 +888,13 @@ impl BPlusTree {
         }
     }
 
-    /// Apply batch updates efficiently using HashMap + rebuild
+    /// Apply batch updates without full rebuild.
     ///
-    /// Instead of O(n) per update (Vec::insert), this does:
-    /// 1. Extract all entries to HashMap: O(n) - now supports multi-level trees!
-    /// 2. Apply all updates to HashMap: O(k)
-    /// 3. Rebuild index from sorted entries: O(n log n) for sort + O(n) for rebuild
-    /// Total: O(n log n + k) instead of O(n * k)
+    /// Performs a two-phase update:
+    /// 1. Delete all old entries.
+    /// 2. Insert all new entries.
     ///
-    /// NOTE: This method now supports multi-level B+ trees through the improved
-    /// get_all_entries() which recursively collects from all nodes.
+    /// This avoids rebuilding the entire tree and keeps memory usage low.
     ///
     /// # Arguments
     /// * `updates` - Vec of (old_key, old_doc_id, new_key, new_doc_id) tuples
@@ -909,48 +906,26 @@ impl BPlusTree {
             return Ok(());
         }
 
-        // Step 1: Extract all current entries into a BTreeMap (key -> doc_ids)
-        // Use BTreeMap because IndexKey doesn't implement Hash (due to OrderedFloat)
-        // but it does implement Ord. BTreeMap also maintains sorted order.
-        //
-        // NOTE: Now uses get_all_entries() which supports multi-level trees!
-        use std::collections::BTreeMap;
-        let mut entries_map: BTreeMap<IndexKey, Vec<DocumentId>> = BTreeMap::new();
-        for (key, doc_id) in self.get_all_entries() {
-            entries_map.entry(key).or_default().push(doc_id);
-        }
+        let mut deletes: Vec<(IndexKey, DocumentId)> = Vec::with_capacity(updates.len());
+        let mut inserts: Vec<(IndexKey, DocumentId)> = Vec::with_capacity(updates.len());
 
-        // Step 2: Apply all updates to the HashMap
         for (old_key, old_doc_id, new_key, new_doc_id) in updates {
-            // Remove old entry
-            if let Some(doc_ids) = entries_map.get_mut(&old_key) {
-                doc_ids.retain(|id| id != &old_doc_id);
-                if doc_ids.is_empty() {
-                    entries_map.remove(&old_key);
-                }
+            if old_key == new_key && old_doc_id == new_doc_id {
+                continue;
             }
-
-            // Add new entry
-            entries_map.entry(new_key).or_default().push(new_doc_id);
+            deletes.push((old_key, old_doc_id));
+            inserts.push((new_key, new_doc_id));
         }
 
-        // Step 3: Convert back to sorted Vec for rebuild
-        let mut entries: Vec<(IndexKey, DocumentId)> =
-            Vec::with_capacity(entries_map.values().map(|v| v.len()).sum());
-        for (key, doc_ids) in entries_map {
-            for doc_id in doc_ids {
-                entries.push((key.clone(), doc_id));
-            }
+        deletes.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        inserts.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+
+        for (key, doc_id) in deletes {
+            self.delete(&key, &doc_id)?;
         }
-
-        // Sort by key - O(n log n)
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Step 4: Clear existing tree and rebuild - O(n)
-        // FIX: Must clear before rebuild to prevent duplicate entries!
-        // Without this, build_from_sorted would ADD to existing entries.
-        self.clear();
-        self.build_from_sorted(entries, false)?;
+        for (key, doc_id) in inserts {
+            self.insert(key, doc_id)?;
+        }
 
         Ok(())
     }

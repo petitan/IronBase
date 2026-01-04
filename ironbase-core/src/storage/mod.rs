@@ -201,6 +201,9 @@ pub struct CollectionMeta {
     /// Custom serialization preserves DocumentId type information in JSON metadata
     #[serde(default, with = "crate::catalog_serde")]
     pub document_catalog: HashMap<crate::document::DocumentId, u64>,
+    /// Stable document iteration order (append/update order)
+    #[serde(default, with = "crate::catalog_serde::vec")]
+    pub document_order: Vec<crate::document::DocumentId>,
 
     /// Persisted index metadata for this collection (B+ tree indexes)
     #[serde(default)]
@@ -540,6 +543,11 @@ impl StorageEngine {
             was_clean_shutdown: was_clean,
         };
 
+        let migrated = Self::rebuild_document_order_if_needed(&mut storage.collections);
+        if migrated {
+            storage.metadata_dirty = true;
+        }
+
         // If metadata was corrupted, attempt recovery (crash scenario)
         if needs_rebuild {
             // Mark as dirty start - don't trust indexes
@@ -593,6 +601,28 @@ impl StorageEngine {
         Ok(storage)
     }
 
+    fn rebuild_document_order_if_needed(collections: &mut HashMap<String, CollectionMeta>) -> bool {
+        let mut migrated = false;
+        for meta in collections.values_mut() {
+            let needs_rebuild = meta.document_order.len() != meta.document_catalog.len()
+                || meta
+                    .document_order
+                    .iter()
+                    .any(|id| !meta.document_catalog.contains_key(id));
+            if needs_rebuild {
+                let mut offsets: Vec<(DocumentId, u64)> = meta
+                    .document_catalog
+                    .iter()
+                    .map(|(id, &offset)| (id.clone(), offset))
+                    .collect();
+                offsets.sort_by_key(|(_, offset)| *offset);
+                meta.document_order = offsets.into_iter().map(|(id, _)| id).collect();
+                migrated = true;
+            }
+        }
+        migrated
+    }
+
     /// Create a new collection
     pub fn create_collection(&mut self, name: &str) -> Result<()> {
         if self.collections.contains_key(name) {
@@ -608,9 +638,10 @@ impl StorageEngine {
             index_offset: 0,
             last_id: 0,
             document_catalog: HashMap::new(), // Initialize empty catalog
-            indexes: Vec::new(),              // Initialize empty index list
-            fuzzy_indexes: Vec::new(),        // Initialize empty fuzzy index list
-            fulltext_indexes: Vec::new(),     // Initialize empty fulltext index list
+            document_order: Vec::new(),
+            indexes: Vec::new(),          // Initialize empty index list
+            fuzzy_indexes: Vec::new(),    // Initialize empty fuzzy index list
+            fulltext_indexes: Vec::new(), // Initialize empty fulltext index list
             schema: None,
             flags: CollectionFlags::default(),
         };
@@ -907,6 +938,7 @@ impl StorageEngine {
                             index_offset: 0,
                             last_id: 0,
                             document_catalog: HashMap::new(),
+                            document_order: Vec::new(),
                             indexes: Vec::new(),
                             fuzzy_indexes: Vec::new(),
                             fulltext_indexes: Vec::new(),
@@ -916,8 +948,11 @@ impl StorageEngine {
 
                     if is_tombstone {
                         meta.document_catalog.remove(&doc_id);
+                        meta.document_order.retain(|id| id != &doc_id);
                     } else {
                         meta.document_catalog.insert(doc_id.clone(), offset);
+                        meta.document_order.retain(|id| id != &doc_id);
+                        meta.document_order.push(doc_id.clone());
                         meta.document_count += 1;
                         meta.live_document_count += 1;
                         documents_found += 1;
@@ -1534,6 +1569,7 @@ impl StorageEngine {
         // Clear existing catalogs and reset counts
         for meta in self.collections.values_mut() {
             meta.document_catalog.clear();
+            meta.document_order.clear();
             meta.document_count = 0;
             meta.live_document_count = 0;
         }
@@ -1589,6 +1625,7 @@ impl StorageEngine {
                                     index_offset: 0,
                                     last_id: 0,
                                     document_catalog: HashMap::new(),
+                                    document_order: Vec::new(),
                                     indexes: Vec::new(),
                                     fuzzy_indexes: Vec::new(),
                                     fulltext_indexes: Vec::new(),
@@ -1599,10 +1636,13 @@ impl StorageEngine {
                             if is_tombstone {
                                 // Remove from catalog if exists (tombstone = deletion)
                                 meta.document_catalog.remove(&doc_id);
+                                meta.document_order.retain(|id| id != &doc_id);
                                 // Don't increment counts for tombstones
                             } else {
                                 // Add/update catalog entry (newer version overwrites older)
                                 meta.document_catalog.insert(doc_id.clone(), offset);
+                                meta.document_order.retain(|id| id != &doc_id);
+                                meta.document_order.push(doc_id.clone());
                                 meta.document_count += 1;
                                 meta.live_document_count += 1;
 
@@ -2592,6 +2632,7 @@ mod tests {
             index_offset: 0,
             last_id: 42,
             document_catalog: HashMap::new(),
+            document_order: Vec::new(),
             indexes: Vec::new(),
             fuzzy_indexes: Vec::new(),
             fulltext_indexes: Vec::new(),
