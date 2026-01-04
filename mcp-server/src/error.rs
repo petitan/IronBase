@@ -64,8 +64,10 @@ impl fmt::Display for OperationContext {
 /// MCP Server Error
 #[derive(Debug)]
 pub enum McpError {
-    /// IronBase storage error
+    /// IronBase storage error (sanitized for external output)
     Storage(String),
+    /// Aggregation error (safe to expose to client)
+    Aggregation(String),
     /// Invalid parameters
     InvalidParams(String),
     /// Collection not found
@@ -97,6 +99,7 @@ impl fmt::Display for McpError {
                 tracing::debug!("Storage error details: {}", msg);
                 write!(f, "Database operation failed")
             }
+            McpError::Aggregation(msg) => write!(f, "Aggregation error: {}", msg),
             McpError::InvalidParams(msg) => write!(f, "Invalid parameters: {}", msg),
             McpError::CollectionNotFound(name) => write!(f, "Collection not found: {}", name),
             McpError::DocumentNotFound(id) => write!(f, "Document not found: {}", id),
@@ -183,6 +186,7 @@ impl From<ironbase_core::IronBaseError> for McpError {
         use ironbase_core::IronBaseError;
         match err {
             IronBaseError::CollectionNotFound(name) => McpError::CollectionNotFound(name),
+            IronBaseError::AggregationError(msg) => McpError::Aggregation(msg),
             other => McpError::Storage(other.to_string()),
         }
     }
