@@ -15,6 +15,7 @@ const FUZZY_INDEX_MAGIC: &[u8; 8] = b"IRONFZX\0";
 const FUZZY_INDEX_VERSION: u32 = 1;
 /// Header size in bytes
 const HEADER_SIZE: u64 = 64;
+const FUZZY_LAZY_LOAD_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Fuzzy matching algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -94,6 +95,9 @@ pub struct FuzzyIndex {
     entries: Vec<(String, String, DocumentId)>,
     /// Optional storage path for persistence
     storage_path: Option<PathBuf>,
+    lazy_mode: bool,
+    entries_offset: u64,
+    entries_size: u64,
 }
 
 impl FuzzyIndex {
@@ -109,6 +113,9 @@ impl FuzzyIndex {
             },
             entries: Vec::new(),
             storage_path: None,
+            lazy_mode: false,
+            entries_offset: 0,
+            entries_size: 0,
         }
     }
 
@@ -130,6 +137,9 @@ impl FuzzyIndex {
             },
             entries: Vec::new(),
             storage_path: Some(storage_path),
+            lazy_mode: false,
+            entries_offset: 0,
+            entries_size: 0,
         }
     }
 
@@ -145,11 +155,12 @@ impl FuzzyIndex {
 
     /// Get entry count (for checking if loaded from file)
     pub fn entry_count(&self) -> usize {
-        self.entries.len()
+        self.metadata.num_entries
     }
 
     /// Insert a value into the fuzzy index
     pub fn insert(&mut self, value: &str, doc_id: DocumentId) {
+        let _ = self.ensure_entries_loaded();
         let lower = value.to_lowercase();
         self.entries.push((lower, value.to_string(), doc_id));
         self.metadata.num_entries = self.entries.len();
@@ -157,12 +168,14 @@ impl FuzzyIndex {
 
     /// Remove a document from the fuzzy index
     pub fn remove(&mut self, doc_id: &DocumentId) {
+        let _ = self.ensure_entries_loaded();
         self.entries.retain(|(_, _, id)| id != doc_id);
         self.metadata.num_entries = self.entries.len();
     }
 
     /// Remove a specific value-document pair
     pub fn remove_value(&mut self, value: &str, doc_id: &DocumentId) {
+        let _ = self.ensure_entries_loaded();
         let lower = value.to_lowercase();
         self.entries
             .retain(|(l, _, id)| !(l == &lower && id == doc_id));
@@ -177,6 +190,16 @@ impl FuzzyIndex {
         let threshold = threshold_override.unwrap_or(self.metadata.threshold);
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
+
+        if self.lazy_mode && self.entries.is_empty() {
+            if let Some(path) = &self.storage_path {
+                if let Ok(mut on_disk) = self.search_in_file(path, &query_lower, threshold) {
+                    results.append(&mut on_disk);
+                }
+                results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                return results;
+            }
+        }
 
         for (lower_value, _original, doc_id) in &self.entries {
             let similarity = self
@@ -255,6 +278,9 @@ impl FuzzyIndex {
         let path = self.storage_path.as_ref().ok_or_else(|| {
             IronBaseError::IndexError("No storage path set for fuzzy index".to_string())
         })?;
+        if self.lazy_mode && self.entries.is_empty() {
+            return Ok(());
+        }
 
         let mut file = File::create(path).map_err(|e| {
             IronBaseError::IndexError(format!("Failed to create fuzzy index file: {}", e))
@@ -374,18 +400,20 @@ impl FuzzyIndex {
         // Calculate sizes
         let entries_size = metadata_offset - entries_offset;
 
-        // Read entries
-        file.seek(SeekFrom::Start(entries_offset))
-            .map_err(|e| IronBaseError::IndexError(format!("Failed to seek to entries: {}", e)))?;
+        let lazy_mode = entries_size > FUZZY_LAZY_LOAD_THRESHOLD_BYTES;
+        let mut entries: Vec<(String, String, DocumentId)> = Vec::new();
 
-        let mut entries_data = vec![0u8; entries_size as usize];
-        file.read_exact(&mut entries_data)
-            .map_err(|e| IronBaseError::IndexError(format!("Failed to read entries: {}", e)))?;
+        if !lazy_mode {
+            // Read entries without buffering the entire section in memory
+            file.seek(SeekFrom::Start(entries_offset)).map_err(|e| {
+                IronBaseError::IndexError(format!("Failed to seek to entries: {}", e))
+            })?;
 
-        let entries: Vec<(String, String, DocumentId)> = serde_json::from_slice(&entries_data)
-            .map_err(|e| {
+            let mut reader = std::io::Read::by_ref(&mut file).take(entries_size);
+            entries = serde_json::from_reader(&mut reader).map_err(|e| {
                 IronBaseError::IndexError(format!("Failed to deserialize fuzzy entries: {}", e))
             })?;
+        }
 
         // Read metadata (rest of file)
         file.seek(SeekFrom::Start(metadata_offset))
@@ -403,6 +431,95 @@ impl FuzzyIndex {
             metadata,
             entries,
             storage_path: Some(path.to_path_buf()),
+            lazy_mode,
+            entries_offset,
+            entries_size,
         })
+    }
+
+    fn ensure_entries_loaded(&mut self) -> Result<()> {
+        if !self.lazy_mode || !self.entries.is_empty() {
+            return Ok(());
+        }
+
+        let path = self.storage_path.as_ref().ok_or_else(|| {
+            IronBaseError::IndexError("No storage path set for fuzzy index".to_string())
+        })?;
+        let mut file = File::open(path).map_err(|e| {
+            IronBaseError::IndexError(format!("Failed to open fuzzy index file: {}", e))
+        })?;
+        file.seek(SeekFrom::Start(self.entries_offset))
+            .map_err(|e| IronBaseError::IndexError(format!("Failed to seek to entries: {}", e)))?;
+
+        let mut reader = std::io::Read::by_ref(&mut file).take(self.entries_size);
+        self.entries = serde_json::from_reader(&mut reader).map_err(|e| {
+            IronBaseError::IndexError(format!("Failed to deserialize fuzzy entries: {}", e))
+        })?;
+        self.metadata.num_entries = self.entries.len();
+        self.lazy_mode = false;
+
+        Ok(())
+    }
+
+    fn search_in_file(
+        &self,
+        path: &std::path::Path,
+        query_lower: &str,
+        threshold: f64,
+    ) -> Result<Vec<(DocumentId, f64)>> {
+        use serde::de::{Deserializer, SeqAccess, Visitor};
+
+        let mut file = File::open(path).map_err(|e| {
+            IronBaseError::IndexError(format!("Failed to open fuzzy index file: {}", e))
+        })?;
+        file.seek(SeekFrom::Start(self.entries_offset))
+            .map_err(|e| IronBaseError::IndexError(format!("Failed to seek to entries: {}", e)))?;
+
+        let mut results = Vec::new();
+        let mut reader = std::io::Read::by_ref(&mut file).take(self.entries_size);
+        let mut de = serde_json::Deserializer::from_reader(&mut reader);
+
+        struct EntryVisitor<'a> {
+            query_lower: &'a str,
+            threshold: f64,
+            algorithm: FuzzyAlgorithm,
+            results: &'a mut Vec<(DocumentId, f64)>,
+        }
+
+        impl<'de, 'a> Visitor<'de> for EntryVisitor<'a> {
+            type Value = ();
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a sequence of fuzzy index entries")
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<(), A::Error>
+            where
+                A: SeqAccess<'de>,
+            {
+                while let Some((lower, _original, doc_id)) =
+                    seq.next_element::<(String, String, DocumentId)>()?
+                {
+                    let similarity = self.algorithm.similarity(self.query_lower, &lower);
+                    if similarity >= self.threshold {
+                        self.results.push((doc_id, similarity));
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let visitor = EntryVisitor {
+            query_lower,
+            threshold,
+            algorithm: self.metadata.algorithm,
+            results: &mut results,
+        };
+
+        de.deserialize_seq(visitor).map_err(|e| {
+            IronBaseError::IndexError(format!("Failed to stream fuzzy entries: {}", e))
+        })?;
+
+        Ok(results)
     }
 }
