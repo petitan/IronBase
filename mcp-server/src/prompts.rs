@@ -647,7 +647,43 @@ IronBase has built-in limits to prevent out-of-memory errors:
 - `"Aggregation exceeded document limit: X documents processed"`
 - `"Aggregation exceeded group limit: X unique groups"`
 
-**Solutions:** Add `$match` to filter, use lower-cardinality group key, or use index-based optimization."#
+**Solutions:** Add `$match` to filter, use lower-cardinality group key, or use index-based optimization.
+
+### Date Statistics: Aggregation vs Range Queries (90x faster!)
+
+When counting documents by date ranges (e.g., yearly statistics), **range queries are 90x faster** than aggregation with `$substr`.
+
+#### ❌ SLOW - Aggregation with $substr (31 seconds on 78K docs):
+```json
+[
+  {"$project": {"year": {"$substr": ["$date", 0, 4]}}},
+  {"$group": {"_id": "$year", "count": {"$sum": 1}}},
+  {"$sort": {"_id": 1}}
+]
+```
+
+**Why slow?** Every document must be loaded and string-processed.
+
+#### ✅ FAST - Range queries with indexed field (346ms on 78K docs):
+```json
+// Count for 2024 (uses date index)
+{"collection": "emails", "query": {"date": {"$gte": "2024", "$lt": "2025"}}}
+
+// Count for 2023
+{"collection": "emails", "query": {"date": {"$gte": "2023", "$lt": "2024"}}}
+```
+
+**Why fast?** B-tree index range scan - no document loading needed!
+
+#### Performance Comparison (78,295 documents)
+| Method | Time | Speedup |
+|--------|------|---------|
+| Aggregation (`$project` + `$group`) | 31.2s | 1x |
+| Range queries (7× `count_documents`) | 346ms | **90x** |
+
+**When to use which:**
+- **Range queries**: Known date ranges, indexed date field, need counts only
+- **Aggregation**: Dynamic grouping, unknown date values, need other calculations"#
                 }
             }
         ]
@@ -1328,6 +1364,7 @@ Rhai is a lightweight scripting language for server-side operations. Scripts can
 
 | Function | Description | Example |
 |----------|-------------|---------|
+| Note | Use global functions (no `db` object) | Call `db_find(...)`, not `db.find(...)` |
 | `db_find(coll, query)` | Find documents | `db_find("users", #{age: #{`$gt`: 18}})` → `#{documents: [...], count: n}` |
 | `db_find_one(coll, query)` | Find single document (or null) | `db_find_one("users", #{name: "Alice"})` |
 | `db_find_one_result(coll, query)` | Find with explicit result type | Returns `#{found: bool, doc: ..., error: ...}` |
