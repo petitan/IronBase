@@ -18,6 +18,7 @@ pub mod crud;
 pub mod helpers;
 pub mod index;
 pub mod listener;
+pub mod params;
 pub mod script;
 pub mod transaction;
 
