@@ -154,7 +154,7 @@ pub fn dispatch_tool(
                 "PANIC in tool: {} - Server continues running", panic_msg
             );
 
-            Err(McpError::Panic(format!(
+            Err(McpError::panic(format!(
                 "Tool '{}' panicked: {}. The server is still running. Please report this issue.",
                 name, panic_msg
             )))
@@ -208,7 +208,7 @@ fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -
                                     .unwrap_or(false);
 
                                 if !has_index {
-                                    return Err(McpError::OperationTooLarge(format!(
+                                    return Err(McpError::operation_too_large(format!(
                                         "Sorting {} documents by '{}' without an index would require loading all documents into memory. \
                                         Either: (1) Create an index with index_create, (2) Add a 'limit' parameter, \
                                         or (3) Use skip/limit pagination. Max unindexed sort: {} documents.",
@@ -234,7 +234,7 @@ fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -
                             .or_else(|| adapter.count_documents(collection, json!({})).ok());
                         if let Some(count) = count {
                             if count as usize > MAX_UNINDEXED_SORT_DOCS {
-                                return Err(McpError::OperationTooLarge(format!(
+                                return Err(McpError::operation_too_large(format!(
                                     "Aggregation with $sort on {} documents without $limit could cause memory issues. \
                                     Add a $limit stage to the pipeline. Max: {} documents.",
                                     count, MAX_UNINDEXED_SORT_DOCS
@@ -324,7 +324,7 @@ fn dispatch_tool_inner(
             admin::dispatch(name, params, adapter, api_key_cache, server_info)
         }
 
-        _ => Err(McpError::InvalidParams(format!("Unknown tool: {}", name))),
+        _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),
     }
 }
 

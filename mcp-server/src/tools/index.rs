@@ -24,7 +24,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "fulltext_search" => handle_fulltext_search(params, adapter),
         "explain" => handle_explain(params, adapter),
         "find_with_hint" => handle_find_with_hint(params, adapter),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown index tool: {}",
             name
         ))),
@@ -50,7 +50,7 @@ fn handle_index_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
         if field_names.is_empty() {
-            return Err(McpError::InvalidParams("fields array is empty".to_string()));
+            return Err(McpError::invalid_params("fields array is empty".to_string()));
         }
         let name = adapter.create_compound_index(&collection, &field_names, unique, sparse)?;
         Ok(json!({"index_name": name, "fields": field_names, "unique": unique, "sparse": sparse}))
@@ -157,7 +157,7 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
         .into_iter()
         .map(|(doc, score)| {
             let projected_doc = if let Some(ref proj) = projection {
-                apply_projection(&doc, proj).map_err(|e| McpError::InvalidParams(e.to_string()))
+                apply_projection(&doc, proj).map_err(|e| McpError::invalid_params(e.to_string()))
             } else {
                 Ok(doc)
             }?;
@@ -229,7 +229,7 @@ fn handle_find_with_hint(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resul
     // Apply sort if specified
     if let Some(ref sort_spec) = sort {
         apply_sort(&mut documents, sort_spec)
-            .map_err(|e| McpError::InvalidParams(e.to_string()))?;
+            .map_err(|e| McpError::invalid_params(e.to_string()))?;
     }
 
     // Apply skip
@@ -252,7 +252,7 @@ fn handle_find_with_hint(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resul
             .into_iter()
             .map(|doc| apply_projection(&doc, proj))
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| McpError::InvalidParams(e.to_string()))?
+            .map_err(|e| McpError::invalid_params(e.to_string()))?
     } else {
         documents
     };

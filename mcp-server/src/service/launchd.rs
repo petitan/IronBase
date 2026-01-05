@@ -80,7 +80,7 @@ pub fn install_launchd() -> ServiceResult<()> {
 
     // Check if running as root
     if !is_root() {
-        return Err("This operation requires root privileges. Please run with sudo.".into());
+        return Err("This operation requires root privileges. Please run with sudo.");
     }
 
     // Create directories
@@ -139,7 +139,7 @@ level = "info"
 /// Uninstall the launchd service
 pub fn uninstall_launchd() -> ServiceResult<()> {
     if !is_root() {
-        return Err("This operation requires root privileges. Please run with sudo.".into());
+        return Err("This operation requires root privileges. Please run with sudo.");
     }
 
     // Stop and unload service

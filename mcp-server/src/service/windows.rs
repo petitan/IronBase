@@ -88,7 +88,7 @@ pub fn install_service() -> ServiceResult<()> {
 
     #[cfg(not(windows))]
     {
-        Err("Windows service management is only available on Windows".into())
+        Err("Windows service management is only available on Windows")
     }
 }
 
@@ -123,7 +123,7 @@ pub fn uninstall_service() -> ServiceResult<()> {
 
     #[cfg(not(windows))]
     {
-        Err("Windows service management is only available on Windows".into())
+        Err("Windows service management is only available on Windows")
     }
 }
 
@@ -142,7 +142,7 @@ pub fn start_service() -> ServiceResult<()> {
 
     #[cfg(not(windows))]
     {
-        Err("Windows service management is only available on Windows".into())
+        Err("Windows service management is only available on Windows")
     }
 }
 
@@ -161,7 +161,7 @@ pub fn stop_service() -> ServiceResult<()> {
 
     #[cfg(not(windows))]
     {
-        Err("Windows service management is only available on Windows".into())
+        Err("Windows service management is only available on Windows")
     }
 }
 
@@ -190,7 +190,7 @@ pub fn status_service() -> ServiceResult<String> {
 
     #[cfg(not(windows))]
     {
-        Err("Windows service management is only available on Windows".into())
+        Err("Windows service management is only available on Windows")
     }
 }
 
@@ -276,7 +276,7 @@ pub fn run_as_service() -> ServiceResult<()> {
 
 #[cfg(not(windows))]
 pub fn run_as_service() -> ServiceResult<()> {
-    Err("Windows service mode is only available on Windows".into())
+    Err("Windows service mode is only available on Windows")
 }
 
 #[cfg(test)]

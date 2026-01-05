@@ -31,7 +31,7 @@ pub fn dispatch(
         "count_documents" => handle_count_documents(params, adapter),
         "distinct" => handle_distinct(params, adapter),
         "aggregate" => handle_aggregate(params, adapter),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown CRUD tool: {}",
             name
         ))),
@@ -103,7 +103,7 @@ fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
     // Apply projection if specified
     let result = match (document, projection) {
         (Some(doc), Some(proj)) => Some(
-            apply_projection(&doc, &proj).map_err(|e| McpError::InvalidParams(e.to_string()))?,
+            apply_projection(&doc, &proj).map_err(|e| McpError::invalid_params(e.to_string()))?,
         ),
         (doc, _) => doc,
     };
