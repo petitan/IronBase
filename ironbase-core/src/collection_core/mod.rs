@@ -279,6 +279,12 @@ struct QueryExecutionContext {
 
     /// Projection specification
     projection: Option<HashMap<String, i32>>,
+
+    /// Maximum response size in bytes (OOM protection)
+    max_response_bytes: Option<usize>,
+
+    /// Cancellation flag for cooperative timeout
+    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl QueryExecutionContext {
@@ -316,6 +322,8 @@ impl QueryExecutionContext {
             original_limit,
             sort_spec: options.sort.clone(),
             projection: options.projection.clone(),
+            max_response_bytes: options.max_response_bytes,
+            cancel_flag: options.cancel_flag.clone(),
         }
     }
 
@@ -949,18 +957,56 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 doc_count, e
             ))
         })?;
+
+        // Response size tracking for OOM protection
+        let max_response_bytes = ctx.max_response_bytes;
+        let mut total_response_bytes: usize = 0;
+
+        // Cancellation flag reference for cooperative timeout
+        let cancel_flag = &ctx.cancel_flag;
+
         let mut loaded = 0;
         for doc_id in doc_ids {
+            // Check for cancellation every 100 documents
+            if loaded % 100 == 0 {
+                if let Some(ref flag) = cancel_flag {
+                    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Query cancelled after loading {} documents. \
+                            The operation was aborted due to timeout or client disconnection.",
+                            loaded
+                        )));
+                    }
+                }
+            }
+
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                // Track response size if limit is set
+                if let Some(max_bytes) = max_response_bytes {
+                    let doc_size = crate::find_options::estimate_json_size(&doc);
+                    if total_response_bytes.saturating_add(doc_size) > max_bytes {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Response size limit exceeded: loaded {} documents ({} bytes), \
+                            next document would exceed {} byte limit. \
+                            Solutions: 1) Add 'limit' to reduce results, \
+                            2) Use 'projection' to exclude large fields, \
+                            3) Use find_streaming() for large results.",
+                            loaded, total_response_bytes, max_bytes
+                        )));
+                    }
+                    total_response_bytes += doc_size;
+                }
+
                 docs.push(doc);
                 loaded += 1;
                 // Progress logging every 10,000 documents
                 if loaded % 10_000 == 0 && doc_count > LARGE_QUERY_WARNING_THRESHOLD {
                     log_debug!(
-                        "find on '{}': loaded {}/{} documents",
+                        "find on '{}': loaded {}/{} documents ({} bytes)",
                         self.name,
                         loaded,
-                        doc_count
+                        doc_count,
+                        total_response_bytes
                     );
                 }
             }

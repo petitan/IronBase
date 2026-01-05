@@ -1112,6 +1112,7 @@ fn test_find_with_projection() {
         limit: None,
         skip: None,
         include_total: false,
+        ..Default::default()
     };
 
     let results = collection.find_with_options(&json!({}), options).unwrap();
@@ -1135,6 +1136,7 @@ fn test_find_with_sort() {
         limit: None,
         skip: None,
         include_total: false,
+        ..Default::default()
     };
 
     let results = collection.find_with_options(&json!({}), options).unwrap();
@@ -1312,6 +1314,7 @@ fn test_find_with_limit_skip() {
         limit: Some(5),
         skip: Some(10),
         include_total: false,
+        ..Default::default()
     };
 
     let results = collection.find_with_options(&json!({}), options).unwrap();

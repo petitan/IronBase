@@ -572,10 +572,7 @@ mod tests {
         });
         let p: ScriptExecParams = ScriptExecParams::parse(params).unwrap();
         assert_eq!(p.code, "return 42;");
-        assert_eq!(
-            p.params.as_ref().and_then(|v| v.get("x")),
-            Some(&json!(10))
-        );
+        assert_eq!(p.params.as_ref().and_then(|v| v.get("x")), Some(&json!(10)));
         assert_eq!(p.max_operations, Some(5000));
     }
 }

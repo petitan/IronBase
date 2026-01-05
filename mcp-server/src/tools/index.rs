@@ -11,9 +11,8 @@ use std::sync::Arc;
 
 use super::helpers::{validate_collection_name, DEFAULT_QUERY_LIMIT};
 use super::params::{
-    ExplainParams, FindWithHintParams, FulltextIndexParams, FulltextSearchParams,
-    FuzzyIndexParams, FuzzySearchParams, IndexCreateParams, IndexDropParams, IndexListParams,
-    ParseParams,
+    ExplainParams, FindWithHintParams, FulltextIndexParams, FulltextSearchParams, FuzzyIndexParams,
+    FuzzySearchParams, IndexCreateParams, IndexDropParams, IndexListParams, ParseParams,
 };
 
 /// Dispatch index tool calls
@@ -101,9 +100,7 @@ fn parse_sort_value(sort: Option<Value>) -> Result<Option<Vec<(String, i32)>>> {
                 Ok(Some(result))
             }
         }
-        Some(_) => Err(McpError::invalid_params(
-            "Sort must be an array or object",
-        )),
+        Some(_) => Err(McpError::invalid_params("Sort must be an array or object")),
     }
 }
 
@@ -202,11 +199,15 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
 
     let threshold = p.threshold;
     let algorithm = p.algorithm.as_deref();
-    let limit = p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(DEFAULT_QUERY_LIMIT);
+    let limit = p
+        .limit
+        .unwrap_or(DEFAULT_QUERY_LIMIT)
+        .min(DEFAULT_QUERY_LIMIT);
     let projection = parse_projection_value(p.projection)?;
 
     // Use the real fuzzy search with index
-    let mut results = adapter.fuzzy_search(&p.collection, &p.field, &p.query, threshold, algorithm)?;
+    let mut results =
+        adapter.fuzzy_search(&p.collection, &p.field, &p.query, threshold, algorithm)?;
 
     // Apply limit
     results.truncate(limit);

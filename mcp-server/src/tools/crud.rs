@@ -7,9 +7,10 @@ use crate::error::{McpError, Result};
 use crate::scripting::ScriptLimits;
 use ironbase_core::find_options::apply_projection;
 use serde_json::{json, Value};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::helpers::{validate_collection_name, DEFAULT_QUERY_LIMIT};
+use super::helpers::{check_cancelled, validate_collection_name, DEFAULT_QUERY_LIMIT};
 use super::params::{
     AggregateParams, CountParams, DeleteParams, DistinctParams, FindOneParams, FindParams,
     InsertManyParams, InsertOneParams, ParseParams, UpdateParams,
@@ -33,12 +34,12 @@ fn parse_sort_value(sort: Option<Value>) -> Result<Option<Vec<(String, i32)>>> {
                         "Sort array items must have exactly 2 elements: [field, direction]",
                     ));
                 }
-                let field = pair[0].as_str().ok_or_else(|| {
-                    McpError::invalid_params("Sort field name must be a string")
-                })?;
-                let direction = pair[1].as_i64().ok_or_else(|| {
-                    McpError::invalid_params("Sort direction must be 1 or -1")
-                })?;
+                let field = pair[0]
+                    .as_str()
+                    .ok_or_else(|| McpError::invalid_params("Sort field name must be a string"))?;
+                let direction = pair[1]
+                    .as_i64()
+                    .ok_or_else(|| McpError::invalid_params("Sort direction must be 1 or -1"))?;
                 if direction != 1 && direction != -1 {
                     return Err(McpError::invalid_params(format!(
                         "Sort direction for '{}' must be 1 or -1, got {}",
@@ -78,11 +79,12 @@ pub fn dispatch(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
     limits: Option<&ScriptLimits>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<Value> {
     match name {
         "insert_one" => handle_insert_one(params, adapter),
         "insert_many" => handle_insert_many(params, adapter),
-        "find" => handle_find(params, adapter, limits),
+        "find" => handle_find(params, adapter, limits, cancel_flag),
         "find_one" => handle_find_one(params, adapter),
         "update_one" => handle_update_one(params, adapter),
         "update_many" => handle_update_many(params, adapter),
@@ -123,7 +125,11 @@ fn handle_find(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
     limits: Option<&ScriptLimits>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<Value> {
+    // Check for cancellation before starting potentially slow operation
+    check_cancelled()?;
+
     let p: FindParams = FindParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -135,12 +141,17 @@ fn handle_find(
     // Apply limit: user's limit capped at max_limit, or max_limit if not specified
     let effective_limit = p.limit.map(|l| l.min(max_limit)).or(Some(max_limit));
 
+    // Get max_result_size from ScriptLimits for OOM protection
+    let max_response_bytes = limits.map(|l| l.max_result_size);
+
     let options = FindOptions {
         projection: p.projection,
         sort: parse_sort_value(p.sort)?,
         limit: effective_limit,
         skip: p.skip,
         include_total: p.include_total,
+        max_response_bytes,
+        cancel_flag,
     };
 
     let result = adapter.find(&p.collection, p.query, options)?;
@@ -155,6 +166,8 @@ fn handle_find(
 }
 
 fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: FindOneParams = FindOneParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -164,11 +177,14 @@ fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
     let result = match (document, p.projection) {
         (Some(doc), Some(proj)) => {
             // Parse projection to HashMap
-            let proj_map: std::collections::HashMap<String, i32> =
-                serde_json::from_value(proj).map_err(|e| {
+            let proj_map: std::collections::HashMap<String, i32> = serde_json::from_value(proj)
+                .map_err(|e| {
                     McpError::invalid_params(format!("Invalid projection format: {}", e))
                 })?;
-            Some(apply_projection(&doc, &proj_map).map_err(|e| McpError::invalid_params(e.to_string()))?)
+            Some(
+                apply_projection(&doc, &proj_map)
+                    .map_err(|e| McpError::invalid_params(e.to_string()))?,
+            )
         }
         (doc, _) => doc,
     };
@@ -195,6 +211,8 @@ fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 }
 
 fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: UpdateParams = UpdateParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -227,6 +245,8 @@ fn handle_delete_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 }
 
 fn handle_delete_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: DeleteParams = DeleteParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -248,6 +268,8 @@ fn handle_count_documents(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 }
 
 fn handle_distinct(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: DistinctParams = DistinctParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -256,6 +278,8 @@ fn handle_distinct(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
 }
 
 fn handle_aggregate(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: AggregateParams = AggregateParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 

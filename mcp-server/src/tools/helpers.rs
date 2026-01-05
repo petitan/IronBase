@@ -7,6 +7,20 @@ use std::collections::HashMap;
 /// Default limit for queries when no ScriptLimits provided
 pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
 
+/// Check if the current request has been cancelled
+///
+/// Call this at the beginning of potentially long operations
+/// to allow early exit when the client sends `notifications/cancelled`.
+///
+/// Returns Ok(()) if not cancelled, Err(RequestCancelled) if cancelled.
+#[inline]
+pub fn check_cancelled() -> Result<()> {
+    if crate::cancellation::is_cancelled() {
+        return Err(McpError::cancelled("Request was cancelled by client"));
+    }
+    Ok(())
+}
+
 /// Maximum collection name length
 pub const MAX_COLLECTION_NAME_LEN: usize = 128;
 
@@ -199,9 +213,7 @@ pub fn parse_projection(params: &Value) -> Result<Option<HashMap<String, i32>>> 
 /// Validate collection name
 pub fn validate_collection_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(McpError::invalid_params(
-            "Collection name cannot be empty",
-        ));
+        return Err(McpError::invalid_params("Collection name cannot be empty"));
     }
     if name.len() > MAX_COLLECTION_NAME_LEN {
         return Err(McpError::invalid_params(format!(
@@ -236,9 +248,7 @@ pub fn validate_collection_name(name: &str) -> Result<()> {
 /// BUG #12 fix: Validate script name (same rules as collection name)
 pub fn validate_script_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(McpError::invalid_params(
-            "Script name cannot be empty",
-        ));
+        return Err(McpError::invalid_params("Script name cannot be empty"));
     }
     if name.len() > MAX_COLLECTION_NAME_LEN {
         return Err(McpError::invalid_params(format!(
@@ -303,8 +313,9 @@ pub fn parse_transaction_id(params: &Value) -> Result<u64> {
 
     // Accept both string and number formats
     if let Some(s) = tx_param.as_str() {
-        s.parse::<u64>()
-            .map_err(|_| McpError::invalid_params(format!("Invalid transaction_id format: '{}'", s)))
+        s.parse::<u64>().map_err(|_| {
+            McpError::invalid_params(format!("Invalid transaction_id format: '{}'", s))
+        })
     } else if let Some(n) = tx_param.as_u64() {
         Ok(n)
     } else if let Some(n) = tx_param.as_i64() {

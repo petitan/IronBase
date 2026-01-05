@@ -165,7 +165,16 @@ impl HandlerContext {
 
         let arguments = params.arguments.unwrap_or_else(|| json!({}));
 
-        match dispatch_tool(&params.name, arguments, &self.adapter, None, None, None) {
+        // Note: stdio transport doesn't support cancellation (None cancel_flag)
+        match dispatch_tool(
+            &params.name,
+            arguments,
+            &self.adapter,
+            None,
+            None,
+            None,
+            None,
+        ) {
             Ok(result) => {
                 if is_notification {
                     return None;

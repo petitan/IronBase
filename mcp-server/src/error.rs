@@ -54,6 +54,8 @@ pub enum ErrorCode {
     SerializationError = -32010,
     /// Aggregation pipeline error
     AggregationError = -32011,
+    /// Request was cancelled (via notifications/cancelled)
+    RequestCancelled = -32012,
 }
 
 impl ErrorCode {
@@ -82,6 +84,7 @@ impl ErrorCode {
             ErrorCode::ScriptError => "Script error",
             ErrorCode::SerializationError => "Serialization error",
             ErrorCode::AggregationError => "Aggregation error",
+            ErrorCode::RequestCancelled => "Request cancelled",
         }
     }
 }
@@ -106,6 +109,7 @@ impl From<i32> for ErrorCode {
             -32009 => ErrorCode::ScriptError,
             -32010 => ErrorCode::SerializationError,
             -32011 => ErrorCode::AggregationError,
+            -32012 => ErrorCode::RequestCancelled,
             _ => ErrorCode::InternalError,
         }
     }
@@ -309,6 +313,11 @@ impl McpError {
         Self::new(ErrorCode::Timeout, msg)
     }
 
+    /// Request cancelled (via MCP notifications/cancelled)
+    pub fn cancelled(reason: impl Into<String>) -> Self {
+        Self::new(ErrorCode::RequestCancelled, reason)
+    }
+
     /// Transaction error
     pub fn transaction(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::TransactionError, msg)
@@ -323,7 +332,10 @@ impl McpError {
     pub fn panic(msg: impl Into<String>) -> Self {
         let full_msg = msg.into();
         tracing::error!("Panic caught in tool handler: {}", full_msg);
-        Self::new(ErrorCode::InternalError, "Internal error: operation failed unexpectedly")
+        Self::new(
+            ErrorCode::InternalError,
+            "Internal error: operation failed unexpectedly",
+        )
     }
 
     // ========================================================================

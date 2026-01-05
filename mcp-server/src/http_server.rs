@@ -560,6 +560,7 @@ async fn run_http_server_internal(
         service,
         initialized_clients: std::sync::Mutex::new(std::collections::HashSet::new()),
         tool_timeout: std::time::Duration::from_secs(config.tool_timeout_secs),
+        request_tracker: Arc::new(crate::cancellation::RequestTracker::new()),
     });
 
     // HTTP request handler
@@ -588,15 +589,63 @@ async fn run_http_server_internal(
             }
         };
 
+        // Handle notifications/cancelled immediately (before spawn_blocking)
+        // This ensures cancellation is processed without waiting for tool execution
+        if request.method == "notifications/cancelled" {
+            let request_id = request
+                .params
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .or_else(|| request.params.get("request_id").and_then(|v| v.as_str()));
+            let reason = request.params.get("reason").and_then(|v| v.as_str());
+
+            if let Some(id) = request_id {
+                state.request_tracker.cancel(id, reason);
+            }
+            // Notifications don't get responses
+            return StatusCode::NO_CONTENT.into_response();
+        }
+
         // Extract API key from Authorization header or JSON params
         let api_key = extract_api_key(&headers, &request.params);
 
+        // Extract JSON-RPC request ID for cancellation tracking
+        let json_rpc_id = request
+            .id
+            .as_ref()
+            .map(|v| match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                _ => trace_id.clone(),
+            })
+            .unwrap_or_else(|| trace_id.clone());
+
+        // Extract tool name for per-tool timeout (only for tools/call)
+        let tool_name = if request.method == "tools/call" {
+            request
+                .params
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown")
+        } else {
+            &request.method
+        };
+
+        // Calculate effective timeout: min(global, per-tool default)
+        let global_timeout_ms = state.tool_timeout.as_millis() as u64;
+        let effective_timeout = crate::timeout::effective_timeout(global_timeout_ms, tool_name);
+
+        // Register request for cancellation support
+        let cancel_flag = state.request_tracker.start(&json_rpc_id);
+
         // Clone state for spawn_blocking closure
         let state_clone = state.clone();
-        let tool_timeout = state.tool_timeout;
         let request_id = request.id.clone();
         let request_method = request.method.clone();
         let trace_id_clone = trace_id.clone();
+        let cancel_flag_clone = cancel_flag.clone();
+        let json_rpc_id_for_cleanup = json_rpc_id.clone();
+        let request_tracker_clone = state.request_tracker.clone();
 
         // Log incoming request with method
         tracing::info!(trace_id = %trace_id, method = %request_method, remote = %remote_addr, "Request started");
@@ -604,23 +653,32 @@ async fn run_http_server_internal(
         // Run potentially blocking operations in spawn_blocking with timeout
         // This prevents long-running operations (like index creation) from blocking the async runtime
         let mut handle = tokio::task::spawn_blocking(move || {
+            // Set thread-local cancellation flag for cooperative checking
+            let _cancel_guard = crate::cancellation::set_cancel_flag(cancel_flag_clone.clone());
+
             handle_request(
                 &request,
                 &state_clone.service,
                 &state_clone.initialized_clients,
                 api_key.as_deref(),
                 Some(remote_addr),
-                tool_timeout,
+                effective_timeout,
+                Some(cancel_flag_clone),
             )
         });
 
         let result = tokio::select! {
             join_result = &mut handle => Ok(join_result),
-            _ = tokio::time::sleep(tool_timeout) => {
+            _ = tokio::time::sleep(effective_timeout) => {
+                // Timeout - signal cancellation and abort
+                cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 handle.abort();
                 Err(())
             }
         };
+
+        // Cleanup: unregister request from tracker
+        request_tracker_clone.finish(&json_rpc_id_for_cleanup);
 
         let elapsed = request_start.elapsed();
 
@@ -665,11 +723,11 @@ async fn run_http_server_internal(
             }
             Err(_) => {
                 // Timeout - operation took too long
-                let timeout_secs = tool_timeout.as_secs();
+                let timeout_secs = elapsed.as_secs();
                 let error_msg = format!(
                     "Operation timed out after {} seconds. Method: '{}'. \
                     Solutions: 1) Add 'limit' to your query, 2) Use an indexed field in your filter, \
-                    3) Increase tool_timeout_secs in config.toml.",
+                    3) Increase tool_timeout_secs in config.toml (or use faster tool).",
                     timeout_secs, request_method
                 );
                 tracing::error!(
@@ -679,7 +737,8 @@ async fn run_http_server_internal(
                     status = "timeout",
                     "<<< MCP TIMEOUT: {}", error_msg
                 );
-                let error_response = create_error_response(-32001, &error_msg, request_id);
+                // Use proper MCP Timeout error code (-32008)
+                let error_response = create_error_response(-32008, &error_msg, request_id);
                 (StatusCode::GATEWAY_TIMEOUT, Json(error_response)).into_response()
             }
         }
@@ -852,8 +911,10 @@ struct HttpAppState {
     /// MCP lifecycle state: track initialize per client
     /// Per spec: "The initialization phase MUST be the first interaction"
     initialized_clients: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// Timeout for long-running tool operations
+    /// Timeout for long-running tool operations (global default)
     tool_timeout: std::time::Duration,
+    /// In-flight request tracker for MCP notifications/cancelled support
+    request_tracker: Arc<crate::cancellation::RequestTracker>,
 }
 
 // MCP Request/Response types imported from crate::transport
@@ -861,36 +922,62 @@ struct HttpAppState {
 /// Get server instructions for LLM clients (sent in initialize response)
 /// These instructions help Claude Desktop and other MCP clients generate better queries
 fn get_server_instructions() -> String {
-    r#"# IronBase MCP Server - Best Practices
+    r#"# IronBase MCP Server
 
-## CRITICAL Performance Rules
+IronBase is a high-performance embedded NoSQL document database with MongoDB-compatible query syntax. Single-file storage (.mlite), zero configuration.
 
-### 1. Date Range Queries - Use $gte/$lt NOT $regex
-❌ SLOW: {"date": {"$regex": "^2024"}}  → Collection scan
-✅ FAST: {"date": {"$gte": "2024", "$lt": "2025"}}  → Index scan (90x faster)
+## Core Capabilities
+- **68 tools**: CRUD, aggregation pipelines, full-text search, fuzzy search, indexes, transactions, scripting
+- **Query operators**: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin, $and, $or, $not, $regex, $exists, $elemMatch, $all, $size
+- **Update operators**: $set, $inc, $unset, $push, $pull, $addToSet, $pop
+- **Aggregation stages**: $match, $group, $project, $sort, $limit, $skip, $unwind, $count
+- **Accumulators**: $sum, $avg, $min, $max, $first, $last
+- **Full-text search**: TF-IDF scoring with Hungarian/English/German stemming
+- **Fuzzy search**: Jaro-Winkler, Levenshtein, Damerau-Levenshtein algorithms
+- **B+ tree indexes**: single-field, compound, unique, sparse
 
-### 2. Aggregation - Always add $match first
-❌ SLOW: [{"$group": {...}}]  → Scans ALL documents
-✅ FAST: [{"$match": {...}}, {"$group": {...}}]  → Filters first
+## Essential Rules
 
-### 3. Always use LIMIT
-- find: Always include "limit": 10-100
-- aggregate: Always end with {"$limit": 20}
+### 1. Always use LIMIT
+- `find`: default is 10,000 - always specify smaller (10-100)
+- `aggregate`: always end with `{"$limit": N}`
 
-### 4. Count before Find
-Before fetching documents, use count_documents to check size.
+### 2. Check size before fetching
+Use `count_documents` before `find` on unknown collections.
 
-### 5. Use Projections
-Only fetch fields you need: "projection": {"field1": 1, "field2": 1}
+### 3. Use projection to reduce response size
+Only request needed fields: `"projection": {"name": 1, "email": 1}`
+Exclude large fields: `"projection": {"body": 0, "content": 0}`
 
-## Available Prompts (use prompts/get for details)
-- "best-practices" - Full optimization guide
-- "aggregation-guide" - Pipeline patterns
-- "query-examples" - Common query patterns
+### 4. Date range queries - use comparison operators
+✅ FAST: `{"date": {"$gte": "2024-01-01", "$lt": "2025-01-01"}}` (uses index)
+❌ SLOW: `{"date": {"$regex": "^2024"}}` (collection scan)
 
-## Script API (script_exec tool)
-Functions: db_find(), db_count(), db_aggregate(), db_insert(), db_update(), db_delete()
-NOT: db.find() (JavaScript style is NOT supported)"#.to_string()
+### 5. Aggregation - filter first with $match
+✅ FAST: `[{"$match": {"status": "active"}}, {"$group": {...}}, {"$limit": 10}]`
+❌ SLOW: `[{"$group": {...}}]` (scans all documents)
+
+## Key Tools
+
+| Tool | Purpose |
+|------|---------|
+| `find` | Query documents with filter, projection, sort, limit, skip |
+| `find_one` | Get single document |
+| `count_documents` | Count matching documents |
+| `aggregate` | Run aggregation pipeline |
+| `fulltext_search` | TF-IDF text search (requires fulltext index) |
+| `fuzzy_search` | Approximate string matching (requires fuzzy index) |
+| `explain` | Analyze query execution plan |
+| `index_list` | Show collection indexes |
+
+## Scripting (Rhai)
+Use `script_exec` for complex operations:
+```
+db_find("collection", #{query}, #{limit: 10})
+db_count("collection", #{status: "active"})
+db_aggregate("collection", [#{...}])
+```
+Note: Use `db_find()` NOT `db.find()` - JavaScript style is not supported."#.to_string()
 }
 
 fn client_identity(api_key: Option<&str>, remote_addr: Option<std::net::SocketAddr>) -> String {
@@ -938,6 +1025,7 @@ fn handle_request(
     api_key: Option<&str>,
     remote_addr: Option<std::net::SocketAddr>,
     tool_timeout: std::time::Duration,
+    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Option<McpResponse> {
     use crate::{
         get_prompt_content, get_prompts_list, get_resources_list, get_tools_list_filtered,
@@ -1010,6 +1098,8 @@ fn handle_request(
             ))
         }
 
+        // notifications/cancelled is handled in the HTTP layer before spawn_blocking
+        // to ensure immediate cancellation without blocking on the tool execution
         "notifications/cancelled" => None,
 
         "tools/list" => {
@@ -1045,10 +1135,14 @@ fn handle_request(
 
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
-            // Create service context
+            // Create service context with cancellation support
             let caller = CallerContext::new(remote_addr, api_key.map(|s| s.to_string()));
             let deadline = Some(Instant::now() + tool_timeout);
-            let ctx = ServiceContext::new(caller, is_initialized, deadline);
+            let ctx = if let Some(flag) = cancel_flag {
+                ServiceContext::with_cancel_flag(caller, is_initialized, deadline, flag)
+            } else {
+                ServiceContext::new(caller, is_initialized, deadline)
+            };
 
             // Create tool request
             let tool_request = ToolRequest::new(&params.name, arguments);

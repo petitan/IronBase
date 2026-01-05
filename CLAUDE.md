@@ -98,6 +98,7 @@ IronBase/
 - Projection (include/exclude mode)
 - Sort (single and multi-field, dot notation)
 - Limit, Skip (pagination)
+- **max_response_bytes** - OOM protection for large responses (2026-01)
 - All support dot notation for nested fields
 
 **storage/** - Append-only storage engine:
@@ -248,6 +249,43 @@ let limits = AggregationLimits::with_memory_budget(256); // 256 MB
 - `ironbase-core/src/aggregation/memory_info.rs` - RAM detektálás
 - `ironbase-core/src/aggregation/types.rs` - AggregationLimits
 
+### Find OOM Protection (2026-01)
+
+A `find` művelet is rendelkezik response size limit védelmmel az OOM megelőzésre.
+
+**Használat:**
+
+```rust
+// Automatic RAM-based limits (MCP uses this by default)
+let options = FindOptions::with_safe_defaults()
+    .with_limit(100)
+    .with_projection(proj);
+let results = collection.find_with_options(&query, options)?;
+
+// Manual limit
+let options = FindOptions::new()
+    .with_max_response_bytes(50 * 1024 * 1024); // 50 MB max
+```
+
+**Skálázási táblázat (`with_safe_defaults()`):**
+
+| Elérhető RAM | max_response_bytes |
+|--------------|--------------------|
+| < 512 MB     | 10 MB              |
+| 512MB - 2GB  | 50 MB              |
+| 2GB - 8GB    | 100 MB             |
+| 8GB - 32GB   | 200 MB             |
+| > 32GB       | 500 MB             |
+
+**MCP Integration:**
+- `ScriptLimits.max_result_size` automatikusan átadódik `FindOptions.max_response_bytes`-nak
+- Ha a response meghaladná a limitet, informatív hibaüzenet jelenik meg:
+  `"Response size limit exceeded: loaded X documents (Y bytes)..."`
+
+**Key files:**
+- `ironbase-core/src/find_options.rs` - FindOptions, estimate_json_size()
+- `ironbase-core/src/collection_core/mod.rs` - find_with_options response tracking
+
 ### Top-K Optimization (Sort + Limit)
 
 When an aggregation pipeline has `$sort` followed by `$limit`, IronBase automatically uses a bounded heap algorithm instead of full sorting:
@@ -279,7 +317,7 @@ With 50,000 unique groups:
 - `ironbase-core/src/aggregation/stages/sort_stage.rs` - Top-K implementation
 
 ### Other Features
-- FindOptions: projection, sort, limit, skip, include_total (all with dot notation)
+- FindOptions: projection, sort, limit, skip, include_total, max_response_bytes (all with dot notation)
 - B+ tree indexes: single-field, compound, unique, fuzzy
 - Query planning: explain(), find_with_hint()
 - ACID transactions with WAL (Read Committed isolation)
