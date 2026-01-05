@@ -1,4 +1,6 @@
 //! Script management tool handlers
+//!
+//! Uses typed parameter structs for compile-time validation.
 
 use crate::adapter::IronBaseAdapter;
 use crate::error::{McpError, Result};
@@ -6,7 +8,11 @@ use crate::scripting::{RhaiEngine, ScriptListFilter, ScriptManager, ScriptOption
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::{get_string, validate_script_name};
+use super::helpers::validate_script_name;
+use super::params::{
+    ParseParams, ScriptExecParams, ScriptHistoryParams, ScriptListParams, ScriptNameParams,
+    ScriptRunParams, ScriptSaveParams, ScriptTagsParams, ScriptVersionParams,
+};
 
 /// Dispatch script tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -30,64 +36,40 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     }
 }
 
-fn parse_tags(params: &Value) -> Option<Vec<String>> {
-    params.get("tags").and_then(|v| {
-        v.as_array().map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-    })
-}
-
-fn parse_dependencies(params: &Value) -> Option<Vec<String>> {
-    params.get("dependencies").and_then(|v| {
-        v.as_array().map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-    })
-}
-
 fn handle_script_save(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    validate_script_name(&name)?;
-    let code = get_string(&params, "code")?;
-    let description = params.get("description").and_then(|v| v.as_str());
-    let tags = parse_tags(&params);
-    let dependencies = parse_dependencies(&params);
+    let p: ScriptSaveParams = ScriptSaveParams::parse(params)?;
+    validate_script_name(&p.name)?;
 
     let manager = ScriptManager::new(Arc::clone(adapter));
-    let version = manager.save(&name, &code, description, tags, dependencies)?;
-    Ok(json!({"success": true, "name": name, "version": version}))
+    let version = manager.save(
+        &p.name,
+        &p.code,
+        p.description.as_deref(),
+        p.tags,
+        p.dependencies,
+    )?;
+    Ok(json!({"success": true, "name": p.name, "version": version}))
 }
 
 fn handle_script_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    let p: ScriptListParams = ScriptListParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    let filter = {
-        let tags = parse_tags(&params);
-        let match_all = params
-            .get("match_all")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if tags.is_some() {
-            Some(ScriptListFilter {
-                tags,
-                match_all_tags: match_all,
-            })
-        } else {
-            None
-        }
+    let filter = if p.tags.is_some() {
+        Some(ScriptListFilter {
+            tags: p.tags,
+            match_all_tags: p.match_all,
+        })
+    } else {
+        None
     };
     let scripts = manager.list(filter)?;
     Ok(json!({"scripts": scripts, "count": scripts.len()}))
 }
 
 fn handle_script_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
+    let p: ScriptNameParams = ScriptNameParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    match manager.get(&name)? {
+    match manager.get(&p.name)? {
         Some(script) => Ok(json!({
             "name": script.name,
             "code": script.code,
@@ -100,36 +82,32 @@ fn handle_script_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
         })),
         None => Err(McpError::invalid_params(format!(
             "Script '{}' not found",
-            name
+            p.name
         ))),
     }
 }
 
 fn handle_script_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
+    let p: ScriptNameParams = ScriptNameParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    let deleted = manager.delete(&name)?;
+    let deleted = manager.delete(&p.name)?;
     if deleted {
-        Ok(json!({"success": true, "deleted": name}))
+        Ok(json!({"success": true, "deleted": p.name}))
     } else {
         Err(McpError::invalid_params(format!(
             "Script '{}' not found",
-            name
+            p.name
         )))
     }
 }
 
 fn handle_script_run(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    let script_params = params.get("params").cloned();
-    let options = params
-        .get("max_operations")
-        .and_then(|v| v.as_u64())
-        .map(ScriptOptions::with_max_operations);
+    let p: ScriptRunParams = ScriptRunParams::parse(params)?;
+    let options = p.max_operations.map(ScriptOptions::with_max_operations);
 
     let manager = ScriptManager::new(Arc::clone(adapter));
     let engine = RhaiEngine::new(Arc::clone(adapter));
-    let result = manager.run_script_with_options(&name, script_params, &engine, options)?;
+    let result = manager.run_script_with_options(&p.name, p.params, &engine, options)?;
 
     Ok(json!({
         "success": true,
@@ -140,17 +118,13 @@ fn handle_script_run(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 }
 
 fn handle_script_exec(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let code = get_string(&params, "code")?;
-    let script_params = params.get("params").cloned();
-    let options = params
-        .get("max_operations")
-        .and_then(|v| v.as_u64())
-        .map(ScriptOptions::with_max_operations);
+    let p: ScriptExecParams = ScriptExecParams::parse(params)?;
+    let options = p.max_operations.map(ScriptOptions::with_max_operations);
 
     let engine = RhaiEngine::new(Arc::clone(adapter));
     let result = match options {
-        Some(opts) => engine.run_with_options(&code, script_params, opts)?,
-        None => engine.run(&code, script_params)?,
+        Some(opts) => engine.run_with_options(&p.code, p.params, opts)?,
+        None => engine.run(&p.code, p.params)?,
     };
 
     Ok(json!({
@@ -162,37 +136,23 @@ fn handle_script_exec(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
 }
 
 fn handle_script_history(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    let limit = params
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .map(|v| v as usize);
+    let p: ScriptHistoryParams = ScriptHistoryParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    let history = manager.get_history(&name, limit)?;
+    let history = manager.get_history(&p.name, p.limit)?;
     Ok(json!({"history": history, "count": history.len()}))
 }
 
 fn handle_script_rollback(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    let version = params
-        .get("version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::invalid_params("version is required".to_string()))?
-        as u32;
+    let p: ScriptVersionParams = ScriptVersionParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    let new_version = manager.rollback(&name, version)?;
-    Ok(json!({"success": true, "name": name, "new_version": new_version}))
+    let new_version = manager.rollback(&p.name, p.version)?;
+    Ok(json!({"success": true, "name": p.name, "new_version": new_version}))
 }
 
 fn handle_script_version_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    let version = params
-        .get("version")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::invalid_params("version is required".to_string()))?
-        as u32;
+    let p: ScriptVersionParams = ScriptVersionParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    match manager.get_version(&name, version)? {
+    match manager.get_version(&p.name, p.version)? {
         Some(v) => Ok(json!({
             "script_name": v.script_name,
             "version": v.version,
@@ -204,33 +164,29 @@ fn handle_script_version_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
         })),
         None => Err(McpError::invalid_params(format!(
             "Version {} of script '{}' not found",
-            version, name
+            p.version, p.name
         ))),
     }
 }
 
 fn handle_script_tags_add(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    let tags: Vec<String> = parse_tags(&params)
-        .ok_or_else(|| McpError::invalid_params("tags array is required".to_string()))?;
+    let p: ScriptTagsParams = ScriptTagsParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    manager.add_tags(&name, tags.clone())?;
-    Ok(json!({"success": true, "name": name, "added_tags": tags}))
+    manager.add_tags(&p.name, p.tags.clone())?;
+    Ok(json!({"success": true, "name": p.name, "added_tags": p.tags}))
 }
 
 fn handle_script_tags_remove(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    let tags: Vec<String> = parse_tags(&params)
-        .ok_or_else(|| McpError::invalid_params("tags array is required".to_string()))?;
+    let p: ScriptTagsParams = ScriptTagsParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    manager.remove_tags(&name, tags.clone())?;
-    Ok(json!({"success": true, "name": name, "removed_tags": tags}))
+    manager.remove_tags(&p.name, p.tags.clone())?;
+    Ok(json!({"success": true, "name": p.name, "removed_tags": p.tags}))
 }
 
 fn handle_script_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
+    let p: ScriptNameParams = ScriptNameParams::parse(params)?;
     let manager = ScriptManager::new(Arc::clone(adapter));
-    match manager.get_stats(&name)? {
+    match manager.get_stats(&p.name)? {
         Some(stats) => Ok(json!({
             "name": stats.name,
             "execution_count": stats.execution_count,
@@ -241,7 +197,7 @@ fn handle_script_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
         })),
         None => Err(McpError::invalid_params(format!(
             "Script '{}' not found",
-            name
+            p.name
         ))),
     }
 }

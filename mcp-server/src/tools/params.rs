@@ -5,7 +5,6 @@
 
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
 
 /// Default value for query fields: empty object {}
 fn empty_object() -> Value {
@@ -220,16 +219,16 @@ pub struct FindWithHintParams {
 #[derive(Debug, Deserialize, Default)]
 pub struct ListCollectionsParams {}
 
-/// Parameters for `create_collection` tool
+/// Parameters for `collection_create` tool
 #[derive(Debug, Deserialize)]
-pub struct CreateCollectionParams {
-    pub collection: String,
+pub struct CollectionCreateParams {
+    pub name: String,
 }
 
-/// Parameters for `drop_collection` tool
+/// Parameters for `collection_drop` tool
 #[derive(Debug, Deserialize)]
-pub struct DropCollectionParams {
-    pub collection: String,
+pub struct CollectionDropParams {
+    pub name: String,
 }
 
 /// Parameters for `collection_stats` tool
@@ -238,54 +237,120 @@ pub struct CollectionStatsParams {
     pub collection: String,
 }
 
+/// Parameters for `schema_set` tool
+#[derive(Debug, Deserialize)]
+pub struct SchemaSetParams {
+    pub collection: String,
+    pub schema: Option<Value>,
+}
+
+/// Parameters for `schema_get` tool
+#[derive(Debug, Deserialize)]
+pub struct SchemaGetParams {
+    pub collection: String,
+}
+
 // ============================================================================
 // Transaction Tool Parameters
 // ============================================================================
 
-/// Parameters for transaction tools (collection-scoped)
+/// Parameters for `commit_transaction` / `rollback_transaction` tools
 #[derive(Debug, Deserialize)]
-pub struct TransactionParams {
+pub struct TransactionIdParams {
+    pub transaction_id: String,
+}
+
+/// Parameters for `insert_one_tx` tool
+#[derive(Debug, Deserialize)]
+pub struct TransactionInsertParams {
+    pub transaction_id: String,
     pub collection: String,
+    pub document: Value,
+}
+
+/// Parameters for `update_one_tx` tool
+#[derive(Debug, Deserialize)]
+pub struct TransactionUpdateParams {
+    pub transaction_id: String,
+    pub collection: String,
+    pub filter: Value,
+    pub update: Value,
+}
+
+/// Parameters for `delete_one_tx` tool
+#[derive(Debug, Deserialize)]
+pub struct TransactionDeleteParams {
+    pub transaction_id: String,
+    pub collection: String,
+    pub filter: Value,
 }
 
 // ============================================================================
 // Script Tool Parameters
 // ============================================================================
 
-/// Parameters for `script_exec` tool
+/// Parameters for `script_save` tool
 #[derive(Debug, Deserialize)]
-pub struct ScriptExecParams {
-    pub script: String,
-    #[serde(default)]
-    pub params: HashMap<String, Value>,
-    pub timeout_ms: Option<u64>,
-    pub max_operations: Option<u64>,
-    pub api_key: Option<String>,
-}
-
-/// Parameters for `script_register` tool
-#[derive(Debug, Deserialize)]
-pub struct ScriptRegisterParams {
+pub struct ScriptSaveParams {
     pub name: String,
-    pub script: String,
+    pub code: String,
     pub description: Option<String>,
-}
-
-/// Parameters for `script_call` tool
-#[derive(Debug, Deserialize)]
-pub struct ScriptCallParams {
-    pub name: String,
     #[serde(default)]
-    pub params: HashMap<String, Value>,
-    pub timeout_ms: Option<u64>,
-    pub max_operations: Option<u64>,
-    pub api_key: Option<String>,
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub dependencies: Option<Vec<String>>,
 }
 
-/// Parameters for `script_delete` / `script_get` tools
+/// Parameters for `script_list` tool
+#[derive(Debug, Deserialize, Default)]
+pub struct ScriptListParams {
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
+    #[serde(default)]
+    pub match_all: bool,
+}
+
+/// Parameters for `script_get` / `script_delete` / `script_stats` tools
 #[derive(Debug, Deserialize)]
 pub struct ScriptNameParams {
     pub name: String,
+}
+
+/// Parameters for `script_run` tool
+#[derive(Debug, Deserialize)]
+pub struct ScriptRunParams {
+    pub name: String,
+    pub params: Option<Value>,
+    pub max_operations: Option<u64>,
+}
+
+/// Parameters for `script_exec` tool
+#[derive(Debug, Deserialize)]
+pub struct ScriptExecParams {
+    pub code: String,
+    pub params: Option<Value>,
+    pub max_operations: Option<u64>,
+}
+
+/// Parameters for `script_history` tool
+#[derive(Debug, Deserialize)]
+pub struct ScriptHistoryParams {
+    pub name: String,
+    pub limit: Option<usize>,
+}
+
+/// Parameters for `script_rollback` / `script_version_get` tools
+#[derive(Debug, Deserialize)]
+pub struct ScriptVersionParams {
+    pub name: String,
+    pub version: u32,
+}
+
+/// Parameters for `script_tags_add` / `script_tags_remove` tools
+#[derive(Debug, Deserialize)]
+pub struct ScriptTagsParams {
+    pub name: String,
+    pub tags: Vec<String>,
 }
 
 // ============================================================================
@@ -296,67 +361,91 @@ pub struct ScriptNameParams {
 #[derive(Debug, Deserialize)]
 pub struct AclSetParams {
     pub collection: String,
-    pub permission: String,
-    pub allow: Option<Vec<String>>,
-    pub deny: Option<Vec<String>>,
+    pub rules: Vec<Value>,
 }
 
-/// Parameters for `acl_get` tool
+/// Parameters for `acl_get` / `acl_delete` tools
 #[derive(Debug, Deserialize)]
-pub struct AclGetParams {
+pub struct AclCollectionParams {
     pub collection: String,
-}
-
-/// Parameters for `acl_delete` tool
-#[derive(Debug, Deserialize)]
-pub struct AclDeleteParams {
-    pub collection: String,
-    pub permission: String,
 }
 
 // ============================================================================
-// Listener Tool Parameters
+// Listener Tool Parameters (Network Listeners)
 // ============================================================================
 
-/// Parameters for `listener_register` tool
+/// Parameters for `listener_get` / `listener_delete` / `listener_enable` / `listener_disable` tools
 #[derive(Debug, Deserialize)]
-pub struct ListenerRegisterParams {
-    pub collection: String,
-    pub event: String,
-    pub script: String,
+pub struct ListenerIdParams {
+    pub id: String,
+}
+
+/// Parameters for `listener_add` tool
+#[derive(Debug, Deserialize)]
+pub struct ListenerAddParams {
+    pub id: String,
+    pub bind: String,
     #[serde(default)]
-    pub enabled: bool,
-    pub priority: Option<i32>,
-}
-
-/// Parameters for `listener_list` tool
-#[derive(Debug, Deserialize)]
-pub struct ListenerListParams {
-    pub collection: Option<String>,
-    pub event: Option<String>,
-}
-
-/// Parameters for `listener_delete` tool
-#[derive(Debug, Deserialize)]
-pub struct ListenerDeleteParams {
-    pub id: String,
-}
-
-/// Parameters for `listener_enable` / `listener_disable` tools
-#[derive(Debug, Deserialize)]
-pub struct ListenerToggleParams {
-    pub id: String,
+    pub tls: bool,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+    pub description: Option<String>,
 }
 
 // ============================================================================
 // Admin Tool Parameters
 // ============================================================================
 
+/// Parameters for `db_open` tool
+#[derive(Debug, Deserialize)]
+pub struct DbOpenParams {
+    pub path: String,
+    #[serde(default)]
+    pub create: bool,
+}
+
 /// Parameters for `admin_compact` tool
 #[derive(Debug, Deserialize, Default)]
 pub struct AdminCompactParams {
     #[serde(default)]
     pub force: bool,
+}
+
+/// Parameters requiring only admin_key verification
+#[derive(Debug, Deserialize)]
+pub struct AdminKeyParams {
+    pub admin_key: Option<String>,
+}
+
+/// Parameters for `admin_create_system_collection` and `admin_drop_protected` tools
+#[derive(Debug, Deserialize)]
+pub struct AdminCollectionParams {
+    pub name: String,
+    pub admin_key: Option<String>,
+}
+
+/// Parameters for `admin_set_collection_flags` tool
+#[derive(Debug, Deserialize)]
+pub struct AdminFlagsParams {
+    pub collection: String,
+    pub is_system: Option<bool>,
+    pub protected: Option<bool>,
+    pub hidden: Option<bool>,
+    pub admin_key: Option<String>,
+}
+
+/// Parameters for `admin_apikey_create` tool
+#[derive(Debug, Deserialize)]
+pub struct AdminApiKeyCreateParams {
+    pub name: String,
+    pub admin_key: Option<String>,
+}
+
+/// Parameters for `admin_apikey_revoke` / `admin_apikey_delete` tools
+#[derive(Debug, Deserialize)]
+pub struct AdminApiKeyIdParams {
+    pub id: u64,
+    pub admin_key: Option<String>,
 }
 
 /// Parameters for `api_key_create` tool
@@ -477,12 +566,16 @@ mod tests {
     #[test]
     fn test_script_exec_params() {
         let params = json!({
-            "script": "return 42;",
+            "code": "return 42;",
             "params": {"x": 10},
-            "timeout_ms": 5000
+            "max_operations": 5000
         });
         let p: ScriptExecParams = ScriptExecParams::parse(params).unwrap();
-        assert_eq!(p.script, "return 42;");
-        assert_eq!(p.params.get("x"), Some(&json!(10)));
+        assert_eq!(p.code, "return 42;");
+        assert_eq!(
+            p.params.as_ref().and_then(|v| v.get("x")),
+            Some(&json!(10))
+        );
+        assert_eq!(p.max_operations, Some(5000));
     }
 }

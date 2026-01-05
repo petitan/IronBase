@@ -1,4 +1,6 @@
 //! Admin tool handlers (require IRONBASE_ADMIN_KEY)
+//!
+//! Uses typed parameter structs for compile-time validation.
 
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
@@ -7,7 +9,11 @@ use crate::ServerInfo;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::{get_string, verify_admin_key};
+use super::helpers::verify_admin_key_opt;
+use super::params::{
+    AdminApiKeyCreateParams, AdminApiKeyIdParams, AdminCollectionParams, AdminFlagsParams,
+    AdminKeyParams, DbOpenParams, ParseParams,
+};
 
 /// Dispatch admin tool calls
 pub fn dispatch(
@@ -38,18 +44,13 @@ pub fn dispatch(
 }
 
 fn handle_db_open(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let path = get_string(&params, "path")?;
-    let create = params
-        .get("create")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    let new_path = adapter.switch_database(&path, create)?;
+    let p: DbOpenParams = DbOpenParams::parse(params)?;
+    let new_path = adapter.switch_database(&p.path, p.create)?;
 
     Ok(json!({
         "success": true,
         "path": new_path,
-        "message": if create { "Database created" } else { "Database opened" }
+        "message": if p.create { "Database created" } else { "Database opened" }
     }))
 }
 
@@ -99,7 +100,8 @@ fn handle_admin_list_all_collections(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
 ) -> Result<Value> {
-    verify_admin_key(&params)?;
+    let p: AdminKeyParams = AdminKeyParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
     let collections = adapter.list_all_collections();
     Ok(json!({"collections": collections, "count": collections.len()}))
 }
@@ -108,11 +110,11 @@ fn handle_admin_create_system_collection(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
 ) -> Result<Value> {
-    verify_admin_key(&params)?;
-    let name = get_string(&params, "name")?;
-    adapter.create_system_collection(&name)?;
+    let p: AdminCollectionParams = AdminCollectionParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
+    adapter.create_system_collection(&p.name)?;
     Ok(
-        json!({"success": true, "collection": name, "flags": {"is_system": true, "protected": true, "hidden": false}}),
+        json!({"success": true, "collection": p.name, "flags": {"is_system": true, "protected": true, "hidden": false}}),
     )
 }
 
@@ -120,22 +122,19 @@ fn handle_admin_set_collection_flags(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
 ) -> Result<Value> {
-    verify_admin_key(&params)?;
-    let collection = get_string(&params, "collection")?;
-    let is_system = params.get("is_system").and_then(|v| v.as_bool());
-    let protected = params.get("protected").and_then(|v| v.as_bool());
-    let hidden = params.get("hidden").and_then(|v| v.as_bool());
-    adapter.set_collection_flags(&collection, is_system, protected, hidden)?;
+    let p: AdminFlagsParams = AdminFlagsParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
+    adapter.set_collection_flags(&p.collection, p.is_system, p.protected, p.hidden)?;
     Ok(
-        json!({"success": true, "collection": collection, "flags": {"is_system": is_system, "protected": protected, "hidden": hidden}}),
+        json!({"success": true, "collection": p.collection, "flags": {"is_system": p.is_system, "protected": p.protected, "hidden": p.hidden}}),
     )
 }
 
 fn handle_admin_drop_protected(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    verify_admin_key(&params)?;
-    let name = get_string(&params, "name")?;
-    adapter.force_drop_collection(&name)?;
-    Ok(json!({"success": true, "dropped": name}))
+    let p: AdminCollectionParams = AdminCollectionParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
+    adapter.force_drop_collection(&p.name)?;
+    Ok(json!({"success": true, "dropped": p.name}))
 }
 
 fn handle_admin_apikey_create(
@@ -143,8 +142,8 @@ fn handle_admin_apikey_create(
     adapter: &Arc<IronBaseAdapter>,
     api_key_cache: Option<&ApiKeyCache>,
 ) -> Result<Value> {
-    verify_admin_key(&params)?;
-    let name = get_string(&params, "name")?;
+    let p: AdminApiKeyCreateParams = AdminApiKeyCreateParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;
@@ -156,7 +155,7 @@ fn handle_admin_apikey_create(
         }
     };
 
-    match crate::api_keys::create_api_key(adapter, &name, cache) {
+    match crate::api_keys::create_api_key(adapter, &p.name, cache) {
         Ok(api_key) => Ok(json!({
             "success": true,
             "id": api_key._id,
@@ -170,7 +169,8 @@ fn handle_admin_apikey_create(
 }
 
 fn handle_admin_apikey_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    verify_admin_key(&params)?;
+    let p: AdminKeyParams = AdminKeyParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
     match crate::api_keys::list_api_keys(adapter) {
         Ok(keys) => Ok(json!({
             "success": true,
@@ -186,11 +186,8 @@ fn handle_admin_apikey_revoke(
     adapter: &Arc<IronBaseAdapter>,
     api_key_cache: Option<&ApiKeyCache>,
 ) -> Result<Value> {
-    verify_admin_key(&params)?;
-    let id = params
-        .get("id")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::invalid_params("id parameter is required"))?;
+    let p: AdminApiKeyIdParams = AdminApiKeyIdParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;
@@ -202,9 +199,9 @@ fn handle_admin_apikey_revoke(
         }
     };
 
-    match crate::api_keys::revoke_api_key(adapter, id, cache) {
-        Ok(true) => Ok(json!({"success": true, "id": id, "status": "revoked"})),
-        Ok(false) => Ok(json!({"success": false, "id": id, "error": "API key not found"})),
+    match crate::api_keys::revoke_api_key(adapter, p.id, cache) {
+        Ok(true) => Ok(json!({"success": true, "id": p.id, "status": "revoked"})),
+        Ok(false) => Ok(json!({"success": false, "id": p.id, "error": "API key not found"})),
         Err(e) => Err(McpError::internal(e)),
     }
 }
@@ -214,11 +211,8 @@ fn handle_admin_apikey_delete(
     adapter: &Arc<IronBaseAdapter>,
     api_key_cache: Option<&ApiKeyCache>,
 ) -> Result<Value> {
-    verify_admin_key(&params)?;
-    let id = params
-        .get("id")
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::invalid_params("id parameter is required"))?;
+    let p: AdminApiKeyIdParams = AdminApiKeyIdParams::parse(params)?;
+    verify_admin_key_opt(p.admin_key.as_deref())?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;
@@ -230,9 +224,9 @@ fn handle_admin_apikey_delete(
         }
     };
 
-    match crate::api_keys::delete_api_key(adapter, id, cache) {
-        Ok(true) => Ok(json!({"success": true, "id": id, "status": "deleted"})),
-        Ok(false) => Ok(json!({"success": false, "id": id, "error": "API key not found"})),
+    match crate::api_keys::delete_api_key(adapter, p.id, cache) {
+        Ok(true) => Ok(json!({"success": true, "id": p.id, "status": "deleted"})),
+        Ok(false) => Ok(json!({"success": false, "id": p.id, "error": "API key not found"})),
         Err(e) => Err(McpError::internal(e)),
     }
 }

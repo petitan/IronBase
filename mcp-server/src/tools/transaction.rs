@@ -1,11 +1,17 @@
 //! Transaction management tool handlers
+//!
+//! Uses typed parameter structs for compile-time validation.
 
 use crate::adapter::IronBaseAdapter;
 use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::{get_object, get_string, parse_transaction_id, validate_collection_name};
+use super::helpers::{parse_transaction_id_str, validate_collection_name};
+use super::params::{
+    ParseParams, TransactionDeleteParams, TransactionIdParams, TransactionInsertParams,
+    TransactionUpdateParams,
+};
 
 /// Dispatch transaction tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -33,7 +39,8 @@ fn handle_begin_transaction(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 }
 
 fn handle_commit_transaction(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let tx_id = parse_transaction_id(&params)?;
+    let p: TransactionIdParams = TransactionIdParams::parse(params)?;
+    let tx_id = parse_transaction_id_str(&p.transaction_id)?;
     adapter.commit_transaction(tx_id)?;
     Ok(json!({
         "success": true,
@@ -42,7 +49,8 @@ fn handle_commit_transaction(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
 }
 
 fn handle_rollback_transaction(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let tx_id = parse_transaction_id(&params)?;
+    let p: TransactionIdParams = TransactionIdParams::parse(params)?;
+    let tx_id = parse_transaction_id_str(&p.transaction_id)?;
     adapter.rollback_transaction(tx_id)?;
     Ok(json!({
         "success": true,
@@ -51,21 +59,31 @@ fn handle_rollback_transaction(params: Value, adapter: &Arc<IronBaseAdapter>) ->
 }
 
 fn handle_insert_one_tx(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let tx_id = parse_transaction_id(&params)?;
-    let collection = get_string(&params, "collection")?;
-    validate_collection_name(&collection)?;
-    let document = get_object(&params, "document")?;
-    let id = adapter.insert_one_tx(&collection, document, tx_id)?;
+    let p: TransactionInsertParams = TransactionInsertParams::parse(params)?;
+    let tx_id = parse_transaction_id_str(&p.transaction_id)?;
+    validate_collection_name(&p.collection)?;
+
+    if !p.document.is_object() {
+        return Err(McpError::invalid_params("document must be a JSON object"));
+    }
+
+    let id = adapter.insert_one_tx(&p.collection, p.document, tx_id)?;
     Ok(json!({"inserted_id": id}))
 }
 
 fn handle_update_one_tx(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let tx_id = parse_transaction_id(&params)?;
-    let collection = get_string(&params, "collection")?;
-    validate_collection_name(&collection)?;
-    let filter = get_object(&params, "filter")?;
-    let update = get_object(&params, "update")?;
-    let result = adapter.update_one_tx(&collection, filter, update, tx_id)?;
+    let p: TransactionUpdateParams = TransactionUpdateParams::parse(params)?;
+    let tx_id = parse_transaction_id_str(&p.transaction_id)?;
+    validate_collection_name(&p.collection)?;
+
+    if !p.filter.is_object() {
+        return Err(McpError::invalid_params("filter must be a JSON object"));
+    }
+    if !p.update.is_object() {
+        return Err(McpError::invalid_params("update must be a JSON object"));
+    }
+
+    let result = adapter.update_one_tx(&p.collection, p.filter, p.update, tx_id)?;
     Ok(json!({
         "matched_count": result.matched_count,
         "modified_count": result.modified_count
@@ -73,11 +91,15 @@ fn handle_update_one_tx(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
 }
 
 fn handle_delete_one_tx(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let tx_id = parse_transaction_id(&params)?;
-    let collection = get_string(&params, "collection")?;
-    validate_collection_name(&collection)?;
-    let filter = get_object(&params, "filter")?;
-    let count = adapter.delete_one_tx(&collection, filter, tx_id)?;
+    let p: TransactionDeleteParams = TransactionDeleteParams::parse(params)?;
+    let tx_id = parse_transaction_id_str(&p.transaction_id)?;
+    validate_collection_name(&p.collection)?;
+
+    if !p.filter.is_object() {
+        return Err(McpError::invalid_params("filter must be a JSON object"));
+    }
+
+    let count = adapter.delete_one_tx(&p.collection, p.filter, tx_id)?;
     Ok(json!({"deleted_count": count}))
 }
 

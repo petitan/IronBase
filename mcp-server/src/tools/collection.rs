@@ -1,4 +1,6 @@
 //! Collection management tool handlers
+//!
+//! Uses typed parameter structs for compile-time validation.
 
 use crate::acl::SYSTEM_ACL_COLLECTION;
 use crate::adapter::IronBaseAdapter;
@@ -6,7 +8,10 @@ use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::{get_string, validate_collection_name};
+use super::helpers::validate_collection_name;
+use super::params::{
+    CollectionCreateParams, CollectionDropParams, ParseParams, SchemaGetParams, SchemaSetParams,
+};
 
 /// Dispatch collection tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -29,39 +34,39 @@ fn handle_collection_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 }
 
 fn handle_collection_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    adapter.create_collection(&name)?;
-    Ok(json!({"success": true, "collection": name}))
+    let p: CollectionCreateParams = CollectionCreateParams::parse(params)?;
+    adapter.create_collection(&p.name)?;
+    Ok(json!({"success": true, "collection": p.name}))
 }
 
 fn handle_collection_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let name = get_string(&params, "name")?;
-    adapter.drop_collection(&name)?;
+    let p: CollectionDropParams = CollectionDropParams::parse(params)?;
+    adapter.drop_collection(&p.name)?;
 
     // Also delete ACL for this collection
     let acl_deleted = adapter
-        .delete_one(SYSTEM_ACL_COLLECTION, json!({"collection": name}))
+        .delete_one(SYSTEM_ACL_COLLECTION, json!({"collection": &p.name}))
         .unwrap_or(0)
         > 0;
 
     Ok(json!({
         "success": true,
-        "dropped": name,
+        "dropped": p.name,
         "acl_deleted": acl_deleted
     }))
 }
 
 fn handle_schema_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let collection = get_string(&params, "collection")?;
-    validate_collection_name(&collection)?;
-    let schema = params.get("schema").cloned().filter(|v| !v.is_null());
-    adapter.set_schema(&collection, schema.clone())?;
+    let p: SchemaSetParams = SchemaSetParams::parse(params)?;
+    validate_collection_name(&p.collection)?;
+    let schema = p.schema.filter(|v| !v.is_null());
+    adapter.set_schema(&p.collection, schema.clone())?;
     Ok(json!({"success": true, "schema_set": schema.is_some()}))
 }
 
 fn handle_schema_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let collection = get_string(&params, "collection")?;
-    validate_collection_name(&collection)?;
-    let schema = adapter.get_schema(&collection)?;
+    let p: SchemaGetParams = SchemaGetParams::parse(params)?;
+    validate_collection_name(&p.collection)?;
+    let schema = adapter.get_schema(&p.collection)?;
     Ok(json!({"schema": schema}))
 }

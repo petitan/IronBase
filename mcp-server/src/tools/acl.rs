@@ -1,4 +1,6 @@
 //! ACL management tool handlers
+//!
+//! Uses typed parameter structs for compile-time validation.
 
 use crate::acl::{Permissions, Principal, SYSTEM_ACL_COLLECTION};
 use crate::adapter::{FindOptions, IronBaseAdapter};
@@ -6,7 +8,7 @@ use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::{get_array, get_string};
+use super::params::{AclCollectionParams, AclSetParams, ParseParams};
 
 /// Dispatch ACL tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -42,17 +44,17 @@ fn handle_acl_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 }
 
 fn handle_acl_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let collection = get_string(&params, "collection")?;
+    let p: AclCollectionParams = AclCollectionParams::parse(params)?;
 
-    match adapter.find_one(SYSTEM_ACL_COLLECTION, json!({"collection": collection})) {
+    match adapter.find_one(SYSTEM_ACL_COLLECTION, json!({"collection": &p.collection})) {
         Ok(Some(doc)) => Ok(doc),
         Ok(None) => Ok(json!({
-            "collection": collection,
+            "collection": p.collection,
             "rules": null,
             "note": "No custom ACL for this collection. Default rules apply."
         })),
         Err(_) => Ok(json!({
-            "collection": collection,
+            "collection": p.collection,
             "rules": null,
             "note": "No custom ACL for this collection. Default rules apply."
         })),
@@ -60,23 +62,22 @@ fn handle_acl_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
 }
 
 fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let collection = get_string(&params, "collection")?;
-    let rules_arr = get_array(&params, "rules")?;
+    let p: AclSetParams = AclSetParams::parse(params)?;
 
     // Validate that collection exists (except for wildcard "*")
-    if collection != "*" {
+    if p.collection != "*" {
         let collections = adapter.list_collections();
-        if !collections.contains(&collection) {
+        if !collections.contains(&p.collection) {
             return Err(McpError::invalid_params(format!(
                 "Collection '{}' does not exist. Create it first before setting ACL.",
-                collection
+                p.collection
             )));
         }
     }
 
     // Parse rules
     let mut parsed_rules: Vec<Value> = Vec::new();
-    for rule_value in rules_arr {
+    for rule_value in &p.rules {
         let principal_str = rule_value
             .get("principal")
             .and_then(|v| v.as_str())
@@ -98,12 +99,12 @@ fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
     }
 
     let acl_doc = json!({
-        "collection": collection,
+        "collection": &p.collection,
         "rules": parsed_rules
     });
 
     // Upsert into _system.acl
-    let filter = json!({"collection": collection});
+    let filter = json!({"collection": &p.collection});
     match adapter.find_one(SYSTEM_ACL_COLLECTION, filter.clone()) {
         Ok(Some(_)) => {
             // Update existing
@@ -117,28 +118,28 @@ fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
 
     Ok(json!({
         "success": true,
-        "collection": collection,
+        "collection": p.collection,
         "rules_count": parsed_rules.len(),
         "note": "ACL updated. Changes take effect on next request."
     }))
 }
 
 fn handle_acl_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let collection = get_string(&params, "collection")?;
+    let p: AclCollectionParams = AclCollectionParams::parse(params)?;
 
     // Prevent deleting built-in rules
-    if collection == "_system.*" {
+    if p.collection == "_system.*" {
         return Err(McpError::invalid_params(
             "Cannot delete built-in _system.* ACL rules",
         ));
     }
 
-    let filter = json!({"collection": collection});
+    let filter = json!({"collection": &p.collection});
     let deleted = adapter.delete_one(SYSTEM_ACL_COLLECTION, filter)?;
 
     Ok(json!({
         "success": true,
-        "collection": collection,
+        "collection": p.collection,
         "deleted": deleted > 0,
         "note": if deleted > 0 {
             "ACL deleted. Default rules now apply."
