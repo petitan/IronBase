@@ -2,21 +2,27 @@
 
 use crate::adapter::{FindOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
+use crate::scripting::ScriptLimits;
 use ironbase_core::find_options::apply_projection;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::helpers::{
-    get_array, get_object, get_string, parse_limit, parse_projection, parse_skip, parse_sort,
-    validate_collection_name, MAX_QUERY_LIMIT,
+    get_array, get_object, get_string, parse_limit_with_max, parse_projection, parse_skip,
+    parse_sort, validate_collection_name, DEFAULT_QUERY_LIMIT,
 };
 
 /// Dispatch CRUD tool calls
-pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+pub fn dispatch(
+    name: &str,
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    limits: Option<&ScriptLimits>,
+) -> Result<Value> {
     match name {
         "insert_one" => handle_insert_one(params, adapter),
         "insert_many" => handle_insert_many(params, adapter),
-        "find" => handle_find(params, adapter),
+        "find" => handle_find(params, adapter, limits),
         "find_one" => handle_find_one(params, adapter),
         "update_one" => handle_update_one(params, adapter),
         "update_many" => handle_update_many(params, adapter),
@@ -48,7 +54,11 @@ fn handle_insert_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
     Ok(json!({"inserted_ids": ids, "inserted_count": ids.len()}))
 }
 
-fn handle_find(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+fn handle_find(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    limits: Option<&ScriptLimits>,
+) -> Result<Value> {
     let collection = get_string(&params, "collection")?;
     validate_collection_name(&collection)?;
     let query = params.get("query").cloned().unwrap_or(json!({}));
@@ -58,7 +68,13 @@ fn handle_find(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
         .unwrap_or(false);
     let projection = parse_projection(&params)?;
     let projection_value = projection.map(|proj| json!(proj));
-    let limit = parse_limit(&params).or(Some(MAX_QUERY_LIMIT));
+
+    // Use dynamic limit from ScriptLimits if available, otherwise default
+    let max_limit = limits
+        .map(|l| l.max_find_documents)
+        .unwrap_or(DEFAULT_QUERY_LIMIT);
+    let limit = parse_limit_with_max(&params, max_limit).or(Some(max_limit));
+
     let options = FindOptions {
         projection: projection_value,
         sort: parse_sort(&params),

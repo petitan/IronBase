@@ -498,7 +498,7 @@ fn handle_request(
 
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
-            match dispatch_tool(&params.name, arguments, adapter, None, None) {
+            match dispatch_tool(&params.name, arguments, adapter, None, None, None) {
                 Ok(result) => {
                     if is_notification {
                         return None;
