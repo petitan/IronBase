@@ -24,6 +24,7 @@ pub mod transaction;
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
 use crate::error::{McpError, Result};
+use crate::scripting::ScriptLimits;
 use crate::ServerInfo;
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -71,12 +72,21 @@ const MAX_UNINDEXED_SORT_DOCS: usize = 100_000;
 ///
 /// SAFETY: All tool handlers are wrapped in catch_unwind to prevent panics
 /// from crashing the server. Panics are converted to McpError::Panic.
+///
+/// # Arguments
+/// * `name` - Tool name
+/// * `params` - Tool parameters as JSON
+/// * `adapter` - Database adapter
+/// * `api_key_cache` - Optional API key cache for admin operations
+/// * `server_info` - Optional server info for admin operations
+/// * `limits` - Optional script limits for unified resource limiting
 pub fn dispatch_tool(
     name: &str,
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
     api_key_cache: Option<&ApiKeyCache>,
     server_info: Option<&ServerInfo>,
+    limits: Option<&ScriptLimits>,
 ) -> Result<Value> {
     let tool_start = std::time::Instant::now();
 
@@ -98,7 +108,7 @@ pub fn dispatch_tool(
     // Note: We use AssertUnwindSafe because our handlers should not panic,
     // but if they do, we want to catch it gracefully
     let result = catch_unwind(AssertUnwindSafe(|| {
-        dispatch_tool_inner(name, params, adapter, api_key_cache, server_info)
+        dispatch_tool_inner(name, params, adapter, api_key_cache, server_info, limits)
     }));
 
     let elapsed = tool_start.elapsed();
@@ -248,12 +258,13 @@ fn dispatch_tool_inner(
     adapter: &Arc<IronBaseAdapter>,
     api_key_cache: Option<&ApiKeyCache>,
     server_info: Option<&ServerInfo>,
+    limits: Option<&ScriptLimits>,
 ) -> Result<Value> {
     match name {
         // CRUD operations
         "insert_one" | "insert_many" | "find" | "find_one" | "update_one" | "update_many"
         | "delete_one" | "delete_many" | "count_documents" | "distinct" | "aggregate" => {
-            crud::dispatch(name, params, adapter)
+            crud::dispatch(name, params, adapter, limits)
         }
 
         // Index operations

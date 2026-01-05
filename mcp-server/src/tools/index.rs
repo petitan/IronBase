@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::helpers::{
     get_string, parse_limit, parse_projection, parse_skip, parse_sort, parse_threshold,
-    validate_collection_name, MAX_QUERY_LIMIT,
+    validate_collection_name, DEFAULT_QUERY_LIMIT,
 };
 
 /// Dispatch index tool calls
@@ -141,13 +141,13 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
     let query = get_string(&params, "query")?;
     let threshold = parse_threshold(&params)?;
     let algorithm = params.get("algorithm").and_then(|v| v.as_str());
-    let limit = parse_limit(&params).or(Some(MAX_QUERY_LIMIT));
+    let limit = parse_limit(&params).or(Some(DEFAULT_QUERY_LIMIT));
     let projection = parse_projection(&params)?;
 
     // Use the real fuzzy search with index
     let mut results = adapter.fuzzy_search(&collection, &field, &query, threshold, algorithm)?;
 
-    // Apply limit if specified (capped at MAX_QUERY_LIMIT)
+    // Apply limit if specified (capped at DEFAULT_QUERY_LIMIT)
     if let Some(lim) = limit {
         results.truncate(lim);
     }
@@ -243,7 +243,7 @@ fn handle_find_with_hint(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resul
 
     // Apply limit
     if let Some(l) = limit {
-        documents.truncate(l.min(MAX_QUERY_LIMIT));
+        documents.truncate(l.min(DEFAULT_QUERY_LIMIT));
     }
 
     // Apply projection if specified

@@ -4,8 +4,8 @@ use crate::error::{McpError, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
-/// Maximum limit for queries (DoS protection)
-pub const MAX_QUERY_LIMIT: usize = 10_000;
+/// Default limit for queries when no ScriptLimits provided
+pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
 
 /// Maximum collection name length
 pub const MAX_COLLECTION_NAME_LEN: usize = 128;
@@ -57,12 +57,17 @@ pub fn verify_admin_key(params: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Validate and parse limit, capping at MAX_QUERY_LIMIT
-pub fn parse_limit(params: &Value) -> Option<usize> {
+/// Validate and parse limit, capping at the provided max
+pub fn parse_limit_with_max(params: &Value, max_limit: usize) -> Option<usize> {
     params
         .get("limit")
         .and_then(|v| v.as_u64())
-        .map(|v| (v as usize).min(MAX_QUERY_LIMIT))
+        .map(|v| (v as usize).min(max_limit))
+}
+
+/// Validate and parse limit, capping at DEFAULT_QUERY_LIMIT
+pub fn parse_limit(params: &Value) -> Option<usize> {
+    parse_limit_with_max(params, DEFAULT_QUERY_LIMIT)
 }
 
 /// Validate and parse skip

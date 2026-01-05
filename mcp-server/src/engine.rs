@@ -198,12 +198,17 @@ impl IronBaseService {
 
         // 4. Execute the tool (ACL was just verified - minimal TOCTOU window)
         let _deadline_guard = request_deadline::set_deadline(ctx.deadline);
+
+        // Get current dynamic limits from LimitsManager
+        let script_limits = self.limits_manager.get_limits();
+
         match dispatch_tool(
             &request.name,
             request.arguments.clone(),
             &self.adapter,
             Some(&self.api_key_cache),
             Some(&self.server_info),
+            Some(&script_limits),
         ) {
             Ok(result) => ToolResult::Success(result),
             Err(e) => ToolResult::Error {

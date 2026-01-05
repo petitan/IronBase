@@ -125,9 +125,13 @@ pub struct FulltextSearchOptions {
 }
 
 /// IronBase Adapter
-/// Maximum concurrent heavy operations (aggregate without $match, full collection scans)
+/// Maximum concurrent heavy operations (aggregate without $match, find with large limit)
 /// Set to 1 to prevent memory exhaustion on large collections
 const MAX_CONCURRENT_HEAVY_OPS: usize = 1;
+
+/// Threshold for "heavy" find operations
+/// Find requests with limit > this value require semaphore permit
+const HEAVY_FIND_THRESHOLD: usize = 1000;
 
 /// Timeout for waiting to acquire heavy operation permit (in seconds)
 const HEAVY_OP_TIMEOUT_SECS: u64 = 30;
@@ -772,8 +776,18 @@ impl IronBaseAdapter {
         Ok(ids.iter().map(Self::doc_id_to_string).collect())
     }
 
-    /// Find documents (uses get_collection - no implicit creation)
-    pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
+    /// Check if a find operation is "heavy" (requires semaphore)
+    fn is_heavy_find(limit: Option<usize>) -> bool {
+        limit.map(|l| l > HEAVY_FIND_THRESHOLD).unwrap_or(true)
+    }
+
+    /// Internal find implementation (no throttling)
+    fn find_internal(
+        &self,
+        collection: &str,
+        query: Value,
+        options: FindOptions,
+    ) -> Result<FindResult> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
 
@@ -833,6 +847,76 @@ impl IronBaseAdapter {
             documents: result.documents,
             total: result.total.map(|t| t as usize),
         })
+    }
+
+    /// Find documents with async semaphore throttling for heavy operations
+    ///
+    /// Heavy operations (limit > HEAVY_FIND_THRESHOLD) are throttled to prevent
+    /// OOM when multiple large finds run simultaneously.
+    pub async fn find_async(
+        &self,
+        collection: &str,
+        query: Value,
+        options: FindOptions,
+    ) -> Result<FindResult> {
+        let is_heavy = Self::is_heavy_find(options.limit);
+
+        if is_heavy {
+            let sem = self.heavy_semaphore_for(collection);
+            let permit = tokio::time::timeout(
+                std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
+                sem.acquire(),
+            )
+            .await;
+
+            match permit {
+                Ok(Ok(_permit)) => {
+                    tracing::info!(
+                        collection = collection,
+                        limit = ?options.limit,
+                        "Heavy find started (limit > {})",
+                        HEAVY_FIND_THRESHOLD
+                    );
+                    let result = self.find_internal(collection, query, options);
+                    tracing::info!(
+                        collection = collection,
+                        success = result.is_ok(),
+                        "Heavy find completed"
+                    );
+                    result
+                }
+                Ok(Err(_)) => Err(crate::error::McpError::Internal(
+                    "Heavy operation semaphore closed unexpectedly".to_string(),
+                )),
+                Err(_) => Err(crate::error::McpError::OperationTooLarge(format!(
+                    "Timeout waiting for find slot. Another heavy operation is in progress. \
+                     Either wait {}s or reduce limit to <= {}.",
+                    HEAVY_OP_TIMEOUT_SECS, HEAVY_FIND_THRESHOLD
+                ))),
+            }
+        } else {
+            self.find_internal(collection, query, options)
+        }
+    }
+
+    /// Find documents (uses get_collection - no implicit creation)
+    /// Uses throttling when called inside a tokio runtime for heavy operations.
+    pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let is_heavy = Self::is_heavy_find(options.limit);
+            if is_heavy {
+                tracing::debug!(
+                    collection = collection,
+                    limit = ?options.limit,
+                    "Heavy find via sync API - using async throttling"
+                );
+            }
+            tokio::task::block_in_place(|| {
+                handle.block_on(self.find_async(collection, query, options))
+            })
+        } else {
+            self.find_internal(collection, query, options)
+        }
     }
 
     /// Find a single document (uses get_collection - no implicit creation)
