@@ -534,12 +534,12 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "count_documents",
                 "title": "Count Documents",
-                "description": "Count documents matching a query",
+                "description": "Count documents matching a query. PERF TIP: For date ranges use {\"date\": {\"$gte\": \"2024\", \"$lt\": \"2025\"}} instead of $regex - 90x faster with index!",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
-                        "query": { "type": "object", "description": "Query filter (empty {} counts all documents)" }
+                        "query": { "type": "object", "description": "Query filter. Use $gte/$lt for ranges (indexed), avoid $regex for prefix matching on indexed fields" }
                     },
                     "required": ["collection"]
                 }
@@ -561,12 +561,12 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "aggregate",
                 "title": "Aggregation Pipeline",
-                "description": "Execute an aggregation pipeline. Include {\"$limit\": 10-20} stage to avoid context overflow!",
+                "description": "Execute an aggregation pipeline. CRITICAL: Always start with {\"$match\": {...}} to filter first! Without $match, scans ALL documents (slow). End with {\"$limit\": 20}. For date stats, use count_documents with range queries instead of $group+$substr (90x faster).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "collection": { "type": "string", "description": "Collection name" },
-                        "pipeline": { "type": "array", "description": "Aggregation pipeline stages: $match, $group, $project, $sort, $limit, $skip" }
+                        "pipeline": { "type": "array", "description": "Pipeline stages. MUST start with $match for large collections! Stages: $match (FIRST!), $group, $project, $sort, $limit, $skip" }
                     },
                     "required": ["collection", "pipeline"]
                 }
@@ -834,13 +834,13 @@ fn get_all_tools_json() -> Value {
             {
                 "name": "script_exec",
                 "title": "Execute Script",
-                "description": "Execute inline Rhai code",
+                "description": "Execute inline Rhai code. API: db_find(coll, query), db_find(coll, query, opts), db_count(coll, query), db_aggregate(coll, pipeline), db_insert(coll, doc), db_update(coll, filter, update), db_delete(coll, filter). NOTE: Use db_find() NOT db.find() - JavaScript style is NOT supported!",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "code": { "type": "string", "description": "Rhai script code" },
-                        "params": { "type": "object", "description": "Optional parameters" },
-                        "max_operations": { "type": "integer", "description": "Max operations limit" }
+                        "code": { "type": "string", "description": "Rhai script code. Use db_find(), db_count(), etc. NOT db.find() or db.count()!" },
+                        "params": { "type": "object", "description": "Optional parameters accessible as 'params' variable" },
+                        "max_operations": { "type": "integer", "description": "Max operations limit (default: 1M)" }
                     },
                     "required": ["code"]
                 }
