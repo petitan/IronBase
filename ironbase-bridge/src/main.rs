@@ -114,20 +114,19 @@ struct JsonRpcError {
 #[derive(Debug)]
 enum JsonRpcInput {
     Single(JsonRpcRequest),
-    Batch(Vec<JsonRpcRequest>),
+    Batch {
+        requests: Vec<JsonRpcRequest>,
+        errors: Vec<JsonRpcResponse>,
+    },
 }
 
 // ============================================================================
 // Helper Functions
 // ============================================================================
 
-/// Check if request is a notification (no id or null id)
+/// Check if request is a notification (no id)
 fn is_notification(request: &JsonRpcRequest) -> bool {
-    match &request.id {
-        None => true,
-        Some(v) if v.is_null() => true,
-        _ => false,
-    }
+    request.id.is_none()
 }
 
 /// Create an error response
@@ -141,6 +140,49 @@ fn make_error_response(id: Option<serde_json::Value>, code: i32, message: &str) 
             message: message.to_string(),
             data: None,
         }),
+    }
+}
+
+#[derive(Debug)]
+enum ParseInputError {
+    ParseError(String),
+    InvalidRequest {
+        id: Option<serde_json::Value>,
+        message: String,
+    },
+}
+
+impl ParseInputError {
+    fn code(&self) -> i32 {
+        match self {
+            ParseInputError::ParseError(_) => -32700,
+            ParseInputError::InvalidRequest { .. } => -32600,
+        }
+    }
+
+    fn message(&self) -> String {
+        match self {
+            ParseInputError::ParseError(msg) => msg.clone(),
+            ParseInputError::InvalidRequest { message, .. } => message.clone(),
+        }
+    }
+
+    fn id(&self) -> Option<serde_json::Value> {
+        match self {
+            ParseInputError::InvalidRequest { id, .. } => id.clone(),
+            _ => None,
+        }
+    }
+}
+
+fn extract_valid_id(value: &serde_json::Value) -> Option<serde_json::Value> {
+    match value {
+        serde_json::Value::Object(map) => match map.get("id") {
+            Some(serde_json::Value::String(_)) => map.get("id").cloned(),
+            Some(serde_json::Value::Number(_)) => map.get("id").cloned(),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -159,40 +201,83 @@ fn validate_jsonrpc_version(request: &JsonRpcRequest) -> Result<()> {
 /// BUG #5 fix: Limit batch size to MAX_BATCH_SIZE
 /// BUG #11 fix: Reject empty batch
 /// BUG #12 fix: Validate jsonrpc version
-fn parse_input(line: &str) -> Result<JsonRpcInput> {
+fn parse_input(line: &str) -> Result<JsonRpcInput, ParseInputError> {
     let trimmed = line.trim();
-    if trimmed.starts_with('[') {
-        let requests: Vec<JsonRpcRequest> =
-            serde_json::from_str(trimmed).context("Failed to parse batch request")?;
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|e| ParseInputError::ParseError(e.to_string()))?;
 
-        // BUG #11 fix: Empty batch is invalid per JSON-RPC 2.0 spec
-        if requests.is_empty() {
-            anyhow::bail!("Empty batch request is invalid");
+    let parse_request = |value: &serde_json::Value| -> Result<JsonRpcRequest, ParseInputError> {
+        if !value.is_object() {
+            return Err(ParseInputError::InvalidRequest {
+                id: None,
+                message: "Request must be an object".to_string(),
+            });
         }
 
-        // BUG #5 fix: Limit batch size to prevent DoS
-        if requests.len() > MAX_BATCH_SIZE {
-            anyhow::bail!(
-                "Batch size {} exceeds maximum allowed ({})",
-                requests.len(),
-                MAX_BATCH_SIZE
-            );
+        let request: JsonRpcRequest = serde_json::from_value(value.clone()).map_err(|e| {
+            ParseInputError::InvalidRequest {
+                id: extract_valid_id(value),
+                message: format!("Invalid request: {}", e),
+            }
+        })?;
+
+        if let Some(serde_json::Value::Null) = &request.id {
+            return Err(ParseInputError::InvalidRequest {
+                id: None,
+                message: "Invalid request: id must be omitted for notifications".to_string(),
+            });
         }
 
-        // BUG #12 fix: Validate jsonrpc version for each request
-        for req in &requests {
-            validate_jsonrpc_version(req)?;
+        validate_jsonrpc_version(&request).map_err(|e| ParseInputError::InvalidRequest {
+            id: request.id.clone(),
+            message: e.to_string(),
+        })?;
+
+        Ok(request)
+    };
+
+    match value {
+        serde_json::Value::Array(values) => {
+            // BUG #11 fix: Empty batch is invalid per JSON-RPC 2.0 spec
+            if values.is_empty() {
+                return Err(ParseInputError::InvalidRequest {
+                    id: None,
+                    message: "Empty batch request is invalid".to_string(),
+                });
+            }
+
+            // BUG #5 fix: Limit batch size to prevent DoS
+            if values.len() > MAX_BATCH_SIZE {
+                return Err(ParseInputError::InvalidRequest {
+                    id: None,
+                    message: format!(
+                        "Batch size {} exceeds maximum allowed ({})",
+                        values.len(),
+                        MAX_BATCH_SIZE
+                    ),
+                });
+            }
+
+            let mut requests = Vec::new();
+            let mut errors = Vec::new();
+
+            for value in values {
+                match parse_request(&value) {
+                    Ok(req) => requests.push(req),
+                    Err(err) => errors.push(make_error_response(err.id(), err.code(), &err.message())),
+                }
+            }
+
+            Ok(JsonRpcInput::Batch { requests, errors })
         }
-
-        Ok(JsonRpcInput::Batch(requests))
-    } else {
-        let request: JsonRpcRequest =
-            serde_json::from_str(trimmed).context("Failed to parse request")?;
-
-        // BUG #12 fix: Validate jsonrpc version
-        validate_jsonrpc_version(&request)?;
-
-        Ok(JsonRpcInput::Single(request))
+        serde_json::Value::Object(_) => {
+            let request = parse_request(&value)?;
+            Ok(JsonRpcInput::Single(request))
+        }
+        _ => Err(ParseInputError::InvalidRequest {
+            id: None,
+            message: "Request must be an object or batch array".to_string(),
+        }),
     }
 }
 
@@ -577,21 +662,22 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
                 }
             }
         }
-        Ok(JsonRpcInput::Batch(requests)) => {
+        Ok(JsonRpcInput::Batch { requests, mut errors }) => {
             tracing::debug!("Processing batch of {} requests", requests.len());
 
-            let responses = process_batch(client, args, requests).await;
+            let mut responses = process_batch(client, args, requests).await;
+            responses.append(&mut errors);
             if responses.is_empty() {
                 return true; // all were notifications
             }
             serialize_response(&responses)
         }
         Err(e) => {
-            tracing::error!("Parse error: {}", e);
+            tracing::error!("Parse error: {}", e.message());
             serialize_response(&make_error_response(
-                None,
-                -32700,
-                &format!("Parse error: {}", e),
+                e.id(),
+                e.code(),
+                &e.message(),
             ))
         }
     };

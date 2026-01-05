@@ -909,6 +909,9 @@ struct InitializeResult {
     capabilities: Capabilities,
     #[serde(rename = "serverInfo")]
     server_info: ServerInfo,
+    /// Instructions for the LLM on how to use this server effectively
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -922,6 +925,41 @@ struct Capabilities {
 struct ServerInfo {
     name: String,
     version: String,
+}
+
+/// Get server instructions for LLM clients (sent in initialize response)
+/// These instructions help Claude Desktop and other MCP clients generate better queries
+fn get_server_instructions() -> String {
+    r#"# IronBase MCP Server - Best Practices
+
+## CRITICAL Performance Rules
+
+### 1. Date Range Queries - Use $gte/$lt NOT $regex
+❌ SLOW: {"date": {"$regex": "^2024"}}  → Collection scan
+✅ FAST: {"date": {"$gte": "2024", "$lt": "2025"}}  → Index scan (90x faster)
+
+### 2. Aggregation - Always add $match first
+❌ SLOW: [{"$group": {...}}]  → Scans ALL documents
+✅ FAST: [{"$match": {...}}, {"$group": {...}}]  → Filters first
+
+### 3. Always use LIMIT
+- find: Always include "limit": 10-100
+- aggregate: Always end with {"$limit": 20}
+
+### 4. Count before Find
+Before fetching documents, use count_documents to check size.
+
+### 5. Use Projections
+Only fetch fields you need: "projection": {"field1": 1, "field2": 1}
+
+## Available Prompts (use prompts/get for details)
+- "best-practices" - Full optimization guide
+- "aggregation-guide" - Pipeline patterns
+- "query-examples" - Common query patterns
+
+## Script API (script_exec tool)
+Functions: db_find(), db_count(), db_aggregate(), db_insert(), db_update(), db_delete()
+NOT: db.find() (JavaScript style is NOT supported)"#.to_string()
 }
 
 fn client_identity(api_key: Option<&str>, remote_addr: Option<std::net::SocketAddr>) -> String {
@@ -974,9 +1012,18 @@ fn handle_request(
         get_prompt_content, get_prompts_list, get_resources_list, get_tools_list_filtered,
         read_resource, ServiceContext, ToolRequest,
     };
-    let is_notification = request.id.is_none() || matches!(&request.id, Some(v) if v.is_null());
+    let has_null_id = matches!(&request.id, Some(v) if v.is_null());
+    let is_notification = request.id.is_none();
     let client_id = client_identity(api_key, remote_addr);
     let is_initialized = is_client_initialized(initialized_clients, &client_id);
+
+    if has_null_id {
+        return Some(create_error_response(
+            -32600,
+            "Invalid request: id must be omitted for notifications",
+            Some(serde_json::Value::Null),
+        ));
+    }
 
     // MCP lifecycle enforcement: only allow initialize and ping before initialization
     // Per spec: "The initialization phase MUST be the first interaction"
@@ -985,6 +1032,9 @@ fn handle_request(
         && request.method != "ping"
         && !request.method.starts_with("notifications/")
     {
+        if is_notification {
+            return None;
+        }
         return Some(create_error_response(
             -32002, // Server not initialized (custom error code)
             "Server not initialized. Call 'initialize' first.",
@@ -994,6 +1044,9 @@ fn handle_request(
 
     match request.method.as_str() {
         "initialize" => {
+            if is_notification {
+                return None;
+            }
             mark_client_initialized(initialized_clients, &client_id);
             Some(create_success_response(
                 serde_json::to_value(InitializeResult {
@@ -1007,6 +1060,7 @@ fn handle_request(
                         name: "ironbase-mcp".to_string(),
                         version: VERSION.to_string(),
                     },
+                    instructions: Some(get_server_instructions()),
                 })
                 .unwrap(),
                 request.id.clone(),
@@ -1015,10 +1069,15 @@ fn handle_request(
 
         "initialized" | "notifications/initialized" => None,
 
-        "ping" => Some(create_success_response(
-            serde_json::json!({}),
-            request.id.clone(),
-        )),
+        "ping" => {
+            if is_notification {
+                return None;
+            }
+            Some(create_success_response(
+                serde_json::json!({}),
+                request.id.clone(),
+            ))
+        }
 
         "notifications/cancelled" => None,
 
@@ -1029,6 +1088,9 @@ fn handle_request(
                     crate::InterfaceType::from_socket_addr(addr) == crate::InterfaceType::Localhost
                 })
                 .unwrap_or(false);
+            if is_notification {
+                return None;
+            }
             Some(create_success_response(
                 get_tools_list_filtered(is_localhost),
                 request.id.clone(),
@@ -1039,6 +1101,9 @@ fn handle_request(
             let params: ToolsCallParams = match serde_json::from_value(request.params.clone()) {
                 Ok(p) => p,
                 Err(e) => {
+                    if is_notification {
+                        return None;
+                    }
                     return Some(create_error_response(
                         -32602,
                         &format!("Invalid params: {}", e),
@@ -1106,11 +1171,19 @@ fn handle_request(
         }
 
         "prompts/list" => Some(create_success_response(
-            get_prompts_list(),
+            {
+                if is_notification {
+                    return None;
+                }
+                get_prompts_list()
+            },
             request.id.clone(),
         )),
 
         "prompts/get" => {
+            if is_notification {
+                return None;
+            }
             let params: PromptsGetParams = match serde_json::from_value(request.params.clone()) {
                 Ok(p) => p,
                 Err(e) => {
@@ -1135,11 +1208,19 @@ fn handle_request(
         }
 
         "resources/list" => Some(create_success_response(
-            get_resources_list(service.adapter()),
+            {
+                if is_notification {
+                    return None;
+                }
+                get_resources_list(service.adapter())
+            },
             request.id.clone(),
         )),
 
         "resources/read" => {
+            if is_notification {
+                return None;
+            }
             #[derive(serde::Deserialize)]
             struct ResourcesReadParams {
                 uri: String,

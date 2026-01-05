@@ -384,8 +384,17 @@ fn handle_request(
     adapter: &Arc<IronBaseAdapter>,
     initialized: &mut bool,
 ) -> Option<McpResponse> {
+    let has_null_id = matches!(&request.id, Some(v) if v.is_null());
     // Check if this is a notification (no id) - notifications get no response per JSON-RPC spec
-    let is_notification = request.id.is_none() || matches!(&request.id, Some(v) if v.is_null());
+    let is_notification = request.id.is_none();
+
+    if has_null_id {
+        return Some(create_error_response(
+            -32600,
+            "Invalid request: id must be omitted for notifications",
+            Some(serde_json::Value::Null),
+        ));
+    }
 
     // MCP lifecycle enforcement: only allow initialize and ping before initialization
     // Per spec: "The initialization phase MUST be the first interaction"
@@ -394,6 +403,9 @@ fn handle_request(
         && request.method != "ping"
         && !request.method.starts_with("notifications/")
     {
+        if is_notification {
+            return None;
+        }
         return Some(create_error_response(
             -32002, // Server not initialized (custom error code)
             "Server not initialized. Call 'initialize' first.",
@@ -403,6 +415,9 @@ fn handle_request(
 
     match request.method.as_str() {
         "initialize" => {
+            if is_notification {
+                return None;
+            }
             *initialized = true;
             eprintln!("Server initialized");
             // BUG #14 fix: Handle serialization error gracefully
@@ -437,6 +452,9 @@ fn handle_request(
 
         "ping" => {
             // Keep-alive ping - allowed before initialization
+            if is_notification {
+                return None;
+            }
             Some(create_success_response(
                 serde_json::json!({}),
                 request.id.clone(),
@@ -454,6 +472,9 @@ fn handle_request(
                 .map(|v| !v.is_empty() && v != "0" && v.to_lowercase() != "false")
                 .unwrap_or(false);
             let is_localhost = !restrict_admin;
+            if is_notification {
+                return None;
+            }
             Some(create_success_response(
                 get_tools_list_filtered(is_localhost),
                 request.id.clone(),
@@ -464,6 +485,9 @@ fn handle_request(
             let params: ToolsCallParams = match serde_json::from_value(request.params.clone()) {
                 Ok(p) => p,
                 Err(e) => {
+                    if is_notification {
+                        return None;
+                    }
                     return Some(create_error_response(
                         -32602,
                         &format!("Invalid params: {}", e),
@@ -497,11 +521,19 @@ fn handle_request(
         }
 
         "prompts/list" => Some(create_success_response(
-            get_prompts_list(),
+            {
+                if is_notification {
+                    return None;
+                }
+                get_prompts_list()
+            },
             request.id.clone(),
         )),
 
         "prompts/get" => {
+            if is_notification {
+                return None;
+            }
             let params: PromptsGetParams = match serde_json::from_value(request.params.clone()) {
                 Ok(p) => p,
                 Err(e) => {
@@ -526,11 +558,19 @@ fn handle_request(
         }
 
         "resources/list" => Some(create_success_response(
-            get_resources_list(adapter),
+            {
+                if is_notification {
+                    return None;
+                }
+                get_resources_list(adapter)
+            },
             request.id.clone(),
         )),
 
         "resources/read" => {
+            if is_notification {
+                return None;
+            }
             #[derive(Deserialize)]
             struct ResourcesReadParams {
                 uri: String,
