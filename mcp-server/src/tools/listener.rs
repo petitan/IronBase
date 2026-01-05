@@ -1,4 +1,6 @@
 //! Listener management tool handlers
+//!
+//! Uses typed parameter structs for compile-time validation.
 
 use crate::adapter::IronBaseAdapter;
 use crate::error::{McpError, Result};
@@ -6,7 +8,7 @@ use crate::listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTI
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::get_string;
+use super::params::{ListenerAddParams, ListenerIdParams, ParseParams};
 
 /// Dispatch listener tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -37,78 +39,64 @@ fn handle_listener_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 }
 
 fn handle_listener_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let id = get_string(&params, "id")?;
+    let p: ListenerIdParams = ListenerIdParams::parse(params)?;
     let manager = ListenerManager::new(adapter.clone());
 
-    match manager.get(&id).unwrap_or(None) {
+    match manager.get(&p.id).unwrap_or(None) {
         Some(listener) => Ok(serde_json::to_value(listener)?),
         None => Err(McpError::invalid_params(format!(
             "Listener not found: {}",
-            id
+            p.id
         ))),
     }
 }
 
 fn handle_listener_add(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let id = get_string(&params, "id")?;
-    let bind = get_string(&params, "bind")?;
-    let tls = params.get("tls").and_then(|v| v.as_bool()).unwrap_or(false);
-    let cert_path = params
-        .get("cert_path")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let key_path = params
-        .get("key_path")
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let description = params
-        .get("description")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let p: ListenerAddParams = ListenerAddParams::parse(params)?;
 
     let config = ListenerConfig {
-        id: id.clone(),
-        bind: bind.clone(),
-        tls,
-        cert_path,
-        key_path,
+        id: p.id.clone(),
+        bind: p.bind.clone(),
+        tls: p.tls,
+        cert_path: p.cert_path,
+        key_path: p.key_path,
         enabled: true,
-        description,
+        description: p.description,
     };
 
     // Validate before saving
     config.validate()?;
 
     let manager = ListenerManager::new(adapter.clone());
-    let is_update = manager.get(&id).unwrap_or(None).is_some();
+    let is_update = manager.get(&p.id).unwrap_or(None).is_some();
     manager.set(&config)?;
 
     Ok(json!({
         "success": true,
-        "id": id,
-        "bind": bind,
-        "tls": tls,
+        "id": p.id,
+        "bind": p.bind,
+        "tls": p.tls,
         "action": if is_update { "updated" } else { "created" },
         "note": "Restart server for changes to take effect"
     }))
 }
 
 fn handle_listener_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let id = get_string(&params, "id")?;
+    let p: ListenerIdParams = ListenerIdParams::parse(params)?;
 
     // Prevent deleting the default listener
-    if id == "default" {
+    if p.id == "default" {
         return Err(McpError::invalid_params(
             "Cannot delete the default listener. Use listener_disable instead.",
         ));
     }
 
     let manager = ListenerManager::new(adapter.clone());
-    let deleted = manager.delete(&id).unwrap_or(false);
+    let deleted = manager.delete(&p.id).unwrap_or(false);
 
     Ok(json!({
         "success": true,
-        "id": id,
+        "id": p.id,
         "deleted": deleted,
         "note": if deleted {
             "Listener deleted. Restart server for changes to take effect."
@@ -119,13 +107,13 @@ fn handle_listener_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 }
 
 fn handle_listener_enable(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let id = get_string(&params, "id")?;
+    let p: ListenerIdParams = ListenerIdParams::parse(params)?;
     let manager = ListenerManager::new(adapter.clone());
-    let updated = manager.enable(&id).unwrap_or(false);
+    let updated = manager.enable(&p.id).unwrap_or(false);
 
     Ok(json!({
         "success": true,
-        "id": id,
+        "id": p.id,
         "enabled": updated,
         "note": if updated {
             "Listener enabled. Restart server for changes to take effect."
@@ -136,13 +124,13 @@ fn handle_listener_enable(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 }
 
 fn handle_listener_disable(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    let id = get_string(&params, "id")?;
+    let p: ListenerIdParams = ListenerIdParams::parse(params)?;
     let manager = ListenerManager::new(adapter.clone());
-    let updated = manager.disable(&id).unwrap_or(false);
+    let updated = manager.disable(&p.id).unwrap_or(false);
 
     Ok(json!({
         "success": true,
-        "id": id,
+        "id": p.id,
         "disabled": updated,
         "note": if updated {
             "Listener disabled. Restart server for changes to take effect."
