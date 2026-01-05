@@ -17,6 +17,7 @@ pub mod scripting;
 pub mod service;
 pub mod shutdown;
 pub mod tools;
+pub mod transport;
 
 // Re-export main types
 pub use acl::{AclConfig, AclManager, CallerContext, InterfaceType, RequiredPermission};
@@ -36,6 +37,10 @@ pub use scripting::{
     ScriptLimits, ScriptManager, ScriptOptions, ScriptResult,
 };
 pub use tools::{dispatch_tool, get_tools_list, get_tools_list_filtered};
+pub use transport::{
+    error_codes, handler::HandlerContext, Capabilities, InitializeResult, JsonRpcError,
+    McpRequest, McpResponse, PromptsGetParams, ResourcesReadParams, ToolsCallParams,
+};
 
 /// Library version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
