@@ -83,7 +83,7 @@ impl std::str::FromStr for InterfaceType {
             "localhost" => Ok(Self::Localhost),
             "internal" => Ok(Self::Internal),
             "external" => Ok(Self::External),
-            _ => Err(McpError::InvalidParams(format!(
+            _ => Err(McpError::invalid_params(format!(
                 "Invalid interface type: {}",
                 s
             ))),
@@ -267,7 +267,7 @@ impl Principal {
     pub fn parse(s: &str) -> Result<Self> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
-            return Err(McpError::InvalidParams(format!(
+            return Err(McpError::invalid_params(format!(
                 "Invalid principal format: {}. Expected 'type:value'",
                 s
             )));
@@ -280,17 +280,17 @@ impl Principal {
             "ip" => {
                 let ip: IpAddr = pvalue
                     .parse()
-                    .map_err(|e| McpError::InvalidParams(format!("Invalid IP address: {}", e)))?;
+                    .map_err(|e| McpError::invalid_params(format!("Invalid IP address: {}", e)))?;
                 Ok(Self::Ip(ip))
             }
             "iprange" => {
                 let net: IpNet = pvalue
                     .parse()
-                    .map_err(|e| McpError::InvalidParams(format!("Invalid IP range: {}", e)))?;
+                    .map_err(|e| McpError::invalid_params(format!("Invalid IP range: {}", e)))?;
                 Ok(Self::IpRange(net))
             }
             "anyone" => Ok(Self::Anyone),
-            _ => Err(McpError::InvalidParams(format!(
+            _ => Err(McpError::invalid_params(format!(
                 "Unknown principal type: {}",
                 ptype
             ))),
@@ -446,7 +446,7 @@ impl AclConfig {
             && required.is_write()
             && caller.interface != InterfaceType::Localhost
         {
-            return Err(McpError::Forbidden(format!(
+            return Err(McpError::forbidden(format!(
                 "'{}' can only be modified from localhost (current: {})",
                 collection, caller.interface
             )));
@@ -461,7 +461,7 @@ impl AclConfig {
                         if rule.permissions.allows(required) {
                             return Ok(());
                         } else {
-                            return Err(McpError::Forbidden(format!(
+                            return Err(McpError::forbidden(format!(
                                 "'{}': {:?} permission required, not granted for {} client",
                                 collection, required, caller.interface
                             )));
@@ -472,7 +472,7 @@ impl AclConfig {
         }
 
         // No matching rule found - deny by default
-        Err(McpError::Forbidden(format!(
+        Err(McpError::forbidden(format!(
             "'{}': no ACL rule for {} client",
             collection, caller.interface
         )))
@@ -514,7 +514,7 @@ impl AclManager {
         required: RequiredPermission,
     ) -> Result<()> {
         let config = self.config.read().map_err(|_| {
-            McpError::Internal("ACL config lock poisoned - service restart required".to_string())
+            McpError::internal("ACL config lock poisoned - service restart required".to_string())
         })?;
         config.check(collection, caller, required)
     }
@@ -524,7 +524,7 @@ impl AclManager {
     pub fn reload(&self) -> Result<()> {
         let new_config = AclConfig::load_from_db(&self.adapter)?;
         let mut config = self.config.write().map_err(|_| {
-            McpError::Internal("ACL config lock poisoned - service restart required".to_string())
+            McpError::internal("ACL config lock poisoned - service restart required".to_string())
         })?;
         *config = new_config;
         Ok(())

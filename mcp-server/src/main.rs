@@ -22,8 +22,8 @@ use std::sync::Arc;
 
 use mcp_ironbase::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list,
-    get_tools_list_filtered, http_server, read_resource, service, IronBaseAdapter, McpError,
-    VERSION,
+    get_tools_list_filtered, http_server, read_resource, service, ErrorCode, IronBaseAdapter,
+    McpError, VERSION,
 };
 
 // ============================================================
@@ -639,18 +639,18 @@ fn create_error_response(code: i32, message: &str, id: Option<serde_json::Value>
 
 fn create_tool_error_response(err: McpError, id: Option<serde_json::Value>) -> McpResponse {
     let message = err.to_string();
-    match err {
-        McpError::InvalidParams(_) => create_error_response(-32602, &message, id),
-        _ => {
-            let response = serde_json::json!({
-                "content": [{
-                    "type": "text",
-                    "text": format!("Error: {}", message)
-                }],
-                "isError": true
-            });
-            create_success_response(response, id)
-        }
+    // Use error code for matching (struct-based McpError)
+    if err.code == ErrorCode::InvalidParams {
+        create_error_response(err.code.code(), &message, id)
+    } else {
+        let response = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error: {}", message)
+            }],
+            "isError": true
+        });
+        create_success_response(response, id)
     }
 }
 

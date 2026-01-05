@@ -134,7 +134,7 @@ impl ScriptManager {
 
             // Check for concurrent modification
             if update_result.matched_count == 0 {
-                return Err(McpError::ScriptError(format!(
+                return Err(McpError::script_error(format!(
                     "Script '{}' was modified by another request. Please retry.",
                     name
                 )));
@@ -254,7 +254,7 @@ impl ScriptManager {
                 .iter()
                 .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
                 .collect();
-            return Err(McpError::ScriptError(format!(
+            return Err(McpError::script_error(format!(
                 "Cannot delete '{}': scripts depend on it: {}",
                 name,
                 dependent_names.join(", ")
@@ -375,7 +375,7 @@ impl ScriptManager {
                 Some(v.tags),
                 Some(v.dependencies),
             ),
-            None => Err(McpError::ScriptError(format!(
+            None => Err(McpError::script_error(format!(
                 "Version {} of script '{}' not found",
                 version, name
             ))),
@@ -396,7 +396,7 @@ impl ScriptManager {
     /// * `tags` - Tags to add
     pub fn add_tags(&self, name: &str, tags: Vec<String>) -> Result<()> {
         if self.get(name)?.is_none() {
-            return Err(McpError::ScriptError(format!(
+            return Err(McpError::script_error(format!(
                 "Script '{}' not found",
                 name
             )));
@@ -418,7 +418,7 @@ impl ScriptManager {
     /// * `tags` - Tags to remove
     pub fn remove_tags(&self, name: &str, tags: Vec<String>) -> Result<()> {
         if self.get(name)?.is_none() {
-            return Err(McpError::ScriptError(format!(
+            return Err(McpError::script_error(format!(
                 "Script '{}' not found",
                 name
             )));
@@ -451,13 +451,13 @@ impl ScriptManager {
     pub fn validate_dependencies(&self, script_name: &str, deps: &[String]) -> Result<()> {
         for dep in deps {
             if dep == script_name {
-                return Err(McpError::ScriptError(format!(
+                return Err(McpError::script_error(format!(
                     "Script '{}' cannot depend on itself",
                     script_name
                 )));
             }
             if self.get(dep)?.is_none() {
-                return Err(McpError::ScriptError(format!(
+                return Err(McpError::script_error(format!(
                     "Dependency '{}' does not exist",
                     dep
                 )));
@@ -484,7 +484,7 @@ impl ScriptManager {
         stack: &mut HashSet<String>,
     ) -> Result<()> {
         if stack.contains(name) {
-            return Err(McpError::ScriptError(format!(
+            return Err(McpError::script_error(format!(
                 "Circular dependency detected involving '{}'",
                 name
             )));
@@ -685,7 +685,7 @@ impl ScriptManager {
         // Get the script
         let script = self
             .get(name)?
-            .ok_or_else(|| McpError::ScriptError(format!("Script '{}' not found", name)))?;
+            .ok_or_else(|| McpError::script_error(format!("Script '{}' not found", name)))?;
 
         // Resolve dependencies
         let dep_order = self.resolve_dependencies(name)?;

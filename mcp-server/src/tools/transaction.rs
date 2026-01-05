@@ -17,7 +17,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "update_one_tx" => handle_update_one_tx(params, adapter),
         "delete_one_tx" => handle_delete_one_tx(params, adapter),
         "transaction_status" => handle_transaction_status(adapter),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown transaction tool: {}",
             name
         ))),

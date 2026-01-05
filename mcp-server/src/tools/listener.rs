@@ -17,7 +17,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "listener_delete" => handle_listener_delete(params, adapter),
         "listener_enable" => handle_listener_enable(params, adapter),
         "listener_disable" => handle_listener_disable(params, adapter),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown listener tool: {}",
             name
         ))),
@@ -42,7 +42,7 @@ fn handle_listener_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
 
     match manager.get(&id).unwrap_or(None) {
         Some(listener) => Ok(serde_json::to_value(listener)?),
-        None => Err(McpError::InvalidParams(format!(
+        None => Err(McpError::invalid_params(format!(
             "Listener not found: {}",
             id
         ))),
@@ -98,8 +98,8 @@ fn handle_listener_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
     // Prevent deleting the default listener
     if id == "default" {
-        return Err(McpError::InvalidParams(
-            "Cannot delete the default listener. Use listener_disable instead.".into(),
+        return Err(McpError::invalid_params(
+            "Cannot delete the default listener. Use listener_disable instead.",
         ));
     }
 

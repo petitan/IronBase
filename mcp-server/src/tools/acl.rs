@@ -16,7 +16,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "acl_set" => handle_acl_set(params, adapter),
         "acl_delete" => handle_acl_delete(params, adapter),
         "acl_cleanup" => handle_acl_cleanup(adapter),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown ACL tool: {}",
             name
         ))),
@@ -67,7 +67,7 @@ fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
     if collection != "*" {
         let collections = adapter.list_collections();
         if !collections.contains(&collection) {
-            return Err(McpError::InvalidParams(format!(
+            return Err(McpError::invalid_params(format!(
                 "Collection '{}' does not exist. Create it first before setting ACL.",
                 collection
             )));
@@ -80,12 +80,12 @@ fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
         let principal_str = rule_value
             .get("principal")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("Rule missing 'principal'".into()))?;
+            .ok_or_else(|| McpError::invalid_params("Rule missing 'principal'"))?;
 
         let permissions_str = rule_value
             .get("permissions")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::InvalidParams("Rule missing 'permissions'".into()))?;
+            .ok_or_else(|| McpError::invalid_params("Rule missing 'permissions'"))?;
 
         // Validate principal format
         let principal = Principal::parse(principal_str)?;
@@ -128,8 +128,8 @@ fn handle_acl_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 
     // Prevent deleting built-in rules
     if collection == "_system.*" {
-        return Err(McpError::InvalidParams(
-            "Cannot delete built-in _system.* ACL rules".into(),
+        return Err(McpError::invalid_params(
+            "Cannot delete built-in _system.* ACL rules",
         ));
     }
 

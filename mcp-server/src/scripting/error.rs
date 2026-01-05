@@ -25,7 +25,7 @@ use super::limits::DEFAULT_MAX_OPERATIONS;
 /// match engine.eval::<Dynamic>(code) {
 ///     Err(e) => {
 ///         let msg = format_rhai_error(&e);
-///         return Err(McpError::ScriptError(msg));
+///         return Err(McpError::script_error(msg));
 ///     }
 ///     ...
 /// }

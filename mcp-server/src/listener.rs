@@ -83,14 +83,14 @@ impl ListenerConfig {
     pub fn validate(&self) -> Result<()> {
         // Check bind address format
         if self.bind.is_empty() {
-            return Err(McpError::InvalidParams(
+            return Err(McpError::invalid_params(
                 "Listener bind address cannot be empty".to_string(),
             ));
         }
 
         // Validate bind address has port
         if !self.bind.contains(':') {
-            return Err(McpError::InvalidParams(format!(
+            return Err(McpError::invalid_params(format!(
                 "Listener bind address must include port: {}",
                 self.bind
             )));
@@ -99,12 +99,12 @@ impl ListenerConfig {
         // Check TLS configuration
         if self.tls {
             if self.cert_path.is_none() {
-                return Err(McpError::InvalidParams(
+                return Err(McpError::invalid_params(
                     "TLS enabled but cert_path not specified".to_string(),
                 ));
             }
             if self.key_path.is_none() {
-                return Err(McpError::InvalidParams(
+                return Err(McpError::invalid_params(
                     "TLS enabled but key_path not specified".to_string(),
                 ));
             }
@@ -117,14 +117,14 @@ impl ListenerConfig {
     pub fn parse_bind(&self) -> Result<(String, u16)> {
         let parts: Vec<&str> = self.bind.rsplitn(2, ':').collect();
         if parts.len() != 2 {
-            return Err(McpError::InvalidParams(format!(
+            return Err(McpError::invalid_params(format!(
                 "Invalid bind address format: {}",
                 self.bind
             )));
         }
 
         let port: u16 = parts[0].parse().map_err(|_| {
-            McpError::InvalidParams(format!("Invalid port in bind address: {}", self.bind))
+            McpError::invalid_params(format!("Invalid port in bind address: {}", self.bind))
         })?;
 
         let host = parts[1].to_string();

@@ -627,14 +627,14 @@ impl IronBaseAdapter {
 
         // Validate path (now atomic with the lock held)
         if !create_if_missing && !path.exists() {
-            return Err(McpError::InvalidParams(format!(
+            return Err(McpError::invalid_params(format!(
                 "Database file does not exist: {}",
                 new_path
             )));
         }
 
         if create_if_missing && path.exists() {
-            return Err(McpError::InvalidParams(format!(
+            return Err(McpError::invalid_params(format!(
                 "Database file already exists: {}",
                 new_path
             )));
@@ -644,14 +644,14 @@ impl IronBaseAdapter {
         if let Some(parent) = path.parent() {
             if !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(|e| {
-                    McpError::Internal(format!("Failed to create directory: {}", e))
+                    McpError::internal(format!("Failed to create directory: {}", e))
                 })?;
             }
         }
 
         // Open new database (creates if needed) - still under write lock
         let new_db = DatabaseCore::open(path)
-            .map_err(|e| McpError::Internal(format!("Failed to open database: {}", e)))?;
+            .map_err(|e| McpError::internal(format!("Failed to open database: {}", e)))?;
 
         // Swap the database (already holding write lock)
         *db_guard = new_db;
@@ -729,7 +729,7 @@ impl IronBaseAdapter {
     pub fn close(&self) -> Result<()> {
         let db = self.db.write();
         db.close()
-            .map_err(|e| crate::error::McpError::Storage(e.to_string()))?;
+            .map_err(|e| crate::error::McpError::storage(e.to_string()))?;
         Ok(())
     }
 
@@ -794,15 +794,15 @@ impl IronBaseAdapter {
         // Convert to IronBase FindOptions - now uses core's include_total
         let projection = if let Some(proj) = options.projection.as_ref() {
             let obj = proj.as_object().ok_or_else(|| {
-                crate::error::McpError::InvalidParams(
-                    "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
+                crate::error::McpError::invalid_params(
+                    "projection must be an object like {\"field\": 1} or {\"field\": 0}",
                 )
             })?;
             let mut map = HashMap::new();
             for (k, v) in obj {
                 let val = if let Some(i) = v.as_i64() {
                     if i != 0 && i != 1 {
-                        return Err(crate::error::McpError::InvalidParams(format!(
+                        return Err(crate::error::McpError::invalid_params(format!(
                             "Invalid projection value for '{}': expected 0 or 1, got {}",
                             k, i
                         )));
@@ -814,13 +814,13 @@ impl IronBaseAdapter {
                     } else if f == 1.0 {
                         1
                     } else {
-                        return Err(crate::error::McpError::InvalidParams(format!(
+                        return Err(crate::error::McpError::invalid_params(format!(
                             "Invalid projection value for '{}': expected 0 or 1, got {}",
                             k, f
                         )));
                     }
                 } else {
-                    return Err(crate::error::McpError::InvalidParams(format!(
+                    return Err(crate::error::McpError::invalid_params(format!(
                         "Invalid projection value for '{}': expected 0 or 1, got {:?}",
                         k, v
                     )));
@@ -885,10 +885,10 @@ impl IronBaseAdapter {
                     );
                     result
                 }
-                Ok(Err(_)) => Err(crate::error::McpError::Internal(
+                Ok(Err(_)) => Err(crate::error::McpError::internal(
                     "Heavy operation semaphore closed unexpectedly".to_string(),
                 )),
-                Err(_) => Err(crate::error::McpError::OperationTooLarge(format!(
+                Err(_) => Err(crate::error::McpError::operation_too_large(format!(
                     "Timeout waiting for find slot. Another heavy operation is in progress. \
                      Either wait {}s or reduce limit to <= {}.",
                     HEAVY_OP_TIMEOUT_SECS, HEAVY_FIND_THRESHOLD
@@ -1081,13 +1081,13 @@ impl IronBaseAdapter {
                 }
                 Ok(Err(_)) => {
                     // Semaphore closed (shouldn't happen)
-                    Err(crate::error::McpError::Internal(
+                    Err(crate::error::McpError::internal(
                         "Heavy operation semaphore closed unexpectedly".to_string(),
                     ))
                 }
                 Err(_) => {
                     // Timeout waiting for permit
-                    Err(crate::error::McpError::OperationTooLarge(format!(
+                    Err(crate::error::McpError::operation_too_large(format!(
                         "Timeout waiting for heavy aggregate slot. Another full-collection \
                          aggregate is in progress. Either wait {}s or add a $match stage \
                          to filter documents first.",

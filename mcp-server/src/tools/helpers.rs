@@ -41,7 +41,7 @@ pub fn verify_admin_key(params: &Value) -> Result<()> {
 
     let expected = match std::env::var("IRONBASE_ADMIN_KEY") {
         Ok(key) if !key.is_empty() => key,
-        _ => return Err(McpError::InvalidParams(ADMIN_AUTH_ERROR.into())),
+        _ => return Err(McpError::invalid_params(ADMIN_AUTH_ERROR)),
     };
 
     let provided = params
@@ -52,7 +52,7 @@ pub fn verify_admin_key(params: &Value) -> Result<()> {
     // Use constant-time comparison to prevent timing attacks
     // Even if provided is empty, we still do the comparison
     if provided.is_empty() || !constant_time_compare(provided.as_bytes(), expected.as_bytes()) {
-        return Err(McpError::InvalidParams(ADMIN_AUTH_ERROR.into()));
+        return Err(McpError::invalid_params(ADMIN_AUTH_ERROR));
     }
     Ok(())
 }
@@ -124,7 +124,7 @@ pub fn parse_sort(params: &Value) -> Option<Vec<(String, i32)>> {
 /// Validate threshold is in range [0.0, 1.0]
 pub fn parse_threshold(params: &Value) -> Result<Option<f64>> {
     match params.get("threshold").and_then(|v| v.as_f64()) {
-        Some(t) if !(0.0..=1.0).contains(&t) => Err(McpError::InvalidParams(format!(
+        Some(t) if !(0.0..=1.0).contains(&t) => Err(McpError::invalid_params(format!(
             "threshold must be between 0.0 and 1.0, got: {}",
             t
         ))),
@@ -142,7 +142,7 @@ pub fn parse_projection(params: &Value) -> Result<Option<HashMap<String, i32>>> 
             for (k, v) in obj {
                 let int_val = if let Some(i) = v.as_i64() {
                     if i != 0 && i != 1 {
-                        return Err(McpError::InvalidParams(format!(
+                        return Err(McpError::invalid_params(format!(
                             "Invalid projection value for '{}': expected 0 or 1, got {}",
                             k, i
                         )));
@@ -154,13 +154,13 @@ pub fn parse_projection(params: &Value) -> Result<Option<HashMap<String, i32>>> 
                     } else if f == 1.0 {
                         1
                     } else {
-                        return Err(McpError::InvalidParams(format!(
+                        return Err(McpError::invalid_params(format!(
                             "Invalid projection value for '{}': expected 0 or 1, got {}",
                             k, f
                         )));
                     }
                 } else {
-                    return Err(McpError::InvalidParams(format!(
+                    return Err(McpError::invalid_params(format!(
                         "Invalid projection value for '{}': expected 0 or 1, got {:?}",
                         k, v
                     )));
@@ -169,8 +169,8 @@ pub fn parse_projection(params: &Value) -> Result<Option<HashMap<String, i32>>> 
             }
             Ok(Some(map))
         } else {
-            Err(McpError::InvalidParams(
-                "projection must be an object like {\"field\": 1} or {\"field\": 0}".into(),
+            Err(McpError::invalid_params(
+                "projection must be an object like {\"field\": 1} or {\"field\": 0}",
             ))
         }
     } else {
@@ -181,12 +181,12 @@ pub fn parse_projection(params: &Value) -> Result<Option<HashMap<String, i32>>> 
 /// Validate collection name
 pub fn validate_collection_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(McpError::InvalidParams(
-            "Collection name cannot be empty".into(),
+        return Err(McpError::invalid_params(
+            "Collection name cannot be empty",
         ));
     }
     if name.len() > MAX_COLLECTION_NAME_LEN {
-        return Err(McpError::InvalidParams(format!(
+        return Err(McpError::invalid_params(format!(
             "Collection name too long (max {} chars)",
             MAX_COLLECTION_NAME_LEN
         )));
@@ -198,8 +198,8 @@ pub fn validate_collection_name(name: &str) -> Result<()> {
     // - Path-like obfuscation attacks
     // System collections (_system.*) can only be created via admin_create_system_collection
     if name.contains('.') {
-        return Err(McpError::InvalidParams(
-            "Collection name cannot contain dots. System collections can only be created via admin tools.".into()
+        return Err(McpError::invalid_params(
+            "Collection name cannot contain dots. System collections can only be created via admin tools."
         ));
     }
 
@@ -208,9 +208,8 @@ pub fn validate_collection_name(name: &str) -> Result<()> {
         .chars()
         .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
     {
-        return Err(McpError::InvalidParams(
-            "Collection name can only contain alphanumeric characters, underscores, and hyphens"
-                .into(),
+        return Err(McpError::invalid_params(
+            "Collection name can only contain alphanumeric characters, underscores, and hyphens",
         ));
     }
     Ok(())
@@ -219,12 +218,12 @@ pub fn validate_collection_name(name: &str) -> Result<()> {
 /// BUG #12 fix: Validate script name (same rules as collection name)
 pub fn validate_script_name(name: &str) -> Result<()> {
     if name.is_empty() {
-        return Err(McpError::InvalidParams(
-            "Script name cannot be empty".into(),
+        return Err(McpError::invalid_params(
+            "Script name cannot be empty",
         ));
     }
     if name.len() > MAX_COLLECTION_NAME_LEN {
-        return Err(McpError::InvalidParams(format!(
+        return Err(McpError::invalid_params(format!(
             "Script name too long (max {} chars)",
             MAX_COLLECTION_NAME_LEN
         )));
@@ -234,9 +233,8 @@ pub fn validate_script_name(name: &str) -> Result<()> {
         .chars()
         .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '-')
     {
-        return Err(McpError::InvalidParams(
-            "Script name can only contain alphanumeric characters, underscores, dots, and hyphens"
-                .into(),
+        return Err(McpError::invalid_params(
+            "Script name can only contain alphanumeric characters, underscores, dots, and hyphens",
         ));
     }
     Ok(())
@@ -248,7 +246,7 @@ pub fn get_string(params: &Value, key: &str) -> Result<String> {
         .get(key)
         .and_then(|v| v.as_str())
         .map(String::from)
-        .ok_or_else(|| McpError::InvalidParams(format!("Missing or invalid '{}' parameter", key)))
+        .ok_or_else(|| McpError::invalid_params(format!("Missing or invalid '{}' parameter", key)))
 }
 
 /// Get required object parameter
@@ -258,7 +256,7 @@ pub fn get_object(params: &Value, key: &str) -> Result<Value> {
         .filter(|v| v.is_object())
         .cloned()
         .ok_or_else(|| {
-            McpError::InvalidParams(format!(
+            McpError::invalid_params(format!(
                 "Missing or invalid '{}' parameter (expected object)",
                 key
             ))
@@ -272,7 +270,7 @@ pub fn get_array(params: &Value, key: &str) -> Result<Vec<Value>> {
         .and_then(|v| v.as_array())
         .cloned()
         .ok_or_else(|| {
-            McpError::InvalidParams(format!(
+            McpError::invalid_params(format!(
                 "Missing or invalid '{}' parameter (expected array)",
                 key
             ))
@@ -283,25 +281,25 @@ pub fn get_array(params: &Value, key: &str) -> Result<Vec<Value>> {
 pub fn parse_transaction_id(params: &Value) -> Result<u64> {
     let tx_param = params
         .get("transaction_id")
-        .ok_or_else(|| McpError::InvalidParams("transaction_id parameter is required".into()))?;
+        .ok_or_else(|| McpError::invalid_params("transaction_id parameter is required"))?;
 
     // Accept both string and number formats
     if let Some(s) = tx_param.as_str() {
         s.parse::<u64>()
-            .map_err(|_| McpError::InvalidParams(format!("Invalid transaction_id format: '{}'", s)))
+            .map_err(|_| McpError::invalid_params(format!("Invalid transaction_id format: '{}'", s)))
     } else if let Some(n) = tx_param.as_u64() {
         Ok(n)
     } else if let Some(n) = tx_param.as_i64() {
         if n >= 0 {
             Ok(n as u64)
         } else {
-            Err(McpError::InvalidParams(
-                "transaction_id cannot be negative".into(),
+            Err(McpError::invalid_params(
+                "transaction_id cannot be negative",
             ))
         }
     } else {
-        Err(McpError::InvalidParams(
-            "transaction_id must be a number or string".into(),
+        Err(McpError::invalid_params(
+            "transaction_id must be a number or string",
         ))
     }
 }

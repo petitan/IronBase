@@ -30,7 +30,7 @@ pub fn dispatch(
         "admin_apikey_list" => handle_admin_apikey_list(params, adapter),
         "admin_apikey_revoke" => handle_admin_apikey_revoke(params, adapter, api_key_cache),
         "admin_apikey_delete" => handle_admin_apikey_delete(params, adapter, api_key_cache),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown admin tool: {}",
             name
         ))),
@@ -165,7 +165,7 @@ fn handle_admin_apikey_create(
             "created_at": api_key.created_at,
             "note": "Save this key now - it cannot be retrieved later!"
         })),
-        Err(e) => Err(McpError::Internal(e)),
+        Err(e) => Err(McpError::internal(e)),
     }
 }
 
@@ -177,7 +177,7 @@ fn handle_admin_apikey_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
             "keys": keys,
             "count": keys.len()
         })),
-        Err(e) => Err(McpError::Internal(e)),
+        Err(e) => Err(McpError::internal(e)),
     }
 }
 
@@ -190,7 +190,7 @@ fn handle_admin_apikey_revoke(
     let id = params
         .get("id")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::InvalidParams("id parameter is required".into()))?;
+        .ok_or_else(|| McpError::invalid_params("id parameter is required"))?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;
@@ -205,7 +205,7 @@ fn handle_admin_apikey_revoke(
     match crate::api_keys::revoke_api_key(adapter, id, cache) {
         Ok(true) => Ok(json!({"success": true, "id": id, "status": "revoked"})),
         Ok(false) => Ok(json!({"success": false, "id": id, "error": "API key not found"})),
-        Err(e) => Err(McpError::Internal(e)),
+        Err(e) => Err(McpError::internal(e)),
     }
 }
 
@@ -218,7 +218,7 @@ fn handle_admin_apikey_delete(
     let id = params
         .get("id")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::InvalidParams("id parameter is required".into()))?;
+        .ok_or_else(|| McpError::invalid_params("id parameter is required"))?;
 
     // Use provided cache or create temporary one (for stdio mode)
     let temp_cache;
@@ -233,6 +233,6 @@ fn handle_admin_apikey_delete(
     match crate::api_keys::delete_api_key(adapter, id, cache) {
         Ok(true) => Ok(json!({"success": true, "id": id, "status": "deleted"})),
         Ok(false) => Ok(json!({"success": false, "id": id, "error": "API key not found"})),
-        Err(e) => Err(McpError::Internal(e)),
+        Err(e) => Err(McpError::internal(e)),
     }
 }

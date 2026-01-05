@@ -213,7 +213,7 @@ impl RhaiEngine {
             Ok(value) => {
                 // Check if cancelled during execution
                 if cancelled.load(Ordering::Relaxed) {
-                    return Err(McpError::ScriptError("Script was cancelled".to_string()));
+                    return Err(McpError::script_error("Script was cancelled".to_string()));
                 }
 
                 let json_result = dynamic_to_json(&value);
@@ -221,7 +221,7 @@ impl RhaiEngine {
                 // Check result size limit
                 let result_size = estimate_json_size(&json_result);
                 if limits.result_exceeds_limit(result_size) {
-                    return Err(McpError::ScriptError(format!(
+                    return Err(McpError::script_error(format!(
                         "Script result too large ({} bytes > {} bytes max). \
                         Return smaller data or use pagination.",
                         result_size, limits.max_result_size
@@ -237,19 +237,19 @@ impl RhaiEngine {
             Err(e) => {
                 // Check if it was a cancellation
                 if cancelled.load(Ordering::Relaxed) {
-                    return Err(McpError::ScriptError("Script was cancelled".to_string()));
+                    return Err(McpError::script_error("Script was cancelled".to_string()));
                 }
 
                 let err_str = format_rhai_error(&e);
 
                 // Check for operation limit
                 if is_operation_limit_error(&e) {
-                    Err(McpError::ScriptError(format!(
+                    Err(McpError::script_error(format!(
                         "Script exceeded maximum operations limit ({})",
                         max_ops
                     )))
                 } else {
-                    Err(McpError::ScriptError(err_str))
+                    Err(McpError::script_error(err_str))
                 }
             }
         }
@@ -300,14 +300,14 @@ impl RhaiEngine {
         // Apply timeout
         match tokio::time::timeout(timeout_duration, handle).await {
             Ok(Ok(result)) => result,
-            Ok(Err(join_err)) => Err(McpError::ScriptError(format!(
+            Ok(Err(join_err)) => Err(McpError::script_error(format!(
                 "Script task panicked: {}",
                 join_err
             ))),
             Err(_elapsed) => {
                 // Timeout - signal cancellation
                 cancelled.store(true, Ordering::SeqCst);
-                Err(McpError::ScriptError(format!(
+                Err(McpError::script_error(format!(
                     "Script execution timed out after {} ms",
                     timeout_ms
                 )))

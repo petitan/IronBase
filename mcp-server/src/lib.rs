@@ -23,7 +23,7 @@ pub use acl::{AclConfig, AclManager, CallerContext, InterfaceType, RequiredPermi
 pub use adapter::{FindOptions, IronBaseAdapter, UpdateResult};
 pub use api_keys::ApiKeyCache;
 pub use engine::{IronBaseService, ServiceContext, ToolRequest, ToolResult};
-pub use error::{McpError, OperationContext, Result};
+pub use error::{ErrorCode, McpError, OperationContext, Result};
 pub use listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTION};
 pub use monitoring::{
     get_memory_stats, get_system_memory, health_check, log_memory_stats, HealthCheck, MemoryStats,

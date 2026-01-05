@@ -23,7 +23,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "script_tags_add" => handle_script_tags_add(params, adapter),
         "script_tags_remove" => handle_script_tags_remove(params, adapter),
         "script_stats" => handle_script_stats(params, adapter),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown script tool: {}",
             name
         ))),
@@ -98,7 +98,7 @@ fn handle_script_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
             "tags": script.tags,
             "dependencies": script.dependencies
         })),
-        None => Err(McpError::InvalidParams(format!(
+        None => Err(McpError::invalid_params(format!(
             "Script '{}' not found",
             name
         ))),
@@ -112,7 +112,7 @@ fn handle_script_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     if deleted {
         Ok(json!({"success": true, "deleted": name}))
     } else {
-        Err(McpError::InvalidParams(format!(
+        Err(McpError::invalid_params(format!(
             "Script '{}' not found",
             name
         )))
@@ -177,7 +177,7 @@ fn handle_script_rollback(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     let version = params
         .get("version")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::InvalidParams("version is required".to_string()))?
+        .ok_or_else(|| McpError::invalid_params("version is required".to_string()))?
         as u32;
     let manager = ScriptManager::new(Arc::clone(adapter));
     let new_version = manager.rollback(&name, version)?;
@@ -189,7 +189,7 @@ fn handle_script_version_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
     let version = params
         .get("version")
         .and_then(|v| v.as_u64())
-        .ok_or_else(|| McpError::InvalidParams("version is required".to_string()))?
+        .ok_or_else(|| McpError::invalid_params("version is required".to_string()))?
         as u32;
     let manager = ScriptManager::new(Arc::clone(adapter));
     match manager.get_version(&name, version)? {
@@ -202,7 +202,7 @@ fn handle_script_version_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
             "dependencies": v.dependencies,
             "created_at": v.created_at
         })),
-        None => Err(McpError::InvalidParams(format!(
+        None => Err(McpError::invalid_params(format!(
             "Version {} of script '{}' not found",
             version, name
         ))),
@@ -212,7 +212,7 @@ fn handle_script_version_get(params: Value, adapter: &Arc<IronBaseAdapter>) -> R
 fn handle_script_tags_add(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let name = get_string(&params, "name")?;
     let tags: Vec<String> = parse_tags(&params)
-        .ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
+        .ok_or_else(|| McpError::invalid_params("tags array is required".to_string()))?;
     let manager = ScriptManager::new(Arc::clone(adapter));
     manager.add_tags(&name, tags.clone())?;
     Ok(json!({"success": true, "name": name, "added_tags": tags}))
@@ -221,7 +221,7 @@ fn handle_script_tags_add(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 fn handle_script_tags_remove(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let name = get_string(&params, "name")?;
     let tags: Vec<String> = parse_tags(&params)
-        .ok_or_else(|| McpError::InvalidParams("tags array is required".to_string()))?;
+        .ok_or_else(|| McpError::invalid_params("tags array is required".to_string()))?;
     let manager = ScriptManager::new(Arc::clone(adapter));
     manager.remove_tags(&name, tags.clone())?;
     Ok(json!({"success": true, "name": name, "removed_tags": tags}))
@@ -239,7 +239,7 @@ fn handle_script_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
             "total_execution_time_ms": stats.total_execution_time_ms,
             "avg_execution_time_ms": stats.avg_execution_time_ms
         })),
-        None => Err(McpError::InvalidParams(format!(
+        None => Err(McpError::invalid_params(format!(
             "Script '{}' not found",
             name
         ))),

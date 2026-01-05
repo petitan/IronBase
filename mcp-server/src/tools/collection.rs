@@ -16,7 +16,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "collection_drop" => handle_collection_drop(params, adapter),
         "schema_set" => handle_schema_set(params, adapter),
         "schema_get" => handle_schema_get(params, adapter),
-        _ => Err(McpError::InvalidParams(format!(
+        _ => Err(McpError::invalid_params(format!(
             "Unknown collection tool: {}",
             name
         ))),
