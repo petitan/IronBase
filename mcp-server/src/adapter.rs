@@ -1237,7 +1237,8 @@ impl IronBaseAdapter {
     ) -> Result<Vec<(Value, f64)>> {
         use ironbase_core::FuzzyAlgorithm;
 
-        let algo = algorithm.map(|a| match a {
+        // Default to JaroWinkler if no algorithm specified
+        let algo = Some(match algorithm.unwrap_or("jaro_winkler") {
             "levenshtein" => FuzzyAlgorithm::Levenshtein,
             "damerau_levenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
             _ => FuzzyAlgorithm::JaroWinkler,
