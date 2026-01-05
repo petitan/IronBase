@@ -3,6 +3,10 @@
 //! Provides HTTP server functionality that can be started with custom shutdown signals.
 
 use crate::acl::{AclManager, CallerContext};
+use crate::transport::{
+    Capabilities, InitializeResult, McpRequest, McpResponse, McpServerInfo, PromptsGetParams,
+    ToolsCallParams,
+};
 use crate::{shutdown, ApiKeyCache, IronBaseAdapter, VERSION};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -852,81 +856,7 @@ struct HttpAppState {
     tool_timeout: std::time::Duration,
 }
 
-// MCP Request/Response types (duplicated from main.rs for lib independence)
-
-#[derive(Debug, serde::Deserialize)]
-struct McpRequest {
-    #[serde(default)]
-    #[allow(dead_code)]
-    jsonrpc: Option<String>,
-    #[serde(default)]
-    id: Option<serde_json::Value>,
-    method: String,
-    #[serde(default)]
-    params: serde_json::Value,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(untagged)]
-enum McpResponse {
-    Success {
-        jsonrpc: String,
-        id: serde_json::Value,
-        result: serde_json::Value,
-    },
-    Error {
-        jsonrpc: String,
-        id: serde_json::Value,
-        error: McpErrorResponse,
-    },
-}
-
-#[derive(Debug, serde::Serialize)]
-struct McpErrorResponse {
-    code: i32,
-    message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    data: Option<serde_json::Value>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ToolsCallParams {
-    name: String,
-    #[serde(default)]
-    arguments: Option<serde_json::Value>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct PromptsGetParams {
-    name: String,
-    #[serde(default)]
-    arguments: Option<serde_json::Value>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct InitializeResult {
-    #[serde(rename = "protocolVersion")]
-    protocol_version: String,
-    capabilities: Capabilities,
-    #[serde(rename = "serverInfo")]
-    server_info: ServerInfo,
-    /// Instructions for the LLM on how to use this server effectively
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct Capabilities {
-    tools: serde_json::Value,
-    prompts: serde_json::Value,
-    resources: serde_json::Value,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct ServerInfo {
-    name: String,
-    version: String,
-}
+// MCP Request/Response types imported from crate::transport
 
 /// Get server instructions for LLM clients (sent in initialize response)
 /// These instructions help Claude Desktop and other MCP clients generate better queries
@@ -1057,7 +987,7 @@ fn handle_request(
                         prompts: serde_json::json!({"listChanged": false}),
                         resources: serde_json::json!({"subscribe": false, "listChanged": true}),
                     },
-                    server_info: ServerInfo {
+                    server_info: McpServerInfo {
                         name: "ironbase-mcp".to_string(),
                         version: VERSION.to_string(),
                     },
@@ -1258,23 +1188,11 @@ fn create_success_response(
     result: serde_json::Value,
     id: Option<serde_json::Value>,
 ) -> McpResponse {
-    McpResponse::Success {
-        jsonrpc: "2.0".to_string(),
-        id: id.unwrap_or(serde_json::Value::Null),
-        result,
-    }
+    McpResponse::success(result, id)
 }
 
 fn create_error_response(code: i32, message: &str, id: Option<serde_json::Value>) -> McpResponse {
-    McpResponse::Error {
-        jsonrpc: "2.0".to_string(),
-        id: id.unwrap_or(serde_json::Value::Null),
-        error: McpErrorResponse {
-            code,
-            message: message.to_string(),
-            data: None,
-        },
-    }
+    McpResponse::error(code, message, id)
 }
 
 #[cfg(test)]
