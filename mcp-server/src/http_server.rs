@@ -11,10 +11,11 @@ use std::time::Instant;
 /// Default max body size: 1 GB
 const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024 * 1024;
 
-///// Default tool timeout: 60 seconds
-/// SAFETY: Reduced from 300s to prevent WSL freezes on runaway queries
-/// If a query takes longer than 60s, it should be optimized with indexes/limits
-const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 60;
+/// Default tool timeout: 25 seconds
+/// SAFETY: Must be SHORTER than Claude Desktop's client timeout (~30s)
+/// Otherwise: client times out → sends new request → server still working on old one → backlog
+/// If a query takes longer than 25s, it MUST be optimized with indexes/limits
+const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 25;
 
 /// A file writer that calls fsync() after every write.
 /// Use for crash debugging when you need guaranteed log persistence.
