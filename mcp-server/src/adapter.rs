@@ -98,6 +98,12 @@ pub struct FindOptions {
     /// If true, also return the total count of matching documents (before limit/skip)
     /// Useful for pagination UI ("Showing 1-10 of 100 results")
     pub include_total: bool,
+    /// Maximum response size in bytes (OOM protection)
+    /// When set, documents are loaded until this limit would be exceeded.
+    pub max_response_bytes: Option<usize>,
+    /// Cancellation flag for cooperative timeout support
+    /// When set to true, the find operation will abort and return an error.
+    pub cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Find result with optional total count
@@ -839,6 +845,10 @@ impl IronBaseAdapter {
             limit: options.limit,
             skip: options.skip,
             include_total: options.include_total,
+            // OOM protection: limit total response size
+            max_response_bytes: options.max_response_bytes,
+            // Cooperative cancellation support
+            cancel_flag: options.cancel_flag,
         };
 
         // Use core's find_with_result which handles count internally

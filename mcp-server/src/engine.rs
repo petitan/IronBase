@@ -18,6 +18,7 @@ use crate::scripting::LimitsManager;
 use crate::tools::dispatch_tool;
 use crate::ServerInfo;
 use serde_json::Value;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,6 +35,9 @@ pub struct ServiceContext {
     pub is_initialized: bool,
     /// Deadline for cooperative cancellation (if set)
     pub deadline: Option<Instant>,
+    /// Cancellation flag for cooperative cancellation
+    /// Set to true externally when request should be cancelled (timeout, client disconnect)
+    pub cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 impl ServiceContext {
@@ -43,6 +47,22 @@ impl ServiceContext {
             caller,
             is_initialized,
             deadline,
+            cancel_flag: None,
+        }
+    }
+
+    /// Create a new service context with cancellation support
+    pub fn with_cancel_flag(
+        caller: CallerContext,
+        is_initialized: bool,
+        deadline: Option<Instant>,
+        cancel_flag: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            caller,
+            is_initialized,
+            deadline,
+            cancel_flag: Some(cancel_flag),
         }
     }
 
@@ -52,6 +72,7 @@ impl ServiceContext {
             caller: CallerContext::localhost(),
             is_initialized: true,
             deadline: None,
+            cancel_flag: None,
         }
     }
 }
@@ -209,6 +230,7 @@ impl IronBaseService {
             Some(&self.api_key_cache),
             Some(&self.server_info),
             Some(&script_limits),
+            ctx.cancel_flag.clone(),
         ) {
             Ok(result) => ToolResult::Success(result),
             Err(e) => ToolResult::Error {

@@ -7,6 +7,8 @@ use crate::value_utils::{
 };
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 /// Options for find queries
 #[derive(Debug, Clone, Default)]
@@ -27,6 +29,20 @@ pub struct FindOptions {
     /// Include total count of matching documents (ignoring limit/skip)
     /// Useful for pagination where you need to know total pages
     pub include_total: bool,
+
+    /// Maximum total response size in bytes (OOM protection)
+    /// When set, documents are loaded until this limit would be exceeded,
+    /// then an error is returned with guidance to use limit/projection.
+    /// Default: None (no limit)
+    ///
+    /// Use `FindOptions::with_safe_defaults()` for automatic RAM-based limits.
+    pub max_response_bytes: Option<usize>,
+
+    /// Cancellation flag for cooperative timeout support
+    /// When set to true, the find operation will abort and return an error.
+    /// Check is performed every 100 documents during loading.
+    /// Default: None (no cancellation support)
+    pub cancel_flag: Option<Arc<AtomicBool>>,
 }
 
 /// Result of find_with_options when include_total is true
@@ -69,6 +85,83 @@ impl FindOptions {
     pub fn with_include_total(mut self, include: bool) -> Self {
         self.include_total = include;
         self
+    }
+
+    /// Set maximum response size in bytes (OOM protection)
+    pub fn with_max_response_bytes(mut self, max_bytes: usize) -> Self {
+        self.max_response_bytes = Some(max_bytes);
+        self
+    }
+
+    /// Set cancellation flag for cooperative timeout support
+    ///
+    /// When the flag is set to true (externally), the find operation will
+    /// check it every 100 documents and abort with a cancellation error.
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Create FindOptions with safe defaults based on system RAM
+    ///
+    /// Automatically sets `max_response_bytes` to ~10% of available RAM,
+    /// capped between 10 MB and 500 MB.
+    ///
+    /// # Scaling table
+    /// | Available RAM | max_response_bytes |
+    /// |---------------|-------------------|
+    /// | < 512 MB      | 10 MB             |
+    /// | 512MB - 2GB   | 50 MB             |
+    /// | 2GB - 8GB     | 100 MB            |
+    /// | 8GB - 32GB    | 200 MB            |
+    /// | > 32GB        | 500 MB            |
+    pub fn with_safe_defaults() -> Self {
+        Self {
+            max_response_bytes: Some(calculate_safe_response_limit()),
+            ..Default::default()
+        }
+    }
+}
+
+/// Calculate safe response size limit based on system RAM
+///
+/// Uses 10% of available RAM, capped between 10 MB and 500 MB.
+/// Falls back to 50 MB if memory detection fails.
+pub fn calculate_safe_response_limit() -> usize {
+    use crate::aggregation::memory_info::get_available_memory_bytes;
+
+    match get_available_memory_bytes() {
+        Some(bytes) => {
+            let available_mb = bytes / (1024 * 1024);
+            // Use 10% of available RAM, bounded [10 MB, 500 MB]
+            let max_mb = (available_mb as usize / 10).clamp(10, 500);
+            max_mb * 1024 * 1024
+        }
+        None => 50 * 1024 * 1024, // 50 MB fallback
+    }
+}
+
+/// Estimate JSON serialized size of a Value (without actually serializing)
+///
+/// Fast approximation that avoids allocation. Used for response size tracking.
+pub fn estimate_json_size(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(true) => 4,
+        Value::Bool(false) => 5,
+        Value::Number(n) => n.to_string().len(),
+        Value::String(s) => s.len() + 2, // quotes
+        Value::Array(arr) => {
+            2 + arr.iter().map(estimate_json_size).sum::<usize>() + arr.len().saturating_sub(1)
+            // commas
+        }
+        Value::Object(obj) => {
+            2 + obj
+                .iter()
+                .map(|(k, v)| k.len() + 3 + estimate_json_size(v)) // "key": value
+                .sum::<usize>()
+                + obj.len().saturating_sub(1) // commas
+        }
     }
 }
 

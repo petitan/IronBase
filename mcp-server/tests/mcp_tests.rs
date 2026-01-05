@@ -255,14 +255,14 @@ fn test_adapter_stats() {
 #[test]
 fn test_dispatch_db_stats() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("db_stats", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("db_stats", json!({}), &adapter, None, None, None, None);
     assert!(result.is_ok());
 }
 
 #[test]
 fn test_dispatch_db_checkpoint() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("db_checkpoint", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("db_checkpoint", json!({}), &adapter, None, None, None, None);
     assert!(result.is_ok());
     let value = result.unwrap();
     assert_eq!(value.get("success"), Some(&json!(true)));
@@ -271,7 +271,7 @@ fn test_dispatch_db_checkpoint() {
 #[test]
 fn test_dispatch_collection_list() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("collection_list", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("collection_list", json!({}), &adapter, None, None, None, None);
     assert!(result.is_ok());
     let value = result.unwrap();
     assert!(value.get("collections").is_some());
@@ -288,7 +288,7 @@ fn test_dispatch_insert_one() {
         "collection": "users",
         "document": {"name": "Alice", "age": 30}
     });
-    let result = dispatch_tool("insert_one", params, &adapter, None, None, None);
+    let result = dispatch_tool("insert_one", params, &adapter, None, None, None, None);
     assert!(result.is_ok());
     let value = result.unwrap();
     assert!(value.get("inserted_id").is_some());
@@ -304,7 +304,7 @@ fn test_dispatch_insert_many() {
             {"name": "Bob", "age": 25}
         ]
     });
-    let result = dispatch_tool("insert_many", params, &adapter, None, None, None);
+    let result = dispatch_tool("insert_many", params, &adapter, None, None, None, None);
     assert!(result.is_ok());
     let value = result.unwrap();
     assert_eq!(value.get("inserted_count"), Some(&json!(2)));
@@ -322,6 +322,7 @@ fn test_dispatch_find() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -330,6 +331,7 @@ fn test_dispatch_find() {
         "find",
         json!({"collection": "users", "query": {"name": "Alice"}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -358,6 +360,7 @@ fn test_dispatch_find_with_options() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -371,6 +374,7 @@ fn test_dispatch_find_with_options() {
             "limit": 2
         }),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -401,6 +405,7 @@ fn test_dispatch_find_with_include_total() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -415,6 +420,7 @@ fn test_dispatch_find_with_include_total() {
             "include_total": true
         }),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -448,6 +454,7 @@ fn test_dispatch_find_without_include_total() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -460,6 +467,7 @@ fn test_dispatch_find_without_include_total() {
             "limit": 2
         }),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -485,6 +493,7 @@ fn test_dispatch_find_one() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -492,6 +501,7 @@ fn test_dispatch_find_one() {
         "find_one",
         json!({"collection": "users", "query": {"name": "Alice"}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -512,6 +522,7 @@ fn test_dispatch_update_one() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -523,6 +534,7 @@ fn test_dispatch_update_one() {
             "update": {"$set": {"age": 31}}
         }),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -544,6 +556,7 @@ fn test_dispatch_delete_one() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -551,6 +564,7 @@ fn test_dispatch_delete_one() {
         "delete_one",
         json!({"collection": "users", "filter": {"name": "Alice"}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -581,6 +595,7 @@ fn test_dispatch_count_documents() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -588,6 +603,7 @@ fn test_dispatch_count_documents() {
         "count_documents",
         json!({"collection": "users", "query": {}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -615,6 +631,7 @@ fn test_dispatch_distinct() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -622,6 +639,7 @@ fn test_dispatch_distinct() {
         "distinct",
         json!({"collection": "users", "field": "city"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -649,6 +667,7 @@ fn test_dispatch_aggregate() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -661,6 +680,7 @@ fn test_dispatch_aggregate() {
             ]
         }),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -686,6 +706,7 @@ fn test_dispatch_index_create_single() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -693,6 +714,7 @@ fn test_dispatch_index_create_single() {
         "index_create",
         json!({"collection": "users", "field": "name"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -713,6 +735,7 @@ fn test_dispatch_index_create_compound() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -720,6 +743,7 @@ fn test_dispatch_index_create_compound() {
         "index_create",
         json!({"collection": "users", "fields": ["name", "age"]}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -738,6 +762,7 @@ fn test_dispatch_index_list() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -748,6 +773,7 @@ fn test_dispatch_index_list() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -755,6 +781,7 @@ fn test_dispatch_index_list() {
         "index_list",
         json!({"collection": "users"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -779,6 +806,7 @@ fn test_dispatch_schema_get_empty() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -786,6 +814,7 @@ fn test_dispatch_schema_get_empty() {
         "schema_get",
         json!({"collection": "users"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -803,6 +832,7 @@ fn test_dispatch_schema_set_and_get() {
         "insert_one",
         json!({"collection": "users", "document": {"name": "Test"}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -824,6 +854,7 @@ fn test_dispatch_schema_set_and_get() {
         None,
         None,
         None,
+        None,
     );
     assert!(set_result.is_ok());
     assert_eq!(set_result.unwrap().get("schema_set"), Some(&json!(true)));
@@ -832,6 +863,7 @@ fn test_dispatch_schema_set_and_get() {
         "schema_get",
         json!({"collection": "users"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -848,7 +880,7 @@ fn test_dispatch_schema_set_and_get() {
 #[test]
 fn test_dispatch_unknown_tool() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("nonexistent_tool", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("nonexistent_tool", json!({}), &adapter, None, None, None, None);
     assert!(result.is_err());
 }
 
@@ -856,7 +888,15 @@ fn test_dispatch_unknown_tool() {
 fn test_dispatch_missing_required_param() {
     let (adapter, _temp) = create_test_adapter();
     // Missing "collection" parameter
-    let result = dispatch_tool("insert_one", json!({"document": {}}), &adapter, None, None, None);
+    let result = dispatch_tool(
+        "insert_one",
+        json!({"document": {}}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(result.is_err());
 }
 
@@ -868,6 +908,7 @@ fn test_dispatch_invalid_param_type() {
         "insert_one",
         json!({"collection": "test", "document": "not an object"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -899,7 +940,7 @@ fn test_concurrent_inserts() {
                     "collection": "concurrent_test",
                     "document": {"thread": thread_id, "index": i}
                 });
-                let result = dispatch_tool("insert_one", params, &adapter_clone, None, None, None);
+                let result = dispatch_tool("insert_one", params, &adapter_clone, None, None, None, None);
                 assert!(result.is_ok(), "Insert failed: {:?}", result.err());
             }
         });
@@ -915,6 +956,7 @@ fn test_concurrent_inserts() {
         "count_documents",
         json!({"collection": "concurrent_test", "query": {}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -941,7 +983,8 @@ fn test_concurrent_reads() {
             &adapter,
             None,
             None,
-        None,
+            None,
+            None,
         )
         .unwrap();
     }
@@ -959,7 +1002,8 @@ fn test_concurrent_reads() {
                     &adapter_clone,
                     None,
                     None,
-        None,
+                    None,
+                    None,
                 );
                 assert!(result.is_ok());
                 let value = result.unwrap();
@@ -988,7 +1032,8 @@ fn test_concurrent_mixed_operations() {
             &adapter,
             None,
             None,
-        None,
+            None,
+            None,
         )
         .unwrap();
     }
@@ -1006,7 +1051,8 @@ fn test_concurrent_mixed_operations() {
                     &adapter_clone,
                     None,
                     None,
-        None,
+                    None,
+                    None,
                 );
             }
         }));
@@ -1026,7 +1072,8 @@ fn test_concurrent_mixed_operations() {
                     &adapter_clone,
                     None,
                     None,
-        None,
+                    None,
+                    None,
                 );
             }
         }));
@@ -1047,7 +1094,8 @@ fn test_concurrent_mixed_operations() {
                     &adapter_clone,
                     None,
                     None,
-        None,
+                    None,
+                    None,
                 );
             }
         }));
@@ -1062,6 +1110,7 @@ fn test_concurrent_mixed_operations() {
         "count_documents",
         json!({"collection": "mixed_test", "query": {}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1100,7 +1149,8 @@ fn test_concurrent_different_collections() {
                     &adapter_clone,
                     None,
                     None,
-        None,
+                    None,
+                    None,
                 )
                 .unwrap();
             }
@@ -1121,7 +1171,8 @@ fn test_concurrent_different_collections() {
             &adapter,
             None,
             None,
-        None,
+            None,
+            None,
         );
         assert!(count_result.is_ok());
         assert_eq!(count_result.unwrap().get("count"), Some(&json!(20)));
@@ -1147,7 +1198,8 @@ fn test_concurrent_aggregation() {
             &adapter,
             None,
             None,
-        None,
+            None,
+            None,
         )
         .unwrap();
     }
@@ -1170,7 +1222,8 @@ fn test_concurrent_aggregation() {
                     &adapter_clone,
                     None,
                     None,
-        None,
+                    None,
+                    None,
                 );
                 assert!(result.is_ok());
                 let value = result.unwrap();
@@ -1202,7 +1255,8 @@ fn test_concurrent_index_operations() {
             &adapter,
             None,
             None,
-        None,
+            None,
+            None,
         )
         .unwrap();
     }
@@ -1224,7 +1278,8 @@ fn test_concurrent_index_operations() {
                 &adapter_clone,
                 None,
                 None,
-        None,
+                None,
+                None,
             );
             // Index creation may succeed or fail if concurrent
             // Just verify no panic
@@ -1241,6 +1296,7 @@ fn test_concurrent_index_operations() {
         "index_list",
         json!({"collection": "index_test"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1265,7 +1321,8 @@ fn test_concurrent_delete_and_read() {
             &adapter,
             None,
             None,
-        None,
+            None,
+            None,
         )
         .unwrap();
     }
@@ -1282,7 +1339,8 @@ fn test_concurrent_delete_and_read() {
                 &adapter_read,
                 None,
                 None,
-        None,
+                None,
+                None,
             );
             assert!(result.is_ok());
         }
@@ -1301,7 +1359,8 @@ fn test_concurrent_delete_and_read() {
                 &adapter_delete,
                 None,
                 None,
-        None,
+                None,
+                None,
             );
         }
     }));
@@ -1315,6 +1374,7 @@ fn test_concurrent_delete_and_read() {
         "count_documents",
         json!({"collection": "delete_test", "query": {}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1354,7 +1414,8 @@ fn test_stress_many_concurrent_operations() {
                             &adapter_clone,
                             None,
                             None,
-        None,
+                            None,
+                            None,
                         );
                     }
                     1 => {
@@ -1364,7 +1425,8 @@ fn test_stress_many_concurrent_operations() {
                             &adapter_clone,
                             None,
                             None,
-        None,
+                            None,
+                            None,
                         );
                     }
                     2 => {
@@ -1378,7 +1440,8 @@ fn test_stress_many_concurrent_operations() {
                             &adapter_clone,
                             None,
                             None,
-        None,
+                            None,
+                            None,
                         );
                     }
                     _ => {
@@ -1388,7 +1451,8 @@ fn test_stress_many_concurrent_operations() {
                             &adapter_clone,
                             None,
                             None,
-        None,
+                            None,
+                            None,
                         );
                     }
                 }
@@ -1405,6 +1469,7 @@ fn test_stress_many_concurrent_operations() {
         "count_documents",
         json!({"collection": "stress_test", "query": {}}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1430,6 +1495,7 @@ fn test_script_save_new() {
         None,
         None,
         None,
+        None,
     );
     assert!(result.is_ok());
     let value = result.unwrap();
@@ -1447,6 +1513,7 @@ fn test_script_save_without_description() {
             "code": "42"
         }),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1472,6 +1539,7 @@ fn test_script_get_existing() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1480,6 +1548,7 @@ fn test_script_get_existing() {
         "script_get",
         json!({"name": "test_script"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1509,6 +1578,7 @@ fn test_script_get_nonexistent() {
         None,
         None,
         None,
+        None,
     );
     // script_get returns error for non-existent script
     assert!(result.is_err());
@@ -1517,7 +1587,7 @@ fn test_script_get_nonexistent() {
 #[test]
 fn test_script_list_empty() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_list", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("script_list", json!({}), &adapter, None, None, None, None);
     assert!(result.is_ok());
     let value = result.unwrap();
     let scripts = value.get("scripts").unwrap().as_array().unwrap();
@@ -1536,12 +1606,14 @@ fn test_script_list_multiple() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     dispatch_tool(
         "script_save",
         json!({"name": "script_b", "code": "2", "description": "Second"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1554,11 +1626,12 @@ fn test_script_list_multiple() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
     // List them
-    let result = dispatch_tool("script_list", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("script_list", json!({}), &adapter, None, None, None, None);
     assert!(result.is_ok());
     let value = result.unwrap();
     let scripts = value.get("scripts").unwrap().as_array().unwrap();
@@ -1591,6 +1664,7 @@ fn test_script_update_existing() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1606,6 +1680,7 @@ fn test_script_update_existing() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1617,13 +1692,14 @@ fn test_script_update_existing() {
         None,
         None,
         None,
+        None,
     );
     let value = result.unwrap();
     assert_eq!(value.get("code"), Some(&json!("version_2")));
     assert_eq!(value.get("description"), Some(&json!("Updated version")));
 
     // Should still be only one script with this name
-    let list_result = dispatch_tool("script_list", json!({}), &adapter, None, None, None);
+    let list_result = dispatch_tool("script_list", json!({}), &adapter, None, None, None, None);
     let count = list_result.unwrap().get("count").unwrap().as_i64().unwrap();
     assert_eq!(count, 1);
 }
@@ -1640,6 +1716,7 @@ fn test_script_delete_existing() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1648,6 +1725,7 @@ fn test_script_delete_existing() {
         "script_delete",
         json!({"name": "to_delete"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1665,6 +1743,7 @@ fn test_script_delete_existing() {
         None,
         None,
         None,
+        None,
     );
     assert!(get_result.is_err());
 }
@@ -1676,6 +1755,7 @@ fn test_script_delete_nonexistent() {
         "script_delete",
         json!({"name": "nonexistent"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1694,6 +1774,7 @@ fn test_script_save_missing_name() {
         None,
         None,
         None,
+        None,
     );
     assert!(result.is_err());
 }
@@ -1701,21 +1782,29 @@ fn test_script_save_missing_name() {
 #[test]
 fn test_script_save_missing_code() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_save", json!({"name": "test"}), &adapter, None, None, None);
+    let result = dispatch_tool(
+        "script_save",
+        json!({"name": "test"}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(result.is_err());
 }
 
 #[test]
 fn test_script_get_missing_name() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_get", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("script_get", json!({}), &adapter, None, None, None, None);
     assert!(result.is_err());
 }
 
 #[test]
 fn test_script_delete_missing_name() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_delete", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("script_delete", json!({}), &adapter, None, None, None, None);
     assert!(result.is_err());
 }
 
@@ -1757,6 +1846,7 @@ fn test_script_run_simple() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1765,6 +1855,7 @@ fn test_script_run_simple() {
         "script_run",
         json!({"name": "add_numbers"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1789,6 +1880,7 @@ fn test_script_run_with_params() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1799,6 +1891,7 @@ fn test_script_run_with_params() {
             "params": {"a": 7, "b": 6}
         }),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1827,6 +1920,7 @@ fn test_script_run_with_print() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1834,6 +1928,7 @@ fn test_script_run_with_print() {
         "script_run",
         json!({"name": "logging_script"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1876,6 +1971,7 @@ fn test_script_run_db_operations() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1883,6 +1979,7 @@ fn test_script_run_db_operations() {
         "script_run",
         json!({"name": "db_script"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1929,6 +2026,7 @@ fn test_script_run_db_update_delete() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1936,6 +2034,7 @@ fn test_script_run_db_update_delete() {
         "script_run",
         json!({"name": "crud_script"}),
         &adapter,
+        None,
         None,
         None,
         None,
@@ -1959,6 +2058,7 @@ fn test_script_run_nonexistent() {
         None,
         None,
         None,
+        None,
     );
     assert!(result.is_err());
 }
@@ -1977,6 +2077,7 @@ fn test_script_run_syntax_error() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
 
@@ -1987,6 +2088,7 @@ fn test_script_run_syntax_error() {
         None,
         None,
         None,
+        None,
     );
     assert!(result.is_err());
 }
@@ -1994,6 +2096,6 @@ fn test_script_run_syntax_error() {
 #[test]
 fn test_script_run_missing_name() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("script_run", json!({}), &adapter, None, None, None);
+    let result = dispatch_tool("script_run", json!({}), &adapter, None, None, None, None);
     assert!(result.is_err());
 }

@@ -29,6 +29,7 @@ use crate::scripting::ScriptLimits;
 use crate::ServerInfo;
 use serde_json::{json, Value};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Get the list of all available tools for MCP tools/list
@@ -81,6 +82,7 @@ const MAX_UNINDEXED_SORT_DOCS: usize = 100_000;
 /// * `api_key_cache` - Optional API key cache for admin operations
 /// * `server_info` - Optional server info for admin operations
 /// * `limits` - Optional script limits for unified resource limiting
+/// * `cancel_flag` - Optional cancellation flag for cooperative timeout
 pub fn dispatch_tool(
     name: &str,
     params: Value,
@@ -88,6 +90,7 @@ pub fn dispatch_tool(
     api_key_cache: Option<&ApiKeyCache>,
     server_info: Option<&ServerInfo>,
     limits: Option<&ScriptLimits>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<Value> {
     let tool_start = std::time::Instant::now();
 
@@ -109,7 +112,15 @@ pub fn dispatch_tool(
     // Note: We use AssertUnwindSafe because our handlers should not panic,
     // but if they do, we want to catch it gracefully
     let result = catch_unwind(AssertUnwindSafe(|| {
-        dispatch_tool_inner(name, params, adapter, api_key_cache, server_info, limits)
+        dispatch_tool_inner(
+            name,
+            params,
+            adapter,
+            api_key_cache,
+            server_info,
+            limits,
+            cancel_flag,
+        )
     }));
 
     let elapsed = tool_start.elapsed();
@@ -260,12 +271,13 @@ fn dispatch_tool_inner(
     api_key_cache: Option<&ApiKeyCache>,
     server_info: Option<&ServerInfo>,
     limits: Option<&ScriptLimits>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<Value> {
     match name {
         // CRUD operations
         "insert_one" | "insert_many" | "find" | "find_one" | "update_one" | "update_many"
         | "delete_one" | "delete_many" | "count_documents" | "distinct" | "aggregate" => {
-            crud::dispatch(name, params, adapter, limits)
+            crud::dispatch(name, params, adapter, limits, cancel_flag)
         }
 
         // Index operations

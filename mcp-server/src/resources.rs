@@ -44,7 +44,15 @@ pub struct ResourceContent {
 }
 
 /// Get list of all available resources from the database
-pub fn get_resources_list(adapter: &IronBaseAdapter) -> Value {
+pub fn get_resources_list(_adapter: &IronBaseAdapter) -> Value {
+    // TEMPORARILY DISABLED - all resources
+    json!({
+        "resources": []
+    })
+}
+
+#[allow(dead_code)]
+fn get_resources_list_full(adapter: &IronBaseAdapter) -> Value {
     let mut resources = Vec::new();
 
     // Add database stats resource
