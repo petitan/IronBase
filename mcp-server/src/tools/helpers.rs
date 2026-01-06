@@ -15,7 +15,7 @@ pub const DEFAULT_QUERY_LIMIT: usize = 10_000;
 /// Returns Ok(()) if not cancelled, Err(RequestCancelled) if cancelled.
 #[inline]
 pub fn check_cancelled() -> Result<()> {
-    if crate::cancellation::is_cancelled() {
+    if crate::execution::is_cancelled() {
         return Err(McpError::cancelled("Request was cancelled by client"));
     }
     Ok(())

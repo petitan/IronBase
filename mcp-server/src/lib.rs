@@ -8,11 +8,11 @@ pub mod api_keys;
 pub mod cancellation;
 pub mod engine;
 pub mod error;
+pub mod execution;
 pub mod http_server;
 pub mod listener;
 pub mod monitoring;
 pub mod prompts;
-pub mod request_deadline;
 pub mod resources;
 pub mod scripting;
 pub mod service;
@@ -42,6 +42,10 @@ pub use tools::{dispatch_tool, get_tools_list, get_tools_list_filtered};
 pub use transport::{
     error_codes, handler::HandlerContext, Capabilities, InitializeResult, JsonRpcError, McpRequest,
     McpResponse, PromptsGetParams, ResourcesReadParams, ToolsCallParams,
+};
+pub use execution::{
+    current_cancel_flag, current_deadline, current_execution_context, is_cancelled,
+    set_execution_context, ExecutionContext, ExecutionGuard,
 };
 
 /// Library version

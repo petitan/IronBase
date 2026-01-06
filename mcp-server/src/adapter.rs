@@ -1,8 +1,7 @@
 //! IronBase Adapter - Direct wrapper around IronBase core
 
-use crate::cancellation;
 use crate::error::Result;
-use crate::request_deadline;
+use crate::execution;
 use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
 use ironbase_core::ExecutionContext;
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
@@ -398,21 +397,21 @@ impl IronBaseAdapter {
     // Execution Context (for cancellation/timeout)
     // ============================================================
 
-    /// Create an ExecutionContext from current thread-local deadline and cancel flag.
+    /// Create an ExecutionContext from current thread-local execution context.
     ///
     /// This consolidates cancellation/timeout support across all operations.
     /// The returned context should be passed to core `_with_ctx` methods.
     fn create_execution_context(&self) -> ExecutionContext {
         let mut ctx = ExecutionContext::new();
 
-        // Add deadline from thread-local (set by HTTP request handler)
-        if let Some(deadline) = request_deadline::current_deadline() {
-            ctx = ctx.with_deadline(deadline);
-        }
-
-        // Add cancel flag from thread-local (set by request tracker)
-        if let Some(flag) = cancellation::current_cancel_flag() {
-            ctx = ctx.with_cancel_flag(flag);
+        // Add deadline and cancel flag from unified thread-local context
+        if let Some(exec_ctx) = execution::current_execution_context() {
+            if let Some(deadline) = exec_ctx.deadline {
+                ctx = ctx.with_deadline(deadline);
+            }
+            if let Some(flag) = exec_ctx.cancel_flag {
+                ctx = ctx.with_cancel_flag(flag);
+            }
         }
 
         ctx
@@ -938,7 +937,7 @@ impl IronBaseAdapter {
         let pipeline_value = Value::Array(pipeline.clone());
         // Use centralized limits + cooperative deadline (if any)
         let mut ctx = AggregationLimitContext::new(AggregationLimits::from_system_memory());
-        if let Some(deadline) = request_deadline::current_deadline() {
+        if let Some(deadline) = execution::current_deadline() {
             ctx = ctx.with_deadline(deadline);
         }
         let results = coll.aggregate_with_context(&pipeline_value, &ctx)?;

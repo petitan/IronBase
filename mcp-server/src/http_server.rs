@@ -653,9 +653,14 @@ async fn run_http_server_internal(
 
         // Run potentially blocking operations in spawn_blocking with timeout
         // This prevents long-running operations (like index creation) from blocking the async runtime
+        let deadline = std::time::Instant::now() + effective_timeout;
         let mut handle = tokio::task::spawn_blocking(move || {
-            // Set thread-local cancellation flag for cooperative checking
-            let _cancel_guard = crate::cancellation::set_cancel_flag(cancel_flag_clone.clone());
+            // Set thread-local execution context for cooperative cancellation and timeout checking
+            let ctx = crate::execution::ExecutionContext::new(
+                Some(deadline),
+                Some(cancel_flag_clone.clone()),
+            );
+            let _exec_guard = crate::execution::set_execution_context(ctx);
 
             handle_request(
                 &request,

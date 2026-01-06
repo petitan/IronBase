@@ -2,7 +2,6 @@
 //!
 //! This module provides:
 //! - `RequestTracker`: Thread-safe registry of in-flight requests
-//! - Thread-local cancellation flag for cooperative checking in tools
 //!
 //! ## MCP Spec Compliance
 //!
@@ -15,9 +14,13 @@
 //! - The request is unknown
 //! - Processing has already completed
 //! - The request cannot be cancelled
+//!
+//! ## Note
+//!
+//! Thread-local cancellation flag handling has been moved to `execution.rs`
+//! which provides a unified `ExecutionContext` for both deadline and cancellation.
 
 use dashmap::DashMap;
-use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -39,9 +42,8 @@ impl RequestTracker {
 
     /// Register a new request, returns cancellation flag
     ///
-    /// The returned `Arc<AtomicBool>` should be:
-    /// 1. Stored in thread-local via `set_cancel_flag()`
-    /// 2. Checked periodically in long-running operations via `is_cancelled()`
+    /// The returned `Arc<AtomicBool>` should be passed to `ExecutionContext`
+    /// via `set_execution_context()` in the HTTP handler.
     pub fn start(&self, request_id: &str) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.in_flight.insert(request_id.to_string(), flag.clone());
@@ -91,73 +93,6 @@ impl Default for RequestTracker {
     }
 }
 
-// Thread-local cancellation flag for cooperative checking
-thread_local! {
-    static CANCEL_FLAG: Cell<Option<Arc<AtomicBool>>> = const { Cell::new(None) };
-}
-
-/// Set cancellation flag for current thread
-///
-/// Returns a guard that clears the flag on drop.
-/// Typical usage:
-/// ```ignore
-/// let flag = tracker.start(&request_id);
-/// let _guard = set_cancel_flag(flag);
-/// // ... do work, periodically call is_cancelled() ...
-/// // guard drops here, clearing thread-local
-/// ```
-pub fn set_cancel_flag(flag: Arc<AtomicBool>) -> CancelGuard {
-    CANCEL_FLAG.set(Some(flag));
-    CancelGuard
-}
-
-/// Check if current request is cancelled
-///
-/// Call this periodically in long-running operations:
-/// ```ignore
-/// for (i, doc) in documents.iter().enumerate() {
-///     if i % 1000 == 0 && is_cancelled() {
-///         return Err(McpError::cancelled("Request was cancelled"));
-///     }
-///     process(doc);
-/// }
-/// ```
-pub fn is_cancelled() -> bool {
-    CANCEL_FLAG.with(|cell| {
-        // We need to temporarily take the value to read it
-        let flag = cell.take();
-        let result = flag
-            .as_ref()
-            .map(|f| f.load(Ordering::Relaxed))
-            .unwrap_or(false);
-        cell.set(flag);
-        result
-    })
-}
-
-/// Get current cancellation flag for passing to core operations
-///
-/// Returns `Some(Arc<AtomicBool>)` if a cancel flag is set for this thread,
-/// `None` otherwise. Use this to pass the flag to core operations that
-/// support cooperative cancellation via `ExecutionContext`.
-pub fn current_cancel_flag() -> Option<Arc<AtomicBool>> {
-    CANCEL_FLAG.with(|cell| {
-        let flag = cell.take();
-        let result = flag.clone();
-        cell.set(flag);
-        result
-    })
-}
-
-/// RAII guard to clear thread-local cancellation flag on drop
-pub struct CancelGuard;
-
-impl Drop for CancelGuard {
-    fn drop(&mut self) {
-        CANCEL_FLAG.set(None);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,38 +130,23 @@ mod tests {
     }
 
     #[test]
-    fn test_thread_local_cancel_flag() {
-        // Initially not cancelled
-        assert!(!is_cancelled());
+    fn test_multiple_requests() {
+        let tracker = RequestTracker::new();
 
-        // Set a flag
-        let flag = Arc::new(AtomicBool::new(false));
-        {
-            let _guard = set_cancel_flag(flag.clone());
+        let flag1 = tracker.start("req-1");
+        let flag2 = tracker.start("req-2");
+        let flag3 = tracker.start("req-3");
+        assert_eq!(tracker.in_flight_count(), 3);
 
-            // Not cancelled yet
-            assert!(!is_cancelled());
+        // Cancel one
+        tracker.cancel("req-2", None);
+        assert!(!flag1.load(Ordering::Relaxed));
+        assert!(flag2.load(Ordering::Relaxed));
+        assert!(!flag3.load(Ordering::Relaxed));
+        assert_eq!(tracker.in_flight_count(), 2);
 
-            // Set cancelled
-            flag.store(true, Ordering::SeqCst);
-            assert!(is_cancelled());
-        }
-
-        // Guard dropped, should be cleared
-        assert!(!is_cancelled());
-    }
-
-    #[test]
-    fn test_cancel_guard_drop() {
-        let flag = Arc::new(AtomicBool::new(true));
-
-        {
-            let _guard = set_cancel_flag(flag.clone());
-            assert!(is_cancelled());
-        }
-
-        // After guard drops, is_cancelled should return false
-        // (because thread-local is cleared, not because flag changed)
-        assert!(!is_cancelled());
+        // Finish another
+        tracker.finish("req-1");
+        assert_eq!(tracker.in_flight_count(), 1);
     }
 }
