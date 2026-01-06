@@ -642,13 +642,14 @@ async fn run_http_server_internal(
         let state_clone = state.clone();
         let request_id = request.id.clone();
         let request_method = request.method.clone();
+        let tool_name_owned = tool_name.to_string();
         let trace_id_clone = trace_id.clone();
         let cancel_flag_clone = cancel_flag.clone();
         let json_rpc_id_for_cleanup = json_rpc_id.clone();
         let request_tracker_clone = state.request_tracker.clone();
 
-        // Log incoming request with method
-        tracing::info!(trace_id = %trace_id, method = %request_method, remote = %remote_addr, "Request started");
+        // Log incoming request with method and tool name
+        tracing::info!(trace_id = %trace_id, method = %request_method, tool = %tool_name, remote = %remote_addr, "Request started");
 
         // Run potentially blocking operations in spawn_blocking with timeout
         // This prevents long-running operations (like index creation) from blocking the async runtime
@@ -688,6 +689,7 @@ async fn run_http_server_internal(
                 tracing::info!(
                     trace_id = %trace_id_clone,
                     method = %request_method,
+                    tool = %tool_name_owned,
                     elapsed_ms = elapsed.as_millis(),
                     status = "success",
                     "Request completed"
@@ -702,6 +704,7 @@ async fn run_http_server_internal(
                 tracing::info!(
                     trace_id = %trace_id_clone,
                     method = %request_method,
+                    tool = %tool_name_owned,
                     elapsed_ms = elapsed.as_millis(),
                     status = "notification",
                     "Request completed (no response)"
@@ -714,6 +717,7 @@ async fn run_http_server_internal(
                 tracing::error!(
                     trace_id = %trace_id_clone,
                     method = %request_method,
+                    tool = %tool_name_owned,
                     elapsed_ms = elapsed.as_millis(),
                     status = "panic",
                     "<<< MCP ERROR: {}", error_msg
@@ -725,14 +729,15 @@ async fn run_http_server_internal(
                 // Timeout - operation took too long
                 let timeout_secs = elapsed.as_secs();
                 let error_msg = format!(
-                    "Operation timed out after {} seconds. Method: '{}'. \
+                    "Operation timed out after {} seconds. Tool: '{}'. \
                     Solutions: 1) Add 'limit' to your query, 2) Use an indexed field in your filter, \
                     3) Increase tool_timeout_secs in config.toml (or use faster tool).",
-                    timeout_secs, request_method
+                    timeout_secs, tool_name_owned
                 );
                 tracing::error!(
                     trace_id = %trace_id_clone,
                     method = %request_method,
+                    tool = %tool_name_owned,
                     elapsed_ms = elapsed.as_millis(),
                     status = "timeout",
                     "<<< MCP TIMEOUT: {}", error_msg

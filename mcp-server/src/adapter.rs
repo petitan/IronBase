@@ -1,8 +1,13 @@
 //! IronBase Adapter - Direct wrapper around IronBase core
 //!
 //! CONCURRENCY CONTROL (2026-01):
-//! Heavy operations (aggregate without $match) are throttled to prevent OOM.
-//! See `HEAVY_OP_SEMAPHORE` for configuration.
+//! Heavy operations are throttled to prevent lock contention and OOM:
+//! - `find` with limit > 1000 or no limit
+//! - `aggregate` without leading $match stage
+//! - `count_documents` with empty query or $regex
+//! - `distinct` (always heavy - scans for unique values)
+//!
+//! See `MAX_CONCURRENT_HEAVY_OPS` for configuration (default: 1 per collection).
 
 use crate::error::Result;
 use crate::request_deadline;
@@ -783,8 +788,44 @@ impl IronBaseAdapter {
     }
 
     /// Check if a find operation is "heavy" (requires semaphore)
-    fn is_heavy_find(limit: Option<usize>) -> bool {
-        limit.map(|l| l > HEAVY_FIND_THRESHOLD).unwrap_or(true)
+    /// Heavy if: limit > threshold OR no limit OR query contains $regex
+    fn is_heavy_find(limit: Option<usize>, query: &Value) -> bool {
+        // Large or unlimited result set
+        if limit.map(|l| l > HEAVY_FIND_THRESHOLD).unwrap_or(true) {
+            return true;
+        }
+        // Regex queries cause collection scan even with small limit
+        Self::contains_regex(query)
+    }
+
+    /// Check if a count operation is "heavy" (requires semaphore)
+    /// Heavy if: empty query OR query contains $regex (full collection scan)
+    fn is_heavy_count(query: &Value) -> bool {
+        // Empty query = full collection scan
+        if query.as_object().map(|o| o.is_empty()).unwrap_or(true) {
+            return true;
+        }
+        // Check for $regex operator (recursive)
+        Self::contains_regex(query)
+    }
+
+    /// Check if a Value contains $regex operator anywhere (recursive)
+    fn contains_regex(value: &Value) -> bool {
+        match value {
+            Value::Object(map) => {
+                for (key, val) in map {
+                    if key == "$regex" {
+                        return true;
+                    }
+                    if Self::contains_regex(val) {
+                        return true;
+                    }
+                }
+                false
+            }
+            Value::Array(arr) => arr.iter().any(Self::contains_regex),
+            _ => false,
+        }
     }
 
     /// Internal find implementation (no throttling)
@@ -861,15 +902,16 @@ impl IronBaseAdapter {
 
     /// Find documents with async semaphore throttling for heavy operations
     ///
-    /// Heavy operations (limit > HEAVY_FIND_THRESHOLD) are throttled to prevent
-    /// OOM when multiple large finds run simultaneously.
+    /// Heavy operations (limit > HEAVY_FIND_THRESHOLD or $regex query) are throttled
+    /// to prevent lock contention when multiple scans run simultaneously.
     pub async fn find_async(
         &self,
         collection: &str,
         query: Value,
         options: FindOptions,
     ) -> Result<FindResult> {
-        let is_heavy = Self::is_heavy_find(options.limit);
+        let is_heavy = Self::is_heavy_find(options.limit, &query);
+        let has_regex = Self::contains_regex(&query);
 
         if is_heavy {
             let sem = self.heavy_semaphore_for(collection);
@@ -881,12 +923,20 @@ impl IronBaseAdapter {
 
             match permit {
                 Ok(Ok(_permit)) => {
-                    tracing::info!(
-                        collection = collection,
-                        limit = ?options.limit,
-                        "Heavy find started (limit > {})",
-                        HEAVY_FIND_THRESHOLD
-                    );
+                    if has_regex {
+                        tracing::info!(
+                            collection = collection,
+                            limit = ?options.limit,
+                            "Heavy find started ($regex query)"
+                        );
+                    } else {
+                        tracing::info!(
+                            collection = collection,
+                            limit = ?options.limit,
+                            "Heavy find started (limit > {})",
+                            HEAVY_FIND_THRESHOLD
+                        );
+                    }
                     let result = self.find_internal(collection, query, options);
                     tracing::info!(
                         collection = collection,
@@ -900,8 +950,8 @@ impl IronBaseAdapter {
                 )),
                 Err(_) => Err(crate::error::McpError::operation_too_large(format!(
                     "Timeout waiting for find slot. Another heavy operation is in progress. \
-                     Either wait {}s or reduce limit to <= {}.",
-                    HEAVY_OP_TIMEOUT_SECS, HEAVY_FIND_THRESHOLD
+                     Wait {}s or avoid $regex (use fulltext_search instead).",
+                    HEAVY_OP_TIMEOUT_SECS
                 ))),
             }
         } else {
@@ -913,11 +963,12 @@ impl IronBaseAdapter {
     /// Uses throttling when called inside a tokio runtime for heavy operations.
     pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let is_heavy = Self::is_heavy_find(options.limit);
+            let is_heavy = Self::is_heavy_find(options.limit, &query);
             if is_heavy {
                 tracing::debug!(
                     collection = collection,
                     limit = ?options.limit,
+                    has_regex = Self::contains_regex(&query),
                     "Heavy find via sync API - using async throttling"
                 );
             }
@@ -989,20 +1040,143 @@ impl IronBaseAdapter {
         Ok(count)
     }
 
-    /// Count documents matching query (uses get_collection - no implicit creation)
-    pub fn count_documents(&self, collection: &str, query: Value) -> Result<u64> {
+    /// Count documents matching query - internal (no throttling)
+    fn count_documents_internal(&self, collection: &str, query: Value) -> Result<u64> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let count = coll.count_documents(&query)?;
         Ok(count)
     }
 
-    /// Get distinct values for a field (uses get_collection - no implicit creation)
-    pub fn distinct(&self, collection: &str, field: &str, query: Value) -> Result<Vec<Value>> {
+    /// Count documents with async semaphore throttling for heavy operations
+    ///
+    /// Heavy operations (empty query or regex) are throttled to prevent
+    /// lock contention when multiple full-collection scans run simultaneously.
+    pub async fn count_documents_async(&self, collection: &str, query: Value) -> Result<u64> {
+        let is_heavy = Self::is_heavy_count(&query);
+
+        if is_heavy {
+            let sem = self.heavy_semaphore_for(collection);
+            let permit = tokio::time::timeout(
+                std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
+                sem.acquire(),
+            )
+            .await;
+
+            match permit {
+                Ok(Ok(_permit)) => {
+                    tracing::info!(
+                        collection = collection,
+                        "Heavy count started (empty query or regex)"
+                    );
+                    let result = self.count_documents_internal(collection, query);
+                    tracing::info!(
+                        collection = collection,
+                        success = result.is_ok(),
+                        "Heavy count completed"
+                    );
+                    result
+                }
+                Ok(Err(_)) => Err(crate::error::McpError::internal(
+                    "Heavy operation semaphore closed unexpectedly".to_string(),
+                )),
+                Err(_) => Err(crate::error::McpError::operation_too_large(format!(
+                    "Timeout waiting for count slot. Another heavy operation is in progress. \
+                     Wait {}s or add a query filter to use an index.",
+                    HEAVY_OP_TIMEOUT_SECS
+                ))),
+            }
+        } else {
+            self.count_documents_internal(collection, query)
+        }
+    }
+
+    /// Count documents matching query (uses get_collection - no implicit creation)
+    /// Uses throttling when called inside a tokio runtime for heavy operations.
+    pub fn count_documents(&self, collection: &str, query: Value) -> Result<u64> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let is_heavy = Self::is_heavy_count(&query);
+            if is_heavy {
+                tracing::debug!(
+                    collection = collection,
+                    "Heavy count via sync API - using async throttling"
+                );
+            }
+            tokio::task::block_in_place(|| {
+                handle.block_on(self.count_documents_async(collection, query))
+            })
+        } else {
+            self.count_documents_internal(collection, query)
+        }
+    }
+
+    /// Distinct values - internal (no throttling)
+    fn distinct_internal(&self, collection: &str, field: &str, query: Value) -> Result<Vec<Value>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let values = coll.distinct(field, &query)?;
         Ok(values)
+    }
+
+    /// Distinct values with async semaphore throttling
+    ///
+    /// Distinct operations are always considered heavy because they scan the collection
+    /// to find unique values.
+    pub async fn distinct_async(
+        &self,
+        collection: &str,
+        field: &str,
+        query: Value,
+    ) -> Result<Vec<Value>> {
+        // Distinct is always heavy (scans collection for unique values)
+        let sem = self.heavy_semaphore_for(collection);
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
+            sem.acquire(),
+        )
+        .await;
+
+        match permit {
+            Ok(Ok(_permit)) => {
+                tracing::info!(
+                    collection = collection,
+                    field = field,
+                    "Heavy distinct started"
+                );
+                let result = self.distinct_internal(collection, field, query);
+                tracing::info!(
+                    collection = collection,
+                    success = result.is_ok(),
+                    "Heavy distinct completed"
+                );
+                result
+            }
+            Ok(Err(_)) => Err(crate::error::McpError::internal(
+                "Heavy operation semaphore closed unexpectedly".to_string(),
+            )),
+            Err(_) => Err(crate::error::McpError::operation_too_large(format!(
+                "Timeout waiting for distinct slot. Another heavy operation is in progress. \
+                 Wait {}s.",
+                HEAVY_OP_TIMEOUT_SECS
+            ))),
+        }
+    }
+
+    /// Get distinct values for a field (uses get_collection - no implicit creation)
+    /// Uses throttling when called inside a tokio runtime.
+    pub fn distinct(&self, collection: &str, field: &str, query: Value) -> Result<Vec<Value>> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tracing::debug!(
+                collection = collection,
+                field = field,
+                "Distinct via sync API - using async throttling"
+            );
+            tokio::task::block_in_place(|| {
+                handle.block_on(self.distinct_async(collection, field, query))
+            })
+        } else {
+            self.distinct_internal(collection, field, query)
+        }
     }
 
     // ============================================================
