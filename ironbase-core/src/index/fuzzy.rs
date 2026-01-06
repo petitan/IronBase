@@ -253,7 +253,13 @@ impl FuzzyIndex {
         let query_lower = query.to_lowercase();
         let mut results = Vec::new();
 
-        // In lazy mode, search in file (TODO: add ctx support for file search)
+        // KNOWN ISSUE (BUG #12): Lazy mode file search does NOT check ctx for cancellation.
+        // The search_in_file() uses serde Visitor pattern which doesn't support periodic
+        // cancellation checks. Risk is LOW because:
+        // 1. Fuzzy indexes are typically small (only indexed field values)
+        // 2. Lazy mode only activates for very large indexes (>10MB)
+        // 3. Outer search_with_ctx() checks cancellation during document loading
+        // TODO: Refactor to support ctx - options: pre-load entries, custom streaming, or thread-local deadline
         if self.lazy_mode && self.entries.is_empty() {
             if let Some(path) = &self.storage_path {
                 if let Ok(mut on_disk) = self.search_in_file(path, &query_lower, threshold) {
