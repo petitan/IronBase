@@ -47,7 +47,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let plan = self.create_plan_for_hint(query_json, hint, &field)?;
 
         // Execute with the forced plan
-        self.find_with_index(parsed_query, plan)
+        // Note: find_with_hint doesn't support ExecutionContext yet
+        // Use find_with_options with hint parameter for deadline/cancellation support
+        self.find_with_index(parsed_query, plan, None, None)
     }
 
     /// Create a compound B+ tree index on multiple fields

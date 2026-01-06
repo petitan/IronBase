@@ -258,6 +258,17 @@ pub struct InsertManyResult {
 
 /// Query execution context extracted from FindOptions
 /// Single Responsibility: Transform user options into execution strategy
+///
+/// ## Deadline Propagation (v1.0.182+)
+///
+/// The `cancel_flag` and `deadline` fields enable cooperative cancellation:
+/// - Propagated through: `collect_doc_ids_with_options` → `collect_doc_ids_from_plan`
+///   → `collect_doc_ids_for_logical_operator` → `filter_doc_ids_by_query`
+/// - Check frequency: Every 100 iterations to balance responsiveness vs overhead
+/// - Check location: BEFORE expensive operations (regex matching, document loading)
+///
+/// **ACID Safety**: Only READ operations support deadline (find, count, distinct).
+/// WRITE operations (insert, update, delete) pass `None` to preserve atomicity.
 #[derive(Debug)]
 struct QueryExecutionContext {
     /// Single-field sort optimization info
@@ -1341,6 +1352,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if let Some((logical_op, clauses)) = QueryPlanner::extract_logical_clauses(query_json) {
             drop(indexes);
             let parsed_query = Query::from_json(query_json)?;
+            // Extract cancel_flag and deadline from ExecutionContext
+            let cancel_flag = ctx.and_then(|c| c.cancel_flag());
+            let deadline = ctx.and_then(|c| c.deadline());
             if let Some((doc_ids, _)) = self.collect_doc_ids_for_logical_operator(
                 &parsed_query,
                 logical_op,
@@ -1349,6 +1363,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 false,
                 0,
                 None,
+                cancel_flag,
+                deadline,
             )? {
                 return Ok(doc_ids.len() as u64);
             }
@@ -1798,8 +1814,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // STREAMING FALLBACK: collect document IDs first, then stream-load one by one
+        // Extract cancel_flag and deadline from ExecutionContext
+        let cancel_flag = ctx.and_then(|c| c.cancel_flag().cloned());
+        let deadline = ctx.and_then(|c| c.deadline());
         let (doc_ids, _) = self.collect_doc_ids_with_options(
-            query_json, None, None, false, 0, None, true, 0, None, None, None,
+            query_json,
+            None,
+            None,
+            false,
+            0,
+            None,
+            true,
+            0,
+            None,
+            cancel_flag.as_ref(),
+            deadline,
         )?;
 
         // Collect distinct values with cancellation checks
@@ -1977,9 +2006,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// Execute query using an index
-    fn find_with_index(&self, parsed_query: Query, plan: QueryPlan) -> Result<Vec<Value>> {
-        let (doc_ids, _) =
-            self.collect_doc_ids_from_plan(&parsed_query, plan, None, false, 0, None)?;
+    fn find_with_index(
+        &self,
+        parsed_query: Query,
+        plan: QueryPlan,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<Vec<Value>> {
+        let (doc_ids, _) = self.collect_doc_ids_from_plan(
+            &parsed_query,
+            plan,
+            None,
+            false,
+            0,
+            None,
+            cancel_flag,
+            deadline,
+        )?;
         let mut results = Vec::with_capacity(doc_ids.len());
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
@@ -2985,6 +3028,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // NOTE: Only use fast path if there are no tombstones (live_count == catalog.len())
         // Otherwise tombstones would be incorrectly counted in skip/limit calculations
         if parsed_query.is_match_all() && live_count == catalog_len as u64 {
+            // Check deadline/cancellation before fast path (large catalogs can still take time to sort)
+            if let Some(flag) = cancel_flag {
+                if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Err(IronBaseError::Cancelled(
+                        "Query cancelled before execution".into(),
+                    ));
+                }
+            }
+            if let Some(dl) = deadline {
+                if std::time::Instant::now() >= dl {
+                    return Err(IronBaseError::Timeout(
+                        "Query timed out before execution".into(),
+                    ));
+                }
+            }
+
             // No tombstones - safe to use fast path
             let effective_limit = limit.unwrap_or(usize::MAX);
 
@@ -3174,6 +3233,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     sort_desc,
                     skip,
                     limit,
+                    cancel_flag,
+                    deadline,
                 )? {
                     return Ok(result);
                 }
@@ -3193,7 +3254,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         };
 
         let (doc_ids_vec, used_sort) = if let Some(plan) = plan {
-            self.collect_doc_ids_from_plan(&parsed_query, plan, sort_field, sort_desc, skip, limit)?
+            self.collect_doc_ids_from_plan(
+                &parsed_query,
+                plan,
+                sort_field,
+                sort_desc,
+                skip,
+                limit,
+                cancel_flag,
+                deadline,
+            )?
         } else if let Some(sf) = sort_field {
             // 🚀 FIX #22: Use index for sort-only queries (no filter)
             // When query is empty but we have a sort field with an index,
@@ -3267,7 +3337,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         sort_desc: bool,
         skip: usize,
         limit: Option<usize>,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<(Vec<DocumentId>, bool)> {
+        // Check deadline/cancellation at start
+        if let Some(flag) = cancel_flag {
+            if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(IronBaseError::Cancelled(
+                    "Query cancelled before index scan".into(),
+                ));
+            }
+        }
+        if let Some(dl) = deadline {
+            if std::time::Instant::now() >= dl {
+                return Err(IronBaseError::Timeout(
+                    "Query timed out before index scan".into(),
+                ));
+            }
+        }
         let mut index_limit_applied = false;
         let mut doc_ids = {
             let indexes = self.indexes.read();
@@ -3476,6 +3563,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         sort_desc: bool,
         skip: usize,
         limit: Option<usize>,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<Option<(Vec<DocumentId>, bool)>> {
         let indexes = self.indexes.read();
         let index_fields = indexes.list_indexes_with_compound_info();
@@ -3501,6 +3590,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             false,
                             0,
                             None,
+                            cancel_flag,
+                            deadline,
                         )?;
                         indexed_sets.push(ids);
                     }
@@ -3533,6 +3624,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             false,
                             0,
                             None,
+                            cancel_flag,
+                            deadline,
                         )?;
                         ids
                     } else {
@@ -3540,8 +3633,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             clause_query,
                             0,
                             None,
-                            None,
-                            None,
+                            cancel_flag,
+                            deadline,
                         )?
                     };
                     for id in ids {
@@ -3563,6 +3656,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             false,
                             0,
                             None,
+                            cancel_flag,
+                            deadline,
                         )?;
                         ids
                     } else {
@@ -3570,16 +3665,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             clause_query,
                             0,
                             None,
-                            None,
-                            None,
+                            cancel_flag,
+                            deadline,
                         )?
                     };
                     for id in ids {
                         excluded.insert(id);
                     }
                 }
-                let all_ids =
-                    self.scan_documents_with_early_termination(&Query::new(), 0, None, None, None)?;
+                let all_ids = self.scan_documents_with_early_termination(
+                    &Query::new(),
+                    0,
+                    None,
+                    cancel_flag,
+                    deadline,
+                )?;
                 all_ids
                     .into_iter()
                     .filter(|id| !excluded.contains(id))
@@ -3587,22 +3687,59 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         };
 
-        let filtered = self.filter_doc_ids_by_query(parsed_query, candidate_ids, skip, limit)?;
+        let filtered = self.filter_doc_ids_by_query(
+            parsed_query,
+            candidate_ids,
+            skip,
+            limit,
+            cancel_flag,
+            deadline,
+        )?;
         let _ = (sort_field, sort_desc);
         Ok(Some((filtered, false)))
     }
 
+    /// Filter document IDs by executing query matching.
+    ///
+    /// This is where expensive operations (regex matching, document loading) occur.
+    /// Deadline/cancellation is checked BEFORE each batch of 100 documents to ensure
+    /// timely response to timeout requests.
+    ///
+    /// # Timeout Behavior (v1.0.182+)
+    /// - Checks every 100 iterations for cancellation/timeout
+    /// - Returns `IronBaseError::Timeout` if deadline exceeded
+    /// - Returns `IronBaseError::Cancelled` if cancel_flag is set
     fn filter_doc_ids_by_query(
         &self,
         parsed_query: &Query,
         doc_ids: Vec<DocumentId>,
         skip: usize,
         limit: Option<usize>,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<Vec<DocumentId>> {
         let mut results = Vec::new();
         let mut skipped = 0usize;
 
-        for doc_id in doc_ids {
+        for (iteration, doc_id) in doc_ids.into_iter().enumerate() {
+            // Check cancellation/timeout every 100 iterations (BEFORE expensive regex matching)
+            if iteration % 100 == 0 {
+                if let Some(flag) = cancel_flag {
+                    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(IronBaseError::Cancelled(
+                            "Query cancelled during filter".into(),
+                        ));
+                    }
+                }
+                if let Some(dl) = deadline {
+                    if std::time::Instant::now() >= dl {
+                        return Err(IronBaseError::Timeout(
+                            "Query timed out during filter".into(),
+                        ));
+                    }
+                }
+            }
+
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 let doc_json_str = serde_json::to_string(&doc)?;
                 let document = Document::from_json(&doc_json_str)?;
