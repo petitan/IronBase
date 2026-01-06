@@ -149,7 +149,7 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
         if storage.get_file_path().is_empty() {
             drop(storage);
             let (doc_ids, _) = collection.collect_doc_ids_with_options(
-                query_json, None, None, false, 0, None, true, 0, None,
+                query_json, None, None, false, 0, None, true, 0, None, None, None,
             )?;
             return Ok(FindCursor::new(collection, doc_ids));
         }
@@ -164,7 +164,7 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
         if needs_catalog_fallback {
             drop(storage);
             let (doc_ids, _) = collection.collect_doc_ids_with_options(
-                query_json, None, None, false, 0, None, true, 0, None,
+                query_json, None, None, false, 0, None, true, 0, None, None, None,
             )?;
             return Ok(FindCursor::new(collection, doc_ids));
         }

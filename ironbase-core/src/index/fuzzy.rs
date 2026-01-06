@@ -237,6 +237,49 @@ impl FuzzyIndex {
         results
     }
 
+    /// Search with ExecutionContext for cancellation support
+    ///
+    /// This is the cancellation-aware version of `search`. It checks the
+    /// ExecutionContext during the expensive similarity calculations.
+    pub fn search_with_ctx(
+        &self,
+        query: &str,
+        threshold_override: Option<f64>,
+        algorithm_override: Option<FuzzyAlgorithm>,
+        ctx: Option<&crate::execution::ExecutionContext>,
+    ) -> Result<Vec<(DocumentId, f64)>> {
+        let threshold = threshold_override.unwrap_or(self.metadata.threshold);
+        let algorithm = algorithm_override.unwrap_or(self.metadata.algorithm);
+        let query_lower = query.to_lowercase();
+        let mut results = Vec::new();
+
+        // In lazy mode, search in file (TODO: add ctx support for file search)
+        if self.lazy_mode && self.entries.is_empty() {
+            if let Some(path) = &self.storage_path {
+                if let Ok(mut on_disk) = self.search_in_file(path, &query_lower, threshold) {
+                    results.append(&mut on_disk);
+                }
+                results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                return Ok(results);
+            }
+        }
+
+        for (iteration, (lower_value, _original, doc_id)) in self.entries.iter().enumerate() {
+            // Check for cancellation periodically
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
+            let similarity = algorithm.similarity(&query_lower, lower_value);
+            if similarity >= threshold {
+                results.push((doc_id.clone(), similarity));
+            }
+        }
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(results)
+    }
+
     /// Get index size
     pub fn size(&self) -> usize {
         self.metadata.num_entries

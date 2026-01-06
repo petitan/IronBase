@@ -9,6 +9,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Instant;
 
 /// Options for find queries
 #[derive(Debug, Clone, Default)]
@@ -43,6 +44,12 @@ pub struct FindOptions {
     /// Check is performed every 100 documents during loading.
     /// Default: None (no cancellation support)
     pub cancel_flag: Option<Arc<AtomicBool>>,
+
+    /// Deadline for timeout enforcement
+    /// When set, the find operation will check this deadline every 100 documents
+    /// and abort with a timeout error if the deadline has passed.
+    /// Default: None (no timeout)
+    pub deadline: Option<Instant>,
 }
 
 /// Result of find_with_options when include_total is true
@@ -99,6 +106,15 @@ impl FindOptions {
     /// check it every 100 documents and abort with a cancellation error.
     pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
         self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Set deadline for timeout enforcement
+    ///
+    /// The find operation will check this deadline every 100 documents
+    /// and abort with a timeout error if the deadline has passed.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
         self
     }
 

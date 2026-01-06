@@ -35,6 +35,7 @@ pub mod database;
 pub mod document;
 pub mod durability;
 pub mod error;
+pub mod execution;
 pub mod find_options;
 pub mod fulltext;
 pub mod query;
@@ -59,6 +60,8 @@ pub(crate) mod wal;
 #[cfg(test)]
 mod test_auto_commit;
 #[cfg(test)]
+mod test_execution_context;
+#[cfg(test)]
 mod transaction_benchmarks;
 #[cfg(test)]
 mod transaction_integration_tests;
@@ -71,6 +74,7 @@ pub use database::DatabaseCore;
 pub use document::{Document, DocumentId};
 pub use durability::DurabilityMode;
 pub use error::{IronBaseError, Result};
+pub use execution::ExecutionContext;
 pub use find_options::{
     calculate_safe_response_limit, estimate_json_size, FindOptions, FindResult,
 };

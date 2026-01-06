@@ -1,17 +1,10 @@
 //! IronBase Adapter - Direct wrapper around IronBase core
-//!
-//! CONCURRENCY CONTROL (2026-01):
-//! Tiered cost estimation with two-level semaphore system:
-//! - Instant: No throttling (indexed point lookups like find_one by _id)
-//! - Light: Collection semaphore only (bounded indexed queries, limit ≤ 100)
-//! - Heavy: Collection + Global semaphore (scans, regex, unbounded)
-//!
-//! See `crate::concurrency::ConcurrencyController` for implementation.
 
-use crate::concurrency::{ConcurrencyController, OperationType};
+use crate::cancellation;
 use crate::error::Result;
 use crate::request_deadline;
 use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
+use ironbase_core::ExecutionContext;
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -141,8 +134,6 @@ pub struct IronBaseAdapter {
     db_path: RwLock<std::path::PathBuf>,
     /// In-memory document counts for fast stats() without lock contention
     collection_stats: CollectionStats,
-    /// Tiered concurrency controller for throttling operations
-    concurrency: crate::concurrency::ConcurrencyController,
 }
 
 /// Scripts collection name
@@ -309,7 +300,6 @@ impl IronBaseAdapter {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
             collection_stats: CollectionStats::new(),
-            concurrency: ConcurrencyController::new(),
         };
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
@@ -402,6 +392,30 @@ impl IronBaseAdapter {
         }
 
         Ok(())
+    }
+
+    // ============================================================
+    // Execution Context (for cancellation/timeout)
+    // ============================================================
+
+    /// Create an ExecutionContext from current thread-local deadline and cancel flag.
+    ///
+    /// This consolidates cancellation/timeout support across all operations.
+    /// The returned context should be passed to core `_with_ctx` methods.
+    fn create_execution_context(&self) -> ExecutionContext {
+        let mut ctx = ExecutionContext::new();
+
+        // Add deadline from thread-local (set by HTTP request handler)
+        if let Some(deadline) = request_deadline::current_deadline() {
+            ctx = ctx.with_deadline(deadline);
+        }
+
+        // Add cancel flag from thread-local (set by request tracker)
+        if let Some(flag) = cancellation::current_cancel_flag() {
+            ctx = ctx.with_cancel_flag(flag);
+        }
+
+        ctx
     }
 
     // ============================================================
@@ -763,93 +777,80 @@ impl IronBaseAdapter {
         Ok(ids.iter().map(Self::doc_id_to_string).collect())
     }
 
-    /// Find documents with tiered concurrency control
-    /// - Instant: Not applicable (find always returns multiple docs)
-    /// - Light: limit ≤ 100, no regex
-    /// - Heavy: limit > 100 or regex or unbounded
+    /// Find documents
     pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
-        let op = OperationType::Find {
-            query: &query,
-            limit: options.limit,
-        };
-        let cost = self.concurrency.estimate_cost(&op);
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
 
-        self.concurrency.execute_sync(collection, cost, || {
-            let db = self.db.read();
-            let coll = db.get_collection(collection)?;
-
-            // Convert to IronBase FindOptions
-            let projection = if let Some(proj) = options.projection.as_ref() {
-                let obj = proj.as_object().ok_or_else(|| {
-                    crate::error::McpError::invalid_params(
-                        "projection must be an object like {\"field\": 1} or {\"field\": 0}",
-                    )
-                })?;
-                let mut map = HashMap::new();
-                for (k, v) in obj {
-                    let val = if let Some(i) = v.as_i64() {
-                        if i != 0 && i != 1 {
-                            return Err(crate::error::McpError::invalid_params(format!(
-                                "Invalid projection value for '{}': expected 0 or 1, got {}",
-                                k, i
-                            )));
-                        }
-                        i as i32
-                    } else if let Some(f) = v.as_f64() {
-                        if f == 0.0 {
-                            0
-                        } else if f == 1.0 {
-                            1
-                        } else {
-                            return Err(crate::error::McpError::invalid_params(format!(
-                                "Invalid projection value for '{}': expected 0 or 1, got {}",
-                                k, f
-                            )));
-                        }
+        // Convert to IronBase FindOptions
+        let projection = if let Some(proj) = options.projection.as_ref() {
+            let obj = proj.as_object().ok_or_else(|| {
+                crate::error::McpError::invalid_params(
+                    "projection must be an object like {\"field\": 1} or {\"field\": 0}",
+                )
+            })?;
+            let mut map = HashMap::new();
+            for (k, v) in obj {
+                let val = if let Some(i) = v.as_i64() {
+                    if i != 0 && i != 1 {
+                        return Err(crate::error::McpError::invalid_params(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, i
+                        )));
+                    }
+                    i as i32
+                } else if let Some(f) = v.as_f64() {
+                    if f == 0.0 {
+                        0
+                    } else if f == 1.0 {
+                        1
                     } else {
                         return Err(crate::error::McpError::invalid_params(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                            k, v
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, f
                         )));
-                    };
-                    map.insert(k.clone(), val);
-                }
-                Some(map)
-            } else {
-                None
-            };
+                    }
+                } else {
+                    return Err(crate::error::McpError::invalid_params(format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                        k, v
+                    )));
+                };
+                map.insert(k.clone(), val);
+            }
+            Some(map)
+        } else {
+            None
+        };
 
-            let ironbase_options = ironbase_core::FindOptions {
-                projection,
-                sort: options.sort,
-                limit: options.limit,
-                skip: options.skip,
-                include_total: options.include_total,
-                max_response_bytes: options.max_response_bytes,
-                cancel_flag: options.cancel_flag,
-            };
+        // Create ExecutionContext for timeout/cancellation support
+        let ctx = self.create_execution_context();
 
-            let result = coll.find_with_result(&query, ironbase_options)?;
-            Ok(FindResult {
-                documents: result.documents,
-                total: result.total.map(|t| t as usize),
-            })
+        let ironbase_options = ironbase_core::FindOptions {
+            projection,
+            sort: options.sort,
+            limit: options.limit,
+            skip: options.skip,
+            include_total: options.include_total,
+            max_response_bytes: options.max_response_bytes,
+            cancel_flag: ctx.cancel_flag().cloned(),
+            deadline: ctx.deadline(),
+        };
+
+        let result = coll.find_with_result(&query, ironbase_options)?;
+        Ok(FindResult {
+            documents: result.documents,
+            total: result.total.map(|t| t as usize),
         })
     }
 
-    /// Find a single document with tiered concurrency control
-    /// - Instant: _id lookup
-    /// - Light: other queries (single doc)
+    /// Find a single document (with cancellation/timeout support)
     pub fn find_one(&self, collection: &str, query: Value) -> Result<Option<Value>> {
-        let op = OperationType::FindOne { query: &query };
-        let cost = self.concurrency.estimate_cost(&op);
-
-        self.concurrency.execute_sync(collection, cost, || {
-            let db = self.db.read();
-            let coll = db.get_collection(collection)?;
-            let result = coll.find_one(&query)?;
-            Ok(result)
-        })
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+        let result = coll.find_one_with_ctx(&query, Some(&ctx))?;
+        Ok(result)
     }
 
     /// Update a single document (with WAL durability)
@@ -904,62 +905,44 @@ impl IronBaseAdapter {
         Ok(count)
     }
 
-    /// Count documents with tiered concurrency control
-    /// - Light: specific query (indexed)
-    /// - Heavy: empty query or regex (full scan)
+    /// Count documents matching query (with cancellation/timeout support)
     pub fn count_documents(&self, collection: &str, query: Value) -> Result<u64> {
-        let op = OperationType::Count { query: &query };
-        let cost = self.concurrency.estimate_cost(&op);
-
-        self.concurrency.execute_sync(collection, cost, || {
-            let db = self.db.read();
-            let coll = db.get_collection(collection)?;
-            let count = coll.count_documents(&query)?;
-            Ok(count)
-        })
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+        let count = coll.count_documents_with_ctx(&query, Some(&ctx))?;
+        Ok(count)
     }
 
-    /// Get distinct values with tiered concurrency control
-    /// - Heavy: always (scans for unique values)
+    /// Get distinct values for a field (with cancellation/timeout support)
     pub fn distinct(&self, collection: &str, field: &str, query: Value) -> Result<Vec<Value>> {
-        let op = OperationType::Distinct;
-        let cost = self.concurrency.estimate_cost(&op);
-
-        self.concurrency.execute_sync(collection, cost, || {
-            let db = self.db.read();
-            let coll = db.get_collection(collection)?;
-            let values = coll.distinct(field, &query)?;
-            Ok(values)
-        })
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+        let values = coll.distinct_with_ctx(field, &query, Some(&ctx))?;
+        Ok(values)
     }
 
     // ============================================================
     // Aggregation
     // ============================================================
 
-    /// Execute aggregation pipeline with tiered concurrency control
-    /// - Light: has leading $match (filtered)
-    /// - Heavy: no $match (full scan)
+    /// Execute aggregation pipeline
     ///
     /// Uses `aggregate_auto()` which automatically scales memory limits based on
     /// available system RAM, preventing OOM on resource-constrained servers.
     pub fn aggregate(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
-        let op = OperationType::Aggregate { pipeline: &pipeline };
-        let cost = self.concurrency.estimate_cost(&op);
-
-        self.concurrency.execute_sync(collection, cost, || {
-            let db = self.db.read();
-            let coll = db.get_collection(collection)?;
-            // Convert Vec<Value> to Value::Array
-            let pipeline_value = Value::Array(pipeline);
-            // Use centralized limits + cooperative deadline (if any)
-            let mut ctx = AggregationLimitContext::new(AggregationLimits::from_system_memory());
-            if let Some(deadline) = request_deadline::current_deadline() {
-                ctx = ctx.with_deadline(deadline);
-            }
-            let results = coll.aggregate_with_context(&pipeline_value, &ctx)?;
-            Ok(results)
-        })
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        // Convert Vec<Value> to Value::Array
+        let pipeline_value = Value::Array(pipeline.clone());
+        // Use centralized limits + cooperative deadline (if any)
+        let mut ctx = AggregationLimitContext::new(AggregationLimits::from_system_memory());
+        if let Some(deadline) = request_deadline::current_deadline() {
+            ctx = ctx.with_deadline(deadline);
+        }
+        let results = coll.aggregate_with_context(&pipeline_value, &ctx)?;
+        Ok(results)
     }
 
     // ============================================================
@@ -1060,9 +1043,7 @@ impl IronBaseAdapter {
         Ok(name)
     }
 
-    /// Fuzzy search using the fuzzy index (returns documents with similarity scores)
-    /// Uses get_collection - no implicit creation
-    /// Cost: Light if limit ≤ 100, Heavy otherwise
+    /// Fuzzy search using the fuzzy index (with cancellation/timeout support)
     pub fn fuzzy_search(
         &self,
         collection: &str,
@@ -1070,26 +1051,22 @@ impl IronBaseAdapter {
         query_str: &str,
         threshold: Option<f64>,
         algorithm: Option<&str>,
-        limit: Option<usize>,
+        _limit: Option<usize>,
     ) -> Result<Vec<(Value, f64)>> {
         use ironbase_core::FuzzyAlgorithm;
 
-        let op = OperationType::FuzzySearch { limit };
-        let cost = self.concurrency.estimate_cost(&op);
+        // Default to JaroWinkler if no algorithm specified
+        let algo = Some(match algorithm.unwrap_or("jaro_winkler") {
+            "levenshtein" => FuzzyAlgorithm::Levenshtein,
+            "damerau_levenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
+            _ => FuzzyAlgorithm::JaroWinkler,
+        });
 
-        self.concurrency.execute_sync(collection, cost, || {
-            // Default to JaroWinkler if no algorithm specified
-            let algo = Some(match algorithm.unwrap_or("jaro_winkler") {
-                "levenshtein" => FuzzyAlgorithm::Levenshtein,
-                "damerau_levenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
-                _ => FuzzyAlgorithm::JaroWinkler,
-            });
-
-            let db = self.db.read();
-            let coll = db.get_collection(collection)?;
-            let results = coll.fuzzy_search(field, query_str, threshold, algo)?;
-            Ok(results)
-        })
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+        let results = coll.fuzzy_search_with_ctx(field, query_str, threshold, algo, Some(&ctx))?;
+        Ok(results)
     }
 
     // ============================================================
@@ -1116,9 +1093,7 @@ impl IronBaseAdapter {
         Ok(name)
     }
 
-    /// Full-text search using the fulltext index (returns documents with scores and matched tokens)
-    /// Uses get_collection - no implicit creation
-    /// Cost: Light if limit ≤ 100, Heavy otherwise
+    /// Full-text search using the fulltext index (with cancellation/timeout support)
     pub fn fulltext_search(
         &self,
         collection: &str,
@@ -1126,22 +1101,19 @@ impl IronBaseAdapter {
         query_str: &str,
         options: FulltextSearchOptions,
     ) -> Result<Vec<(Value, f64, Vec<String>)>> {
-        let op = OperationType::FulltextSearch { limit: options.limit };
-        let cost = self.concurrency.estimate_cost(&op);
-
-        self.concurrency.execute_sync(collection, cost, || {
-            let db = self.db.read();
-            let coll = db.get_collection(collection)?;
-            let results = coll.fulltext_search(
-                field,
-                query_str,
-                options.limit,
-                options.skip,
-                options.min_score,
-                options.projection.clone(),
-            )?;
-            Ok(results)
-        })
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+        let results = coll.fulltext_search_with_ctx(
+            field,
+            query_str,
+            options.limit,
+            options.skip,
+            options.min_score,
+            options.projection.clone(),
+            Some(&ctx),
+        )?;
+        Ok(results)
     }
 
     /// List all fulltext indexes for a collection

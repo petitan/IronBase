@@ -135,6 +135,20 @@ pub fn is_cancelled() -> bool {
     })
 }
 
+/// Get current cancellation flag for passing to core operations
+///
+/// Returns `Some(Arc<AtomicBool>)` if a cancel flag is set for this thread,
+/// `None` otherwise. Use this to pass the flag to core operations that
+/// support cooperative cancellation via `ExecutionContext`.
+pub fn current_cancel_flag() -> Option<Arc<AtomicBool>> {
+    CANCEL_FLAG.with(|cell| {
+        let flag = cell.take();
+        let result = flag.clone();
+        cell.set(flag);
+        result
+    })
+}
+
 /// RAII guard to clear thread-local cancellation flag on drop
 pub struct CancelGuard;
 
