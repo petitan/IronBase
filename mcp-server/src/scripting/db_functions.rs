@@ -567,7 +567,7 @@ fn register_search_functions(
     engine.register_fn(
         "db_fuzzy_search",
         move |collection: &str, field: &str, query: &str, threshold: f64| -> Dynamic {
-            match adapter_fzsrch.fuzzy_search(collection, field, query, Some(threshold), None) {
+            match adapter_fzsrch.fuzzy_search(collection, field, query, Some(threshold), None, None) {
                 Ok(results) => {
                     let result: Vec<Dynamic> = results
                         .into_iter()

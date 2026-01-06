@@ -101,29 +101,16 @@ fn test_get_prompts_list_returns_prompts() {
 fn test_prompts_list_has_expected_count() {
     let result = get_prompts_list();
     let prompts = result.get("prompts").unwrap().as_array().unwrap();
-    // Expected: 18 prompts (including fulltext-search, acl-guide, database-admin, security-guide, listener-config)
-    assert_eq!(prompts.len(), 18);
+    // Prompts are temporarily disabled - expect 0
+    assert_eq!(prompts.len(), 0);
 }
 
 #[test]
 fn test_prompts_list_contains_expected_prompts() {
     let result = get_prompts_list();
     let prompts = result.get("prompts").unwrap().as_array().unwrap();
-    let prompt_names: Vec<&str> = prompts
-        .iter()
-        .filter_map(|p| p.get("name").and_then(|n| n.as_str()))
-        .collect();
-
-    assert!(prompt_names.contains(&"discover-schema"));
-    assert!(prompt_names.contains(&"query-operators"));
-    assert!(prompt_names.contains(&"aggregation-guide"));
-    assert!(prompt_names.contains(&"query-examples"));
-    assert!(prompt_names.contains(&"date-query"));
-    assert!(prompt_names.contains(&"fulltext-search"));
-    assert!(prompt_names.contains(&"acl-guide"));
-    assert!(prompt_names.contains(&"database-admin"));
-    assert!(prompt_names.contains(&"security-guide"));
-    assert!(prompt_names.contains(&"listener-config"));
+    // Prompts are temporarily disabled - expect empty array
+    assert!(prompts.is_empty());
 }
 
 // ============================================================

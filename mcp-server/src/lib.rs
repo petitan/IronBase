@@ -6,6 +6,7 @@ pub mod acl;
 pub mod adapter;
 pub mod api_keys;
 pub mod cancellation;
+pub mod concurrency;
 pub mod engine;
 pub mod error;
 pub mod http_server;

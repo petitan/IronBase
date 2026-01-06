@@ -205,11 +205,11 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
         .min(DEFAULT_QUERY_LIMIT);
     let projection = parse_projection_value(p.projection)?;
 
-    // Use the real fuzzy search with index
+    // Use the real fuzzy search with index (limit passed for cost estimation)
     let mut results =
-        adapter.fuzzy_search(&p.collection, &p.field, &p.query, threshold, algorithm)?;
+        adapter.fuzzy_search(&p.collection, &p.field, &p.query, threshold, algorithm, Some(limit))?;
 
-    // Apply limit
+    // Apply limit (safety net - already limited in cost estimation)
     results.truncate(limit);
 
     // Format results with scores, applying projection if specified

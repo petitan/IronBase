@@ -1,14 +1,14 @@
 //! IronBase Adapter - Direct wrapper around IronBase core
 //!
 //! CONCURRENCY CONTROL (2026-01):
-//! Heavy operations are throttled to prevent lock contention and OOM:
-//! - `find` with limit > 1000 or no limit
-//! - `aggregate` without leading $match stage
-//! - `count_documents` with empty query or $regex
-//! - `distinct` (always heavy - scans for unique values)
+//! Tiered cost estimation with two-level semaphore system:
+//! - Instant: No throttling (indexed point lookups like find_one by _id)
+//! - Light: Collection semaphore only (bounded indexed queries, limit ≤ 100)
+//! - Heavy: Collection + Global semaphore (scans, regex, unbounded)
 //!
-//! See `MAX_CONCURRENT_HEAVY_OPS` for configuration (default: 1 per collection).
+//! See `crate::concurrency::ConcurrencyController` for implementation.
 
+use crate::concurrency::{ConcurrencyController, OperationType};
 use crate::error::Result;
 use crate::request_deadline;
 use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
@@ -18,7 +18,6 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 
 // ============================================================================
 // In-Memory Collection Stats (for fast db_stats without lock contention)
@@ -136,26 +135,14 @@ pub struct FulltextSearchOptions {
 }
 
 /// IronBase Adapter
-/// Maximum concurrent heavy operations (aggregate without $match, find with large limit)
-/// Set to 1 to prevent memory exhaustion on large collections
-const MAX_CONCURRENT_HEAVY_OPS: usize = 1;
-
-/// Threshold for "heavy" find operations
-/// Find requests with limit > this value require semaphore permit
-const HEAVY_FIND_THRESHOLD: usize = 1000;
-
-/// Timeout for waiting to acquire heavy operation permit (in seconds)
-const HEAVY_OP_TIMEOUT_SECS: u64 = 30;
-
 pub struct IronBaseAdapter {
     db: Arc<RwLock<DatabaseCore<StorageEngine>>>,
     /// Database file path (stored for stats, wrapped in RwLock for dynamic switching)
     db_path: RwLock<std::path::PathBuf>,
     /// In-memory document counts for fast stats() without lock contention
     collection_stats: CollectionStats,
-    /// Per-collection semaphore to limit concurrent heavy operations
-    /// This prevents OOM while avoiding cross-collection throttling.
-    heavy_op_semaphores: RwLock<HashMap<String, Arc<Semaphore>>>,
+    /// Tiered concurrency controller for throttling operations
+    concurrency: crate::concurrency::ConcurrencyController,
 }
 
 /// Scripts collection name
@@ -322,22 +309,11 @@ impl IronBaseAdapter {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
             collection_stats: CollectionStats::new(),
-            heavy_op_semaphores: RwLock::new(HashMap::new()),
+            concurrency: ConcurrencyController::new(),
         };
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
         Ok(adapter)
-    }
-
-    fn heavy_semaphore_for(&self, collection: &str) -> Arc<Semaphore> {
-        if let Some(sem) = self.heavy_op_semaphores.read().get(collection) {
-            return Arc::clone(sem);
-        }
-
-        let mut map = self.heavy_op_semaphores.write();
-        map.entry(collection.to_string())
-            .or_insert_with(|| Arc::new(Semaphore::new(MAX_CONCURRENT_HEAVY_OPS)))
-            .clone()
     }
 
     /// Ensure system collections exist with correct flags and schemas
@@ -787,205 +763,93 @@ impl IronBaseAdapter {
         Ok(ids.iter().map(Self::doc_id_to_string).collect())
     }
 
-    /// Check if a find operation is "heavy" (requires semaphore)
-    /// Heavy if: limit > threshold OR no limit OR query contains $regex
-    fn is_heavy_find(limit: Option<usize>, query: &Value) -> bool {
-        // Large or unlimited result set
-        if limit.map(|l| l > HEAVY_FIND_THRESHOLD).unwrap_or(true) {
-            return true;
-        }
-        // Regex queries cause collection scan even with small limit
-        Self::contains_regex(query)
-    }
+    /// Find documents with tiered concurrency control
+    /// - Instant: Not applicable (find always returns multiple docs)
+    /// - Light: limit ≤ 100, no regex
+    /// - Heavy: limit > 100 or regex or unbounded
+    pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
+        let op = OperationType::Find {
+            query: &query,
+            limit: options.limit,
+        };
+        let cost = self.concurrency.estimate_cost(&op);
 
-    /// Check if a count operation is "heavy" (requires semaphore)
-    /// Heavy if: empty query OR query contains $regex (full collection scan)
-    fn is_heavy_count(query: &Value) -> bool {
-        // Empty query = full collection scan
-        if query.as_object().map(|o| o.is_empty()).unwrap_or(true) {
-            return true;
-        }
-        // Check for $regex operator (recursive)
-        Self::contains_regex(query)
-    }
+        self.concurrency.execute_sync(collection, cost, || {
+            let db = self.db.read();
+            let coll = db.get_collection(collection)?;
 
-    /// Check if a Value contains $regex operator anywhere (recursive)
-    fn contains_regex(value: &Value) -> bool {
-        match value {
-            Value::Object(map) => {
-                for (key, val) in map {
-                    if key == "$regex" {
-                        return true;
-                    }
-                    if Self::contains_regex(val) {
-                        return true;
-                    }
-                }
-                false
-            }
-            Value::Array(arr) => arr.iter().any(Self::contains_regex),
-            _ => false,
-        }
-    }
-
-    /// Internal find implementation (no throttling)
-    fn find_internal(
-        &self,
-        collection: &str,
-        query: Value,
-        options: FindOptions,
-    ) -> Result<FindResult> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-
-        // Convert to IronBase FindOptions - now uses core's include_total
-        let projection = if let Some(proj) = options.projection.as_ref() {
-            let obj = proj.as_object().ok_or_else(|| {
-                crate::error::McpError::invalid_params(
-                    "projection must be an object like {\"field\": 1} or {\"field\": 0}",
-                )
-            })?;
-            let mut map = HashMap::new();
-            for (k, v) in obj {
-                let val = if let Some(i) = v.as_i64() {
-                    if i != 0 && i != 1 {
-                        return Err(crate::error::McpError::invalid_params(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {}",
-                            k, i
-                        )));
-                    }
-                    i as i32
-                } else if let Some(f) = v.as_f64() {
-                    if f == 0.0 {
-                        0
-                    } else if f == 1.0 {
-                        1
+            // Convert to IronBase FindOptions
+            let projection = if let Some(proj) = options.projection.as_ref() {
+                let obj = proj.as_object().ok_or_else(|| {
+                    crate::error::McpError::invalid_params(
+                        "projection must be an object like {\"field\": 1} or {\"field\": 0}",
+                    )
+                })?;
+                let mut map = HashMap::new();
+                for (k, v) in obj {
+                    let val = if let Some(i) = v.as_i64() {
+                        if i != 0 && i != 1 {
+                            return Err(crate::error::McpError::invalid_params(format!(
+                                "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                k, i
+                            )));
+                        }
+                        i as i32
+                    } else if let Some(f) = v.as_f64() {
+                        if f == 0.0 {
+                            0
+                        } else if f == 1.0 {
+                            1
+                        } else {
+                            return Err(crate::error::McpError::invalid_params(format!(
+                                "Invalid projection value for '{}': expected 0 or 1, got {}",
+                                k, f
+                            )));
+                        }
                     } else {
                         return Err(crate::error::McpError::invalid_params(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {}",
-                            k, f
+                            "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                            k, v
                         )));
-                    }
-                } else {
-                    return Err(crate::error::McpError::invalid_params(format!(
-                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                        k, v
-                    )));
-                };
-                map.insert(k.clone(), val);
-            }
-            Some(map)
-        } else {
-            None
-        };
+                    };
+                    map.insert(k.clone(), val);
+                }
+                Some(map)
+            } else {
+                None
+            };
 
-        let ironbase_options = ironbase_core::FindOptions {
-            projection,
-            // Sort already parsed by tools.rs - None means O(1) skip/limit
-            sort: options.sort,
-            limit: options.limit,
-            skip: options.skip,
-            include_total: options.include_total,
-            // OOM protection: limit total response size
-            max_response_bytes: options.max_response_bytes,
-            // Cooperative cancellation support
-            cancel_flag: options.cancel_flag,
-        };
+            let ironbase_options = ironbase_core::FindOptions {
+                projection,
+                sort: options.sort,
+                limit: options.limit,
+                skip: options.skip,
+                include_total: options.include_total,
+                max_response_bytes: options.max_response_bytes,
+                cancel_flag: options.cancel_flag,
+            };
 
-        // Use core's find_with_result which handles count internally
-        let result = coll.find_with_result(&query, ironbase_options)?;
-        Ok(FindResult {
-            documents: result.documents,
-            total: result.total.map(|t| t as usize),
+            let result = coll.find_with_result(&query, ironbase_options)?;
+            Ok(FindResult {
+                documents: result.documents,
+                total: result.total.map(|t| t as usize),
+            })
         })
     }
 
-    /// Find documents with async semaphore throttling for heavy operations
-    ///
-    /// Heavy operations (limit > HEAVY_FIND_THRESHOLD or $regex query) are throttled
-    /// to prevent lock contention when multiple scans run simultaneously.
-    pub async fn find_async(
-        &self,
-        collection: &str,
-        query: Value,
-        options: FindOptions,
-    ) -> Result<FindResult> {
-        let is_heavy = Self::is_heavy_find(options.limit, &query);
-        let has_regex = Self::contains_regex(&query);
-
-        if is_heavy {
-            let sem = self.heavy_semaphore_for(collection);
-            let permit = tokio::time::timeout(
-                std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
-                sem.acquire(),
-            )
-            .await;
-
-            match permit {
-                Ok(Ok(_permit)) => {
-                    if has_regex {
-                        tracing::info!(
-                            collection = collection,
-                            limit = ?options.limit,
-                            "Heavy find started ($regex query)"
-                        );
-                    } else {
-                        tracing::info!(
-                            collection = collection,
-                            limit = ?options.limit,
-                            "Heavy find started (limit > {})",
-                            HEAVY_FIND_THRESHOLD
-                        );
-                    }
-                    let result = self.find_internal(collection, query, options);
-                    tracing::info!(
-                        collection = collection,
-                        success = result.is_ok(),
-                        "Heavy find completed"
-                    );
-                    result
-                }
-                Ok(Err(_)) => Err(crate::error::McpError::internal(
-                    "Heavy operation semaphore closed unexpectedly".to_string(),
-                )),
-                Err(_) => Err(crate::error::McpError::operation_too_large(format!(
-                    "Timeout waiting for find slot. Another heavy operation is in progress. \
-                     Wait {}s or avoid $regex (use fulltext_search instead).",
-                    HEAVY_OP_TIMEOUT_SECS
-                ))),
-            }
-        } else {
-            self.find_internal(collection, query, options)
-        }
-    }
-
-    /// Find documents (uses get_collection - no implicit creation)
-    /// Uses throttling when called inside a tokio runtime for heavy operations.
-    pub fn find(&self, collection: &str, query: Value, options: FindOptions) -> Result<FindResult> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let is_heavy = Self::is_heavy_find(options.limit, &query);
-            if is_heavy {
-                tracing::debug!(
-                    collection = collection,
-                    limit = ?options.limit,
-                    has_regex = Self::contains_regex(&query),
-                    "Heavy find via sync API - using async throttling"
-                );
-            }
-            tokio::task::block_in_place(|| {
-                handle.block_on(self.find_async(collection, query, options))
-            })
-        } else {
-            self.find_internal(collection, query, options)
-        }
-    }
-
-    /// Find a single document (uses get_collection - no implicit creation)
+    /// Find a single document with tiered concurrency control
+    /// - Instant: _id lookup
+    /// - Light: other queries (single doc)
     pub fn find_one(&self, collection: &str, query: Value) -> Result<Option<Value>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        let result = coll.find_one(&query)?;
-        Ok(result)
+        let op = OperationType::FindOne { query: &query };
+        let cost = self.concurrency.estimate_cost(&op);
+
+        self.concurrency.execute_sync(collection, cost, || {
+            let db = self.db.read();
+            let coll = db.get_collection(collection)?;
+            let result = coll.find_one(&query)?;
+            Ok(result)
+        })
     }
 
     /// Update a single document (with WAL durability)
@@ -1040,275 +904,62 @@ impl IronBaseAdapter {
         Ok(count)
     }
 
-    /// Count documents matching query - internal (no throttling)
-    fn count_documents_internal(&self, collection: &str, query: Value) -> Result<u64> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        let count = coll.count_documents(&query)?;
-        Ok(count)
-    }
-
-    /// Count documents with async semaphore throttling for heavy operations
-    ///
-    /// Heavy operations (empty query or regex) are throttled to prevent
-    /// lock contention when multiple full-collection scans run simultaneously.
-    pub async fn count_documents_async(&self, collection: &str, query: Value) -> Result<u64> {
-        let is_heavy = Self::is_heavy_count(&query);
-
-        if is_heavy {
-            let sem = self.heavy_semaphore_for(collection);
-            let permit = tokio::time::timeout(
-                std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
-                sem.acquire(),
-            )
-            .await;
-
-            match permit {
-                Ok(Ok(_permit)) => {
-                    tracing::info!(
-                        collection = collection,
-                        "Heavy count started (empty query or regex)"
-                    );
-                    let result = self.count_documents_internal(collection, query);
-                    tracing::info!(
-                        collection = collection,
-                        success = result.is_ok(),
-                        "Heavy count completed"
-                    );
-                    result
-                }
-                Ok(Err(_)) => Err(crate::error::McpError::internal(
-                    "Heavy operation semaphore closed unexpectedly".to_string(),
-                )),
-                Err(_) => Err(crate::error::McpError::operation_too_large(format!(
-                    "Timeout waiting for count slot. Another heavy operation is in progress. \
-                     Wait {}s or add a query filter to use an index.",
-                    HEAVY_OP_TIMEOUT_SECS
-                ))),
-            }
-        } else {
-            self.count_documents_internal(collection, query)
-        }
-    }
-
-    /// Count documents matching query (uses get_collection - no implicit creation)
-    /// Uses throttling when called inside a tokio runtime for heavy operations.
+    /// Count documents with tiered concurrency control
+    /// - Light: specific query (indexed)
+    /// - Heavy: empty query or regex (full scan)
     pub fn count_documents(&self, collection: &str, query: Value) -> Result<u64> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let is_heavy = Self::is_heavy_count(&query);
-            if is_heavy {
-                tracing::debug!(
-                    collection = collection,
-                    "Heavy count via sync API - using async throttling"
-                );
-            }
-            tokio::task::block_in_place(|| {
-                handle.block_on(self.count_documents_async(collection, query))
-            })
-        } else {
-            self.count_documents_internal(collection, query)
-        }
+        let op = OperationType::Count { query: &query };
+        let cost = self.concurrency.estimate_cost(&op);
+
+        self.concurrency.execute_sync(collection, cost, || {
+            let db = self.db.read();
+            let coll = db.get_collection(collection)?;
+            let count = coll.count_documents(&query)?;
+            Ok(count)
+        })
     }
 
-    /// Distinct values - internal (no throttling)
-    fn distinct_internal(&self, collection: &str, field: &str, query: Value) -> Result<Vec<Value>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        let values = coll.distinct(field, &query)?;
-        Ok(values)
-    }
-
-    /// Distinct values with async semaphore throttling
-    ///
-    /// Distinct operations are always considered heavy because they scan the collection
-    /// to find unique values.
-    pub async fn distinct_async(
-        &self,
-        collection: &str,
-        field: &str,
-        query: Value,
-    ) -> Result<Vec<Value>> {
-        // Distinct is always heavy (scans collection for unique values)
-        let sem = self.heavy_semaphore_for(collection);
-        let permit = tokio::time::timeout(
-            std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
-            sem.acquire(),
-        )
-        .await;
-
-        match permit {
-            Ok(Ok(_permit)) => {
-                tracing::info!(
-                    collection = collection,
-                    field = field,
-                    "Heavy distinct started"
-                );
-                let result = self.distinct_internal(collection, field, query);
-                tracing::info!(
-                    collection = collection,
-                    success = result.is_ok(),
-                    "Heavy distinct completed"
-                );
-                result
-            }
-            Ok(Err(_)) => Err(crate::error::McpError::internal(
-                "Heavy operation semaphore closed unexpectedly".to_string(),
-            )),
-            Err(_) => Err(crate::error::McpError::operation_too_large(format!(
-                "Timeout waiting for distinct slot. Another heavy operation is in progress. \
-                 Wait {}s.",
-                HEAVY_OP_TIMEOUT_SECS
-            ))),
-        }
-    }
-
-    /// Get distinct values for a field (uses get_collection - no implicit creation)
-    /// Uses throttling when called inside a tokio runtime.
+    /// Get distinct values with tiered concurrency control
+    /// - Heavy: always (scans for unique values)
     pub fn distinct(&self, collection: &str, field: &str, query: Value) -> Result<Vec<Value>> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tracing::debug!(
-                collection = collection,
-                field = field,
-                "Distinct via sync API - using async throttling"
-            );
-            tokio::task::block_in_place(|| {
-                handle.block_on(self.distinct_async(collection, field, query))
-            })
-        } else {
-            self.distinct_internal(collection, field, query)
-        }
+        let op = OperationType::Distinct;
+        let cost = self.concurrency.estimate_cost(&op);
+
+        self.concurrency.execute_sync(collection, cost, || {
+            let db = self.db.read();
+            let coll = db.get_collection(collection)?;
+            let values = coll.distinct(field, &query)?;
+            Ok(values)
+        })
     }
 
     // ============================================================
     // Aggregation
     // ============================================================
 
-    /// Check if a pipeline has a leading non-empty $match stage
-    /// Used to determine if this is a "heavy" operation that needs throttling.
-    /// Note: This does not verify index usage.
-    fn has_leading_match(pipeline: &[Value]) -> bool {
-        if let Some(first_stage) = pipeline.first() {
-            if let Some(obj) = first_stage.as_object() {
-                if let Some(match_value) = obj.get("$match") {
-                    return match_value
-                        .as_object()
-                        .map(|m| !m.is_empty())
-                        .unwrap_or(false);
-                }
-            }
-        }
-        false
-    }
-
-    /// Execute aggregation pipeline (sync version - no throttling)
-    /// For internal use only. External callers should use aggregate_async().
+    /// Execute aggregation pipeline with tiered concurrency control
+    /// - Light: has leading $match (filtered)
+    /// - Heavy: no $match (full scan)
     ///
     /// Uses `aggregate_auto()` which automatically scales memory limits based on
     /// available system RAM, preventing OOM on resource-constrained servers.
-    fn aggregate_internal(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        // Convert Vec<Value> to Value::Array
-        let pipeline_value = Value::Array(pipeline);
-        // Use centralized limits + cooperative deadline (if any)
-        let mut ctx = AggregationLimitContext::new(AggregationLimits::from_system_memory());
-        if let Some(deadline) = request_deadline::current_deadline() {
-            ctx = ctx.with_deadline(deadline);
-        }
-        let results = coll.aggregate_with_context(&pipeline_value, &ctx)?;
-        Ok(results)
-    }
-
-    /// Execute aggregation pipeline with concurrency throttling
-    ///
-    /// Heavy operations (aggregates without leading $match) are throttled to
-    /// prevent OOM when multiple full-collection scans run simultaneously.
-    ///
-    /// # Throttling Rules
-    /// - Pipelines WITH non-empty `$match` as first stage: No throttling (may still scan)
-    /// - Pipelines WITHOUT `$match`: Limited to MAX_CONCURRENT_HEAVY_OPS concurrent
-    ///
-    /// # Errors
-    /// - Returns error if timeout waiting for heavy operation slot
-    /// - Returns error if aggregation itself fails
-    pub async fn aggregate_async(
-        &self,
-        collection: &str,
-        pipeline: Vec<Value>,
-    ) -> Result<Vec<Value>> {
-        let is_heavy = !Self::has_leading_match(&pipeline);
-
-        if is_heavy {
-            // Try to acquire semaphore with timeout
-            let sem = self.heavy_semaphore_for(collection);
-            let permit = tokio::time::timeout(
-                std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
-                sem.acquire(),
-            )
-            .await;
-
-            match permit {
-                Ok(Ok(_permit)) => {
-                    // Got permit - execute the heavy operation
-                    // The permit is automatically released when dropped
-                    tracing::info!(
-                        collection = collection,
-                        "Heavy aggregate started (no $match, full scan)"
-                    );
-                    let result = self.aggregate_internal(collection, pipeline);
-                    tracing::info!(
-                        collection = collection,
-                        success = result.is_ok(),
-                        "Heavy aggregate completed"
-                    );
-                    result
-                }
-                Ok(Err(_)) => {
-                    // Semaphore closed (shouldn't happen)
-                    Err(crate::error::McpError::internal(
-                        "Heavy operation semaphore closed unexpectedly".to_string(),
-                    ))
-                }
-                Err(_) => {
-                    // Timeout waiting for permit
-                    Err(crate::error::McpError::operation_too_large(format!(
-                        "Timeout waiting for heavy aggregate slot. Another full-collection \
-                         aggregate is in progress. Either wait {}s or add a $match stage \
-                         to filter documents first.",
-                        HEAVY_OP_TIMEOUT_SECS
-                    )))
-                }
-            }
-        } else {
-            // Light operation - no throttling needed
-            self.aggregate_internal(collection, pipeline)
-        }
-    }
-
-    /// Execute aggregation pipeline (sync version)
-    /// Uses throttling when called inside a tokio runtime, otherwise runs directly.
     pub fn aggregate(&self, collection: &str, pipeline: Vec<Value>) -> Result<Vec<Value>> {
-        // Check if we're in a tokio runtime
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            // We're in a tokio runtime - use block_in_place for sync call
-            let is_heavy = !Self::has_leading_match(&pipeline);
-            if is_heavy {
-                // For heavy ops, we need to handle async properly
-                // Since we can't easily do async here, just run without throttle
-                // The async version should be preferred for MCP calls
-                tracing::warn!(
-                    collection = collection,
-                    "Heavy aggregate called via sync API - consider using aggregate_async"
-                );
+        let op = OperationType::Aggregate { pipeline: &pipeline };
+        let cost = self.concurrency.estimate_cost(&op);
+
+        self.concurrency.execute_sync(collection, cost, || {
+            let db = self.db.read();
+            let coll = db.get_collection(collection)?;
+            // Convert Vec<Value> to Value::Array
+            let pipeline_value = Value::Array(pipeline);
+            // Use centralized limits + cooperative deadline (if any)
+            let mut ctx = AggregationLimitContext::new(AggregationLimits::from_system_memory());
+            if let Some(deadline) = request_deadline::current_deadline() {
+                ctx = ctx.with_deadline(deadline);
             }
-            // Use block_in_place to avoid blocking the runtime
-            tokio::task::block_in_place(|| {
-                handle.block_on(self.aggregate_async(collection, pipeline))
-            })
-        } else {
-            // Not in tokio runtime - just run directly
-            self.aggregate_internal(collection, pipeline)
-        }
+            let results = coll.aggregate_with_context(&pipeline_value, &ctx)?;
+            Ok(results)
+        })
     }
 
     // ============================================================
@@ -1409,100 +1060,36 @@ impl IronBaseAdapter {
         Ok(name)
     }
 
-    /// Fuzzy search - internal (no throttling)
-    fn fuzzy_search_internal(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-        threshold: Option<f64>,
-        algorithm: Option<&str>,
-    ) -> Result<Vec<(Value, f64)>> {
-        use ironbase_core::FuzzyAlgorithm;
-
-        // Default to JaroWinkler if no algorithm specified
-        let algo = Some(match algorithm.unwrap_or("jaro_winkler") {
-            "levenshtein" => FuzzyAlgorithm::Levenshtein,
-            "damerau_levenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
-            _ => FuzzyAlgorithm::JaroWinkler,
-        });
-
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        let results = coll.fuzzy_search(field, query, threshold, algo)?;
-        Ok(results)
-    }
-
-    /// Fuzzy search with async semaphore throttling
-    ///
-    /// Fuzzy search operations are always considered heavy because they
-    /// scan the fuzzy index and compute similarity scores.
-    pub async fn fuzzy_search_async(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-        threshold: Option<f64>,
-        algorithm: Option<&str>,
-    ) -> Result<Vec<(Value, f64)>> {
-        // Fuzzy search is always heavy
-        let sem = self.heavy_semaphore_for(collection);
-        let permit = tokio::time::timeout(
-            std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
-            sem.acquire(),
-        )
-        .await;
-
-        match permit {
-            Ok(Ok(_permit)) => {
-                tracing::info!(
-                    collection = collection,
-                    field = field,
-                    query = query,
-                    "Heavy fuzzy_search started"
-                );
-                let result = self.fuzzy_search_internal(collection, field, query, threshold, algorithm);
-                tracing::info!(
-                    collection = collection,
-                    success = result.is_ok(),
-                    "Heavy fuzzy_search completed"
-                );
-                result
-            }
-            Ok(Err(_)) => Err(crate::error::McpError::internal(
-                "Heavy operation semaphore closed unexpectedly".to_string(),
-            )),
-            Err(_) => Err(crate::error::McpError::operation_too_large(format!(
-                "Timeout waiting for fuzzy_search slot. Another heavy operation is in progress. \
-                 Wait {}s.",
-                HEAVY_OP_TIMEOUT_SECS
-            ))),
-        }
-    }
-
     /// Fuzzy search using the fuzzy index (returns documents with similarity scores)
     /// Uses get_collection - no implicit creation
-    /// Uses throttling when called inside a tokio runtime.
+    /// Cost: Light if limit ≤ 100, Heavy otherwise
     pub fn fuzzy_search(
         &self,
         collection: &str,
         field: &str,
-        query: &str,
+        query_str: &str,
         threshold: Option<f64>,
         algorithm: Option<&str>,
+        limit: Option<usize>,
     ) -> Result<Vec<(Value, f64)>> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tracing::debug!(
-                collection = collection,
-                field = field,
-                "Fuzzy search via sync API - using async throttling"
-            );
-            tokio::task::block_in_place(|| {
-                handle.block_on(self.fuzzy_search_async(collection, field, query, threshold, algorithm))
-            })
-        } else {
-            self.fuzzy_search_internal(collection, field, query, threshold, algorithm)
-        }
+        use ironbase_core::FuzzyAlgorithm;
+
+        let op = OperationType::FuzzySearch { limit };
+        let cost = self.concurrency.estimate_cost(&op);
+
+        self.concurrency.execute_sync(collection, cost, || {
+            // Default to JaroWinkler if no algorithm specified
+            let algo = Some(match algorithm.unwrap_or("jaro_winkler") {
+                "levenshtein" => FuzzyAlgorithm::Levenshtein,
+                "damerau_levenshtein" => FuzzyAlgorithm::DamerauLevenshtein,
+                _ => FuzzyAlgorithm::JaroWinkler,
+            });
+
+            let db = self.db.read();
+            let coll = db.get_collection(collection)?;
+            let results = coll.fuzzy_search(field, query_str, threshold, algo)?;
+            Ok(results)
+        })
     }
 
     // ============================================================
@@ -1529,95 +1116,32 @@ impl IronBaseAdapter {
         Ok(name)
     }
 
-    /// Full-text search - internal (no throttling)
-    fn fulltext_search_internal(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-        options: FulltextSearchOptions,
-    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
-        let db = self.db.read();
-        let coll = db.get_collection(collection)?;
-        let results = coll.fulltext_search(
-            field,
-            query,
-            options.limit,
-            options.skip,
-            options.min_score,
-            options.projection,
-        )?;
-        Ok(results)
-    }
-
-    /// Full-text search with async semaphore throttling
-    ///
-    /// Full-text search operations are always considered heavy because they
-    /// scan the inverted index and may load many documents.
-    pub async fn fulltext_search_async(
-        &self,
-        collection: &str,
-        field: &str,
-        query: &str,
-        options: FulltextSearchOptions,
-    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
-        // Fulltext search is always heavy
-        let sem = self.heavy_semaphore_for(collection);
-        let permit = tokio::time::timeout(
-            std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
-            sem.acquire(),
-        )
-        .await;
-
-        match permit {
-            Ok(Ok(_permit)) => {
-                tracing::info!(
-                    collection = collection,
-                    field = field,
-                    query = query,
-                    "Heavy fulltext_search started"
-                );
-                let result = self.fulltext_search_internal(collection, field, query, options);
-                tracing::info!(
-                    collection = collection,
-                    success = result.is_ok(),
-                    "Heavy fulltext_search completed"
-                );
-                result
-            }
-            Ok(Err(_)) => Err(crate::error::McpError::internal(
-                "Heavy operation semaphore closed unexpectedly".to_string(),
-            )),
-            Err(_) => Err(crate::error::McpError::operation_too_large(format!(
-                "Timeout waiting for fulltext_search slot. Another heavy operation is in progress. \
-                 Wait {}s.",
-                HEAVY_OP_TIMEOUT_SECS
-            ))),
-        }
-    }
-
     /// Full-text search using the fulltext index (returns documents with scores and matched tokens)
     /// Uses get_collection - no implicit creation
-    /// Uses throttling when called inside a tokio runtime.
+    /// Cost: Light if limit ≤ 100, Heavy otherwise
     pub fn fulltext_search(
         &self,
         collection: &str,
         field: &str,
-        query: &str,
+        query_str: &str,
         options: FulltextSearchOptions,
     ) -> Result<Vec<(Value, f64, Vec<String>)>> {
-        if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            tracing::debug!(
-                collection = collection,
-                field = field,
-                "Fulltext search via sync API - using async throttling"
-            );
-            tokio::task::block_in_place(|| {
-                handle.block_on(self.fulltext_search_async(collection, field, query, options))
-            })
-        } else {
-            self.fulltext_search_internal(collection, field, query, options)
-        }
+        let op = OperationType::FulltextSearch { limit: options.limit };
+        let cost = self.concurrency.estimate_cost(&op);
+
+        self.concurrency.execute_sync(collection, cost, || {
+            let db = self.db.read();
+            let coll = db.get_collection(collection)?;
+            let results = coll.fulltext_search(
+                field,
+                query_str,
+                options.limit,
+                options.skip,
+                options.min_score,
+                options.projection.clone(),
+            )?;
+            Ok(results)
+        })
     }
 
     /// List all fulltext indexes for a collection
