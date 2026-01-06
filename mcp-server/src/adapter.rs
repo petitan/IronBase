@@ -1409,9 +1409,8 @@ impl IronBaseAdapter {
         Ok(name)
     }
 
-    /// Fuzzy search using the fuzzy index (returns documents with similarity scores)
-    /// Uses get_collection - no implicit creation
-    pub fn fuzzy_search(
+    /// Fuzzy search - internal (no throttling)
+    fn fuzzy_search_internal(
         &self,
         collection: &str,
         field: &str,
@@ -1432,6 +1431,78 @@ impl IronBaseAdapter {
         let coll = db.get_collection(collection)?;
         let results = coll.fuzzy_search(field, query, threshold, algo)?;
         Ok(results)
+    }
+
+    /// Fuzzy search with async semaphore throttling
+    ///
+    /// Fuzzy search operations are always considered heavy because they
+    /// scan the fuzzy index and compute similarity scores.
+    pub async fn fuzzy_search_async(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        threshold: Option<f64>,
+        algorithm: Option<&str>,
+    ) -> Result<Vec<(Value, f64)>> {
+        // Fuzzy search is always heavy
+        let sem = self.heavy_semaphore_for(collection);
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
+            sem.acquire(),
+        )
+        .await;
+
+        match permit {
+            Ok(Ok(_permit)) => {
+                tracing::info!(
+                    collection = collection,
+                    field = field,
+                    query = query,
+                    "Heavy fuzzy_search started"
+                );
+                let result = self.fuzzy_search_internal(collection, field, query, threshold, algorithm);
+                tracing::info!(
+                    collection = collection,
+                    success = result.is_ok(),
+                    "Heavy fuzzy_search completed"
+                );
+                result
+            }
+            Ok(Err(_)) => Err(crate::error::McpError::internal(
+                "Heavy operation semaphore closed unexpectedly".to_string(),
+            )),
+            Err(_) => Err(crate::error::McpError::operation_too_large(format!(
+                "Timeout waiting for fuzzy_search slot. Another heavy operation is in progress. \
+                 Wait {}s.",
+                HEAVY_OP_TIMEOUT_SECS
+            ))),
+        }
+    }
+
+    /// Fuzzy search using the fuzzy index (returns documents with similarity scores)
+    /// Uses get_collection - no implicit creation
+    /// Uses throttling when called inside a tokio runtime.
+    pub fn fuzzy_search(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        threshold: Option<f64>,
+        algorithm: Option<&str>,
+    ) -> Result<Vec<(Value, f64)>> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tracing::debug!(
+                collection = collection,
+                field = field,
+                "Fuzzy search via sync API - using async throttling"
+            );
+            tokio::task::block_in_place(|| {
+                handle.block_on(self.fuzzy_search_async(collection, field, query, threshold, algorithm))
+            })
+        } else {
+            self.fuzzy_search_internal(collection, field, query, threshold, algorithm)
+        }
     }
 
     // ============================================================
@@ -1458,9 +1529,8 @@ impl IronBaseAdapter {
         Ok(name)
     }
 
-    /// Full-text search using the fulltext index (returns documents with scores and matched tokens)
-    /// Uses get_collection - no implicit creation
-    pub fn fulltext_search(
+    /// Full-text search - internal (no throttling)
+    fn fulltext_search_internal(
         &self,
         collection: &str,
         field: &str,
@@ -1478,6 +1548,76 @@ impl IronBaseAdapter {
             options.projection,
         )?;
         Ok(results)
+    }
+
+    /// Full-text search with async semaphore throttling
+    ///
+    /// Full-text search operations are always considered heavy because they
+    /// scan the inverted index and may load many documents.
+    pub async fn fulltext_search_async(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        options: FulltextSearchOptions,
+    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+        // Fulltext search is always heavy
+        let sem = self.heavy_semaphore_for(collection);
+        let permit = tokio::time::timeout(
+            std::time::Duration::from_secs(HEAVY_OP_TIMEOUT_SECS),
+            sem.acquire(),
+        )
+        .await;
+
+        match permit {
+            Ok(Ok(_permit)) => {
+                tracing::info!(
+                    collection = collection,
+                    field = field,
+                    query = query,
+                    "Heavy fulltext_search started"
+                );
+                let result = self.fulltext_search_internal(collection, field, query, options);
+                tracing::info!(
+                    collection = collection,
+                    success = result.is_ok(),
+                    "Heavy fulltext_search completed"
+                );
+                result
+            }
+            Ok(Err(_)) => Err(crate::error::McpError::internal(
+                "Heavy operation semaphore closed unexpectedly".to_string(),
+            )),
+            Err(_) => Err(crate::error::McpError::operation_too_large(format!(
+                "Timeout waiting for fulltext_search slot. Another heavy operation is in progress. \
+                 Wait {}s.",
+                HEAVY_OP_TIMEOUT_SECS
+            ))),
+        }
+    }
+
+    /// Full-text search using the fulltext index (returns documents with scores and matched tokens)
+    /// Uses get_collection - no implicit creation
+    /// Uses throttling when called inside a tokio runtime.
+    pub fn fulltext_search(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        options: FulltextSearchOptions,
+    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tracing::debug!(
+                collection = collection,
+                field = field,
+                "Fulltext search via sync API - using async throttling"
+            );
+            tokio::task::block_in_place(|| {
+                handle.block_on(self.fulltext_search_async(collection, field, query, options))
+            })
+        } else {
+            self.fulltext_search_internal(collection, field, query, options)
+        }
     }
 
     /// List all fulltext indexes for a collection

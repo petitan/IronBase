@@ -4,6 +4,14 @@ use serde_json::{json, Value};
 
 /// Get the list of all available prompts for MCP prompts/list
 pub fn get_prompts_list() -> Value {
+    // TEMPORARILY DISABLED - all prompts
+    json!({
+        "prompts": []
+    })
+}
+
+#[allow(dead_code)]
+fn get_prompts_list_full() -> Value {
     json!({
         "prompts": [
             {
