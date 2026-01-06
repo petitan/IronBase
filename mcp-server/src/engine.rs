@@ -13,7 +13,6 @@ use crate::acl::{
 };
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
-use crate::request_deadline;
 use crate::scripting::LimitsManager;
 use crate::tools::dispatch_tool;
 use crate::ServerInfo;
@@ -218,7 +217,8 @@ impl IronBaseService {
         }
 
         // 4. Execute the tool (ACL was just verified - minimal TOCTOU window)
-        let _deadline_guard = request_deadline::set_deadline(ctx.deadline);
+        // Note: ExecutionContext (deadline + cancel_flag) is already set by http_server.rs
+        // via set_execution_context() in spawn_blocking, so no need to set it here.
 
         // Get current dynamic limits from LimitsManager
         let script_limits = self.limits_manager.get_limits();
