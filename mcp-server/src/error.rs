@@ -271,10 +271,9 @@ impl McpError {
         Self::resource_exhausted(msg, None)
     }
 
-    /// Script execution error
+    /// Script execution error (no masking)
     pub fn script_error(msg: impl Into<String>) -> Self {
-        let sanitized = sanitize_script_error(&msg.into());
-        Self::new(ErrorCode::ScriptError, sanitized)
+        Self::new(ErrorCode::ScriptError, msg)
     }
 
     /// Aggregation error
@@ -287,11 +286,9 @@ impl McpError {
         Self::new(ErrorCode::SerializationError, msg)
     }
 
-    /// Internal/storage error (sanitized)
+    /// Internal/storage error (no masking - full details exposed to client)
     pub fn storage(msg: impl Into<String>) -> Self {
-        let full_msg = msg.into();
-        tracing::debug!("Storage error details: {}", full_msg);
-        Self::new(ErrorCode::ServerError, "Database operation failed")
+        Self::new(ErrorCode::ServerError, msg)
     }
 
     /// Internal error
@@ -328,13 +325,13 @@ impl McpError {
         Self::new(ErrorCode::ValidationError, msg)
     }
 
-    /// Panic caught (internal error)
+    /// Panic caught (no masking - full panic details exposed)
     pub fn panic(msg: impl Into<String>) -> Self {
         let full_msg = msg.into();
         tracing::error!("Panic caught in tool handler: {}", full_msg);
         Self::new(
             ErrorCode::InternalError,
-            "Internal error: operation failed unexpectedly",
+            format!("Internal panic: {}", full_msg),
         )
     }
 
@@ -409,32 +406,6 @@ impl From<serde_json::Error> for McpError {
 }
 
 // ============================================================================
-// Helper functions
-// ============================================================================
-
-/// Sanitize script error messages to prevent internal information disclosure
-fn sanitize_script_error(msg: &str) -> String {
-    let mut result = msg.to_string();
-
-    // Remove line/position references like "(line 5, position 20)"
-    while let Some(start) = result.find("(line ") {
-        if let Some(end) = result[start..].find(')') {
-            result.replace_range(start..start + end + 1, "(...)");
-        } else {
-            break;
-        }
-    }
-
-    // Truncate very long error messages
-    if result.len() > 200 {
-        result.truncate(200);
-        result.push_str("...");
-    }
-
-    result
-}
-
-// ============================================================================
 // Result type alias
 // ============================================================================
 
@@ -494,11 +465,4 @@ mod tests {
         assert!(err.data.as_ref().unwrap()["limit"] == 10000);
     }
 
-    #[test]
-    fn test_sanitize_script_error() {
-        let msg = "Error at (line 5, position 20): undefined variable";
-        let sanitized = sanitize_script_error(msg);
-        assert!(!sanitized.contains("line 5"));
-        assert!(sanitized.contains("(...)"));
-    }
 }

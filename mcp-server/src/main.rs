@@ -366,8 +366,7 @@ fn run_stdio_server(cli: &Cli) {
             // BUG #14 fix: Handle JSON serialization errors gracefully
             let response_str = serde_json::to_string(&response).unwrap_or_else(|e| {
                 eprintln!("Response serialization error: {}", e);
-                r#"{"jsonrpc":"2.0","error":{"code":-32603,"message":"Internal error"}}"#
-                    .to_string()
+                format!(r#"{{"jsonrpc":"2.0","error":{{"code":-32603,"message":"Serialization error: {}"}}}}"#, e)
             });
             // Write response only for requests, not notifications
             if let Err(e) = writeln!(stdout, "{}", response_str) {
