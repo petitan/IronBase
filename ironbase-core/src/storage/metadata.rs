@@ -793,8 +793,8 @@ mod tests {
         use std::io::{Seek, Write};
         file.seek(SeekFrom::Start(1000)).unwrap();
 
-        // Write a size larger than 16MB (suspicious)
-        let huge_size = 20 * 1024 * 1024u32; // 20MB
+        // Write a size larger than MAX_DOCUMENT_SIZE_BYTES (64MB)
+        let huge_size = 70 * 1024 * 1024u32; // 70MB > 64MB limit
         file.write_all(&huge_size.to_le_bytes()).unwrap();
         file.sync_all().unwrap();
 
