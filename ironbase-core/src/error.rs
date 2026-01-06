@@ -59,6 +59,12 @@ pub enum IronBaseError {
 
     #[error("Out of memory: {0}")]
     OutOfMemory(String),
+
+    #[error("Operation cancelled: {0}")]
+    Cancelled(String),
+
+    #[error("Operation timed out: {0}")]
+    Timeout(String),
 }
 
 pub type Result<T> = std::result::Result<T, IronBaseError>;

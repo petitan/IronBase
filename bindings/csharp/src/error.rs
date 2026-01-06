@@ -71,6 +71,12 @@ pub enum IronBaseErrorCode {
     /// Out of memory
     OutOfMemory = -18,
 
+    /// Operation cancelled by client
+    Cancelled = -19,
+
+    /// Operation timed out
+    Timeout = -20,
+
     /// Unknown/internal error
     Unknown = -99,
 }
@@ -96,6 +102,8 @@ impl From<&IronBaseError> for IronBaseErrorCode {
             IronBaseError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
             IronBaseError::DatabaseClosed => IronBaseErrorCode::OperationNotAllowed,
             IronBaseError::OutOfMemory(_) => IronBaseErrorCode::OutOfMemory,
+            IronBaseError::Cancelled(_) => IronBaseErrorCode::Cancelled,
+            IronBaseError::Timeout(_) => IronBaseErrorCode::Timeout,
             IronBaseError::Unknown(_) => IronBaseErrorCode::Unknown,
         }
     }

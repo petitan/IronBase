@@ -957,6 +957,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             true,
             0,
             None,
+            None, // No cancel_flag for delete operations
+            None, // No deadline for delete operations
         )?;
 
         // Find first matching and delete
@@ -1036,8 +1038,9 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
         // This avoids bulk-loading all documents into memory
-        let (doc_ids, _) = self
-            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json, None, None, false, 0, None, true, 0, None, None, None,
+        )?;
 
         let mut deleted = 0u64;
         // BUG #2 FIX: Track actual deleted documents for WAL
@@ -1238,8 +1241,9 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
         // This avoids bulk-loading all documents into memory
-        let (doc_ids, _) = self
-            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json, None, None, false, 0, None, true, 0, None, None, None,
+        )?;
 
         let mut deleted = 0u64;
         let mut wal_entries: Vec<(DocumentId, Value)> = Vec::new();
@@ -1849,6 +1853,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             true,
             0,
             None,
+            None, // No cancel_flag for delete operations
+            None, // No deadline for delete operations
         )?;
 
         for doc_id in doc_ids {

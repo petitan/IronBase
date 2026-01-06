@@ -5,6 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::error::{IronBaseError, Result};
+use crate::execution::ExecutionContext;
 use crate::fulltext::FulltextIndexMetadata;
 use crate::index::FuzzyAlgorithm;
 use crate::log_error;
@@ -134,6 +135,47 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Fetch full documents for matched IDs
         let mut results = Vec::with_capacity(matches.len());
         for (doc_id, similarity) in matches {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                results.push((doc, similarity));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Fuzzy search with execution context for cancellation support.
+    ///
+    /// This is the cancellation-aware version of `fuzzy_search`.
+    /// Pass an ExecutionContext to enable timeout/cancellation checking.
+    pub fn fuzzy_search_with_ctx(
+        &self,
+        field: &str,
+        query: &str,
+        threshold: Option<f64>,
+        algorithm: Option<FuzzyAlgorithm>,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<(Value, f64)>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+
+        // Find fuzzy index for this field
+        let fuzzy_index = indexes.get_fuzzy_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fuzzy index found for field '{}'", field))
+        })?;
+
+        // Perform search WITH cancellation support (the expensive part!)
+        let matches = fuzzy_index.search_with_ctx(query, threshold, algorithm, ctx)?;
+
+        drop(indexes);
+
+        // Fetch full documents for matched IDs with cancellation checks
+        let mut results = Vec::with_capacity(matches.len());
+        for (iteration, (doc_id, similarity)) in matches.into_iter().enumerate() {
+            // Check for cancellation every N iterations
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 results.push((doc, similarity));
             }
@@ -344,6 +386,60 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Fetch documents for matched IDs and apply projection if specified
         let mut results = Vec::with_capacity(search_results.len());
         for result in search_results {
+            if let Some(doc) = self.read_document_by_id(&result.doc_id)? {
+                let projected_doc = if let Some(ref proj) = projection {
+                    crate::find_options::apply_projection(&doc, proj)?
+                } else {
+                    doc
+                };
+                results.push((projected_doc, result.score, result.matched_tokens));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Fulltext search with execution context for cancellation support.
+    ///
+    /// This is the cancellation-aware version of `fulltext_search`.
+    /// Pass an ExecutionContext to enable timeout/cancellation checking.
+    pub fn fulltext_search_with_ctx(
+        &self,
+        field: &str,
+        query: &str,
+        limit: Option<usize>,
+        skip: Option<usize>,
+        min_score: Option<f64>,
+        projection: Option<HashMap<String, i32>>,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+
+        // Find fulltext index for this field
+        let fulltext_index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index found for field '{}'", field))
+        })?;
+
+        // Perform search WITH cancellation support (the expensive part!)
+        let search_results = fulltext_index.search_with_ctx(
+            query,
+            limit.unwrap_or(10),
+            skip.unwrap_or(0),
+            min_score,
+            ctx,
+        )?;
+
+        drop(indexes);
+
+        // Fetch documents for matched IDs with cancellation checks
+        let mut results = Vec::with_capacity(search_results.len());
+        for (iteration, result) in search_results.into_iter().enumerate() {
+            // Check for cancellation every N iterations
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
             if let Some(doc) = self.read_document_by_id(&result.doc_id)? {
                 let projected_doc = if let Some(ref proj) = projection {
                     crate::find_options::apply_projection(&doc, proj)?

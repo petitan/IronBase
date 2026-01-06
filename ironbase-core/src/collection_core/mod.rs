@@ -189,6 +189,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
+use crate::execution::ExecutionContext;
 use crate::index::{IndexKey, IndexManager, RangeQueryMode, ScanOrder};
 use crate::query::Query;
 use crate::query_cache::{QueryCache, QueryHash};
@@ -285,6 +286,9 @@ struct QueryExecutionContext {
 
     /// Cancellation flag for cooperative timeout
     cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+
+    /// Deadline for timeout enforcement
+    deadline: Option<std::time::Instant>,
 }
 
 impl QueryExecutionContext {
@@ -324,6 +328,7 @@ impl QueryExecutionContext {
             projection: options.projection.clone(),
             max_response_bytes: options.max_response_bytes,
             cancel_flag: options.cancel_flag.clone(),
+            deadline: options.deadline,
         }
     }
 
@@ -931,8 +936,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             ctx.fetch_skip,
             ctx.fetch_limit,
             ctx.sort_field.is_none(),
-            ctx.original_skip,  // For index-based sort: skip
-            ctx.original_limit, // For index-based sort: enables early termination
+            ctx.original_skip,        // For index-based sort: skip
+            ctx.original_limit,       // For index-based sort: enables early termination
+            ctx.cancel_flag.as_ref(), // For cooperative cancellation
+            ctx.deadline,             // For cooperative timeout
         )?;
 
         // Phase 3: Document loading with OOM protection
@@ -967,13 +974,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let mut loaded = 0;
         for doc_id in doc_ids {
-            // Check for cancellation every 100 documents
+            // Check for cancellation/timeout every 100 documents
             if loaded % 100 == 0 {
                 if let Some(ref flag) = cancel_flag {
                     if flag.load(std::sync::atomic::Ordering::Relaxed) {
-                        return Err(IronBaseError::InvalidQuery(format!(
+                        return Err(IronBaseError::Cancelled(format!(
                             "Query cancelled after loading {} documents. \
-                            The operation was aborted due to timeout or client disconnection.",
+                            The operation was aborted due to client disconnection.",
+                            loaded
+                        )));
+                    }
+                }
+                if let Some(dl) = ctx.deadline {
+                    if std::time::Instant::now() >= dl {
+                        return Err(IronBaseError::Timeout(format!(
+                            "Query timed out after loading {} documents. \
+                            The operation exceeded the configured deadline.",
                             loaded
                         )));
                     }
@@ -1100,7 +1116,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if storage.get_file_path().is_empty() {
             drop(storage);
             let (doc_ids, _) = self.collect_doc_ids_with_options(
-                query_json, None, None, false, 0, None, true, 0, None,
+                query_json, None, None, false, 0, None, true, 0, None, None, None,
             )?;
             return Ok(FindCursor::new(self, doc_ids));
         }
@@ -1113,7 +1129,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if QueryPlanner::extract_logical_clauses(query_json).is_some() {
             if has_catalog {
                 let (doc_ids, _) = self.collect_doc_ids_with_options(
-                    query_json, None, None, false, 0, None, true, 0, None,
+                    query_json, None, None, false, 0, None, true, 0, None, None, None,
                 )?;
                 return Ok(FindCursor::new(self, doc_ids));
             }
@@ -1135,7 +1151,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if has_catalog {
             let (doc_ids, _) = self.collect_doc_ids_with_options(
-                query_json, None, None, false, 0, None, true, 0, None,
+                query_json, None, None, false, 0, None, true, 0, None, None, None,
             )?;
             return Ok(FindCursor::new(self, doc_ids));
         }
@@ -1184,6 +1200,65 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             true,
             0,
             None,
+            None, // No cancel_flag for find_one
+            None, // No deadline for find_one
+        )?;
+
+        if let Some(doc_id) = doc_ids.first() {
+            self.read_document_by_id(doc_id)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Find one document matching query with execution context for cancellation support.
+    ///
+    /// This is the cancellation-aware version of `find_one`.
+    /// Note: find_one is already bounded (limit=1), so cancellation is rarely needed,
+    /// but this method allows passing an execution context for consistency.
+    pub fn find_one_with_ctx(
+        &self,
+        query_json: &Value,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Option<Value>> {
+        self.check_not_closed()?;
+
+        // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
+        if let Some(query_obj) = query_json.as_object() {
+            if query_obj.len() == 1 && query_obj.contains_key("_id") {
+                if let Some(id_val) = query_obj.get("_id") {
+                    if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                        if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                            let parsed_query = Query::from_json(query_json)?;
+                            let document = Document::from_value(&doc)?;
+
+                            if parsed_query.matches(&document)? {
+                                return Ok(Some(doc));
+                            }
+                        }
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+
+        // Extract cancel_flag and deadline from ExecutionContext if available
+        let cancel_flag = ctx.and_then(|c| c.cancel_flag().cloned());
+        let deadline = ctx.and_then(|c| c.deadline());
+
+        // Use QueryPlanner with limit=1 - enables index usage for indexed fields
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json,
+            None,
+            None,
+            false,
+            0,
+            Some(1),
+            true,
+            0,
+            None,
+            cancel_flag.as_ref(),
+            deadline,
         )?;
 
         if let Some(doc_id) = doc_ids.first() {
@@ -1216,7 +1291,37 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Index-aware count with Vec-less fallback
-        self.count_with_plan(query_json)
+        self.count_with_plan(query_json, None)
+    }
+
+    /// Count documents matching a query with execution context for cancellation support.
+    ///
+    /// This is the cancellation-aware version of `count_documents`.
+    /// Pass an ExecutionContext to enable timeout/cancellation checking.
+    pub fn count_documents_with_ctx(
+        &self,
+        query_json: &Value,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<u64> {
+        self.check_not_closed()?;
+
+        // Fast path: empty query = count all (O(1))
+        if Self::query_matches_all(query_json) {
+            let storage = self.storage.read();
+            return Ok(storage.get_live_count(&self.name).unwrap_or(0));
+        }
+
+        // Fast path: _id query = O(1) lookup
+        if let Some(doc_id) = Self::extract_id_query(query_json) {
+            return Ok(if self.read_document_by_id(&doc_id)?.is_some() {
+                1
+            } else {
+                0
+            });
+        }
+
+        // Index-aware count with Vec-less fallback
+        self.count_with_plan(query_json, ctx)
     }
 
     /// Count using QueryPlanner for index optimization
@@ -1226,7 +1331,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Falls back to streaming scan if no suitable index exists.
     ///
     /// 🔧 REFACTORED: Uses unified range_query(Count) for O(1) memory index counting.
-    fn count_with_plan(&self, query_json: &Value) -> Result<u64> {
+    fn count_with_plan(&self, query_json: &Value, ctx: Option<&ExecutionContext>) -> Result<u64> {
         use crate::index::RangeQueryResult;
 
         // Try index-based counting
@@ -1247,7 +1352,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             )? {
                 return Ok(doc_ids.len() as u64);
             }
-            return self.count_with_scan(query_json);
+            return self.count_with_scan(query_json, ctx);
         }
 
         if let Some((_, plan)) = QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
@@ -1370,7 +1475,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Fallback: streaming count without Vec allocation
-        self.count_with_scan(query_json)
+        self.count_with_scan(query_json, ctx)
     }
 
     /// Adjust index count for tombstones.
@@ -1408,7 +1513,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// ⚠️ OOM PREVENTION: Chunks prevent loading all docs at once!
     /// Lásd: CLAUDE.md "OOM Prevention" szekció
     /// Performance: ~30-50s instead of 274s for 78K emails
-    fn count_with_scan(&self, query_json: &Value) -> Result<u64> {
+    fn count_with_scan(&self, query_json: &Value, ctx: Option<&ExecutionContext>) -> Result<u64> {
         /// Max documents per chunk - limits memory to ~500MB
         const CHUNK_SIZE: usize = 1000;
 
@@ -1429,7 +1534,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let mut total_count = 0u64;
 
         // Process in chunks to limit memory usage
-        for chunk in catalog_entries.chunks(CHUNK_SIZE) {
+        for (chunks_processed, chunk) in catalog_entries.chunks(CHUNK_SIZE).enumerate() {
+            // Check for cancellation at the start of each chunk
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(chunks_processed)?;
+            }
+
             // Phase 1: Read chunk bytes (sequential, holds lock)
             let raw_docs: Vec<Vec<u8>> = chunk
                 .iter()
@@ -1596,8 +1706,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // STREAMING FALLBACK: When no index is available or query has filters
         // Collect only document IDs first (small: ~8-32 bytes each)
         // Then stream-load documents one by one - never bulk load all docs into memory
-        let (doc_ids, _) = self
-            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json, None, None, false, 0, None, true, 0, None, None, None,
+        )?;
 
         // Collect distinct values - stream documents one by one
         // OOM PROTECTION: Use try_reserve for dynamic memory checking
@@ -1632,6 +1743,91 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     if seen_hashes.insert(value_hash) {
                         // Dynamic memory check every 1000 new distinct values
+                        if distinct_values.len() % 1000 == 0 && !distinct_values.is_empty() {
+                            distinct_values.try_reserve(1000).map_err(|e| {
+                                IronBaseError::OutOfMemory(format!(
+                                    "Out of memory at {} distinct values ({}). \
+                                    Consider using a more restrictive query filter.",
+                                    distinct_values.len(),
+                                    e
+                                ))
+                            })?;
+                        }
+                        distinct_values.push(field_value.clone());
+                    }
+                }
+            }
+        }
+
+        Ok(distinct_values)
+    }
+
+    /// Get distinct values for a field with execution context for cancellation support.
+    ///
+    /// This is the cancellation-aware version of `distinct`.
+    /// Pass an ExecutionContext to enable timeout/cancellation checking.
+    pub fn distinct_with_ctx(
+        &self,
+        field: &str,
+        query_json: &Value,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
+
+        // Handle _id query optimization
+        if let Some(doc_id) = Self::extract_id_query(query_json) {
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                let doc_json_str = serde_json::to_string(&doc)?;
+                let document = Document::from_json(&doc_json_str)?;
+                let values: Vec<Value> = document.get_all(field).into_iter().cloned().collect();
+                return Ok(values);
+            }
+            return Ok(Vec::new());
+        }
+
+        // INDEX-BASED OPTIMIZATION: use index to get distinct values without loading documents
+        if query_json == &serde_json::json!({}) {
+            if let Some(distinct_values) = self.try_index_based_distinct(field)? {
+                log_debug!(
+                    "distinct: used index for field '{}', found {} unique values",
+                    field,
+                    distinct_values.len()
+                );
+                return Ok(distinct_values);
+            }
+        }
+
+        // STREAMING FALLBACK: collect document IDs first, then stream-load one by one
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json, None, None, false, 0, None, true, 0, None, None, None,
+        )?;
+
+        // Collect distinct values with cancellation checks
+        let mut seen_hashes: HashSet<u64> = HashSet::new();
+        let mut distinct_values = Vec::new();
+
+        let estimated_unique = doc_ids.len().min(100_000);
+        distinct_values.try_reserve(estimated_unique).map_err(|e| {
+            IronBaseError::OutOfMemory(format!(
+                "Cannot allocate for ~{} distinct values ({}). \
+                Solutions: 1) Use indexed distinct, 2) Add a query filter, 3) Increase system memory.",
+                estimated_unique, e
+            ))
+        })?;
+
+        for (iteration, doc_id) in doc_ids.iter().enumerate() {
+            // Check for cancellation every N iterations
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
+            if let Some(doc) = self.read_document_by_id(doc_id)? {
+                let document = Document::from_value_owned(doc)?;
+
+                for field_value in document.get_all(field) {
+                    let value_hash = crate::value_utils::value_hash(field_value);
+
+                    if seen_hashes.insert(value_hash) {
                         if distinct_values.len() % 1000 == 0 && !distinct_values.is_empty() {
                             distinct_values.try_reserve(1000).map_err(|e| {
                                 IronBaseError::OutOfMemory(format!(
@@ -2742,6 +2938,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         parsed_query: &Query,
         skip: usize,
         limit: Option<usize>,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
     ) -> Result<Vec<DocumentId>> {
         let mut storage = self.storage.write();
 
@@ -2847,7 +3045,29 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         sorted_entries.sort_by(|(a, _), (b, _)| a.cmp(b));
 
         // Iterate over sorted entries with early termination (for filtered queries)
-        for (doc_id, offset) in sorted_entries {
+        for (scanned, (doc_id, offset)) in sorted_entries.into_iter().enumerate() {
+            // Check for cancellation/timeout every 100 documents BEFORE expensive operations
+            if scanned % 100 == 0 {
+                if let Some(flag) = cancel_flag {
+                    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(IronBaseError::Cancelled(format!(
+                            "Query cancelled after scanning {} documents. \
+                            The operation was aborted due to client disconnection.",
+                            scanned
+                        )));
+                    }
+                }
+                if let Some(dl) = deadline {
+                    if std::time::Instant::now() >= dl {
+                        return Err(IronBaseError::Timeout(format!(
+                            "Query timed out after scanning {} documents. \
+                            The operation exceeded the configured deadline.",
+                            scanned
+                        )));
+                    }
+                }
+            }
+
             // Check if we've collected enough documents
             // MongoDB compatibility: limit(0) means "no limit"
             if let Some(limit_count) = limit {
@@ -2902,8 +3122,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     fn collect_doc_ids(&self, query_json: &Value) -> Result<Vec<DocumentId>> {
-        let (ids, _) = self
-            .collect_doc_ids_with_options(query_json, None, None, false, 0, None, true, 0, None)?;
+        let (ids, _) = self.collect_doc_ids_with_options(
+            query_json, None, None, false, 0, None, true, 0, None, None, None,
+        )?;
         Ok(ids)
     }
 
@@ -2918,6 +3139,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         use_cache: bool,
         original_skip: usize,          // For index-based sort: skip count
         original_limit: Option<usize>, // For index-based sort: enables early termination
+        cancel_flag: Option<&Arc<AtomicBool>>, // For cooperative cancellation
+        deadline: Option<std::time::Instant>, // For cooperative timeout
     ) -> Result<(Vec<DocumentId>, bool)> {
         let cache_hash = if use_cache
             && hint.is_none()
@@ -2993,14 +3216,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     (doc_ids, true)
                 } else {
                     // No suitable index found, fall back to collection scan
-                    let doc_ids =
-                        self.scan_documents_with_early_termination(&parsed_query, skip, limit)?;
+                    let doc_ids = self.scan_documents_with_early_termination(
+                        &parsed_query,
+                        skip,
+                        limit,
+                        cancel_flag,
+                        deadline,
+                    )?;
                     (doc_ids, false)
                 }
             } else {
                 // Query has filter but no index plan - must scan all documents
-                let doc_ids =
-                    self.scan_documents_with_early_termination(&parsed_query, skip, limit)?;
+                let doc_ids = self.scan_documents_with_early_termination(
+                    &parsed_query,
+                    skip,
+                    limit,
+                    cancel_flag,
+                    deadline,
+                )?;
                 (doc_ids, false)
             }
         } else {
@@ -3008,7 +3241,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // This is critical for performance on large collections with pagination.
             // Previously scan_documents_via_catalog() loaded ALL documents first,
             // making limit=1 take the same time as limit=50 on large collections.
-            let doc_ids = self.scan_documents_with_early_termination(&parsed_query, skip, limit)?;
+            let doc_ids = self.scan_documents_with_early_termination(
+                &parsed_query,
+                skip,
+                limit,
+                cancel_flag,
+                deadline,
+            )?;
             (doc_ids, false)
         };
 
@@ -3297,7 +3536,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         )?;
                         ids
                     } else {
-                        self.scan_documents_with_early_termination(clause_query, 0, None)?
+                        self.scan_documents_with_early_termination(
+                            clause_query,
+                            0,
+                            None,
+                            None,
+                            None,
+                        )?
                     };
                     for id in ids {
                         if seen.insert(id.clone()) {
@@ -3321,13 +3566,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         )?;
                         ids
                     } else {
-                        self.scan_documents_with_early_termination(clause_query, 0, None)?
+                        self.scan_documents_with_early_termination(
+                            clause_query,
+                            0,
+                            None,
+                            None,
+                            None,
+                        )?
                     };
                     for id in ids {
                         excluded.insert(id);
                     }
                 }
-                let all_ids = self.scan_documents_with_early_termination(&Query::new(), 0, None)?;
+                let all_ids =
+                    self.scan_documents_with_early_termination(&Query::new(), 0, None, None, None)?;
                 all_ids
                     .into_iter()
                     .filter(|id| !excluded.contains(id))

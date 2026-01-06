@@ -1153,6 +1153,82 @@ impl FulltextIndex {
         results.into_iter().skip(skip).take(limit).collect()
     }
 
+    /// Search for documents with ExecutionContext for cancellation support
+    ///
+    /// This is the cancellation-aware version of `search`. It checks the
+    /// ExecutionContext during the expensive iterations to allow early termination.
+    pub fn search_with_ctx(
+        &self,
+        query: &str,
+        limit: usize,
+        skip: usize,
+        min_score: Option<f64>,
+        ctx: Option<&crate::execution::ExecutionContext>,
+    ) -> Result<Vec<FtsSearchResult>> {
+        let query_tokens = tokenize(query, &self.options);
+        if query_tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let total_docs = self.doc_tokens_offsets.len() as f64;
+        if total_docs == 0.0 {
+            return Ok(Vec::new());
+        }
+
+        let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
+        let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
+        let mut iteration: usize = 0;
+
+        for token in &query_tokens {
+            // Check cancellation before loading token entries (disk I/O)
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+            iteration += 1;
+
+            if let Some(entries) = self.get_token_entries_merged(token) {
+                let idf = (1.0 + total_docs / entries.len() as f64).ln();
+
+                for (doc_id, tf) in entries {
+                    // Check cancellation periodically during iteration
+                    if let Some(exec_ctx) = ctx {
+                        exec_ctx.maybe_check(iteration)?;
+                    }
+                    iteration += 1;
+
+                    *doc_scores.entry(doc_id.clone()).or_default() += (tf as f64) * idf;
+                    matched
+                        .entry(doc_id.clone())
+                        .or_default()
+                        .push(token.clone());
+                }
+            }
+        }
+
+        if doc_scores.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let min = min_score.unwrap_or(0.0);
+
+        let mut results: Vec<_> = doc_scores
+            .into_iter()
+            .filter(|(_, score)| *score >= min)
+            .map(|(doc_id, score)| FtsSearchResult {
+                matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
+                doc_id,
+                score,
+            })
+            .collect();
+
+        results.sort_by(|a, b| match b.score.partial_cmp(&a.score) {
+            Some(std::cmp::Ordering::Equal) | None => a.doc_id.cmp(&b.doc_id),
+            Some(ord) => ord,
+        });
+
+        Ok(results.into_iter().skip(skip).take(limit).collect())
+    }
+
     /// Check if a document is in the index
     pub fn contains(&self, doc_id: &DocumentId) -> bool {
         self.doc_tokens_offsets.contains_key(doc_id)
