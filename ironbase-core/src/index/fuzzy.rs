@@ -15,7 +15,7 @@ const FUZZY_INDEX_MAGIC: &[u8; 8] = b"IRONFZX\0";
 const FUZZY_INDEX_VERSION: u32 = 1;
 /// Header size in bytes
 const HEADER_SIZE: u64 = 64;
-const FUZZY_LAZY_LOAD_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
+const FUZZY_LAZY_LOAD_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Fuzzy matching algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -241,11 +241,19 @@ impl FuzzyIndex {
     ///
     /// This is the cancellation-aware version of `search`. It checks the
     /// ExecutionContext during the expensive similarity calculations.
+    ///
+    /// # Arguments
+    /// * `query` - The search query string
+    /// * `threshold_override` - Optional threshold override (0.0-1.0)
+    /// * `algorithm_override` - Optional algorithm override
+    /// * `limit` - Optional limit for early exit (returns top N results)
+    /// * `ctx` - Optional execution context for cancellation
     pub fn search_with_ctx(
         &self,
         query: &str,
         threshold_override: Option<f64>,
         algorithm_override: Option<FuzzyAlgorithm>,
+        limit: Option<usize>,
         ctx: Option<&crate::execution::ExecutionContext>,
     ) -> Result<Vec<(DocumentId, f64)>> {
         let threshold = threshold_override.unwrap_or(self.metadata.threshold);
@@ -257,7 +265,7 @@ impl FuzzyIndex {
         // The search_in_file() uses serde Visitor pattern which doesn't support periodic
         // cancellation checks. Risk is LOW because:
         // 1. Fuzzy indexes are typically small (only indexed field values)
-        // 2. Lazy mode only activates for very large indexes (>10MB)
+        // 2. Lazy mode only activates for very large indexes (>100MB now)
         // 3. Outer search_with_ctx() checks cancellation during document loading
         // TODO: Refactor to support ctx - options: pre-load entries, custom streaming, or thread-local deadline
         if self.lazy_mode && self.entries.is_empty() {
@@ -266,12 +274,16 @@ impl FuzzyIndex {
                     results.append(&mut on_disk);
                 }
                 results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                // Apply limit after sorting
+                if let Some(lim) = limit {
+                    results.truncate(lim);
+                }
                 return Ok(results);
             }
         }
 
+        // Collect all matches above threshold
         for (iteration, (lower_value, _original, doc_id)) in self.entries.iter().enumerate() {
-            // Check for cancellation periodically
             if let Some(exec_ctx) = ctx {
                 exec_ctx.maybe_check(iteration)?;
             }
@@ -283,6 +295,12 @@ impl FuzzyIndex {
         }
 
         results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Apply limit after sorting to get top N results
+        if let Some(lim) = limit {
+            results.truncate(lim);
+        }
+
         Ok(results)
     }
 

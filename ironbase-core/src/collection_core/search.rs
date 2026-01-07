@@ -147,12 +147,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// This is the cancellation-aware version of `fuzzy_search`.
     /// Pass an ExecutionContext to enable timeout/cancellation checking.
+    ///
+    /// # Arguments
+    /// * `field` - Field to search (must have a fuzzy index)
+    /// * `query` - Search query string
+    /// * `threshold` - Optional similarity threshold override (0.0-1.0)
+    /// * `algorithm` - Optional algorithm override
+    /// * `limit` - Optional limit for top N results
+    /// * `ctx` - Optional execution context for cancellation
     pub fn fuzzy_search_with_ctx(
         &self,
         field: &str,
         query: &str,
         threshold: Option<f64>,
         algorithm: Option<FuzzyAlgorithm>,
+        limit: Option<usize>,
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<(Value, f64)>> {
         self.check_not_closed()?;
@@ -163,8 +172,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             IronBaseError::IndexError(format!("No fuzzy index found for field '{}'", field))
         })?;
 
-        // Perform search WITH cancellation support (the expensive part!)
-        let matches = fuzzy_index.search_with_ctx(query, threshold, algorithm, ctx)?;
+        // Perform search WITH cancellation support and limit (the expensive part!)
+        let matches = fuzzy_index.search_with_ctx(query, threshold, algorithm, limit, ctx)?;
 
         drop(indexes);
 
