@@ -1050,7 +1050,7 @@ impl IronBaseAdapter {
         query_str: &str,
         threshold: Option<f64>,
         algorithm: Option<&str>,
-        _limit: Option<usize>,
+        limit: Option<usize>,
     ) -> Result<Vec<(Value, f64)>> {
         use ironbase_core::FuzzyAlgorithm;
 
@@ -1064,7 +1064,7 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let ctx = self.create_execution_context();
-        let results = coll.fuzzy_search_with_ctx(field, query_str, threshold, algo, Some(&ctx))?;
+        let results = coll.fuzzy_search_with_ctx(field, query_str, threshold, algo, limit, Some(&ctx))?;
         Ok(results)
     }
 
