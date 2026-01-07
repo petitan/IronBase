@@ -1,6 +1,6 @@
 [package]
 name = "ironbase-tui"
-version = "0.2.13"
+version = "0.2.14"
 edition = "2021"
 description = "Intelligent TUI for IronBase NoSQL database"
 license = "MIT"
