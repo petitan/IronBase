@@ -269,7 +269,11 @@ impl McpClient {
         });
 
         let result = self.call_tool("aggregate", args).await?;
-        let docs: Vec<Value> = serde_json::from_value(result)?;
+        // Result is {"results": [...], "count": N}
+        let docs: Vec<Value> = result
+            .get("results")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
         Ok(docs)
     }
 
