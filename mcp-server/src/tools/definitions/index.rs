@@ -1,8 +1,8 @@
 //! Index management tool definitions
 //!
 //! Tools: index_create, index_list, index_create_fuzzy, index_create_fulltext,
-//!        fulltext_search, fuzzy_search, index_list_fulltext, index_drop,
-//!        index_stats_refresh, explain, find_with_hint
+//!        fulltext_search, fulltext_analyze, fuzzy_search, index_list_fulltext,
+//!        index_drop, index_stats_refresh, explain, find_with_hint
 
 use super::common::{fields, schemas};
 use serde_json::{json, Value};
@@ -91,9 +91,27 @@ pub fn tools() -> Vec<Value> {
                     "limit": fields::limit_results(10),
                     "skip": fields::skip_results(),
                     "min_score": fields::min_score(),
-                    "projection": fields::projection_simple()
+                    "projection": fields::projection_simple(),
+                    "highlight": fields::highlight(),
+                    "highlight_context": fields::highlight_context(),
+                    "highlight_max_snippets": fields::highlight_max_snippets()
                 },
                 "required": ["collection", "field", "query"]
+            }
+        }),
+        json!({
+            "name": "fulltext_analyze",
+            "title": "Analyze Text Tokenization",
+            "description": "Debug tool showing how text is tokenized: original words, normalized form, stemmed form, and which tokens are kept. Useful for understanding why searches match or don't match.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "text": fields::text_to_analyze(),
+                    "language": fields::fulltext_language(),
+                    "accent_folding": fields::accent_folding(),
+                    "min_word_length": fields::min_word_length()
+                },
+                "required": ["text"]
             }
         }),
         json!({

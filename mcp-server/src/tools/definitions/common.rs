@@ -390,6 +390,45 @@ pub mod fields {
         })
     }
 
+    /// Highlight enable flag
+    pub fn highlight() -> Value {
+        json!({
+            "type": "boolean",
+            "description": "Enable snippet highlighting with <mark> tags around matched terms",
+            "default": false
+        })
+    }
+
+    /// Highlight context characters
+    pub fn highlight_context() -> Value {
+        json!({
+            "type": "integer",
+            "description": "Characters to include around each match in snippets",
+            "default": 100,
+            "minimum": 20,
+            "maximum": 500
+        })
+    }
+
+    /// Highlight max snippets
+    pub fn highlight_max_snippets() -> Value {
+        json!({
+            "type": "integer",
+            "description": "Maximum number of snippets to return per field",
+            "default": 3,
+            "minimum": 1,
+            "maximum": 10
+        })
+    }
+
+    /// Text to analyze
+    pub fn text_to_analyze() -> Value {
+        json!({
+            "type": "string",
+            "description": "Text to tokenize and analyze"
+        })
+    }
+
     /// Aggregation pipeline
     pub fn pipeline() -> Value {
         json!({

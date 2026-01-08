@@ -54,7 +54,7 @@ pub(crate) mod logging;
 pub(crate) mod query_cache;
 pub(crate) mod query_planner;
 pub(crate) mod recovery;
-pub(crate) mod value_utils;
+pub mod value_utils;
 pub(crate) mod wal;
 
 #[cfg(test)]

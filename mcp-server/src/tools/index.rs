@@ -11,8 +11,9 @@ use std::sync::Arc;
 
 use super::helpers::{validate_collection_name, DEFAULT_QUERY_LIMIT};
 use super::params::{
-    ExplainParams, FindWithHintParams, FulltextIndexParams, FulltextSearchParams, FuzzyIndexParams,
-    FuzzySearchParams, IndexCreateParams, IndexDropParams, IndexListParams, ParseParams,
+    ExplainParams, FindWithHintParams, FulltextAnalyzeParams, FulltextIndexParams,
+    FulltextSearchParams, FuzzyIndexParams, FuzzySearchParams, IndexCreateParams, IndexDropParams,
+    IndexListParams, ParseParams,
 };
 
 /// Dispatch index tool calls
@@ -27,6 +28,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "index_stats_refresh" => handle_index_stats_refresh(params, adapter),
         "fuzzy_search" => handle_fuzzy_search(params, adapter),
         "fulltext_search" => handle_fulltext_search(params, adapter),
+        "fulltext_analyze" => handle_fulltext_analyze(params),
         "explain" => handle_explain(params, adapter),
         "find_with_hint" => handle_find_with_hint(params, adapter),
         _ => Err(McpError::invalid_params(format!(
@@ -264,22 +266,54 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         skip: p.skip,
         min_score: p.min_score,
         projection,
+        highlight: p.highlight,
+        highlight_context: p.highlight_context,
+        highlight_max_snippets: p.highlight_max_snippets,
     };
     let results = adapter.fulltext_search(&p.collection, &p.field, &p.query, options)?;
 
-    // Format results with scores and matched tokens
+    // Format results with scores, matched tokens, and optional highlights
     let documents: Vec<Value> = results
         .into_iter()
-        .map(|(doc, score, matched_tokens)| {
-            json!({
-                "document": doc,
-                "score": score,
-                "matched_tokens": matched_tokens
-            })
+        .map(|res| {
+            let mut result = json!({
+                "document": res.document,
+                "score": res.score,
+                "matched_tokens": res.matched_tokens
+            });
+            // Add highlights if present
+            if let Some(highlights) = res.highlights {
+                result["highlights"] = json!(highlights);
+            }
+            result
         })
         .collect();
 
     Ok(json!({"results": documents, "count": documents.len()}))
+}
+
+/// Handle fulltext_analyze - debug tokenization process
+fn handle_fulltext_analyze(params: Value) -> Result<Value> {
+    use ironbase_core::fulltext::{analyze_text, FtsLanguage, FtsOptions};
+
+    let p: FulltextAnalyzeParams = FulltextAnalyzeParams::parse(params)?;
+
+    // Parse language
+    let language = match p.language.to_lowercase().as_str() {
+        "hungarian" | "hu" => FtsLanguage::Hungarian,
+        "english" | "en" => FtsLanguage::English,
+        "german" | "de" => FtsLanguage::German,
+        _ => FtsLanguage::None,
+    };
+
+    let options = FtsOptions {
+        language,
+        min_word_length: p.min_word_length.unwrap_or(2),
+        accent_folding: p.accent_folding,
+    };
+
+    let result = analyze_text(&p.text, &options);
+    Ok(json!(result))
 }
 
 fn handle_explain(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

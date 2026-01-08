@@ -576,4 +576,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .map(|idx| idx.metadata())
             .collect())
     }
+
+    /// Get fulltext index options for a field
+    ///
+    /// Returns the FtsOptions used by the fulltext index on the specified field.
+    /// This is useful for generating highlights with the same tokenization settings.
+    pub fn get_fulltext_index_options(&self, field: &str) -> Result<crate::fulltext::FtsOptions> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index found for field '{}'", field))
+        })?;
+        Ok(index.options.clone())
+    }
 }

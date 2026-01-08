@@ -293,6 +293,7 @@ fn dispatch_tool_inner(
         | "index_stats_refresh"
         | "fuzzy_search"
         | "fulltext_search"
+        | "fulltext_analyze"
         | "explain"
         | "find_with_hint" => index::dispatch(name, params, adapter),
 
