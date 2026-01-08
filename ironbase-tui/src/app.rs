@@ -1557,25 +1557,60 @@ impl App {
 
     // === Async Index Management ===
 
-    /// Create a new index (async)
+    /// Create a new index (async) - supports both single and compound indexes
     pub async fn execute_create_index_async(&mut self) {
-        let field = self.index_state.field_input.trim().to_string();
-        if field.is_empty() {
+        let fields = self.index_state.get_fields();
+
+        if fields.is_empty() {
             self.index_state.error = Some("Mező neve kötelező".to_string());
             return;
         }
 
         let collection = self.index_state.collection.clone();
         let unique = self.index_state.unique;
+        let sparse = self.index_state.sparse;
+        let is_compound = self.index_state.is_compound;
 
         let Some(db) = &self.db else {
             self.set_error("Nincs megnyitva adatbázis");
             return;
         };
 
-        match db.create_index(&collection, &field, unique).await {
+        let result = if is_compound && fields.len() > 1 {
+            // Compound index
+            db.create_compound_index(&collection, &fields, unique, sparse)
+                .await
+        } else {
+            // Single field index
+            let field = fields.first().map(|s| s.as_str()).unwrap_or("");
+            db.create_index(&collection, field, unique, sparse).await
+        };
+
+        match result {
             Ok(()) => {
-                self.index_state.message = Some(format!("Index létrehozva: {}", field));
+                let mut flags = Vec::new();
+                if unique {
+                    flags.push("unique");
+                }
+                if sparse {
+                    flags.push("sparse");
+                }
+                let flags_str = if flags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", flags.join(", "))
+                };
+
+                let index_desc = if is_compound && fields.len() > 1 {
+                    format!("Compound index: {}{}", fields.join(", "), flags_str)
+                } else {
+                    format!(
+                        "Index: {}{}",
+                        fields.first().unwrap_or(&String::new()),
+                        flags_str
+                    )
+                };
+                self.index_state.message = Some(format!("{} létrehozva", index_desc));
                 self.index_state.cancel_create();
                 self.index_state.indexes = self.get_current_indexes_async().await;
             }

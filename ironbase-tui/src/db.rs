@@ -256,9 +256,31 @@ impl DbWrapper {
         Ok(collections.iter().filter_map(|c| c.doc_count).sum())
     }
 
-    /// Create a new index
-    pub async fn create_index(&self, collection: &str, field: &str, unique: bool) -> Result<()> {
-        self.client.create_index(collection, field, unique).await?;
+    /// Create a single-field index
+    pub async fn create_index(
+        &self,
+        collection: &str,
+        field: &str,
+        unique: bool,
+        sparse: bool,
+    ) -> Result<()> {
+        self.client
+            .create_index(collection, field, unique, sparse)
+            .await?;
+        Ok(())
+    }
+
+    /// Create a compound index (multiple fields)
+    pub async fn create_compound_index(
+        &self,
+        collection: &str,
+        fields: &[String],
+        unique: bool,
+        sparse: bool,
+    ) -> Result<()> {
+        self.client
+            .create_compound_index(collection, fields, unique, sparse)
+            .await?;
         Ok(())
     }
 

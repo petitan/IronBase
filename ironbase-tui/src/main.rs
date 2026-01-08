@@ -1675,7 +1675,13 @@ async fn handle_index_key_async(app: &mut App, key: KeyCode, modifiers: KeyModif
                 app.index_state.next_form_field();
             }
             (KeyCode::Char(' '), _) if app.index_state.form_field == 1 => {
+                app.index_state.toggle_compound();
+            }
+            (KeyCode::Char(' '), _) if app.index_state.form_field == 2 => {
                 app.index_state.toggle_unique();
+            }
+            (KeyCode::Char(' '), _) if app.index_state.form_field == 3 => {
+                app.index_state.toggle_sparse();
             }
             (KeyCode::Backspace, _) if app.index_state.form_field == 0 => {
                 app.index_state.backspace();
