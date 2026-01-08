@@ -392,9 +392,50 @@ impl From<ironbase_core::IronBaseError> for McpError {
     fn from(err: ironbase_core::IronBaseError) -> Self {
         use ironbase_core::IronBaseError;
         match err {
+            // Collection errors
             IronBaseError::CollectionNotFound(name) => McpError::collection_not_found(&name),
+            IronBaseError::CollectionExists(name) => {
+                McpError::validation(format!("Collection '{}' already exists", name))
+            }
+
+            // Document errors
+            IronBaseError::DocumentNotFound => McpError::document_not_found("unknown"),
+
+            // Query/validation errors
+            IronBaseError::InvalidQuery(msg) => McpError::invalid_params(msg),
+            IronBaseError::SchemaError(msg) => McpError::validation(msg),
+            IronBaseError::OperationNotAllowed(msg) => McpError::invalid_params(msg),
+
+            // Index errors
+            IronBaseError::IndexError(msg) => McpError::index_error(msg),
+
+            // Aggregation errors
             IronBaseError::AggregationError(msg) => McpError::aggregation(msg),
-            other => McpError::storage(other.to_string()),
+
+            // Transaction errors
+            IronBaseError::TransactionCommitted => {
+                McpError::transaction("Transaction already committed or aborted")
+            }
+            IronBaseError::TransactionAborted(msg) => McpError::transaction(msg),
+
+            // Resource errors
+            IronBaseError::OutOfMemory(msg) => McpError::resource_exhausted(msg, None),
+            IronBaseError::DatabaseLocked(path) => {
+                McpError::resource_exhausted(format!("Database '{}' is locked", path), None)
+            }
+
+            // Timeout/cancellation errors
+            IronBaseError::Timeout(msg) => McpError::timeout(msg),
+            IronBaseError::Cancelled(msg) => McpError::cancelled(msg),
+
+            // Storage/corruption errors
+            IronBaseError::Io(e) => McpError::storage(e.to_string()),
+            IronBaseError::Serialization(msg) => McpError::serialization(msg),
+            IronBaseError::Deserialization(e) => McpError::serialization(e.to_string()),
+            IronBaseError::Corruption(msg) => McpError::storage(format!("Corruption: {}", msg)),
+            IronBaseError::WALCorruption => McpError::storage("WAL corruption detected"),
+            IronBaseError::DatabaseClosed => McpError::storage("Database is closed"),
+            IronBaseError::Unknown(msg) => McpError::storage(msg),
         }
     }
 }

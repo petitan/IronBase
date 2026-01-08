@@ -75,8 +75,10 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
                 Style::default().fg(theme.fg)
             };
 
-            let unique_marker = if idx.contains("unique") { " [U]" } else { "" };
-            ListItem::new(format!("  {}{}  ", idx, unique_marker)).style(style)
+            let mut markers = String::new();
+            if idx.contains("unique") { markers.push_str(" [U]"); }
+            if idx.contains("sparse") { markers.push_str(" [S]"); }
+            ListItem::new(format!("  {}{}  ", idx, markers)).style(style)
         })
         .collect();
 

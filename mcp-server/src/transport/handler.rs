@@ -9,7 +9,7 @@ use crate::transport::{
 };
 use crate::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list,
-    get_tools_list_filtered, read_resource, ErrorCode, IronBaseAdapter, McpError, VERSION,
+    get_tools_list_filtered, read_resource, IronBaseAdapter, McpError, VERSION,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -287,21 +287,9 @@ impl HandlerContext {
 /// Create a tool error response, wrapping the error appropriately
 fn create_tool_error_response(err: McpError, id: Option<serde_json::Value>) -> McpResponse {
     let message = err.to_string();
-
-    // Use error code for matching (struct-based McpError)
-    if err.code == ErrorCode::InvalidParams {
-        McpResponse::error(err.code.code(), &message, id)
-    } else {
-        // For other errors, wrap as tool error content
-        let response = json!({
-            "content": [{
-                "type": "text",
-                "text": format!("Error: {}", message)
-            }],
-            "isError": true
-        });
-        McpResponse::success(response, id)
-    }
+    // Use JSON-RPC error for ALL errors to preserve error code
+    // This allows clients to programmatically handle different error types
+    McpResponse::error(err.code.code(), &message, id)
 }
 
 #[cfg(test)]
