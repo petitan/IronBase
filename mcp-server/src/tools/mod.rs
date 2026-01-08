@@ -290,6 +290,7 @@ fn dispatch_tool_inner(
         | "index_create_fulltext"
         | "index_list_fulltext"
         | "index_drop"
+        | "index_stats_refresh"
         | "fuzzy_search"
         | "fulltext_search"
         | "explain"

@@ -628,6 +628,66 @@ mod tests {
             .unwrap();
         assert_eq!(tree.metadata.num_keys, 1);
     }
+
+    #[test]
+    fn test_refresh_stats_single_field() {
+        let mut tree = BPlusTree::new("idx".into(), "field".into(), false, false);
+        tree.insert(IndexKey::String("a".into()), DocumentId::Int(1))
+            .unwrap();
+        tree.insert(IndexKey::String("b".into()), DocumentId::Int(2))
+            .unwrap();
+        tree.insert(IndexKey::String("a".into()), DocumentId::Int(3))
+            .unwrap(); // duplicate key
+
+        tree.refresh_stats();
+
+        assert_eq!(tree.metadata.stats.distinct_count, 2); // "a" and "b"
+        assert_eq!(tree.metadata.stats.null_count, 0);
+        assert!(tree.metadata.stats.last_analyzed > 0);
+        assert!((tree.metadata.stats.sample_rate - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_refresh_stats_with_nulls() {
+        let mut tree = BPlusTree::new("idx".into(), "field".into(), true, false); // unique
+        tree.insert(IndexKey::String("a".into()), DocumentId::Int(1))
+            .unwrap();
+        tree.insert(IndexKey::Null, DocumentId::Int(2)).unwrap();
+
+        tree.refresh_stats();
+
+        assert_eq!(tree.metadata.stats.distinct_count, 2); // "a" and Null
+        assert_eq!(tree.metadata.stats.null_count, 1);
+    }
+
+    #[test]
+    fn test_refresh_stats_empty_index() {
+        let mut tree = BPlusTree::new("idx".into(), "field".into(), false, false);
+        tree.refresh_stats();
+
+        assert_eq!(tree.metadata.stats.distinct_count, 0);
+        assert_eq!(tree.metadata.stats.null_count, 0);
+    }
+
+    #[test]
+    fn test_refresh_stats_many_duplicates() {
+        let mut tree = BPlusTree::new("idx".into(), "status".into(), false, false);
+        // Insert 100 docs with only 3 distinct values
+        for i in 0..100 {
+            let status = match i % 3 {
+                0 => "active",
+                1 => "pending",
+                _ => "closed",
+            };
+            tree.insert(IndexKey::String(status.into()), DocumentId::Int(i))
+                .unwrap();
+        }
+
+        tree.refresh_stats();
+
+        assert_eq!(tree.metadata.stats.distinct_count, 3);
+        assert_eq!(tree.metadata.stats.null_count, 0);
+    }
 }
 
 #[cfg(test)]

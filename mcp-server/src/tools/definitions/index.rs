@@ -2,7 +2,7 @@
 //!
 //! Tools: index_create, index_list, index_create_fuzzy, index_create_fulltext,
 //!        fulltext_search, fuzzy_search, index_list_fulltext, index_drop,
-//!        explain, find_with_hint
+//!        index_stats_refresh, explain, find_with_hint
 
 use super::common::{fields, schemas};
 use serde_json::{json, Value};
@@ -147,6 +147,12 @@ pub fn tools() -> Vec<Value> {
                 },
                 "required": ["collection", "index_name"]
             }
+        }),
+        json!({
+            "name": "index_stats_refresh",
+            "title": "Refresh Index Statistics",
+            "description": "Recompute statistics (distinct_count, null_count) for all B+ tree indexes. The query planner uses these statistics to choose the best index. Run this after bulk inserts or when explain shows distinct_count: 0.",
+            "inputSchema": schemas::collection_only()
         }),
         json!({
             "name": "explain",

@@ -662,4 +662,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let indexes = self.indexes.read();
         Ok(indexes.list_indexes_with_prefix_field())
     }
+
+    /// Refresh statistics for all B+ tree indexes in this collection.
+    ///
+    /// This method scans all leaf nodes in each index to compute:
+    /// - `distinct_count`: number of unique key values
+    /// - `null_count`: number of null key values
+    ///
+    /// The query planner uses these statistics to estimate selectivity
+    /// and choose the best index for a query.
+    ///
+    /// # Example
+    /// ```ignore
+    /// collection.refresh_index_stats()?;
+    /// // Now explain() will show accurate distinct_count values
+    /// ```
+    pub fn refresh_index_stats(&self) -> Result<()> {
+        self.check_not_closed()?;
+        let mut indexes = self.indexes.write();
+        indexes.refresh_all_stats();
+        Ok(())
+    }
 }

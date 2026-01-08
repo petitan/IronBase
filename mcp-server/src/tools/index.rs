@@ -24,6 +24,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "index_create_fulltext" => handle_index_create_fulltext(params, adapter),
         "index_list_fulltext" => handle_index_list_fulltext(params, adapter),
         "index_drop" => handle_index_drop(params, adapter),
+        "index_stats_refresh" => handle_index_stats_refresh(params, adapter),
         "fuzzy_search" => handle_fuzzy_search(params, adapter),
         "fulltext_search" => handle_fulltext_search(params, adapter),
         "explain" => handle_explain(params, adapter),
@@ -191,6 +192,21 @@ fn handle_index_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 
     adapter.drop_index(&p.collection, &p.index_name)?;
     Ok(json!({"success": true, "dropped": p.index_name}))
+}
+
+/// Refresh statistics for all B+ tree indexes in a collection.
+///
+/// The query planner uses these statistics to estimate selectivity
+/// and choose the best index for a query.
+fn handle_index_stats_refresh(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    let p: IndexListParams = IndexListParams::parse(params)?;
+    validate_collection_name(&p.collection)?;
+
+    adapter.refresh_index_stats(&p.collection)?;
+    Ok(json!({
+        "success": true,
+        "message": format!("Index statistics refreshed for collection '{}'", p.collection)
+    }))
 }
 
 fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

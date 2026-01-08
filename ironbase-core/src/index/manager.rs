@@ -640,6 +640,44 @@ impl IndexManager {
         Ok(())
     }
 
+    // ========== INDEX STATISTICS ==========
+
+    /// Refresh statistics for all B+ tree indexes.
+    ///
+    /// This method traverses all leaf nodes in each index and computes:
+    /// - `distinct_count`: number of unique key values
+    /// - `null_count`: number of null key values
+    ///
+    /// The query planner uses these statistics to estimate selectivity
+    /// and choose the best index for a query.
+    ///
+    /// # Performance
+    /// - Time: O(n) per index where n = total keys
+    /// - Memory: O(k) per index where k = number of leaf nodes (pointers only)
+    pub fn refresh_all_stats(&mut self) {
+        for (_, index) in self.btree_indexes.iter_mut() {
+            index.refresh_stats();
+        }
+    }
+
+    /// Refresh statistics for a specific B+ tree index.
+    ///
+    /// # Arguments
+    /// * `index_name` - Name of the index to refresh
+    ///
+    /// # Errors
+    /// Returns `IndexError` if the index does not exist.
+    pub fn refresh_index_stats(&mut self, index_name: &str) -> Result<()> {
+        if let Some(index) = self.btree_indexes.get_mut(index_name) {
+            index.refresh_stats();
+            return Ok(());
+        }
+        Err(IronBaseError::IndexError(format!(
+            "Index not found: {}",
+            index_name
+        )))
+    }
+
     // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========
 
     /// Add a document to all indexes (B+ tree and fuzzy)
