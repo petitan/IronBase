@@ -1202,6 +1202,8 @@ mod compound_prefix_tests {
         manager
             .create_btree_index("users_age".to_string(), "age".to_string(), false, false)
             .unwrap();
+        // Mark index as ready (normally done by collection after population)
+        manager.set_index_ready("users_age").unwrap();
 
         // Create compound index
         manager
@@ -1212,6 +1214,8 @@ mod compound_prefix_tests {
                 false,
             )
             .unwrap();
+        // Mark index as ready (normally done by collection after population)
+        manager.set_index_ready("users_country_city").unwrap();
 
         let infos = manager.list_indexes_with_compound_info();
 

@@ -483,6 +483,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 tree_height: 1,
                 root_offset: 0,
                 stats: crate::index::IndexStats::default(),
+                building: false, // _id index is ready when loaded
             };
             if let Some(loaded_tree) =
                 crate::collection_core::try_load_index_from_file(&db_path, &id_meta)

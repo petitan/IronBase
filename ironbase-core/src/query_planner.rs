@@ -1259,6 +1259,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1291,6 +1292,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1307,6 +1309,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1351,6 +1354,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1389,6 +1393,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1413,6 +1418,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1437,6 +1443,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1499,6 +1506,7 @@ mod tests {
                 num_fields: 1,
                 sparse: false,
                 distinct_count: 0,
+                building: false,
             },
             IndexPrefixInfo {
                 index_name: "users_email_ci".to_string(),
@@ -1507,6 +1515,7 @@ mod tests {
                 num_fields: 1,
                 sparse: true, // CI indexes are sparse
                 distinct_count: 0,
+                building: false,
             },
         ];
 
@@ -1541,6 +1550,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         // No CI index available - should return None (collection scan)
@@ -1566,6 +1576,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 0,
+            building: false,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1584,6 +1595,7 @@ mod tests {
                 num_fields: 1,
                 sparse: false,
                 distinct_count: 5, // Low distinct = high selectivity
+                building: false,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1592,6 +1604,7 @@ mod tests {
                 num_fields: 2,
                 sparse: false,
                 distinct_count: 100, // Higher distinct
+                building: false,
             },
         ];
 
@@ -1624,6 +1637,7 @@ mod tests {
                 num_fields: 1,
                 sparse: false,
                 distinct_count: 10, // Low distinct = ~100 rows per value = higher cost
+                building: false,
             },
             IndexPrefixInfo {
                 index_name: "products_category_brand".to_string(),
@@ -1632,6 +1646,7 @@ mod tests {
                 num_fields: 2,
                 sparse: false,
                 distinct_count: 1000, // High distinct = ~1 row per value = lower cost
+                building: false,
             },
         ];
 
@@ -1702,6 +1717,7 @@ mod tests {
                 num_fields: 1,
                 sparse: false,
                 distinct_count: 5,
+                building: false,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1710,6 +1726,7 @@ mod tests {
                 num_fields: 2,
                 sparse: false,
                 distinct_count: 100,
+                building: false,
             },
         ];
 
@@ -1749,6 +1766,7 @@ mod tests {
             num_fields: 1,
             sparse: false,
             distinct_count: 5,
+            building: false,
         }];
 
         let explain = QueryPlanner::explain_query_with_fields(&query, &index_fields);

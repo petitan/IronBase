@@ -27,6 +27,10 @@ pub use adapter::{FindOptions, IronBaseAdapter, UpdateResult};
 pub use api_keys::ApiKeyCache;
 pub use engine::{IronBaseService, ServiceContext, ToolRequest, ToolResult};
 pub use error::{ErrorCode, McpError, OperationContext, Result};
+pub use execution::{
+    current_cancel_flag, current_deadline, current_execution_context, is_cancelled,
+    set_execution_context, ExecutionContext, ExecutionGuard,
+};
 pub use listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTION};
 pub use monitoring::{
     get_memory_stats, get_system_memory, health_check, log_memory_stats, HealthCheck, MemoryStats,
@@ -42,10 +46,6 @@ pub use tools::{dispatch_tool, get_tools_list, get_tools_list_filtered};
 pub use transport::{
     error_codes, handler::HandlerContext, Capabilities, InitializeResult, JsonRpcError, McpRequest,
     McpResponse, PromptsGetParams, ResourcesReadParams, ToolsCallParams,
-};
-pub use execution::{
-    current_cancel_flag, current_deadline, current_execution_context, is_cancelled,
-    set_execution_context, ExecutionContext, ExecutionGuard,
 };
 
 /// Library version

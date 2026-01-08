@@ -632,4 +632,3 @@ for r in results {{
         ]
     })
 }
-

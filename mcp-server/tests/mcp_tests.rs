@@ -258,7 +258,15 @@ fn test_dispatch_db_checkpoint() {
 #[test]
 fn test_dispatch_collection_list() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("collection_list", json!({}), &adapter, None, None, None, None);
+    let result = dispatch_tool(
+        "collection_list",
+        json!({}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(result.is_ok());
     let value = result.unwrap();
     assert!(value.get("collections").is_some());
@@ -867,7 +875,15 @@ fn test_dispatch_schema_set_and_get() {
 #[test]
 fn test_dispatch_unknown_tool() {
     let (adapter, _temp) = create_test_adapter();
-    let result = dispatch_tool("nonexistent_tool", json!({}), &adapter, None, None, None, None);
+    let result = dispatch_tool(
+        "nonexistent_tool",
+        json!({}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    );
     assert!(result.is_err());
 }
 
@@ -927,7 +943,8 @@ fn test_concurrent_inserts() {
                     "collection": "concurrent_test",
                     "document": {"thread": thread_id, "index": i}
                 });
-                let result = dispatch_tool("insert_one", params, &adapter_clone, None, None, None, None);
+                let result =
+                    dispatch_tool("insert_one", params, &adapter_clone, None, None, None, None);
                 assert!(result.is_ok(), "Insert failed: {:?}", result.err());
             }
         });

@@ -260,6 +260,10 @@ pub struct IndexMetadata {
     /// Statistics for query planning
     #[serde(default)]
     pub stats: IndexStats,
+    /// True while index is being built - query planner should ignore this index
+    /// to prevent using partially populated indexes (which would return incomplete results)
+    #[serde(default)]
+    pub building: bool,
 }
 
 impl IndexMetadata {
@@ -299,6 +303,7 @@ impl BPlusTree {
                 tree_height: 1,
                 root_offset: 0,
                 stats: IndexStats::default(),
+                building: false,
             },
         }
     }
@@ -333,6 +338,7 @@ impl BPlusTree {
                 tree_height: 1,
                 root_offset: 0,
                 stats: IndexStats::default(),
+                building: false,
             },
         }
     }
@@ -382,8 +388,19 @@ impl BPlusTree {
                 tree_height: 1,
                 root_offset: 0,
                 stats: IndexStats::default(),
+                building: false,
             },
         }
+    }
+
+    /// Check if this index is currently being built
+    pub fn is_building(&self) -> bool {
+        self.metadata.building
+    }
+
+    /// Set the building flag (for index creation lifecycle)
+    pub fn set_building(&mut self, building: bool) {
+        self.metadata.building = building;
     }
 
     /// Extract compound key from a document

@@ -1064,7 +1064,8 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let ctx = self.create_execution_context();
-        let results = coll.fuzzy_search_with_ctx(field, query_str, threshold, algo, limit, Some(&ctx))?;
+        let results =
+            coll.fuzzy_search_with_ctx(field, query_str, threshold, algo, limit, Some(&ctx))?;
         Ok(results)
     }
 

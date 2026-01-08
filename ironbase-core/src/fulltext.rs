@@ -33,6 +33,119 @@ use unicode_normalization::UnicodeNormalization;
 pub type TokenEntry = (DocumentId, u32);
 
 // ============================================================================
+// Query Parsing (MongoDB-compatible phrase search)
+// ============================================================================
+
+/// Parsed query with phrases and regular terms
+///
+/// MongoDB-style query parsing:
+/// - `"exact phrase"` → phrase that must appear exactly
+/// - `word1 word2` → terms that are OR-ed (default)
+/// - `"phrase one" word "phrase two"` → mixed query
+#[derive(Debug, Clone, Default)]
+pub struct ParsedQuery {
+    /// Exact phrases to match (extracted from quoted strings)
+    pub phrases: Vec<String>,
+    /// Regular terms to OR-search
+    pub terms: Vec<String>,
+}
+
+impl ParsedQuery {
+    /// Check if query contains any phrases
+    pub fn has_phrases(&self) -> bool {
+        !self.phrases.is_empty()
+    }
+
+    /// Get all terms for initial OR search (phrases tokenized + regular terms)
+    pub fn all_search_terms(&self, options: &FtsOptions) -> Vec<String> {
+        let mut all_terms = self.terms.clone();
+        for phrase in &self.phrases {
+            all_terms.extend(tokenize(phrase, options));
+        }
+        all_terms
+    }
+}
+
+/// Parse a query string for phrases (MongoDB-compatible syntax)
+///
+/// Detects quoted phrases like `"exact phrase"` and separates them from
+/// regular OR-ed terms.
+///
+/// # Examples
+/// ```rust,ignore
+/// let parsed = parse_query("hello world");
+/// // phrases: [], terms: ["hello", "world"]
+///
+/// let parsed = parse_query("\"hello world\"");
+/// // phrases: ["hello world"], terms: []
+///
+/// let parsed = parse_query("\"exact phrase\" other words");
+/// // phrases: ["exact phrase"], terms: ["other", "words"]
+/// ```
+pub fn parse_query(query: &str) -> ParsedQuery {
+    let mut result = ParsedQuery::default();
+    let mut remaining = query.trim();
+
+    while !remaining.is_empty() {
+        // Look for quoted phrase
+        if remaining.starts_with('"') {
+            // Find closing quote
+            if let Some(end_pos) = remaining[1..].find('"') {
+                let phrase = remaining[1..=end_pos].trim().to_string();
+                if !phrase.is_empty() {
+                    result.phrases.push(phrase);
+                }
+                remaining = remaining[end_pos + 2..].trim();
+            } else {
+                // No closing quote - treat rest as terms
+                for term in remaining[1..].split_whitespace() {
+                    if !term.is_empty() {
+                        result.terms.push(term.to_string());
+                    }
+                }
+                break;
+            }
+        } else {
+            // Regular term - take until next quote or whitespace
+            let next_quote = remaining.find('"').unwrap_or(remaining.len());
+            let before_quote = &remaining[..next_quote];
+
+            for term in before_quote.split_whitespace() {
+                if !term.is_empty() {
+                    result.terms.push(term.to_string());
+                }
+            }
+
+            remaining = remaining[next_quote..].trim();
+        }
+    }
+
+    result
+}
+
+/// Build a regex pattern for phrase matching
+///
+/// Creates a case-insensitive regex that matches the exact phrase,
+/// allowing flexible whitespace between words.
+///
+/// # Example
+/// ```rust,ignore
+/// let regex = build_phrase_regex("hello world")?;
+/// assert!(regex.is_match("Hello  World")); // case insensitive, flexible space
+/// assert!(!regex.is_match("world hello")); // wrong order
+/// ```
+pub fn build_phrase_regex(phrase: &str) -> Result<regex::Regex> {
+    let pattern = phrase
+        .split_whitespace()
+        .map(regex::escape)
+        .collect::<Vec<_>>()
+        .join(r"\s+");
+
+    regex::Regex::new(&format!(r"(?i)\b{}\b", pattern))
+        .map_err(|e| IronBaseError::InvalidQuery(format!("Invalid phrase regex: {}", e)))
+}
+
+// ============================================================================
 // Stop Words
 // ============================================================================
 
@@ -443,6 +556,9 @@ pub struct FulltextIndexMetadata {
     pub accent_folding: bool,
     pub num_documents: usize,
     pub num_tokens: usize,
+    /// True while index is being built - query planner should ignore this index
+    #[serde(default)]
+    pub building: bool,
 }
 
 /// Internal metadata structure for saving to .ftidx file
@@ -554,6 +670,9 @@ pub struct FulltextIndex {
     /// In lazy mode, removed docs can't be deleted from disk immediately,
     /// so we track them here and filter them out during search.
     deleted_doc_ids: HashSet<DocumentId>,
+    /// True while index is being built - search operations should return empty results
+    /// to prevent using partially populated indexes
+    pub building: bool,
 }
 
 /// Search result with score and matched tokens
@@ -581,6 +700,7 @@ impl FulltextIndex {
             lazy_mode: false,
             file_version: FTIDX_VERSION_V3, // New indexes use V3 format
             deleted_doc_ids: HashSet::new(),
+            building: false,
         }
     }
 
@@ -605,6 +725,7 @@ impl FulltextIndex {
             lazy_mode: false,
             file_version: FTIDX_VERSION_V3, // New indexes use V3 format
             deleted_doc_ids: HashSet::new(),
+            building: false,
         };
 
         // Create and initialize the file with header
@@ -682,7 +803,18 @@ impl FulltextIndex {
             accent_folding: self.options.accent_folding,
             num_documents: self.doc_tokens_offsets.len(),
             num_tokens: self.inverted_index.len(),
+            building: self.building,
         }
+    }
+
+    /// Check if this index is currently being built
+    pub fn is_building(&self) -> bool {
+        self.building
+    }
+
+    /// Set the building flag (for index creation lifecycle)
+    pub fn set_building(&mut self, building: bool) {
+        self.building = building;
     }
 
     /// Write doc_tokens to disk and return the file offset
@@ -1493,6 +1625,7 @@ impl FulltextIndex {
                 lazy_mode: false,               // V1: full in-memory mode
                 file_version: FTIDX_VERSION_V1, // Will upgrade to V3 on next flush
                 deleted_doc_ids: HashSet::new(),
+                building: false, // Loaded from disk = already complete
             })
         } else {
             // V2/V3 format: token_entries_offset, token_offsets_offset, metadata_offset
@@ -1542,6 +1675,7 @@ impl FulltextIndex {
                 lazy_mode: true,       // V2/V3: lazy loading mode
                 file_version: version, // V2 will upgrade to V3 on next flush, V3 stays V3
                 deleted_doc_ids: HashSet::new(),
+                building: false, // Loaded from disk = already complete
             })
         }
     }
@@ -2099,5 +2233,101 @@ mod tests {
         }
 
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    // ========================================================================
+    // Query Parsing Tests (MongoDB-compatible phrase search)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_query_simple_terms() {
+        let parsed = super::parse_query("hello world");
+        assert!(parsed.phrases.is_empty());
+        assert_eq!(parsed.terms, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_parse_query_single_phrase() {
+        let parsed = super::parse_query("\"hello world\"");
+        assert_eq!(parsed.phrases, vec!["hello world"]);
+        assert!(parsed.terms.is_empty());
+    }
+
+    #[test]
+    fn test_parse_query_phrase_and_terms() {
+        let parsed = super::parse_query("\"exact phrase\" other words");
+        assert_eq!(parsed.phrases, vec!["exact phrase"]);
+        assert_eq!(parsed.terms, vec!["other", "words"]);
+    }
+
+    #[test]
+    fn test_parse_query_multiple_phrases() {
+        let parsed = super::parse_query("\"first phrase\" middle \"second phrase\"");
+        assert_eq!(parsed.phrases, vec!["first phrase", "second phrase"]);
+        assert_eq!(parsed.terms, vec!["middle"]);
+    }
+
+    #[test]
+    fn test_parse_query_unclosed_quote() {
+        // Unclosed quote treats rest as terms
+        let parsed = super::parse_query("\"unclosed phrase");
+        assert!(parsed.phrases.is_empty());
+        assert_eq!(parsed.terms, vec!["unclosed", "phrase"]);
+    }
+
+    #[test]
+    fn test_parse_query_empty_phrase() {
+        // Empty quotes should be ignored
+        let parsed = super::parse_query("\"\" word");
+        assert!(parsed.phrases.is_empty());
+        assert_eq!(parsed.terms, vec!["word"]);
+    }
+
+    #[test]
+    fn test_parse_query_has_phrases() {
+        let no_phrases = super::parse_query("hello world");
+        assert!(!no_phrases.has_phrases());
+
+        let with_phrases = super::parse_query("\"hello world\"");
+        assert!(with_phrases.has_phrases());
+    }
+
+    #[test]
+    fn test_build_phrase_regex_simple() {
+        let regex = super::build_phrase_regex("hello world").unwrap();
+        assert!(regex.is_match("hello world"));
+        assert!(regex.is_match("Hello World")); // case insensitive
+        assert!(regex.is_match("hello  world")); // flexible whitespace
+        assert!(!regex.is_match("world hello")); // wrong order
+        assert!(!regex.is_match("helloworld")); // no word boundary
+    }
+
+    #[test]
+    fn test_build_phrase_regex_special_chars() {
+        // Special regex characters should be escaped
+        let regex = super::build_phrase_regex("C++ programming").unwrap();
+        assert!(regex.is_match("C++ programming"));
+        assert!(regex.is_match("c++  Programming")); // case insensitive
+    }
+
+    #[test]
+    fn test_build_phrase_regex_hungarian() {
+        let regex = super::build_phrase_regex("Projectin Kft").unwrap();
+        assert!(regex.is_match("Projectin Kft"));
+        assert!(regex.is_match("projectin kft")); // case insensitive
+        assert!(regex.is_match("PROJECTIN  KFT")); // flexible whitespace
+        assert!(!regex.is_match("Kft Projectin")); // wrong order
+    }
+
+    #[test]
+    fn test_parsed_query_all_search_terms() {
+        let options = super::FtsOptions::new(super::FtsLanguage::English);
+        let parsed = super::parse_query("\"hello world\" other");
+        let terms = parsed.all_search_terms(&options);
+        // Should contain tokenized phrase + regular terms
+        // "hello world" tokenizes to ["hello", "world"]
+        assert!(terms.contains(&"hello".to_string()));
+        assert!(terms.contains(&"world".to_string()));
+        assert!(terms.contains(&"other".to_string()));
     }
 }
