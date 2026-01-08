@@ -14,7 +14,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &IndexState, theme: &Theme) 
     let chunks = Layout::vertical([
         Constraint::Length(2), // Help text
         Constraint::Min(8),    // Existing indexes list
-        Constraint::Length(5), // Create new index form
+        Constraint::Length(7), // Create new index form (field + compound + unique + sparse + hint)
         Constraint::Length(1), // Status/error
     ])
     .split(inner);
@@ -100,7 +100,9 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
 
     let form_chunks = Layout::vertical([
         Constraint::Length(1), // Field name input
+        Constraint::Length(1), // Compound checkbox
         Constraint::Length(1), // Unique checkbox
+        Constraint::Length(1), // Sparse checkbox
         Constraint::Length(1), // Create button hint
     ])
     .split(inner);
@@ -117,33 +119,76 @@ fn render_create_form(frame: &mut Frame, area: Rect, state: &IndexState, theme: 
     } else {
         ""
     };
+
+    let field_label = if state.is_compound {
+        " Mezok (vesszovel): "
+    } else {
+        " Mezo neve: "
+    };
+
     let field_line = Line::from(vec![
-        Span::raw(" Mezo neve: "),
+        Span::raw(field_label),
         Span::styled(&state.field_input, field_style),
         Span::styled(cursor, Style::default().fg(theme.accent)),
     ]);
     frame.render_widget(Paragraph::new(field_line), form_chunks[0]);
 
-    // Unique checkbox
-    let unique_style = if state.is_creating && state.form_field == 1 {
+    // Compound checkbox (form_field == 1)
+    let compound_style = if state.is_creating && state.form_field == 1 {
         Style::default().fg(theme.accent)
     } else {
         Style::default().fg(theme.muted)
     };
 
-    let checkbox = if state.unique { "[X]" } else { "[ ]" };
+    let compound_checkbox = if state.is_compound { "[X]" } else { "[ ]" };
+    let compound_line = Line::from(vec![
+        Span::raw(" Compound: "),
+        Span::styled(compound_checkbox, compound_style),
+        Span::styled(
+            if state.is_compound {
+                format!(" [{} mezo]", state.compound_fields.len())
+            } else {
+                String::new()
+            },
+            Style::default().fg(theme.muted),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(compound_line), form_chunks[1]);
+
+    // Unique checkbox (form_field == 2)
+    let unique_style = if state.is_creating && state.form_field == 2 {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+
+    let unique_checkbox = if state.unique { "[X]" } else { "[ ]" };
     let unique_line = Line::from(vec![
         Span::raw(" Unique: "),
-        Span::styled(checkbox, unique_style),
-        Span::raw(" (Space valt)"),
+        Span::styled(unique_checkbox, unique_style),
     ]);
-    frame.render_widget(Paragraph::new(unique_line), form_chunks[1]);
+    frame.render_widget(Paragraph::new(unique_line), form_chunks[2]);
+
+    // Sparse checkbox (form_field == 3)
+    let sparse_style = if state.is_creating && state.form_field == 3 {
+        Style::default().fg(theme.accent)
+    } else {
+        Style::default().fg(theme.muted)
+    };
+
+    let sparse_checkbox = if state.sparse { "[X]" } else { "[ ]" };
+    let sparse_line = Line::from(vec![
+        Span::raw(" Sparse: "),
+        Span::styled(sparse_checkbox, sparse_style),
+        Span::styled(" (csak letezo mezok)", Style::default().fg(theme.muted)),
+    ]);
+    frame.render_widget(Paragraph::new(sparse_line), form_chunks[3]);
 
     // Create hint
     if state.is_creating {
-        let hint = Paragraph::new(" [Enter] Letrehoz  [Esc] Megse")
+        let hint = Paragraph::new(" [Enter] Letrehoz  [Tab] Kovetkezo  [Esc] Megse")
             .style(Style::default().fg(theme.muted));
-        frame.render_widget(hint, form_chunks[2]);
+        frame.render_widget(hint, form_chunks[4]);
     }
 }
 

@@ -292,12 +292,38 @@ impl McpClient {
         Ok(indexes)
     }
 
-    /// Create an index
-    pub async fn create_index(&self, collection: &str, field: &str, unique: bool) -> McpResult<()> {
+    /// Create a single-field index
+    pub async fn create_index(
+        &self,
+        collection: &str,
+        field: &str,
+        unique: bool,
+        sparse: bool,
+    ) -> McpResult<()> {
         let args = serde_json::json!({
             "collection": collection,
             "field": field,
-            "unique": unique
+            "unique": unique,
+            "sparse": sparse
+        });
+
+        self.call_tool("index_create", args).await?;
+        Ok(())
+    }
+
+    /// Create a compound index (multiple fields)
+    pub async fn create_compound_index(
+        &self,
+        collection: &str,
+        fields: &[String],
+        unique: bool,
+        sparse: bool,
+    ) -> McpResult<()> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "fields": fields,
+            "unique": unique,
+            "sparse": sparse
         });
 
         self.call_tool("index_create", args).await?;
