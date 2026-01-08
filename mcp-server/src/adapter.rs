@@ -458,6 +458,12 @@ impl IronBaseAdapter {
                     let count = coll.count_documents(&serde_json::json!({})).unwrap_or(0);
                     self.collection_stats.set(name, count);
 
+                    // Refresh index statistics for query planner optimization
+                    // This computes distinct_count/null_count for all B+ tree indexes
+                    if let Err(e) = coll.refresh_index_stats() {
+                        tracing::warn!("Failed to refresh index stats for '{}': {}", name, e);
+                    }
+
                     let elapsed = coll_start.elapsed();
                     if elapsed.as_millis() > 100 {
                         // Only log slow collections
