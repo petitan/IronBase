@@ -186,4 +186,7 @@ pub struct IndexPrefixInfo {
     pub case_insensitive: bool,
     /// Number of null key values in the index (for sparse index cost)
     pub null_count: u64,
+    /// Ratio of documents with multikey arrays (0.0-1.0)
+    /// Higher values indicate more index entries per document
+    pub multikey_ratio: f32,
 }
