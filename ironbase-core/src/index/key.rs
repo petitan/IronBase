@@ -178,4 +178,6 @@ pub struct IndexPrefixInfo {
     pub sparse: bool,
     /// Estimated distinct key count for selectivity (0 = unknown)
     pub distinct_count: u64,
+    /// Whether this index is currently being built (should be ignored by query planner)
+    pub building: bool,
 }

@@ -226,6 +226,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         };
 
+        // Mark index as ready BEFORE persisting metadata
+        {
+            let mut indexes = self.indexes.write();
+            if let Err(e) = indexes.set_index_ready(&index_name) {
+                tracing::warn!(error = %e, "Failed to mark compound index as ready");
+            }
+        }
+
         // THEN persist metadata with correct root_offset
         {
             let mut storage = self.storage.write();
@@ -251,6 +259,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         tree_height: 1,
                         root_offset,
                         stats: IndexStats::default(),
+                        building: false,
                     });
 
                 meta.indexes.push(index_meta);
@@ -393,6 +402,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         };
 
+        // Mark index as ready BEFORE persisting metadata
+        // This ensures the saved metadata has building=false
+        {
+            let mut indexes = self.indexes.write();
+            if let Err(e) = indexes.set_index_ready(&index_name) {
+                tracing::warn!(error = %e, "Failed to mark index as ready");
+            }
+        }
+
         // THEN persist metadata with correct root_offset
         {
             let mut storage = self.storage.write();
@@ -418,6 +436,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         tree_height: 1,
                         root_offset,
                         stats: IndexStats::default(),
+                        building: false, // Explicitly set to false
                     });
 
                 meta.indexes.push(index_meta);
@@ -587,6 +606,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         tree_height: 1,
                         root_offset,
                         stats: IndexStats::default(),
+                        building: false, // CI index is ready after this point
                     });
 
                 meta.indexes.push(index_meta);

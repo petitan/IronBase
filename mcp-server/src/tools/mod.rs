@@ -11,11 +11,11 @@
 //! - `transaction` - Transaction management (begin, commit, rollback)
 //! - `helpers` - Common helper functions
 
-mod definitions;
 pub mod acl;
 pub mod admin;
 pub mod collection;
 pub mod crud;
+mod definitions;
 pub mod helpers;
 pub mod index;
 pub mod listener;

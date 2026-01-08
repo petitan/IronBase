@@ -129,6 +129,51 @@ pub fn effective_timeout(global_ms: u64, tool_name: &str) -> Duration {
     Duration::from_millis(global_ms.min(tool_default))
 }
 
+/// Tools that should run without timeout
+///
+/// Index creation operations can take a long time on large collections
+/// (e.g., 78K+ documents) and should not be interrupted by server-side timeouts.
+/// Clients can still cancel via the MCP protocol if needed.
+static NO_TIMEOUT_TOOLS: &[&str] = &[
+    "index_create",
+    "index_create_fulltext",
+    "index_create_fuzzy",
+    "index_create_compound",
+];
+
+/// Check if a tool should run without timeout
+pub fn is_no_timeout_tool(tool_name: &str) -> bool {
+    NO_TIMEOUT_TOOLS.contains(&tool_name)
+}
+
+/// Get effective timeout for a tool, or None if it should run without timeout
+///
+/// Returns:
+/// - `None` for index creation operations (they can take arbitrarily long)
+/// - `Some(Duration)` for all other operations
+///
+/// ## Arguments
+///
+/// * `global_ms` - Global timeout from config.toml in milliseconds
+/// * `tool_name` - Name of the tool being executed
+///
+/// ## Example
+///
+/// ```ignore
+/// let global = config.tool_timeout_secs * 1000;
+/// match effective_timeout_option(global, "index_create") {
+///     None => { /* No deadline - index creation can take as long as needed */ }
+///     Some(timeout) => { /* Set deadline for regular operations */ }
+/// }
+/// ```
+pub fn effective_timeout_option(global_ms: u64, tool_name: &str) -> Option<Duration> {
+    if is_no_timeout_tool(tool_name) {
+        None // Index operations run without timeout
+    } else {
+        Some(effective_timeout(global_ms, tool_name))
+    }
+}
+
 /// Get all tool timeouts (for debugging/documentation)
 pub fn all_tool_timeouts() -> &'static HashMap<&'static str, u64> {
     &TOOL_TIMEOUTS

@@ -353,4 +353,3 @@ The `$**` operator finds a field name at ANY depth in the document structure.
         ]
     })
 }
-

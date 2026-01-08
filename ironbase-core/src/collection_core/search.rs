@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::fulltext::FulltextIndexMetadata;
+use crate::fulltext::{build_phrase_regex, parse_query, FulltextIndexMetadata};
 use crate::index::FuzzyAlgorithm;
 use crate::log_error;
 use crate::storage::{RawStorage, Storage};
@@ -67,6 +67,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
             Ok(())
         })?;
+
+        // Mark index as ready after population is complete
+        {
+            let mut indexes = self.indexes.write();
+            if let Err(e) = indexes.set_index_ready(&index_name) {
+                tracing::warn!(error = %e, "Failed to mark fuzzy index as ready");
+            }
+        }
 
         // Step 4: Get metadata for persistence
         let metadata = {
@@ -293,9 +301,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             return Err(e);
         }
 
-        // Step 4: Flush fulltext index to disk and get metadata
+        // Step 4: Mark index as ready and flush to disk
         let metadata = {
             let mut indexes = self.indexes.write();
+            // Mark index as ready BEFORE persisting
+            if let Err(e) = indexes.set_index_ready(&index_name) {
+                tracing::warn!(error = %e, "Failed to mark fulltext index as ready");
+            }
             if let Some(index) = indexes.get_fulltext_index_mut(&index_name) {
                 // Flush the fulltext index to persist inverted index data to .ftidx file
                 if let Err(e) = index.save_to_file() {
@@ -412,6 +424,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ///
     /// This is the cancellation-aware version of `fulltext_search`.
     /// Pass an ExecutionContext to enable timeout/cancellation checking.
+    ///
+    /// # MongoDB-compatible phrase search
+    ///
+    /// Supports quoted phrases for exact matching (MongoDB $text syntax):
+    /// - `"exact phrase"` - matches documents containing the exact phrase
+    /// - `word1 word2` - matches documents containing either word (OR)
+    /// - `"phrase one" other words` - mixed: phrase AND/OR other words
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // OR search (default)
+    /// coll.fulltext_search_with_ctx("content", "hello world", ...)?;
+    ///
+    /// // Phrase search (exact match)
+    /// coll.fulltext_search_with_ctx("content", "\"hello world\"", ...)?;
+    /// ```
     pub fn fulltext_search_with_ctx(
         &self,
         field: &str,
@@ -423,6 +451,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         ctx: Option<&ExecutionContext>,
     ) -> Result<Vec<(Value, f64, Vec<String>)>> {
         self.check_not_closed()?;
+
+        // Parse query for phrases (MongoDB-compatible syntax)
+        let parsed = parse_query(query);
+        let effective_limit = limit.unwrap_or(10);
+        let effective_skip = skip.unwrap_or(0);
+
         let indexes = self.indexes.read();
 
         // Find fulltext index for this field
@@ -430,32 +464,101 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             IronBaseError::IndexError(format!("No fulltext index found for field '{}'", field))
         })?;
 
-        // Perform search WITH cancellation support (the expensive part!)
+        // If no phrases, use fast path (existing behavior)
+        if !parsed.has_phrases() {
+            let search_results = fulltext_index.search_with_ctx(
+                query,
+                effective_limit,
+                effective_skip,
+                min_score,
+                ctx,
+            )?;
+
+            drop(indexes);
+
+            // Fetch documents for matched IDs with cancellation checks
+            let mut results = Vec::with_capacity(search_results.len());
+            for (iteration, result) in search_results.into_iter().enumerate() {
+                if let Some(exec_ctx) = ctx {
+                    exec_ctx.maybe_check(iteration)?;
+                }
+
+                if let Some(doc) = self.read_document_by_id(&result.doc_id)? {
+                    let projected_doc = if let Some(ref proj) = projection {
+                        crate::find_options::apply_projection(&doc, proj)?
+                    } else {
+                        doc
+                    };
+                    results.push((projected_doc, result.score, result.matched_tokens));
+                }
+            }
+
+            return Ok(results);
+        }
+
+        // Phrase search: get more candidates, then filter with regex
+        // Request limit * 10 candidates to account for regex filtering
+        let candidate_limit = effective_limit.saturating_mul(10).max(100);
+
+        // Build search query from all terms (phrases tokenized + regular terms)
+        let all_terms = parsed.all_search_terms(&fulltext_index.options);
+
+        // Search for candidates (skip=0, we handle skip manually after filtering)
         let search_results = fulltext_index.search_with_ctx(
-            query,
-            limit.unwrap_or(10),
-            skip.unwrap_or(0),
+            &all_terms.join(" "),
+            candidate_limit,
+            0, // No skip - we apply it after phrase filtering
             min_score,
             ctx,
         )?;
 
         drop(indexes);
 
-        // Fetch documents for matched IDs with cancellation checks
-        let mut results = Vec::with_capacity(search_results.len());
+        // Build regex patterns for all phrases
+        let phrase_regexes: Vec<_> = parsed
+            .phrases
+            .iter()
+            .map(|p| build_phrase_regex(p))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Streaming doc loading with phrase filtering
+        let mut results = Vec::new();
+        let mut skipped = 0;
+
         for (iteration, result) in search_results.into_iter().enumerate() {
-            // Check for cancellation every N iterations
+            // Cancellation check
             if let Some(exec_ctx) = ctx {
                 exec_ctx.maybe_check(iteration)?;
             }
 
             if let Some(doc) = self.read_document_by_id(&result.doc_id)? {
-                let projected_doc = if let Some(ref proj) = projection {
-                    crate::find_options::apply_projection(&doc, proj)?
-                } else {
-                    doc
-                };
-                results.push((projected_doc, result.score, result.matched_tokens));
+                // Get field text for phrase matching
+                let text = doc.get(field).and_then(|v| v.as_str()).unwrap_or("");
+
+                // Check all phrases match
+                let all_phrases_match = phrase_regexes.iter().all(|re| re.is_match(text));
+
+                if all_phrases_match {
+                    // Handle skip
+                    if skipped < effective_skip {
+                        skipped += 1;
+                        continue;
+                    }
+
+                    // Apply projection
+                    let projected_doc = if let Some(ref proj) = projection {
+                        crate::find_options::apply_projection(&doc, proj)?
+                    } else {
+                        doc
+                    };
+
+                    results.push((projected_doc, result.score, result.matched_tokens));
+
+                    // Early exit when limit reached
+                    if results.len() >= effective_limit {
+                        break;
+                    }
+                }
             }
         }
 

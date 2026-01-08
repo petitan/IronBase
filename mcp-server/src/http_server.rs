@@ -632,8 +632,9 @@ async fn run_http_server_internal(
         };
 
         // Calculate effective timeout: min(global, per-tool default)
+        // Index creation operations return None (no timeout) to allow long-running builds
         let global_timeout_ms = state.tool_timeout.as_millis() as u64;
-        let effective_timeout = crate::timeout::effective_timeout(global_timeout_ms, tool_name);
+        let effective_timeout = crate::timeout::effective_timeout_option(global_timeout_ms, tool_name);
 
         // Register request for cancellation support
         let cancel_flag = state.request_tracker.start(&json_rpc_id);
@@ -649,15 +650,21 @@ async fn run_http_server_internal(
         let request_tracker_clone = state.request_tracker.clone();
 
         // Log incoming request with method and tool name
-        tracing::info!(trace_id = %trace_id, method = %request_method, tool = %tool_name, remote = %remote_addr, "Request started");
+        let timeout_str = match effective_timeout {
+            Some(t) => format!("{}s", t.as_secs()),
+            None => "unlimited".to_string(),
+        };
+        tracing::info!(trace_id = %trace_id, method = %request_method, tool = %tool_name, timeout = %timeout_str, remote = %remote_addr, "Request started");
 
-        // Run potentially blocking operations in spawn_blocking with timeout
-        // This prevents long-running operations (like index creation) from blocking the async runtime
-        let deadline = std::time::Instant::now() + effective_timeout;
+        // Run potentially blocking operations in spawn_blocking
+        // Index creation operations run without timeout (effective_timeout = None)
+        let deadline = effective_timeout.map(|t| std::time::Instant::now() + t);
+        let effective_timeout_for_handler = effective_timeout.unwrap_or(std::time::Duration::from_secs(86400)); // Default 24h for no-timeout tools
         let mut handle = tokio::task::spawn_blocking(move || {
-            // Set thread-local execution context for cooperative cancellation and timeout checking
+            // Set thread-local execution context for cooperative cancellation
+            // For index operations, deadline is None - only client cancellation can stop them
             let ctx = crate::execution::ExecutionContext::new(
-                Some(deadline),
+                deadline,
                 Some(cancel_flag_clone.clone()),
             );
             let _exec_guard = crate::execution::set_execution_context(ctx);
@@ -668,19 +675,27 @@ async fn run_http_server_internal(
                 &state_clone.initialized_clients,
                 api_key.as_deref(),
                 Some(remote_addr),
-                effective_timeout,
+                effective_timeout_for_handler,
                 Some(cancel_flag_clone),
             )
         });
 
-        let result = tokio::select! {
-            join_result = &mut handle => Ok(join_result),
-            _ = tokio::time::sleep(effective_timeout) => {
-                // Timeout - signal cancellation and abort
-                cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
-                handle.abort();
-                Err(())
+        // For index operations (no timeout), wait indefinitely for completion
+        // For other operations, use select! to enforce the timeout
+        let result = if let Some(timeout_duration) = effective_timeout {
+            tokio::select! {
+                join_result = &mut handle => Ok(join_result),
+                _ = tokio::time::sleep(timeout_duration) => {
+                    // Timeout - signal cancellation and abort
+                    cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                    handle.abort();
+                    Err(())
+                }
             }
+        } else {
+            // No timeout - wait indefinitely (index creation)
+            // Client can still cancel via notifications/cancelled
+            Ok(handle.await)
         };
 
         // Cleanup: unregister request from tracker

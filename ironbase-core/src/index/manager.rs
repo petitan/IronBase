@@ -97,6 +97,10 @@ impl IndexManager {
 
     /// Create B+ tree index (single field)
     ///
+    /// The index is created with `building=true` to prevent the query planner
+    /// from using it until it's fully populated. Call `set_index_ready()` after
+    /// population is complete.
+    ///
     /// # Arguments
     /// * `name` - Index name
     /// * `field` - Field to index
@@ -116,7 +120,9 @@ impl IndexManager {
             )));
         }
 
-        let tree = BPlusTree::new(name.clone(), field, unique, sparse);
+        let mut tree = BPlusTree::new(name.clone(), field, unique, sparse);
+        // Mark as building - caller must call set_index_ready() after population
+        tree.set_building(true);
         self.btree_indexes.insert(name, tree);
         Ok(())
     }
@@ -124,6 +130,7 @@ impl IndexManager {
     /// Create case-insensitive B+ tree index (single field)
     ///
     /// String values are lowercased before indexing for case-insensitive matching.
+    /// The index is created with `building=true`. Call `set_index_ready()` after population.
     ///
     /// # Arguments
     /// * `name` - Index name (typically "{collection}_{field}_ci")
@@ -142,12 +149,15 @@ impl IndexManager {
             )));
         }
 
-        let tree = BPlusTree::new_ci(name.clone(), field, unique);
+        let mut tree = BPlusTree::new_ci(name.clone(), field, unique);
+        tree.set_building(true);
         self.btree_indexes.insert(name, tree);
         Ok(())
     }
 
     /// Create compound B+ tree index (multiple fields)
+    ///
+    /// The index is created with `building=true`. Call `set_index_ready()` after population.
     ///
     /// # Arguments
     /// * `name` - Index name
@@ -184,7 +194,8 @@ impl IndexManager {
             ));
         }
 
-        let tree = BPlusTree::new_compound(name.clone(), fields, unique, sparse);
+        let mut tree = BPlusTree::new_compound(name.clone(), fields, unique, sparse);
+        tree.set_building(true);
         self.btree_indexes.insert(name, tree);
         Ok(())
     }
@@ -289,6 +300,11 @@ impl IndexManager {
         let mut result: Vec<IndexPrefixInfo> = Vec::new();
 
         for (name, index) in &self.btree_indexes {
+            // CRITICAL: Skip indexes that are currently being built
+            // Using a partially-built index would return incomplete results!
+            if index.metadata.building {
+                continue;
+            }
             let is_compound = index.metadata.is_compound();
             let prefix_field = if is_compound {
                 // For compound indexes, return the first field to enable prefix queries
@@ -308,10 +324,11 @@ impl IndexManager {
                 num_fields,
                 sparse: index.metadata.sparse,
                 distinct_count: index.metadata.stats.distinct_count,
+                building: false, // Only ready indexes reach here
             });
         }
 
-        // Legacy indexes are single-field only (never sparse, no stats)
+        // Legacy indexes are single-field only (never sparse, no stats, never building)
         for (name, index) in &self.legacy_indexes {
             result.push(IndexPrefixInfo {
                 index_name: name.clone(),
@@ -320,11 +337,42 @@ impl IndexManager {
                 num_fields: 1,
                 sparse: false,
                 distinct_count: 0, // No stats for legacy indexes
+                building: false,   // Legacy indexes are always ready
             });
         }
 
         result.sort_by(|a, b| a.index_name.cmp(&b.index_name));
         result
+    }
+
+    /// Set an index to "building" state (query planner will ignore it)
+    ///
+    /// Call this BEFORE starting to populate the index to prevent
+    /// queries from using a partially populated index.
+    pub fn set_index_building(&mut self, name: &str, building: bool) -> Result<()> {
+        if let Some(index) = self.btree_indexes.get_mut(name) {
+            index.set_building(building);
+            return Ok(());
+        }
+        if let Some(index) = self.fuzzy_indexes.get_mut(name) {
+            index.set_building(building);
+            return Ok(());
+        }
+        if let Some(index) = self.fulltext_indexes.get_mut(name) {
+            index.set_building(building);
+            return Ok(());
+        }
+        Err(IronBaseError::IndexError(format!(
+            "Index not found: {}",
+            name
+        )))
+    }
+
+    /// Mark an index as ready (query planner can use it)
+    ///
+    /// Call this AFTER the index has been fully populated.
+    pub fn set_index_ready(&mut self, name: &str) -> Result<()> {
+        self.set_index_building(name, false)
     }
 
     // ========== FUZZY INDEX OPERATIONS ==========
@@ -358,6 +406,8 @@ impl IndexManager {
 
     /// Create fuzzy index with disk-based storage
     ///
+    /// The index is created with `building=true`. Call `set_index_ready()` after population.
+    ///
     /// # Arguments
     /// * `name` - Unique index name
     /// * `field` - Field to index
@@ -384,12 +434,13 @@ impl IndexManager {
             )));
         }
 
-        let index = if let Some(path) = storage_path {
+        let mut index = if let Some(path) = storage_path {
             self.index_file_paths.insert(name.clone(), path.clone());
             FuzzyIndex::new_with_storage(&name, &field, algorithm, threshold, path)
         } else {
             FuzzyIndex::new(&name, &field, algorithm, threshold)
         };
+        index.set_building(true);
 
         self.fuzzy_indexes.insert(name, index);
         Ok(())
@@ -453,6 +504,8 @@ impl IndexManager {
 
     /// Create full-text search index with disk-based storage
     ///
+    /// The index is created with `building=true`. Call `set_index_ready()` after population.
+    ///
     /// # Arguments
     /// * `name` - Unique index name
     /// * `field` - Field to index (supports dot notation)
@@ -487,12 +540,13 @@ impl IndexManager {
             accent_folding.unwrap_or(true),
         );
 
-        let index = if let Some(path) = storage_path {
+        let mut index = if let Some(path) = storage_path {
             self.index_file_paths.insert(name.clone(), path.clone());
             FulltextIndex::new_with_storage(&name, &field, options, path)?
         } else {
             FulltextIndex::new(&name, &field, options)
         };
+        index.set_building(true);
         self.fulltext_indexes.insert(name, index);
         Ok(())
     }

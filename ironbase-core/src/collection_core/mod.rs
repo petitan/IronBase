@@ -3580,6 +3580,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let candidate_ids = match logical_op {
             LogicalOperator::And => {
+                let target_limit = limit.unwrap_or(usize::MAX);
                 let mut indexed_sets: Vec<Vec<DocumentId>> = Vec::new();
                 for (clause_query, plan_opt) in &clause_plans {
                     if let Some(plan) = plan_opt.clone() {
@@ -3589,7 +3590,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             None,
                             false,
                             0,
-                            None,
+                            Some(target_limit),
                             cancel_flag,
                             deadline,
                         )?;
@@ -3613,36 +3614,67 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 base
             }
             LogicalOperator::Or => {
+                let target_limit = limit.unwrap_or(usize::MAX);
                 let mut seen = HashSet::new();
                 let mut union = Vec::new();
-                for (clause_query, plan_opt) in &clause_plans {
-                    let ids = if let Some(plan) = plan_opt.clone() {
-                        let (ids, _) = self.collect_doc_ids_from_plan(
-                            clause_query,
-                            plan,
-                            None,
-                            false,
-                            0,
-                            None,
-                            cancel_flag,
-                            deadline,
-                        )?;
-                        ids
-                    } else {
-                        self.scan_documents_with_early_termination(
-                            clause_query,
-                            0,
-                            None,
-                            cancel_flag,
-                            deadline,
-                        )?
-                    };
+
+                // Partition: indexed clauses first (fast), non-indexed last (slow)
+                let (indexed, non_indexed): (Vec<_>, Vec<_>) =
+                    clause_plans.iter().partition(|(_, plan)| plan.is_some());
+
+                // 1. Run indexed clauses first
+                for (clause_query, plan_opt) in &indexed {
+                    if union.len() >= target_limit {
+                        break;
+                    }
+
+                    let remaining = target_limit.saturating_sub(union.len());
+                    let (ids, _) = self.collect_doc_ids_from_plan(
+                        clause_query,
+                        plan_opt.clone().unwrap(),
+                        None,
+                        false,
+                        0,
+                        Some(remaining),
+                        cancel_flag,
+                        deadline,
+                    )?;
+
                     for id in ids {
                         if seen.insert(id.clone()) {
                             union.push(id);
+                            if union.len() >= target_limit {
+                                break;
+                            }
                         }
                     }
                 }
+
+                // 2. Run non-indexed clauses only if we still need more results
+                for (clause_query, _) in &non_indexed {
+                    if union.len() >= target_limit {
+                        break;
+                    }
+
+                    let remaining = target_limit.saturating_sub(union.len());
+                    let ids = self.scan_documents_with_early_termination(
+                        clause_query,
+                        0,
+                        Some(remaining),
+                        cancel_flag,
+                        deadline,
+                    )?;
+
+                    for id in ids {
+                        if seen.insert(id.clone()) {
+                            union.push(id);
+                            if union.len() >= target_limit {
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 union
             }
             LogicalOperator::Nor => {

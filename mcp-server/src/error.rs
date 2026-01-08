@@ -464,5 +464,4 @@ mod tests {
         assert_eq!(err.code, ErrorCode::ResourceExhausted);
         assert!(err.data.as_ref().unwrap()["limit"] == 10000);
     }
-
 }

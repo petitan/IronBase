@@ -69,6 +69,9 @@ pub struct FuzzyIndexMetadata {
     pub algorithm: FuzzyAlgorithm,
     pub threshold: f64,
     pub num_entries: usize,
+    /// True while index is being built - query planner should ignore this index
+    #[serde(default)]
+    pub building: bool,
 }
 
 /// Fuzzy text index - stores string values for similarity search
@@ -110,6 +113,7 @@ impl FuzzyIndex {
                 algorithm,
                 threshold: threshold.clamp(0.0, 1.0),
                 num_entries: 0,
+                building: false,
             },
             entries: Vec::new(),
             storage_path: None,
@@ -134,6 +138,7 @@ impl FuzzyIndex {
                 algorithm,
                 threshold: threshold.clamp(0.0, 1.0),
                 num_entries: 0,
+                building: false,
             },
             entries: Vec::new(),
             storage_path: Some(storage_path),
@@ -141,6 +146,16 @@ impl FuzzyIndex {
             entries_offset: 0,
             entries_size: 0,
         }
+    }
+
+    /// Check if this index is currently being built
+    pub fn is_building(&self) -> bool {
+        self.metadata.building
+    }
+
+    /// Set the building flag (for index creation lifecycle)
+    pub fn set_building(&mut self, building: bool) {
+        self.metadata.building = building;
     }
 
     /// Set storage path for persistence
