@@ -180,4 +180,10 @@ pub struct IndexPrefixInfo {
     pub distinct_count: u64,
     /// Whether this index is currently being built (should be ignored by query planner)
     pub building: bool,
+    /// Total number of keys in the index (for cost calculation)
+    pub num_keys: u64,
+    /// Whether this is a case-insensitive index
+    pub case_insensitive: bool,
+    /// Number of null key values in the index (for sparse index cost)
+    pub null_count: u64,
 }

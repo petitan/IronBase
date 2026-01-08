@@ -177,140 +177,7 @@ impl QueryPlanner {
 
         Some((op, clauses.clone()))
     }
-    /// Analyze a query and determine if an index can be used
-    /// Returns (field_name, QueryPlan) if an index opportunity is found
-    ///
-    /// DEPRECATED: Use analyze_query_with_fields() for compound index support
-    #[deprecated(
-        since = "0.3.0",
-        note = "use analyze_query_with_fields for compound index support"
-    )]
-    #[allow(dead_code)]
-    pub fn analyze_query(
-        query_json: &Value,
-        available_indexes: &[String],
-    ) -> Option<(String, QueryPlan)> {
-        // Check for simple equality query: { "field": value }
-        if let Value::Object(ref map) = query_json {
-            // First try range query analysis (handles { "field": { "$gte": ... } })
-            if let Some((field, plan)) = Self::analyze_range_query(query_json, available_indexes) {
-                return Some((field, plan));
-            }
-
-            // Skip logical operators like $and, $or, $nor
-            if map.keys().any(|k| k.starts_with('$')) {
-                return None;
-            }
-
-            // Simple equality query: { "field": value }
-            for (field, value) in map {
-                // Skip if value contains operators (like {"age": {"$gt": 5}})
-                if let Value::Object(ref val_map) = value {
-                    if val_map.keys().any(|k| k.starts_with('$')) {
-                        // Already handled by range query analysis above
-                        continue;
-                    }
-                }
-
-                // Check if we have an index on this field
-                let index_name = Self::find_index_for_field(field, available_indexes)?;
-
-                let key = IndexKey::from(value);
-                return Some((
-                    field.clone(),
-                    QueryPlan::IndexScan {
-                        index_name,
-                        field: field.clone(),
-                        key,
-                        is_compound: false, // Legacy method doesn't know about compound indexes
-                    },
-                ));
-            }
-        }
-
-        None
-    }
-
-    /// Analyze query for range operators ($gt, $gte, $lt, $lte)
-    ///
-    /// DEPRECATED: Used by deprecated analyze_query()
-    #[allow(dead_code)]
-    fn analyze_range_query(
-        query_json: &Value,
-        available_indexes: &[String],
-    ) -> Option<(String, QueryPlan)> {
-        if let Value::Object(ref map) = query_json {
-            for (field, conditions) in map {
-                if field.starts_with('$') {
-                    continue; // Skip logical operators at root level
-                }
-
-                if let Value::Object(ref cond_map) = conditions {
-                    // Check for range operators
-                    let has_gt = cond_map.contains_key("$gt");
-                    let has_gte = cond_map.contains_key("$gte");
-                    let has_lt = cond_map.contains_key("$lt");
-                    let has_lte = cond_map.contains_key("$lte");
-
-                    if has_gt || has_gte || has_lt || has_lte {
-                        // We have a range query
-                        let index_name = Self::find_index_for_field(field, available_indexes)?;
-
-                        let start = if has_gte {
-                            cond_map.get("$gte").map(IndexKey::from)
-                        } else if has_gt {
-                            cond_map.get("$gt").map(IndexKey::from)
-                        } else {
-                            None
-                        };
-
-                        let end = if has_lte {
-                            cond_map.get("$lte").map(IndexKey::from)
-                        } else if has_lt {
-                            cond_map.get("$lt").map(IndexKey::from)
-                        } else {
-                            None
-                        };
-
-                        let inclusive_start = has_gte || (!has_gt && !has_gte);
-                        let inclusive_end = has_lte || (!has_lt && !has_lte);
-
-                        return Some((
-                            field.clone(),
-                            QueryPlan::IndexRangeScan {
-                                index_name,
-                                field: field.clone(),
-                                start,
-                                end,
-                                inclusive_start,
-                                inclusive_end,
-                            },
-                        ));
-                    }
-                }
-            }
-        }
-
-        None
-    }
-
-    /// Find an index for a given field
-    ///
-    /// DEPRECATED: This method has a bug with compound indexes - it matches
-    /// any index ending with _{field}, even if the field is not the first
-    /// (prefix) field of a compound index.
-    ///
-    /// Use find_index_for_field_v2 with index_fields parameter instead.
-    #[allow(dead_code)]
-    fn find_index_for_field(field: &str, available_indexes: &[String]) -> Option<String> {
-        // Look for index ending with _{field}
-        available_indexes
-            .iter()
-            .find(|idx| idx.ends_with(&format!("_{}", field)))
-            .cloned()
-    }
-
-    /// Find an index for a given field (v2 - compound index aware)
+    /// Find an index for a given field (compound index aware)
     ///
     /// Takes a list of IndexPrefixInfo containing:
     /// - index_name: The index name
@@ -318,7 +185,7 @@ impl QueryPlanner {
     /// - is_compound: Whether this is a compound index
     ///
     /// Returns (index_name, is_compound) if found.
-    fn find_index_for_field_v2(
+    fn find_index_for_field(
         field: &str,
         index_fields: &[IndexPrefixInfo],
     ) -> Option<(String, bool)> {
@@ -395,11 +262,21 @@ impl QueryPlanner {
                 .iter()
                 .find(|i| i.prefix_field == field && i.sparse)
             {
+                // Dynamic cost based on actual index size (num_keys)
+                // Small sparse index = very cheap, large sparse index = proportionally more expensive
+                let cost = if info.num_keys > 0 {
+                    (info.num_keys as f64).max(1.0)
+                } else {
+                    100.0 // Fallback if num_keys unknown
+                };
                 candidates.push(CandidatePlan::new(
                     plan,
                     field,
-                    100.0, // Sparse scan cost (moderate, depends on sparsity)
-                    format!("Sparse index {} for $exists:true", info.index_name),
+                    cost,
+                    format!(
+                        "Sparse index {} for $exists:true (keys: {})",
+                        info.index_name, info.num_keys
+                    ),
                 ));
             }
         }
@@ -600,7 +477,7 @@ impl QueryPlanner {
                     if has_gt || has_gte || has_lt || has_lte {
                         // Compound-index-aware field matching (we only need the index name for range queries)
                         let (index_name, is_compound) =
-                            Self::find_index_for_field_v2(field, index_fields)?;
+                            Self::find_index_for_field(field, index_fields)?;
                         if is_compound {
                             continue;
                         }
@@ -667,11 +544,10 @@ impl QueryPlanner {
 
                 // For case-insensitive regex, try to find a CI index
                 if info.case_insensitive {
-                    // Look for case-insensitive index: {collection}_{field}_ci
-                    let ci_index_suffix = format!("{}_ci", field);
+                    // Look for case-insensitive index by flag (not by name suffix)
                     if let Some(idx_info) = index_fields
                         .iter()
-                        .find(|i| i.index_name.ends_with(&ci_index_suffix))
+                        .find(|i| i.prefix_field == *field && i.case_insensitive)
                     {
                         if !idx_info.is_compound {
                             return Some((
@@ -690,7 +566,7 @@ impl QueryPlanner {
                     continue;
                 }
 
-                let (index_name, is_compound) = Self::find_index_for_field_v2(field, index_fields)?;
+                let (index_name, is_compound) = Self::find_index_for_field(field, index_fields)?;
                 if is_compound {
                     continue;
                 }
@@ -737,7 +613,7 @@ impl QueryPlanner {
                 };
 
                 // Check if we have an index on this field
-                let (index_name, is_compound) = Self::find_index_for_field_v2(field, index_fields)?;
+                let (index_name, is_compound) = Self::find_index_for_field(field, index_fields)?;
                 if is_compound {
                     continue; // Don't optimize compound indexes for now
                 }
@@ -884,122 +760,7 @@ impl QueryPlanner {
             .map(|info| (info.prefix, info.exact, info.case_insensitive))
     }
 
-    /// Create a query plan description for explain output
-    ///
-    /// DEPRECATED: Use explain_query_with_fields() for compound index support
-    #[deprecated(
-        since = "0.3.0",
-        note = "use explain_query_with_fields for compound index support"
-    )]
-    #[allow(deprecated)]
-    #[allow(dead_code)]
-    pub fn explain_query(query_json: &Value, available_indexes: &[String]) -> Value {
-        use serde_json::json;
-
-        #[allow(deprecated)]
-        if let Some((field, plan)) = Self::analyze_query(query_json, available_indexes) {
-            // Index-based plan
-            match plan {
-                QueryPlan::IndexScan {
-                    ref index_name,
-                    ref key,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": "IndexScan",
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": "equality",
-                        "searchKey": format!("{:?}", key),
-                        "estimatedCost": "O(log n)",
-                    })
-                }
-                QueryPlan::IndexRangeScan {
-                    ref index_name,
-                    ref start,
-                    ref end,
-                    inclusive_start,
-                    inclusive_end,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": "IndexRangeScan",
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": "range",
-                        "range": {
-                            "start": format!("{:?}", start),
-                            "end": format!("{:?}", end),
-                            "inclusiveStart": inclusive_start,
-                            "inclusiveEnd": inclusive_end,
-                        },
-                        "estimatedCost": "O(log n + k)",
-                    })
-                }
-                // SparseIndexScan is unreachable in deprecated analyze_query
-                // (it only uses the old method that doesn't support sparse)
-                QueryPlan::SparseIndexScan { ref index_name, .. } => {
-                    json!({
-                        "queryPlan": "SparseIndexScan",
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_SPARSE_INDEX",
-                        "indexType": "sparse_exists",
-                        "estimatedCost": "O(k)",
-                    })
-                }
-                QueryPlan::RegexPrefixScan {
-                    ref index_name,
-                    ref prefix,
-                    exact,
-                    case_insensitive,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": if case_insensitive { "CIRegexPrefixScan" } else { "RegexPrefixScan" },
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": if case_insensitive { "ci_regex_prefix" } else { "regex_prefix" },
-                        "prefix": prefix,
-                        "exact": exact,
-                        "caseInsensitive": case_insensitive,
-                        "estimatedCost": "O(log n + k)",
-                    })
-                }
-                // MultiRegexPrefixScan is unreachable in deprecated analyze_query
-                QueryPlan::MultiRegexPrefixScan {
-                    ref index_name,
-                    ref prefixes,
-                    ..
-                } => {
-                    json!({
-                        "queryPlan": "MultiRegexPrefixScan",
-                        "indexUsed": index_name,
-                        "field": field,
-                        "stage": "FETCH_WITH_INDEX",
-                        "indexType": "multi_regex_prefix",
-                        "prefixes": prefixes,
-                        "estimatedCost": "O(k * (log n + m))",
-                    })
-                }
-            }
-        } else {
-            // No index available
-            json!({
-                "queryPlan": "CollectionScan",
-                "indexUsed": null,
-                "stage": "FULL_SCAN",
-                "reason": "No suitable index found for query",
-                "estimatedCost": "O(n)",
-                "availableIndexes": available_indexes,
-            })
-        }
-    }
-
-    /// Create a query plan description for explain output (v2 - compound index aware)
+    /// Create a query plan description for explain output (compound index aware)
     ///
     /// Uses the new compound-index-aware query analysis for accurate explain output.
     /// Returns the chosen plan along with all evaluated candidates.
@@ -1188,7 +949,6 @@ impl QueryPlanner {
 }
 
 #[cfg(test)]
-#[allow(deprecated)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -1196,9 +956,34 @@ mod tests {
     #[test]
     fn test_equality_query_analysis() {
         let query = json!({"age": 25});
-        let indexes = vec!["users_age".to_string(), "users_id".to_string()];
+        let index_fields = vec![
+            IndexPrefixInfo {
+                index_name: "users_age".to_string(),
+                prefix_field: "age".to_string(),
+                is_compound: false,
+                num_fields: 1,
+                sparse: false,
+                distinct_count: 0,
+                building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
+            },
+            IndexPrefixInfo {
+                index_name: "users_id".to_string(),
+                prefix_field: "id".to_string(),
+                is_compound: false,
+                num_fields: 1,
+                sparse: false,
+                distinct_count: 0,
+                building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
+            },
+        ];
 
-        let result = QueryPlanner::analyze_query(&query, &indexes);
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
         assert!(result.is_some());
 
         let (field, plan) = result.unwrap();
@@ -1222,9 +1007,20 @@ mod tests {
     #[test]
     fn test_range_query_analysis() {
         let query = json!({"age": {"$gte": 18, "$lt": 65}});
-        let indexes = vec!["users_age".to_string()];
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_age".to_string(),
+            prefix_field: "age".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 0,
+            building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
+        }];
 
-        let result = QueryPlanner::analyze_query(&query, &indexes);
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
         assert!(result.is_some());
 
         let (field, plan) = result.unwrap();
@@ -1260,6 +1056,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1293,6 +1092,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1310,6 +1112,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1319,19 +1124,41 @@ mod tests {
     #[test]
     fn test_no_index_available() {
         let query = json!({"name": "Alice"});
-        let indexes = vec!["users_age".to_string()];
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_age".to_string(),
+            prefix_field: "age".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 0,
+            building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
+        }];
 
-        let result = QueryPlanner::analyze_query(&query, &indexes);
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_complex_query_no_optimization() {
         let query = json!({"$and": [{"age": 25}, {"name": "Alice"}]});
-        let indexes = vec!["users_age".to_string()];
+        let index_fields = vec![IndexPrefixInfo {
+            index_name: "users_age".to_string(),
+            prefix_field: "age".to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 0,
+            building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
+        }];
 
         // Complex queries not yet supported
-        let result = QueryPlanner::analyze_query(&query, &indexes);
+        let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
         assert!(result.is_none());
     }
 
@@ -1355,6 +1182,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1394,6 +1224,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1419,6 +1252,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1444,6 +1280,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1507,6 +1346,9 @@ mod tests {
                 sparse: false,
                 distinct_count: 0,
                 building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
             },
             IndexPrefixInfo {
                 index_name: "users_email_ci".to_string(),
@@ -1516,6 +1358,9 @@ mod tests {
                 sparse: true, // CI indexes are sparse
                 distinct_count: 0,
                 building: false,
+                num_keys: 0,
+                case_insensitive: true, // This is the CI index!
+                null_count: 0,
             },
         ];
 
@@ -1551,6 +1396,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false, // Not a CI index
+            null_count: 0,
         }];
 
         // No CI index available - should return None (collection scan)
@@ -1577,6 +1425,9 @@ mod tests {
             sparse: false,
             distinct_count: 0,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1596,6 +1447,9 @@ mod tests {
                 sparse: false,
                 distinct_count: 5, // Low distinct = high selectivity
                 building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1605,6 +1459,9 @@ mod tests {
                 sparse: false,
                 distinct_count: 100, // Higher distinct
                 building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
             },
         ];
 
@@ -1638,6 +1495,9 @@ mod tests {
                 sparse: false,
                 distinct_count: 10, // Low distinct = ~100 rows per value = higher cost
                 building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
             },
             IndexPrefixInfo {
                 index_name: "products_category_brand".to_string(),
@@ -1647,6 +1507,9 @@ mod tests {
                 sparse: false,
                 distinct_count: 1000, // High distinct = ~1 row per value = lower cost
                 building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
             },
         ];
 
@@ -1718,6 +1581,9 @@ mod tests {
                 sparse: false,
                 distinct_count: 5,
                 building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1727,6 +1593,9 @@ mod tests {
                 sparse: false,
                 distinct_count: 100,
                 building: false,
+                num_keys: 0,
+                case_insensitive: false,
+                null_count: 0,
             },
         ];
 
@@ -1767,6 +1636,9 @@ mod tests {
             sparse: false,
             distinct_count: 5,
             building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
         }];
 
         let explain = QueryPlanner::explain_query_with_fields(&query, &index_fields);
