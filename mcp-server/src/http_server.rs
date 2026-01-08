@@ -1190,19 +1190,9 @@ fn handle_request(
                     if is_notification {
                         return None;
                     }
-                    let response = serde_json::json!({
-                        "content": [{
-                            "type": "text",
-                            "text": format!("Error: {}", message)
-                        }],
-                        "isError": true
-                    });
-                    // Use code for JSON-RPC error if it's a standard error
-                    if code == -32602 || code == -32601 {
-                        Some(create_error_response(code, &message, request.id.clone()))
-                    } else {
-                        Some(create_success_response(response, request.id.clone()))
-                    }
+                    // Use JSON-RPC error for ALL tool errors to preserve error code
+                    // This allows clients to programmatically handle different error types
+                    Some(create_error_response(code, &message, request.id.clone()))
                 }
                 crate::ToolResult::AccessDenied(msg) => {
                     if is_notification {

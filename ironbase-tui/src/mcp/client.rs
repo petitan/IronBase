@@ -261,6 +261,119 @@ impl McpClient {
         Ok(count)
     }
 
+    /// Delete multiple documents
+    pub async fn delete_many(&self, collection: &str, filter: &Value) -> McpResult<u64> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "filter": filter
+        });
+
+        let result = self.call_tool("delete_many", args).await?;
+        Ok(result
+            .get("deleted_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0))
+    }
+
+    /// Insert multiple documents
+    pub async fn insert_many(&self, collection: &str, documents: &[Value]) -> McpResult<Vec<Value>> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "documents": documents
+        });
+
+        let result = self.call_tool("insert_many", args).await?;
+        Ok(result
+            .get("inserted_ids")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Update multiple documents
+    pub async fn update_many(
+        &self,
+        collection: &str,
+        filter: &Value,
+        update: &Value,
+    ) -> McpResult<(u64, u64)> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "filter": filter,
+            "update": update
+        });
+
+        let result = self.call_tool("update_many", args).await?;
+        let matched = result
+            .get("matched_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let modified = result
+            .get("modified_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Ok((matched, modified))
+    }
+
+    /// Get distinct values for a field
+    pub async fn distinct(
+        &self,
+        collection: &str,
+        field: &str,
+        filter: Option<&Value>,
+    ) -> McpResult<Vec<Value>> {
+        let mut args = serde_json::json!({
+            "collection": collection,
+            "field": field
+        });
+        if let Some(f) = filter {
+            args["filter"] = f.clone();
+        }
+
+        let result = self.call_tool("distinct", args).await?;
+        Ok(result
+            .get("values")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Fuzzy search on a field
+    pub async fn fuzzy_search(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+        limit: Option<usize>,
+    ) -> McpResult<Vec<Value>> {
+        let mut args = serde_json::json!({
+            "collection": collection,
+            "field": field,
+            "query": query
+        });
+        if let Some(l) = limit {
+            args["limit"] = serde_json::json!(l);
+        }
+
+        let result = self.call_tool("fuzzy_search", args).await?;
+        Ok(result
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Explain query plan
+    pub async fn explain(&self, collection: &str, query: &Value) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "query": query
+        });
+
+        let result = self.call_tool("explain", args).await?;
+        Ok(result.get("plan").cloned().unwrap_or(serde_json::json!(null)))
+    }
+
     /// Run aggregation pipeline
     pub async fn aggregate(&self, collection: &str, pipeline: &Value) -> McpResult<Vec<Value>> {
         let args = serde_json::json!({

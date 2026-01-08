@@ -10,7 +10,10 @@ use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use super::helpers::{check_cancelled, validate_collection_name, DEFAULT_QUERY_LIMIT};
+use super::helpers::{
+    check_cancelled, validate_collection_name, validate_document, validate_filter, validate_update,
+    DEFAULT_QUERY_LIMIT,
+};
 use super::params::{
     AggregateParams, CountParams, DeleteParams, DistinctParams, FindOneParams, FindParams,
     InsertManyParams, InsertOneParams, ParseParams, UpdateParams,
@@ -101,19 +104,19 @@ pub fn dispatch(
 }
 
 fn handle_insert_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: InsertOneParams = InsertOneParams::parse(params)?;
     validate_collection_name(&p.collection)?;
-
-    // Ensure document is an object
-    if !p.document.is_object() {
-        return Err(McpError::invalid_params("document must be a JSON object"));
-    }
+    validate_document(&p.document)?;
 
     let id = adapter.insert_one(&p.collection, p.document)?;
     Ok(json!({"inserted_id": id}))
 }
 
 fn handle_insert_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: InsertManyParams = InsertManyParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -192,16 +195,12 @@ fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
 }
 
 fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: UpdateParams = UpdateParams::parse(params)?;
     validate_collection_name(&p.collection)?;
-
-    // Ensure filter and update are objects
-    if !p.filter.is_object() {
-        return Err(McpError::invalid_params("filter must be a JSON object"));
-    }
-    if !p.update.is_object() {
-        return Err(McpError::invalid_params("update must be a JSON object"));
-    }
+    validate_filter(&p.filter)?;
+    validate_update(&p.update)?;
 
     let result = adapter.update_one(&p.collection, p.filter, p.update)?;
     Ok(json!({
@@ -215,14 +214,8 @@ fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
 
     let p: UpdateParams = UpdateParams::parse(params)?;
     validate_collection_name(&p.collection)?;
-
-    // Ensure filter and update are objects
-    if !p.filter.is_object() {
-        return Err(McpError::invalid_params("filter must be a JSON object"));
-    }
-    if !p.update.is_object() {
-        return Err(McpError::invalid_params("update must be a JSON object"));
-    }
+    validate_filter(&p.filter)?;
+    validate_update(&p.update)?;
 
     let result = adapter.update_many(&p.collection, p.filter, p.update)?;
     Ok(json!({
@@ -232,13 +225,11 @@ fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
 }
 
 fn handle_delete_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: DeleteParams = DeleteParams::parse(params)?;
     validate_collection_name(&p.collection)?;
-
-    // Ensure filter is an object
-    if !p.filter.is_object() {
-        return Err(McpError::invalid_params("filter must be a JSON object"));
-    }
+    validate_filter(&p.filter)?;
 
     let count = adapter.delete_one(&p.collection, p.filter)?;
     Ok(json!({"deleted_count": count}))
@@ -249,17 +240,15 @@ fn handle_delete_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
 
     let p: DeleteParams = DeleteParams::parse(params)?;
     validate_collection_name(&p.collection)?;
-
-    // Ensure filter is an object
-    if !p.filter.is_object() {
-        return Err(McpError::invalid_params("filter must be a JSON object"));
-    }
+    validate_filter(&p.filter)?;
 
     let count = adapter.delete_many(&p.collection, p.filter)?;
     Ok(json!({"deleted_count": count}))
 }
 
 fn handle_count_documents(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    check_cancelled()?;
+
     let p: CountParams = CountParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
