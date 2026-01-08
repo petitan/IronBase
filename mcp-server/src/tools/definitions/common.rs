@@ -394,7 +394,7 @@ pub mod fields {
     pub fn highlight() -> Value {
         json!({
             "type": "boolean",
-            "description": "Enable snippet highlighting with <mark> tags around matched terms",
+            "description": "Enable snippet highlighting with <mark> tags around matched terms. Requires the searched field to be included in projection.",
             "default": false
         })
     }
