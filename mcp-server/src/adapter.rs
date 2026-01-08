@@ -1004,6 +1004,17 @@ impl IronBaseAdapter {
         Ok(())
     }
 
+    /// Refresh index statistics for a collection
+    ///
+    /// Scans all B+ tree indexes and computes distinct_count and null_count.
+    /// The query planner uses these statistics to choose the best index.
+    pub fn refresh_index_stats(&self, collection: &str) -> Result<()> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        coll.refresh_index_stats()?;
+        Ok(())
+    }
+
     /// Explain query execution plan (uses get_collection - no implicit creation)
     pub fn explain(&self, collection: &str, query: Value) -> Result<Value> {
         let db = self.db.read();

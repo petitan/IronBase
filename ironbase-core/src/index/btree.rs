@@ -1438,6 +1438,64 @@ impl BPlusTree {
         self.metadata.num_keys = self.count_actual_keys();
     }
 
+    /// Refresh index statistics by scanning all keys in leaf nodes.
+    ///
+    /// This method traverses all leaf nodes (which are already sorted in B+ tree order)
+    /// and counts distinct keys and null values in a single O(n) pass.
+    ///
+    /// Memory usage: O(k) where k is the number of leaf nodes (only pointers stored).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut tree = BPlusTree::new("idx".into(), "field".into(), false, false);
+    /// tree.insert(IndexKey::String("a".into()), 1).unwrap();
+    /// tree.insert(IndexKey::String("b".into()), 2).unwrap();
+    /// tree.refresh_stats();
+    /// assert_eq!(tree.metadata.stats.distinct_count, 2);
+    /// ```
+    pub fn refresh_stats(&mut self) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let mut all_leaves: Vec<&LeafNode> = Vec::new();
+        Self::collect_leaves_for_stats(&self.root, &mut all_leaves);
+
+        let mut distinct_count: u64 = 0;
+        let mut null_count: u64 = 0;
+        let mut last_key: Option<&IndexKey> = None;
+
+        for leaf in all_leaves {
+            for key in &leaf.keys {
+                if last_key != Some(key) {
+                    distinct_count += 1;
+                    last_key = Some(key);
+                }
+                if matches!(key, IndexKey::Null) {
+                    null_count += 1;
+                }
+            }
+        }
+
+        self.metadata.stats.distinct_count = distinct_count;
+        self.metadata.stats.null_count = null_count;
+        self.metadata.stats.last_analyzed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.metadata.stats.sample_rate = 1.0;
+    }
+
+    /// Collect leaf node references for stats calculation (no cloning)
+    fn collect_leaves_for_stats<'a>(node: &'a BTreeNode, leaves: &mut Vec<&'a LeafNode>) {
+        match node {
+            BTreeNode::Leaf(leaf) => leaves.push(leaf),
+            BTreeNode::Internal(internal) => {
+                for child in &internal.children {
+                    Self::collect_leaves_for_stats(child, leaves);
+                }
+            }
+        }
+    }
+
     // ===== FILE-BASED PERSISTENCE =====
 
     /// Save a single node to file and return its offset
