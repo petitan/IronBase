@@ -234,6 +234,46 @@ impl IndexStats {
         }
         (total_docs / self.distinct_count).max(1)
     }
+
+    /// Validate and fix statistics against index size
+    ///
+    /// Called after deserializing to ensure consistency.
+    /// Fixes any invalid values to safe defaults.
+    ///
+    /// # Arguments
+    /// * `num_keys` - Total number of keys in the index
+    ///
+    /// # Returns
+    /// `true` if any fixes were applied, `false` if stats were valid
+    pub fn validate_and_fix(&mut self, num_keys: u64) -> bool {
+        let mut fixed = false;
+
+        // distinct_count cannot exceed num_keys
+        if self.distinct_count > num_keys {
+            self.distinct_count = num_keys;
+            fixed = true;
+        }
+
+        // null_count cannot exceed num_keys
+        if self.null_count > num_keys {
+            self.null_count = num_keys;
+            fixed = true;
+        }
+
+        // multikey_ratio must be in [0.0, 1.0]
+        if self.multikey_ratio < 0.0 || self.multikey_ratio > 1.0 || self.multikey_ratio.is_nan() {
+            self.multikey_ratio = 0.0;
+            fixed = true;
+        }
+
+        // sample_rate must be in [0.0, 1.0]
+        if self.sample_rate < 0.0 || self.sample_rate > 1.0 || self.sample_rate.is_nan() {
+            self.sample_rate = 0.0;
+            fixed = true;
+        }
+
+        fixed
+    }
 }
 
 /// Index metadata
@@ -834,8 +874,21 @@ impl BPlusTree {
     ///
     /// NOTE: This method now supports multi-level B+ trees through recursive traversal.
     /// For Internal nodes, it recursively collects entries from all children.
+    ///
+    /// OOM Protection: Pre-allocates based on known num_keys.
     pub fn get_all_entries(&self) -> Vec<(IndexKey, DocumentId)> {
         let mut results = Vec::new();
+        // OOM protection: try to pre-allocate based on known entry count
+        let estimated = self.metadata.num_keys as usize;
+        if results.try_reserve(estimated).is_err() {
+            // If we can't allocate, return empty vec (caller should handle)
+            tracing::warn!(
+                "get_all_entries: failed to reserve {} entries for index '{}'",
+                estimated,
+                self.metadata.name
+            );
+            return results;
+        }
         self.collect_entries_recursive(&self.root, &mut results);
         results
     }
@@ -869,11 +922,21 @@ impl BPlusTree {
     /// Get all entries with file handle support for multi-level persistent trees
     ///
     /// This method can traverse Internal nodes by loading children from disk.
+    ///
+    /// OOM Protection: Pre-allocates based on known num_keys.
     pub fn get_all_entries_with_file(
         &self,
         file: &mut File,
     ) -> Result<Vec<(IndexKey, DocumentId)>> {
         let mut results = Vec::new();
+        // OOM protection: try to pre-allocate based on known entry count
+        let estimated = self.metadata.num_keys as usize;
+        results.try_reserve(estimated).map_err(|_| {
+            IronBaseError::OutOfMemory(format!(
+                "Cannot allocate {} entries for index '{}'",
+                estimated, self.metadata.name
+            ))
+        })?;
         self.collect_entries_recursive_with_file(&self.root, file, &mut results)?;
         Ok(results)
     }
@@ -1242,7 +1305,36 @@ impl BPlusTree {
         results
     }
 
-    /// Internal: Scan descending with skip/limit and early termination
+    /// Walk all leaf nodes in DESCENDING order (right-to-left traversal).
+    /// Callback returns `true` to continue, `false` to stop early.
+    /// This avoids collecting all leaves into a Vec for LIMIT queries.
+    fn walk_leaves_desc<F>(&self, callback: &mut F) -> bool
+    where
+        F: FnMut(&LeafNode) -> bool,
+    {
+        Self::walk_leaves_desc_node(&self.root, callback)
+    }
+
+    fn walk_leaves_desc_node<F>(node: &BTreeNode, callback: &mut F) -> bool
+    where
+        F: FnMut(&LeafNode) -> bool,
+    {
+        match node {
+            BTreeNode::Leaf(leaf) => callback(leaf),
+            BTreeNode::Internal(internal) => {
+                // Traverse children RIGHT to LEFT for descending order
+                for child in internal.children.iter().rev() {
+                    if !Self::walk_leaves_desc_node(child, callback) {
+                        return false; // Early termination
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    /// Internal: Scan descending with skip/limit and early termination.
+    /// O(k) memory where k = limit, NOT O(n) like before.
     fn scan_desc_internal(
         &self,
         start: &IndexKey,
@@ -1250,26 +1342,16 @@ impl BPlusTree {
         skip: usize,
         limit: Option<usize>,
     ) -> Vec<DocumentId> {
-        // Collect all leaf nodes first (we need to traverse them in reverse)
-        let mut all_leaves: Vec<&LeafNode> = Vec::new();
-        fn collect_leaves<'a>(node: &'a BTreeNode, leaves: &mut Vec<&'a LeafNode>) {
-            match node {
-                BTreeNode::Leaf(leaf) => leaves.push(leaf),
-                BTreeNode::Internal(internal) => {
-                    for child in &internal.children {
-                        collect_leaves(child, leaves);
-                    }
-                }
-            }
-        }
-        collect_leaves(&self.root, &mut all_leaves);
-
         let mut results = Vec::new();
         let mut skipped = 0usize;
         let limit_count = limit.unwrap_or(usize::MAX);
 
-        // Iterate leaves from right to left (largest values first)
-        for leaf in all_leaves.into_iter().rev() {
+        // Pre-allocate for expected results (bounded by limit)
+        if limit_count < 10_000 {
+            let _ = results.try_reserve(limit_count);
+        }
+
+        self.walk_leaves_desc(&mut |leaf| {
             for idx in (0..leaf.keys.len()).rev() {
                 let key = &leaf.keys[idx];
 
@@ -1291,15 +1373,17 @@ impl BPlusTree {
 
                 // Check limit (early termination!)
                 if results.len() >= limit_count {
-                    return results;
+                    return false; // Stop walking
                 }
             }
-        }
+            true // Continue to next leaf
+        });
 
         results
     }
 
-    /// Internal: Scan descending with key+doc_id pairs and early termination
+    /// Internal: Scan descending with key+doc_id pairs and early termination.
+    /// O(k) memory where k = limit, NOT O(n) like before.
     fn scan_desc_pairs_internal(
         &self,
         start: &IndexKey,
@@ -1307,24 +1391,16 @@ impl BPlusTree {
         skip: usize,
         limit: Option<usize>,
     ) -> Vec<(IndexKey, DocumentId)> {
-        let mut all_leaves: Vec<&LeafNode> = Vec::new();
-        fn collect_leaves<'a>(node: &'a BTreeNode, leaves: &mut Vec<&'a LeafNode>) {
-            match node {
-                BTreeNode::Leaf(leaf) => leaves.push(leaf),
-                BTreeNode::Internal(internal) => {
-                    for child in &internal.children {
-                        collect_leaves(child, leaves);
-                    }
-                }
-            }
-        }
-        collect_leaves(&self.root, &mut all_leaves);
-
         let mut results = Vec::new();
         let mut skipped = 0usize;
         let limit_count = limit.unwrap_or(usize::MAX);
 
-        for leaf in all_leaves.into_iter().rev() {
+        // Pre-allocate for expected results (bounded by limit)
+        if limit_count < 10_000 {
+            let _ = results.try_reserve(limit_count);
+        }
+
+        self.walk_leaves_desc(&mut |leaf| {
             for idx in (0..leaf.keys.len()).rev() {
                 let key = &leaf.keys[idx];
                 if key < start || key > end {
@@ -1338,10 +1414,11 @@ impl BPlusTree {
                     results.push((key.clone(), leaf.document_ids[idx].clone()));
                 }
                 if results.len() >= limit_count {
-                    return results;
+                    return false; // Stop walking
                 }
             }
-        }
+            true // Continue to next leaf
+        });
 
         results
     }
@@ -1453,27 +1530,28 @@ impl BPlusTree {
     /// tree.refresh_stats();
     /// assert_eq!(tree.metadata.stats.distinct_count, 2);
     /// ```
+    /// Refresh index statistics by streaming through all keys.
+    /// O(n) time, O(1) memory (no Vec collection of leaves).
     pub fn refresh_stats(&mut self) {
         use std::time::{SystemTime, UNIX_EPOCH};
 
-        let mut all_leaves: Vec<&LeafNode> = Vec::new();
-        Self::collect_leaves_for_stats(&self.root, &mut all_leaves);
-
         let mut distinct_count: u64 = 0;
         let mut null_count: u64 = 0;
-        let mut last_key: Option<&IndexKey> = None;
+        // Clone last_key across leaf boundaries (one key at a time, O(1) memory)
+        let mut last_key: Option<IndexKey> = None;
 
-        for leaf in all_leaves {
+        // Stream through leaves in ascending order (left-to-right)
+        Self::walk_leaves_asc(&self.root, &mut |leaf| {
             for key in &leaf.keys {
-                if last_key != Some(key) {
+                if last_key.as_ref() != Some(key) {
                     distinct_count += 1;
-                    last_key = Some(key);
+                    last_key = Some(key.clone());
                 }
                 if matches!(key, IndexKey::Null) {
                     null_count += 1;
                 }
             }
-        }
+        });
 
         self.metadata.stats.distinct_count = distinct_count;
         self.metadata.stats.null_count = null_count;
@@ -1482,15 +1560,33 @@ impl BPlusTree {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         self.metadata.stats.sample_rate = 1.0;
+
+        // Note: multikey_ratio cannot be accurately calculated in streaming mode
+        // (would require O(n) memory to track unique doc_ids).
+        // Instead, use heuristic based on multikey flag:
+        // - If index has seen multikey docs (arrays), assume moderate ratio
+        // - Otherwise, keep at 0.0
+        if self.metadata.multikey {
+            // Rough estimate: if index is multikey, assume ~25% of docs have arrays
+            // This is conservative - real value could be higher or lower
+            self.metadata.stats.multikey_ratio = 0.25;
+        } else {
+            self.metadata.stats.multikey_ratio = 0.0;
+        }
     }
 
-    /// Collect leaf node references for stats calculation (no cloning)
-    fn collect_leaves_for_stats<'a>(node: &'a BTreeNode, leaves: &mut Vec<&'a LeafNode>) {
+    /// Walk all leaf nodes in ASCENDING order (left-to-right traversal).
+    /// O(1) memory - doesn't collect leaves into Vec.
+    fn walk_leaves_asc<F>(node: &BTreeNode, callback: &mut F)
+    where
+        F: FnMut(&LeafNode),
+    {
         match node {
-            BTreeNode::Leaf(leaf) => leaves.push(leaf),
+            BTreeNode::Leaf(leaf) => callback(leaf),
             BTreeNode::Internal(internal) => {
+                // Traverse children LEFT to RIGHT for ascending order
                 for child in &internal.children {
-                    Self::collect_leaves_for_stats(child, leaves);
+                    Self::walk_leaves_asc(child, callback);
                 }
             }
         }
@@ -1663,6 +1759,10 @@ impl BPlusTree {
         // Sync num_keys with actual tree content
         // (metadata from CollectionData may be stale if not synced on every insert/delete)
         tree.sync_num_keys();
+
+        // Validate statistics against actual index size
+        tree.metadata.stats.validate_and_fix(tree.metadata.num_keys);
+
         Ok(tree)
     }
 

@@ -688,6 +688,68 @@ mod tests {
         assert_eq!(tree.metadata.stats.distinct_count, 3);
         assert_eq!(tree.metadata.stats.null_count, 0);
     }
+
+    #[test]
+    fn test_stats_validate_and_fix() {
+        use crate::index::btree::IndexStats;
+
+        // Test 1: Valid stats - no changes
+        let mut stats = IndexStats {
+            distinct_count: 50,
+            null_count: 10,
+            multikey_ratio: 0.5,
+            sample_rate: 1.0,
+            last_analyzed: 0,
+        };
+        assert!(!stats.validate_and_fix(100)); // No fixes needed
+        assert_eq!(stats.distinct_count, 50);
+        assert_eq!(stats.null_count, 10);
+
+        // Test 2: distinct_count > num_keys - should be capped
+        let mut stats = IndexStats {
+            distinct_count: 200,
+            null_count: 10,
+            multikey_ratio: 0.5,
+            sample_rate: 1.0,
+            last_analyzed: 0,
+        };
+        assert!(stats.validate_and_fix(100)); // Fixed!
+        assert_eq!(stats.distinct_count, 100);
+
+        // Test 3: null_count > num_keys - should be capped
+        let mut stats = IndexStats {
+            distinct_count: 50,
+            null_count: 150,
+            multikey_ratio: 0.5,
+            sample_rate: 1.0,
+            last_analyzed: 0,
+        };
+        assert!(stats.validate_and_fix(100)); // Fixed!
+        assert_eq!(stats.null_count, 100);
+
+        // Test 4: Invalid multikey_ratio - should be reset
+        let mut stats = IndexStats {
+            distinct_count: 50,
+            null_count: 10,
+            multikey_ratio: 1.5, // Invalid!
+            sample_rate: 1.0,
+            last_analyzed: 0,
+        };
+        assert!(stats.validate_and_fix(100)); // Fixed!
+        assert_eq!(stats.multikey_ratio, 0.0);
+
+        // Test 5: NaN values - should be reset
+        let mut stats = IndexStats {
+            distinct_count: 50,
+            null_count: 10,
+            multikey_ratio: f32::NAN,
+            sample_rate: f32::NAN,
+            last_analyzed: 0,
+        };
+        assert!(stats.validate_and_fix(100)); // Fixed!
+        assert_eq!(stats.multikey_ratio, 0.0);
+        assert_eq!(stats.sample_rate, 0.0);
+    }
 }
 
 #[cfg(test)]

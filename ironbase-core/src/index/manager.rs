@@ -325,6 +325,9 @@ impl IndexManager {
                 sparse: index.metadata.sparse,
                 distinct_count: index.metadata.stats.distinct_count,
                 building: false, // Only ready indexes reach here
+                num_keys: index.metadata.num_keys,
+                case_insensitive: index.metadata.case_insensitive,
+                null_count: index.metadata.stats.null_count,
             });
         }
 
@@ -336,8 +339,11 @@ impl IndexManager {
                 is_compound: false,
                 num_fields: 1,
                 sparse: false,
-                distinct_count: 0, // No stats for legacy indexes
-                building: false,   // Legacy indexes are always ready
+                distinct_count: 0,       // No stats for legacy indexes
+                building: false,         // Legacy indexes are always ready
+                num_keys: 0,             // No size info for legacy indexes
+                case_insensitive: false, // Legacy indexes are case-sensitive
+                null_count: 0,           // No null count for legacy indexes
             });
         }
 
