@@ -188,6 +188,32 @@ pub struct FulltextSearchParams {
     pub skip: Option<usize>,
     pub min_score: Option<f64>,
     pub projection: Option<Value>,
+    /// Enable highlight/snippet generation (default: false)
+    #[serde(default)]
+    pub highlight: bool,
+    /// Characters of context around each match (default: 100)
+    pub highlight_context: Option<usize>,
+    /// Maximum snippets per field (default: 3)
+    pub highlight_max_snippets: Option<usize>,
+}
+
+/// Parameters for `fulltext_analyze` tool (token debug)
+#[derive(Debug, Deserialize)]
+pub struct FulltextAnalyzeParams {
+    /// Text to analyze
+    pub text: String,
+    /// Language for stemming/stop words ("hungarian", "english", "german", "none")
+    #[serde(default = "default_language")]
+    pub language: String,
+    /// Enable accent folding (default: true)
+    #[serde(default = "default_true")]
+    pub accent_folding: bool,
+    /// Minimum word length (default: 2)
+    pub min_word_length: Option<usize>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Parameters for `explain` tool

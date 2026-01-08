@@ -683,6 +683,371 @@ pub struct FtsSearchResult {
     pub matched_tokens: Vec<String>,
 }
 
+// ============================================================================
+// Highlight Support
+// ============================================================================
+
+/// Options for generating highlights/snippets
+#[derive(Debug, Clone)]
+pub struct HighlightOptions {
+    /// Number of characters to include before and after match (default: 100)
+    pub context_chars: usize,
+    /// Maximum number of snippets to return per field (default: 3)
+    pub max_snippets: usize,
+    /// Tag to wrap matched terms (default: "<mark>")
+    pub highlight_start: String,
+    /// Closing tag for matched terms (default: "</mark>")
+    pub highlight_end: String,
+}
+
+impl Default for HighlightOptions {
+    fn default() -> Self {
+        Self {
+            context_chars: 100,
+            max_snippets: 3,
+            highlight_start: "<mark>".to_string(),
+            highlight_end: "</mark>".to_string(),
+        }
+    }
+}
+
+/// Highlight result for a single field
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightResult {
+    /// Field name that was searched
+    pub field: String,
+    /// Snippets with highlighted matches
+    pub snippets: Vec<String>,
+}
+
+/// Generate highlighted snippets from text containing matched tokens
+///
+/// # Arguments
+/// * `text` - The source text to extract snippets from
+/// * `query_tokens` - Tokens to highlight (stemmed form)
+/// * `field` - Field name for the result
+/// * `options` - FTS options (for tokenization settings)
+/// * `highlight_opts` - Highlight configuration
+///
+/// # Returns
+/// `HighlightResult` with snippets containing `<mark>` tags around matches
+pub fn generate_highlights(
+    text: &str,
+    query_tokens: &[String],
+    field: &str,
+    options: &FtsOptions,
+    highlight_opts: &HighlightOptions,
+) -> HighlightResult {
+    if text.is_empty() || query_tokens.is_empty() {
+        return HighlightResult {
+            field: field.to_string(),
+            snippets: Vec::new(),
+        };
+    }
+
+    // Find all match positions in the text
+    // We need to match against normalized/stemmed tokens
+    let stemmer = options.language.stemmer_algorithm().map(Stemmer::create);
+    let query_set: HashSet<&str> = query_tokens.iter().map(|s| s.as_str()).collect();
+
+    // Track match positions: (start_byte, end_byte, original_word)
+    let mut matches: Vec<(usize, usize, String)> = Vec::new();
+
+    // Find word positions in original text
+    let mut word_start_byte = 0;
+    let mut in_word = false;
+    let mut current_word = String::new();
+
+    for (i, c) in text.char_indices() {
+        let is_word_char = c.is_alphanumeric();
+
+        if is_word_char {
+            if !in_word {
+                word_start_byte = i;
+                in_word = true;
+                current_word.clear();
+            }
+            current_word.push(c);
+        } else if in_word {
+            // End of word - check if it matches
+            let word_end_byte = i;
+            let normalized = if options.accent_folding {
+                fold_accents(&current_word).to_lowercase()
+            } else {
+                current_word.to_lowercase()
+            };
+
+            // Skip short words
+            if normalized.chars().count() >= options.min_word_length {
+                // Apply stemming
+                let stemmed = stemmer
+                    .as_ref()
+                    .map(|st| st.stem(&normalized).to_string())
+                    .unwrap_or_else(|| normalized.clone());
+
+                // Check if this word matches any query token
+                if query_set.contains(stemmed.as_str()) {
+                    matches.push((word_start_byte, word_end_byte, current_word.clone()));
+                }
+            }
+
+            in_word = false;
+            current_word.clear();
+        }
+    }
+
+    // Handle last word if text doesn't end with separator
+    if in_word && !current_word.is_empty() {
+        let word_end_byte = text.len();
+        let normalized = if options.accent_folding {
+            fold_accents(&current_word).to_lowercase()
+        } else {
+            current_word.to_lowercase()
+        };
+
+        if normalized.chars().count() >= options.min_word_length {
+            let stemmed = stemmer
+                .as_ref()
+                .map(|st| st.stem(&normalized).to_string())
+                .unwrap_or_else(|| normalized.clone());
+
+            if query_set.contains(stemmed.as_str()) {
+                matches.push((word_start_byte, word_end_byte, current_word.clone()));
+            }
+        }
+    }
+
+    if matches.is_empty() {
+        return HighlightResult {
+            field: field.to_string(),
+            snippets: Vec::new(),
+        };
+    }
+
+    // Generate snippets around matches
+    let mut snippets: Vec<String> = Vec::new();
+    let mut used_ranges: Vec<(usize, usize)> = Vec::new();
+
+    for (match_start, match_end, _original_word) in &matches {
+        if snippets.len() >= highlight_opts.max_snippets {
+            break;
+        }
+
+        // Calculate snippet boundaries (in bytes)
+        let snippet_start = match_start.saturating_sub(highlight_opts.context_chars);
+        let snippet_end = (match_end + highlight_opts.context_chars).min(text.len());
+
+        // Adjust to character boundaries
+        let snippet_start = text[..snippet_start]
+            .char_indices()
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let snippet_end = text[snippet_end..]
+            .char_indices()
+            .next()
+            .map(|(i, _)| snippet_end + i)
+            .unwrap_or(text.len());
+
+        // Check if this range overlaps with already used ranges
+        let overlaps = used_ranges
+            .iter()
+            .any(|(start, end)| snippet_start < *end && snippet_end > *start);
+
+        if overlaps {
+            continue;
+        }
+
+        used_ranges.push((snippet_start, snippet_end));
+
+        // Build snippet with highlighting
+        let mut snippet = String::new();
+
+        // Add ellipsis if not at start
+        if snippet_start > 0 {
+            snippet.push_str("...");
+        }
+
+        // Find all matches within this snippet range
+        let matches_in_range: Vec<_> = matches
+            .iter()
+            .filter(|(s, e, _)| *s >= snippet_start && *e <= snippet_end)
+            .collect();
+
+        let snippet_text = &text[snippet_start..snippet_end];
+        let mut last_end = 0;
+
+        for (ms, me, _) in matches_in_range {
+            let rel_start = ms - snippet_start;
+            let rel_end = me - snippet_start;
+
+            // Add text before match
+            if rel_start > last_end {
+                snippet.push_str(&snippet_text[last_end..rel_start]);
+            }
+
+            // Add highlighted match
+            snippet.push_str(&highlight_opts.highlight_start);
+            snippet.push_str(&snippet_text[rel_start..rel_end]);
+            snippet.push_str(&highlight_opts.highlight_end);
+
+            last_end = rel_end;
+        }
+
+        // Add remaining text
+        if last_end < snippet_text.len() {
+            snippet.push_str(&snippet_text[last_end..]);
+        }
+
+        // Add ellipsis if not at end
+        if snippet_end < text.len() {
+            snippet.push_str("...");
+        }
+
+        snippets.push(snippet);
+    }
+
+    HighlightResult {
+        field: field.to_string(),
+        snippets,
+    }
+}
+
+// ============================================================================
+// Text Analysis (Token Debug)
+// ============================================================================
+
+/// Analysis result for a single token
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenAnalysis {
+    /// Original token as it appears in text
+    pub original: String,
+    /// After accent folding and lowercase
+    pub normalized: String,
+    /// After stemming (if language set)
+    pub stemmed: String,
+    /// Whether the token is kept (not a stop word, meets min length)
+    pub kept: bool,
+    /// Reason if not kept
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filtered_reason: Option<String>,
+}
+
+/// Result of analyzing text for token processing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextAnalysisResult {
+    /// Original input text
+    pub input: String,
+    /// Language used for analysis
+    pub language: String,
+    /// Whether accent folding was applied
+    pub accent_folding: bool,
+    /// Minimum word length filter
+    pub min_word_length: usize,
+    /// Detailed analysis of each token
+    pub tokens: Vec<TokenAnalysis>,
+    /// List of stop words that were removed
+    pub stop_words_removed: Vec<String>,
+    /// Final tokens that would be used for indexing/search
+    pub final_tokens: Vec<String>,
+}
+
+/// Analyze text to show tokenization steps
+///
+/// This function is useful for debugging and understanding how text
+/// is processed for fulltext search. It shows each step of the pipeline:
+/// 1. Original word extraction
+/// 2. Accent folding and lowercase
+/// 3. Stemming
+/// 4. Stop word filtering
+///
+/// # Example
+/// ```ignore
+/// let result = analyze_text("Kálmán Péter ügyvezető", &FtsOptions::hungarian());
+/// // Shows: "Kálmán" -> "kalman" -> "kalman" (kept)
+/// //        "Péter" -> "peter" -> "peter" (kept)
+/// //        "ügyvezető" -> "ugyvezeto" -> "ugyvezet" (kept)
+/// ```
+pub fn analyze_text(text: &str, options: &FtsOptions) -> TextAnalysisResult {
+    let stop_words: HashSet<&str> = options.language.stop_words().iter().copied().collect();
+    let stemmer = options.language.stemmer_algorithm().map(Stemmer::create);
+
+    let mut tokens: Vec<TokenAnalysis> = Vec::new();
+    let mut stop_words_removed: Vec<String> = Vec::new();
+    let mut final_tokens: Vec<String> = Vec::new();
+
+    // Split into words
+    for word in text.split_whitespace() {
+        let original = word
+            .trim_matches(|c: char| !c.is_alphanumeric())
+            .to_string();
+        if original.is_empty() {
+            continue;
+        }
+
+        // Normalize: accent fold + lowercase
+        let normalized = if options.accent_folding {
+            fold_accents(&original).to_lowercase()
+        } else {
+            original.to_lowercase()
+        };
+
+        // Check min length
+        if normalized.chars().count() < options.min_word_length {
+            tokens.push(TokenAnalysis {
+                original: original.clone(),
+                normalized: normalized.clone(),
+                stemmed: normalized.clone(),
+                kept: false,
+                filtered_reason: Some(format!(
+                    "Too short (min: {} chars)",
+                    options.min_word_length
+                )),
+            });
+            continue;
+        }
+
+        // Check stop words
+        if stop_words.contains(normalized.as_str()) {
+            stop_words_removed.push(original.clone());
+            tokens.push(TokenAnalysis {
+                original: original.clone(),
+                normalized: normalized.clone(),
+                stemmed: normalized.clone(),
+                kept: false,
+                filtered_reason: Some("Stop word".to_string()),
+            });
+            continue;
+        }
+
+        // Apply stemming
+        let stemmed = stemmer
+            .as_ref()
+            .map(|st| st.stem(&normalized).to_string())
+            .unwrap_or_else(|| normalized.clone());
+
+        tokens.push(TokenAnalysis {
+            original,
+            normalized,
+            stemmed: stemmed.clone(),
+            kept: true,
+            filtered_reason: None,
+        });
+
+        final_tokens.push(stemmed);
+    }
+
+    TextAnalysisResult {
+        input: text.to_string(),
+        language: format!("{:?}", options.language),
+        accent_folding: options.accent_folding,
+        min_word_length: options.min_word_length,
+        tokens,
+        stop_words_removed,
+        final_tokens,
+    }
+}
+
 impl FulltextIndex {
     /// Create a new fulltext index (memory-only, no disk storage)
     pub fn new(name: &str, field: &str, options: FtsOptions) -> Self {

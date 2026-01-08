@@ -347,9 +347,7 @@ pub fn parse_transaction_id_str(tx_id: &str) -> Result<u64> {
 /// Validate that a value is a JSON object (for documents)
 pub fn validate_document(doc: &Value) -> Result<()> {
     if !doc.is_object() {
-        return Err(McpError::invalid_params(
-            "document must be a JSON object",
-        ));
+        return Err(McpError::invalid_params("document must be a JSON object"));
     }
     Ok(())
 }
@@ -357,9 +355,7 @@ pub fn validate_document(doc: &Value) -> Result<()> {
 /// Validate that a value is a JSON object (for filters/queries)
 pub fn validate_filter(filter: &Value) -> Result<()> {
     if !filter.is_object() {
-        return Err(McpError::invalid_params(
-            "filter must be a JSON object",
-        ));
+        return Err(McpError::invalid_params("filter must be a JSON object"));
     }
     Ok(())
 }
@@ -367,9 +363,7 @@ pub fn validate_filter(filter: &Value) -> Result<()> {
 /// Validate that a value is a JSON object (for update operations)
 pub fn validate_update(update: &Value) -> Result<()> {
     if !update.is_object() {
-        return Err(McpError::invalid_params(
-            "update must be a JSON object",
-        ));
+        return Err(McpError::invalid_params("update must be a JSON object"));
     }
     Ok(())
 }

@@ -647,18 +647,21 @@ fn register_search_functions(
                 skip,
                 min_score,
                 projection,
+                highlight: false, // Scripting doesn't support highlights yet
+                highlight_context: None,
+                highlight_max_snippets: None,
             };
 
             match adapter_ftsrch.fulltext_search(collection, field, query, options) {
                 Ok(results) => {
                     let result: Vec<Dynamic> = results
                         .into_iter()
-                        .map(|(doc, score, tokens)| {
+                        .map(|res| {
                             let mut map = Map::new();
-                            map.insert("document".into(), json_to_dynamic(&doc));
-                            map.insert("score".into(), Dynamic::from(score));
+                            map.insert("document".into(), json_to_dynamic(&res.document));
+                            map.insert("score".into(), Dynamic::from(res.score));
                             let token_dyn: Vec<Dynamic> =
-                                tokens.into_iter().map(Dynamic::from).collect();
+                                res.matched_tokens.into_iter().map(Dynamic::from).collect();
                             map.insert("matched_tokens".into(), Dynamic::from(token_dyn));
                             Dynamic::from(map)
                         })

@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::execution;
 use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
+use ironbase_core::value_utils::get_nested_value;
 use ironbase_core::ExecutionContext;
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
 use parking_lot::RwLock;
@@ -124,6 +125,28 @@ pub struct FulltextSearchOptions {
     pub skip: Option<usize>,
     pub min_score: Option<f64>,
     pub projection: Option<HashMap<String, i32>>,
+    /// Enable highlight/snippet generation
+    pub highlight: bool,
+    /// Characters of context around each match (default: 100)
+    pub highlight_context: Option<usize>,
+    /// Maximum snippets per field (default: 3)
+    pub highlight_max_snippets: Option<usize>,
+}
+
+/// Full-text search result with optional highlights
+#[derive(Debug)]
+pub struct FulltextSearchResult {
+    pub document: Value,
+    pub score: f64,
+    pub matched_tokens: Vec<String>,
+    pub highlights: Option<Vec<HighlightResultJson>>,
+}
+
+/// Highlight result for JSON serialization
+#[derive(Debug, serde::Serialize)]
+pub struct HighlightResultJson {
+    pub field: String,
+    pub snippets: Vec<String>,
 }
 
 /// IronBase Adapter
@@ -1111,16 +1134,27 @@ impl IronBaseAdapter {
     }
 
     /// Full-text search using the fulltext index (with cancellation/timeout support)
+    /// Returns results with optional highlights/snippets
     pub fn fulltext_search(
         &self,
         collection: &str,
         field: &str,
         query_str: &str,
         options: FulltextSearchOptions,
-    ) -> Result<Vec<(Value, f64, Vec<String>)>> {
+    ) -> Result<Vec<FulltextSearchResult>> {
+        use ironbase_core::fulltext::{generate_highlights, tokenize, HighlightOptions};
+
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let ctx = self.create_execution_context();
+
+        // Get FTS options from the index (needed for highlight generation)
+        let fts_options = if options.highlight {
+            coll.get_fulltext_index_options(field).ok()
+        } else {
+            None
+        };
+
         let results = coll.fulltext_search_with_ctx(
             field,
             query_str,
@@ -1130,6 +1164,58 @@ impl IronBaseAdapter {
             options.projection.clone(),
             Some(&ctx),
         )?;
+
+        // Convert results and optionally generate highlights
+        let results = results
+            .into_iter()
+            .map(|(doc, score, matched_tokens)| {
+                let highlights = if options.highlight {
+                    if let Some(ref fts_opts) = fts_options {
+                        // Get the field value from the document for highlighting
+                        let field_value = get_nested_value(&doc, field)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        if !field_value.is_empty() {
+                            // Tokenize query to get stemmed tokens for matching
+                            let query_tokens = tokenize(query_str, fts_opts);
+
+                            let highlight_opts = HighlightOptions {
+                                context_chars: options.highlight_context.unwrap_or(100),
+                                max_snippets: options.highlight_max_snippets.unwrap_or(3),
+                                ..Default::default()
+                            };
+
+                            let result =
+                                generate_highlights(field_value, &query_tokens, field, fts_opts, &highlight_opts);
+
+                            if !result.snippets.is_empty() {
+                                Some(vec![HighlightResultJson {
+                                    field: result.field,
+                                    snippets: result.snippets,
+                                }])
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                FulltextSearchResult {
+                    document: doc,
+                    score,
+                    matched_tokens,
+                    highlights,
+                }
+            })
+            .collect();
+
         Ok(results)
     }
 
