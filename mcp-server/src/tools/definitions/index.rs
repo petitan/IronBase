@@ -75,7 +75,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "fulltext_search",
             "title": "Full-Text Search",
-            "description": "Search documents using TF-IDF relevance scoring. Requires index_create_fulltext first.",
+            "description": "Search documents using TF-IDF relevance scoring. Requires index_create_fulltext first. Set highlight=true to get <mark>...</mark> snippets around matches. IMPORTANT: The searched field must be included in projection for highlights to work.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
