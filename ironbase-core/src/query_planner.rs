@@ -74,15 +74,17 @@ impl CandidatePlan {
 
     /// Create a candidate with selectivity-based cost
     /// Lower distinct_count = higher selectivity = lower cost
+    /// multikey_ratio (0.0-1.0) indicates how many docs have array values
     pub fn with_selectivity(
         plan: QueryPlan,
         field: String,
         index_name: &str,
         distinct_count: u64,
         total_docs: u64,
+        multikey_ratio: f32,
     ) -> Self {
         let total_docs = total_docs.max(DEFAULT_DOC_ESTIMATE);
-        let estimated_cost = if distinct_count > 0 {
+        let base_cost = if distinct_count > 0 {
             // Selectivity = 1 / distinct_count
             // Estimated rows = total_docs / distinct_count
             // Cost = estimated rows (lower is better)
@@ -91,6 +93,13 @@ impl CandidatePlan {
             // Unknown selectivity - use default high cost
             total_docs as f64
         };
+
+        // Multikey indexes have more entries per document (one per array element)
+        // This means scanning might need to read more index entries
+        // Overhead: 1.0 (no multikey) to 1.5 (25% of docs have arrays with avg 3 elements)
+        let multikey_overhead = 1.0 + (multikey_ratio as f64 * 0.5);
+        let estimated_cost = base_cost * multikey_overhead;
+
         let reason = format!(
             "Index {} on field {} (distinct: {}, est. rows: {:.0})",
             index_name, field, distinct_count, estimated_cost
@@ -304,6 +313,7 @@ impl QueryPlanner {
                     &info.index_name,
                     info.distinct_count,
                     DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
+                    info.multikey_ratio,
                 ));
             } else {
                 candidates.push(CandidatePlan::with_default_cost(
@@ -369,6 +379,7 @@ impl QueryPlanner {
                     &info.index_name,
                     info.distinct_count,
                     DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
+                    info.multikey_ratio,
                 ));
             }
         }
@@ -410,6 +421,7 @@ impl QueryPlanner {
                         &info.index_name,
                         info.distinct_count,
                         DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
+                        info.multikey_ratio,
                     ));
                 }
             }
@@ -968,6 +980,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
             IndexPrefixInfo {
                 index_name: "users_id".to_string(),
@@ -980,6 +993,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
         ];
 
@@ -1018,6 +1032,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1059,6 +1074,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1095,6 +1111,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1115,6 +1132,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1135,6 +1153,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1155,6 +1174,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         // Complex queries not yet supported
@@ -1185,6 +1205,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1227,6 +1248,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1255,6 +1277,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1283,6 +1306,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1349,6 +1373,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
             IndexPrefixInfo {
                 index_name: "users_email_ci".to_string(),
@@ -1361,6 +1386,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: true, // This is the CI index!
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
         ];
 
@@ -1399,6 +1425,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false, // Not a CI index
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         // No CI index available - should return None (collection scan)
@@ -1428,6 +1455,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1450,6 +1478,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1462,6 +1491,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
         ];
 
@@ -1498,6 +1528,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
             IndexPrefixInfo {
                 index_name: "products_category_brand".to_string(),
@@ -1510,6 +1541,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
         ];
 
@@ -1538,19 +1570,33 @@ mod tests {
             is_compound: false,
         };
 
-        // Test with_selectivity cost calculation
+        // Test with_selectivity cost calculation (no multikey)
         let candidate = CandidatePlan::with_selectivity(
             plan.clone(),
             "field".to_string(),
             "test_idx",
             10,   // distinct_count
             1000, // total_docs
+            0.0,  // multikey_ratio (no multikey)
         );
 
-        // Cost should be total_docs / distinct_count = 1000 / 10 = 100
+        // Cost should be total_docs / distinct_count = 1000 / 10 = 100 (no overhead)
         assert!((candidate.estimated_cost - 100.0).abs() < 0.001);
         assert!(candidate.reason.contains("distinct: 10"));
         assert!(candidate.reason.contains("est. rows: 100"));
+
+        // Test with multikey overhead (25% of docs have arrays)
+        let candidate_multikey = CandidatePlan::with_selectivity(
+            plan,
+            "field".to_string(),
+            "test_idx",
+            10,   // distinct_count
+            1000, // total_docs
+            0.25, // multikey_ratio (25% multikey)
+        );
+
+        // Cost should be 100 * 1.125 = 112.5 (1.0 + 0.25 * 0.5 overhead)
+        assert!((candidate_multikey.estimated_cost - 112.5).abs() < 0.001);
     }
 
     #[test]
@@ -1584,6 +1630,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1596,6 +1643,7 @@ mod tests {
                 num_keys: 0,
                 case_insensitive: false,
                 null_count: 0,
+                multikey_ratio: 0.0,
             },
         ];
 
@@ -1639,6 +1687,7 @@ mod tests {
             num_keys: 0,
             case_insensitive: false,
             null_count: 0,
+            multikey_ratio: 0.0,
         }];
 
         let explain = QueryPlanner::explain_query_with_fields(&query, &index_fields);
