@@ -34,7 +34,7 @@ impl FuzzyAlgorithm {
     pub fn similarity(&self, a: &str, b: &str) -> f64 {
         let a_lower = a.to_lowercase();
         let b_lower = b.to_lowercase();
-        match self {
+        let result = match self {
             FuzzyAlgorithm::JaroWinkler => jaro_winkler(&a_lower, &b_lower),
             FuzzyAlgorithm::Levenshtein => normalized_levenshtein(&a_lower, &b_lower),
             FuzzyAlgorithm::DamerauLevenshtein => {
@@ -45,6 +45,13 @@ impl FuzzyAlgorithm {
                 let distance = damerau_levenshtein(&a_lower, &b_lower);
                 1.0 - (distance as f64 / max_len as f64)
             }
+        };
+
+        // Defensive: treat NaN as no match (consistent with btree.rs pattern)
+        if result.is_nan() {
+            0.0
+        } else {
+            result
         }
     }
 
@@ -298,6 +305,7 @@ impl FuzzyIndex {
         }
 
         // Collect all matches above threshold
+        // Note: iteration counter starts from 0 here - lazy-mode branch above always returns early
         for (iteration, (lower_value, _original, doc_id)) in self.entries.iter().enumerate() {
             if let Some(exec_ctx) = ctx {
                 exec_ctx.maybe_check(iteration)?;

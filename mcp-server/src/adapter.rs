@@ -1260,9 +1260,7 @@ impl IronBaseAdapter {
         query_str: &str,
         options: FulltextSearchOptions,
     ) -> Result<Vec<FulltextSearchResult>> {
-        use ironbase_core::fulltext::{
-            FulltextSearchOptions as CoreOptions, HighlightOptions,
-        };
+        use ironbase_core::fulltext::{FulltextSearchOptions as CoreOptions, HighlightOptions};
 
         let db = self.db.read();
         let coll = db.get_collection(collection)?;

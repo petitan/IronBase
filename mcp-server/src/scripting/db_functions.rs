@@ -647,7 +647,7 @@ fn register_search_functions(
                 skip,
                 min_score,
                 projection,
-                filter: None, // Scripting doesn't support filter yet
+                filter: None,     // Scripting doesn't support filter yet
                 highlight: false, // Scripting doesn't support highlights yet
                 highlight_context: None,
                 highlight_max_snippets: None,

@@ -233,7 +233,11 @@ fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
     let options = FuzzySearchOptions {
         algorithm,
         threshold: p.threshold,
-        limit: Some(p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(DEFAULT_QUERY_LIMIT)),
+        limit: Some(
+            p.limit
+                .unwrap_or(DEFAULT_QUERY_LIMIT)
+                .min(DEFAULT_QUERY_LIMIT),
+        ),
         skip: p.skip,
         projection,
         filter: p.filter,
@@ -358,7 +362,10 @@ fn handle_find_with_hint(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resul
     }
 
     // Set limit (bounded by DEFAULT_QUERY_LIMIT for safety)
-    let limit = p.limit.map(|l| l.min(DEFAULT_QUERY_LIMIT)).unwrap_or(DEFAULT_QUERY_LIMIT);
+    let limit = p
+        .limit
+        .map(|l| l.min(DEFAULT_QUERY_LIMIT))
+        .unwrap_or(DEFAULT_QUERY_LIMIT);
     options = options.with_limit(limit);
 
     // Core handles everything: sort, skip, limit, projection, OOM protection
