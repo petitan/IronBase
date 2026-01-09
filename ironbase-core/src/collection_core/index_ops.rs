@@ -93,8 +93,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let parsed_query = Query::from_json(query_json)?;
 
-        // Verify hint index exists
-        {
+        // Verify hint index exists and extract field name
+        // Note: There's a TOCTOU window between this check and create_plan_for_hint,
+        // but if the index is dropped between these calls, create_plan_for_hint will
+        // fail gracefully with an IndexError. This is acceptable for a hint-based API.
+        let field = {
             let indexes = self.indexes.read();
             if indexes.get_btree_index(hint).is_none() {
                 return Err(IronBaseError::IndexError(format!(
@@ -102,13 +105,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     hint
                 )));
             }
-        }
+            self.extract_field_from_index_name(hint)
+        };
 
         // Build execution context from options
         let ctx = QueryExecutionContext::from_options(&options);
 
-        // Extract field from index name and create plan
-        let field = self.extract_field_from_index_name(hint);
+        // Create plan using the hinted index (may fail if index dropped - graceful failure)
         let plan = self.create_plan_for_hint(query_json, hint, &field)?;
 
         // Execute with the forced plan and cancellation support

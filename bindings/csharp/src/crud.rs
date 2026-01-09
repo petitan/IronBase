@@ -346,7 +346,7 @@ pub extern "C" fn ironbase_find_with_options(
     if let Some(proj) = options.get("projection").and_then(|v| v.as_object()) {
         let mut projection_map = HashMap::new();
         for (k, v) in proj {
-            if let Some(n) = v.as_i64() {
+            let int_val = if let Some(n) = v.as_i64() {
                 if n != 0 && n != 1 {
                     set_last_error(&format!(
                         "Invalid projection value for '{}': expected 0 or 1, got {}",
@@ -354,14 +354,28 @@ pub extern "C" fn ironbase_find_with_options(
                     ));
                     return ptr::null_mut();
                 }
-                projection_map.insert(k.clone(), n as i32);
+                n as i32
+            } else if let Some(f) = v.as_f64() {
+                // Handle float 0.0/1.0 (consistent with Python, MCP, Rhai bindings)
+                if f == 0.0 {
+                    0
+                } else if f == 1.0 {
+                    1
+                } else {
+                    set_last_error(&format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {}",
+                        k, f
+                    ));
+                    return ptr::null_mut();
+                }
             } else {
                 set_last_error(&format!(
                     "Invalid projection value for '{}': expected 0 or 1, got {:?}",
                     k, v
                 ));
                 return ptr::null_mut();
-            }
+            };
+            projection_map.insert(k.clone(), int_val);
         }
         find_options.projection = Some(projection_map);
     }
