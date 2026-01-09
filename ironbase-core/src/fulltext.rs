@@ -834,19 +834,23 @@ pub fn generate_highlights(
         }
 
         // Calculate snippet boundaries (in bytes)
-        let snippet_start = match_start.saturating_sub(highlight_opts.context_chars);
-        let snippet_end = (match_end + highlight_opts.context_chars).min(text.len());
+        let raw_start = match_start.saturating_sub(highlight_opts.context_chars);
+        let raw_end = (match_end + highlight_opts.context_chars).min(text.len());
 
-        // Adjust to character boundaries
-        let snippet_start = text[..snippet_start]
+        // Adjust to character boundaries using safe iteration
+        // Find the largest valid char boundary <= raw_start
+        let snippet_start = text
             .char_indices()
+            .take_while(|(i, _)| *i <= raw_start)
             .last()
             .map(|(i, _)| i)
             .unwrap_or(0);
-        let snippet_end = text[snippet_end..]
+
+        // Find the smallest valid char boundary >= raw_end
+        let snippet_end = text
             .char_indices()
-            .next()
-            .map(|(i, _)| snippet_end + i)
+            .find(|(i, _)| *i >= raw_end)
+            .map(|(i, _)| i)
             .unwrap_or(text.len());
 
         // Check if this range overlaps with already used ranges
