@@ -605,3 +605,123 @@ impl FuzzyIndex {
         Ok(results)
     }
 }
+
+// ============================================================================
+// Extended Search API (fulltext_search_ext-consistent)
+// ============================================================================
+
+use serde_json::Value;
+use std::collections::HashMap as StdHashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Instant;
+
+/// Options for extended fuzzy search (consistent with FulltextSearchOptions)
+///
+/// # Example
+/// ```rust,ignore
+/// use ironbase_core::FuzzySearchOptions;
+/// use serde_json::json;
+///
+/// let options = FuzzySearchOptions::new()
+///     .with_limit(10)
+///     .with_threshold(0.75)
+///     .with_filter(json!({"status": "active"}))
+///     .with_projection(HashMap::from([("name".to_string(), 1)]));
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct FuzzySearchOptions {
+    /// Algorithm to use (default: from index metadata)
+    pub algorithm: Option<FuzzyAlgorithm>,
+    /// Minimum similarity threshold (0.0-1.0, default: from index metadata)
+    pub threshold: Option<f64>,
+    /// Maximum results to return (default: 10)
+    pub limit: Option<usize>,
+    /// Results to skip for pagination
+    pub skip: Option<usize>,
+    /// Field projection (include/exclude): {"field": 1} or {"field": 0}
+    pub projection: Option<StdHashMap<String, i32>>,
+    /// MongoDB-style post-filter applied to fuzzy results
+    /// Example: {"status": "active", "category": {"$in": ["A", "B"]}}
+    pub filter: Option<Value>,
+    /// Enable highlight of matched value (default: false)
+    pub highlight: bool,
+    /// Cancellation flag for cooperative cancellation
+    pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Deadline for timeout support
+    pub deadline: Option<Instant>,
+}
+
+impl FuzzySearchOptions {
+    /// Create new options with defaults
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set algorithm override
+    pub fn with_algorithm(mut self, algorithm: FuzzyAlgorithm) -> Self {
+        self.algorithm = Some(algorithm);
+        self
+    }
+
+    /// Set threshold override
+    pub fn with_threshold(mut self, threshold: f64) -> Self {
+        self.threshold = Some(threshold.clamp(0.0, 1.0));
+        self
+    }
+
+    /// Set result limit
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Set skip for pagination
+    pub fn with_skip(mut self, skip: usize) -> Self {
+        self.skip = Some(skip);
+        self
+    }
+
+    /// Set field projection
+    pub fn with_projection(mut self, projection: StdHashMap<String, i32>) -> Self {
+        self.projection = Some(projection);
+        self
+    }
+
+    /// Set MongoDB-style post-filter
+    pub fn with_filter(mut self, filter: Value) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Enable highlight
+    pub fn with_highlight(mut self) -> Self {
+        self.highlight = true;
+        self
+    }
+
+    /// Set cancellation flag
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Set deadline
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+}
+
+/// Result from extended fuzzy search (consistent with FulltextSearchResultExt)
+#[derive(Debug, Clone)]
+pub struct FuzzySearchResult {
+    /// The matched document (with projection applied if specified)
+    pub document: Value,
+    /// Similarity score (0.0-1.0)
+    pub score: f64,
+    /// The original value that matched the query
+    pub matched_value: String,
+    /// Optional highlight showing the matched value with <mark> tags
+    pub highlight: Option<String>,
+}

@@ -69,7 +69,9 @@ pub use btree::{
     BPlusTree, IndexMetadata, IndexStats, RangeQueryMode, RangeQueryResult, ScanOrder,
     NODE_PAGE_SIZE,
 };
-pub use fuzzy::{FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata};
+pub use fuzzy::{
+    FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata, FuzzySearchOptions, FuzzySearchResult,
+};
 pub use key::{IndexKey, IndexPrefixInfo, OrderedFloat};
 pub use legacy::{Index, IndexDefinition, IndexType};
 pub use manager::IndexManager;

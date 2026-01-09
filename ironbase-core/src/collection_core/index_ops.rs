@@ -4,6 +4,7 @@
 use serde_json::Value;
 
 use crate::error::{IronBaseError, Result};
+use crate::find_options::FindOptions;
 use crate::index::{IndexKey, IndexManager, IndexMetadata, IndexStats};
 use crate::query::Query;
 use crate::query_planner::QueryPlanner;
@@ -11,7 +12,7 @@ use crate::storage::{RawStorage, Storage};
 use crate::value_utils::{get_all_nested_values, path_crosses_array};
 
 use super::index_persistence::persist_index_to_disk;
-use super::CollectionCore;
+use super::{CollectionCore, QueryExecutionContext};
 
 /// Index operations for CollectionCore
 impl<S: Storage + RawStorage> CollectionCore<S> {
@@ -24,7 +25,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(plan)
     }
 
-    /// Find with manual index hint
+    /// Find with manual index hint (basic version)
+    ///
+    /// For sort/skip/limit/projection support, use `find_with_hint_ext` instead.
     pub fn find_with_hint(&self, query_json: &Value, hint: &str) -> Result<Vec<Value>> {
         let parsed_query = Query::from_json(query_json)?;
 
@@ -50,6 +53,146 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Note: find_with_hint doesn't support ExecutionContext yet
         // Use find_with_options with hint parameter for deadline/cancellation support
         self.find_with_index(parsed_query, plan, None, None)
+    }
+
+    /// Find with manual index hint and full options support
+    ///
+    /// Extended version of `find_with_hint` that supports:
+    /// - Sort (with Top-K optimization when limit is set)
+    /// - Skip/Limit (pagination)
+    /// - Projection (field inclusion/exclusion)
+    /// - max_response_bytes (OOM protection)
+    /// - cancel_flag/deadline (cooperative timeout)
+    ///
+    /// # Arguments
+    /// * `query_json` - MongoDB-style query filter
+    /// * `hint` - Name of the B+ tree index to force
+    /// * `options` - FindOptions with sort, skip, limit, projection, etc.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let options = FindOptions::new()
+    ///     .with_sort(vec![("date".to_string(), -1)])  // DESC
+    ///     .with_skip(10)
+    ///     .with_limit(20)
+    ///     .with_projection(HashMap::from([("_id".to_string(), 1), ("name".to_string(), 1)]));
+    ///
+    /// let results = collection.find_with_hint_ext(
+    ///     &json!({"status": "active"}),
+    ///     "myindex_status",
+    ///     options
+    /// )?;
+    /// ```
+    pub fn find_with_hint_ext(
+        &self,
+        query_json: &Value,
+        hint: &str,
+        options: FindOptions,
+    ) -> Result<Vec<Value>> {
+        self.check_not_closed()?;
+
+        let parsed_query = Query::from_json(query_json)?;
+
+        // Verify hint index exists
+        {
+            let indexes = self.indexes.read();
+            if indexes.get_btree_index(hint).is_none() {
+                return Err(IronBaseError::IndexError(format!(
+                    "Index '{}' not found (hint)",
+                    hint
+                )));
+            }
+        }
+
+        // Build execution context from options
+        let ctx = QueryExecutionContext::from_options(&options);
+
+        // Extract field from index name and create plan
+        let field = self.extract_field_from_index_name(hint);
+        let plan = self.create_plan_for_hint(query_json, hint, &field)?;
+
+        // Execute with the forced plan and cancellation support
+        let doc_ids = {
+            let (ids, _) = self.collect_doc_ids_from_plan(
+                &parsed_query,
+                plan,
+                None,  // sort_field handled in post-processing
+                false, // sort_descending
+                0,     // fetch all, paginate after
+                None,  // fetch all
+                ctx.cancel_flag.as_ref(),
+                ctx.deadline,
+            )?;
+            ids
+        };
+
+        // Load documents with OOM protection
+        let doc_count = doc_ids.len();
+        let mut docs = Vec::new();
+        docs.try_reserve(doc_count).map_err(|e| {
+            IronBaseError::InvalidQuery(format!(
+                "Out of memory: cannot allocate space for {} documents ({}). \
+                Solutions: 1) Add 'limit' to your query, 2) Use projection to reduce response size.",
+                doc_count, e
+            ))
+        })?;
+
+        let max_response_bytes = ctx.max_response_bytes;
+        let mut total_response_bytes: usize = 0;
+
+        for (i, doc_id) in doc_ids.into_iter().enumerate() {
+            // Check for cancellation/timeout every 100 documents
+            if i % 100 == 0 {
+                if let Some(ref flag) = ctx.cancel_flag {
+                    if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(IronBaseError::Cancelled(format!(
+                            "Query cancelled after loading {} documents.",
+                            i
+                        )));
+                    }
+                }
+                if let Some(dl) = ctx.deadline {
+                    if std::time::Instant::now() >= dl {
+                        return Err(IronBaseError::Timeout(format!(
+                            "Query timed out after loading {} documents.",
+                            i
+                        )));
+                    }
+                }
+            }
+
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                // Track response size for OOM protection
+                if let Some(max_bytes) = max_response_bytes {
+                    let doc_size = crate::find_options::estimate_json_size(&doc);
+                    if total_response_bytes.saturating_add(doc_size) > max_bytes {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Response size limit exceeded: loaded {} documents ({} bytes), \
+                            next document would exceed {} byte limit. \
+                            Solutions: 1) Add 'limit', 2) Use 'projection' to exclude large fields.",
+                            i, total_response_bytes, max_bytes
+                        )));
+                    }
+                    total_response_bytes += doc_size;
+                }
+                docs.push(doc);
+            }
+        }
+
+        // Post-processing pipeline (consistent with find_with_options)
+
+        // 1. Apply sort if specified
+        if let Some(ref sort_spec) = ctx.sort_spec {
+            crate::find_options::apply_sort(&mut docs, sort_spec)?;
+        }
+
+        // 2. Apply skip/limit after sorting
+        let docs = ctx.apply_post_sort_pagination(docs);
+
+        // 3. Apply projection
+        let docs = ctx.apply_projection_to_docs(docs)?;
+
+        Ok(docs)
     }
 
     /// Create a compound B+ tree index on multiple fields

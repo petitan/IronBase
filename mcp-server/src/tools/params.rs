@@ -175,7 +175,13 @@ pub struct FuzzySearchParams {
     pub threshold: Option<f64>,
     pub algorithm: Option<String>,
     pub limit: Option<usize>,
+    pub skip: Option<usize>,
     pub projection: Option<Value>,
+    /// MongoDB-style filter applied AFTER fuzzy matching (core-level filtering)
+    pub filter: Option<Value>,
+    /// Enable highlight of matched value (default: false)
+    #[serde(default)]
+    pub highlight: bool,
 }
 
 /// Parameters for `fulltext_search` tool
@@ -188,6 +194,10 @@ pub struct FulltextSearchParams {
     pub skip: Option<usize>,
     pub min_score: Option<f64>,
     pub projection: Option<Value>,
+    /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering)
+    /// Use this to combine fulltext search with other query operators (e.g., $regex, $eq)
+    /// Example: {"from.email": {"$regex": "@scania.com$"}}
+    pub filter: Option<Value>,
     /// Enable highlight/snippet generation (default: false)
     #[serde(default)]
     pub highlight: bool,

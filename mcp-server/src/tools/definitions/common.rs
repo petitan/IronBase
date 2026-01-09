@@ -390,6 +390,14 @@ pub mod fields {
         })
     }
 
+    /// MongoDB-style post-filter for fulltext search results
+    pub fn fulltext_filter() -> Value {
+        json!({
+            "type": "object",
+            "description": "MongoDB-style filter applied AFTER TF-IDF scoring. Use to combine fulltext search with other operators. Example: {\"from.email\": {\"$regex\": \"@company\\\\.com$\"}}"
+        })
+    }
+
     /// Highlight enable flag
     pub fn highlight() -> Value {
         json!({

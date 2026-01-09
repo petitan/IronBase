@@ -4,11 +4,16 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::document::Document;
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::fulltext::{build_phrase_regex, parse_query, FulltextIndexMetadata};
-use crate::index::FuzzyAlgorithm;
+use crate::fulltext::{
+    build_phrase_regex, generate_highlights, parse_query, tokenize, FulltextIndexMetadata,
+    FulltextSearchOptions, FulltextSearchResultExt,
+};
+use crate::index::{FuzzyAlgorithm, FuzzySearchOptions, FuzzySearchResult};
 use crate::log_error;
+use crate::query::Query;
 use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
 
@@ -195,6 +200,172 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 results.push((doc, similarity));
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Extended fuzzy search with filter + projection support (CORE LEVEL)
+    ///
+    /// This is the recommended unified API for fuzzy search (consistent with fulltext_search_ext).
+    /// All logic (similarity matching, filter, projection) is handled in core.
+    ///
+    /// # Arguments
+    /// * `field` - Field with fuzzy index
+    /// * `query` - Search query string (the value to match)
+    /// * `options` - `FuzzySearchOptions` with all search parameters
+    ///
+    /// # Returns
+    /// Vector of `FuzzySearchResult` with document, score, matched value, and optional highlight
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::FuzzySearchOptions;
+    /// use serde_json::json;
+    ///
+    /// let options = FuzzySearchOptions::new()
+    ///     .with_limit(10)
+    ///     .with_threshold(0.75)
+    ///     .with_filter(json!({"status": "active"}))
+    ///     .with_projection(HashMap::from([("name".to_string(), 1)]));
+    ///
+    /// let results = collection.fuzzy_search_ext("name", "Jhon", options)?;
+    /// for result in results {
+    ///     println!("Score: {:.2}, Matched: {}, Doc: {:?}",
+    ///              result.score, result.matched_value, result.document);
+    /// }
+    /// ```
+    pub fn fuzzy_search_ext(
+        &self,
+        field: &str,
+        query: &str,
+        options: FuzzySearchOptions,
+    ) -> Result<Vec<FuzzySearchResult>> {
+        self.check_not_closed()?;
+
+        // Build execution context from options
+        let ctx = if options.cancel_flag.is_some() || options.deadline.is_some() {
+            Some(
+                ExecutionContext::new()
+                    .with_deadline_opt(options.deadline)
+                    .with_cancel_flag_opt(options.cancel_flag.clone()),
+            )
+        } else {
+            None
+        };
+
+        let effective_limit = options.limit.unwrap_or(10);
+        let effective_skip = options.skip.unwrap_or(0);
+
+        let indexes = self.indexes.read();
+
+        // Find fuzzy index for this field
+        let fuzzy_index = indexes.get_fuzzy_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fuzzy index found for field '{}'", field))
+        })?;
+
+        // Parse filter if provided
+        let parsed_filter = if let Some(ref filter) = options.filter {
+            Some(Query::from_json(filter)?)
+        } else {
+            None
+        };
+
+        // Determine candidate limit - if we have a filter, request more candidates
+        let candidate_limit = if parsed_filter.is_some() {
+            effective_limit.saturating_mul(10).max(100)
+        } else {
+            effective_limit
+        };
+
+        // Perform fuzzy search with cancellation support
+        let matches = fuzzy_index.search_with_ctx(
+            query,
+            options.threshold,
+            options.algorithm,
+            Some(candidate_limit),
+            ctx.as_ref(),
+        )?;
+
+        drop(indexes);
+
+        // Process results: load doc, filter, project, highlight
+        let mut results = Vec::new();
+        let mut skipped = 0;
+
+        for (iteration, (doc_id, similarity)) in matches.into_iter().enumerate() {
+            // Cancellation check
+            if let Some(ref exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
+            // Load document
+            let doc = match self.read_document_by_id(&doc_id)? {
+                Some(d) => d,
+                None => continue, // Deleted doc, skip
+            };
+
+            // Apply MongoDB filter (if provided)
+            if let Some(ref filter) = parsed_filter {
+                match Document::from_value(&doc) {
+                    Ok(document) => {
+                        if !filter.matches(&document)? {
+                            continue; // Doesn't match filter, skip
+                        }
+                    }
+                    Err(_) => continue, // Invalid document, skip
+                }
+            }
+
+            // Handle skip (manual skip when filter was used)
+            if parsed_filter.is_some() && skipped < effective_skip {
+                skipped += 1;
+                continue;
+            }
+
+            // Get matched value for the result
+            let matched_value = get_nested_value(&doc, field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Apply projection
+            let projected_doc = if let Some(ref proj) = options.projection {
+                crate::find_options::apply_projection(&doc, proj)?
+            } else {
+                doc
+            };
+
+            // Generate highlight if enabled
+            let highlight = if options.highlight && !matched_value.is_empty() {
+                // Simple highlight: wrap the matched portion in <mark> tags
+                // For fuzzy matching, we highlight the entire matched value
+                Some(format!("<mark>{}</mark>", matched_value))
+            } else {
+                None
+            };
+
+            // Build result
+            results.push(FuzzySearchResult {
+                document: projected_doc,
+                score: similarity,
+                matched_value,
+                highlight,
+            });
+
+            // Early exit when limit reached
+            if results.len() >= effective_limit {
+                break;
+            }
+        }
+
+        // If no filter was used, handle skip manually (for efficiency, skip was not applied in search)
+        if parsed_filter.is_none() && effective_skip > 0 {
+            if effective_skip < results.len() {
+                results = results.into_iter().skip(effective_skip).collect();
+            } else {
+                results.clear();
             }
         }
 
@@ -559,6 +730,231 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         break;
                     }
                 }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Extended fulltext search with filter + highlight support (CORE LEVEL)
+    ///
+    /// This is the recommended unified API for fulltext search.
+    /// All logic (TF-IDF, filter, highlight) is handled in core.
+    ///
+    /// # Arguments
+    /// * `field` - Field with fulltext index
+    /// * `query` - Search query text (supports phrase search with "quotes")
+    /// * `options` - `FulltextSearchOptions` with all search parameters
+    ///
+    /// # Returns
+    /// Vector of `FulltextSearchResultExt` with document, score, matched tokens, and optional highlights
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::fulltext::FulltextSearchOptions;
+    /// use serde_json::json;
+    ///
+    /// let options = FulltextSearchOptions::new()
+    ///     .with_limit(10)
+    ///     .with_filter(json!({"from.email": {"$regex": "@scania.com$"}}))
+    ///     .with_highlight(100, 3);
+    ///
+    /// let results = collection.fulltext_search_ext("subject", "mérőcella", options)?;
+    /// for result in results {
+    ///     println!("Score: {:.2}, Doc: {:?}", result.score, result.document);
+    ///     if let Some(highlights) = result.highlights {
+    ///         for h in highlights {
+    ///             for snippet in h.snippets {
+    ///                 println!("  Highlight: {}", snippet);
+    ///             }
+    ///         }
+    ///     }
+    /// }
+    /// ```
+    pub fn fulltext_search_ext(
+        &self,
+        field: &str,
+        query: &str,
+        options: FulltextSearchOptions,
+    ) -> Result<Vec<FulltextSearchResultExt>> {
+        self.check_not_closed()?;
+
+        // Build execution context from options
+        let ctx = if options.cancel_flag.is_some() || options.deadline.is_some() {
+            Some(
+                ExecutionContext::new()
+                    .with_deadline_opt(options.deadline)
+                    .with_cancel_flag_opt(options.cancel_flag.clone()),
+            )
+        } else {
+            None
+        };
+
+        // Parse query for phrases (MongoDB-compatible syntax)
+        let parsed = parse_query(query);
+        let effective_limit = options.limit.unwrap_or(10);
+        let effective_skip = options.skip.unwrap_or(0);
+
+        let indexes = self.indexes.read();
+
+        // Find fulltext index for this field
+        let fulltext_index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index found for field '{}'", field))
+        })?;
+
+        // Store FTS options for tokenization and highlights
+        let fts_options = fulltext_index.options.clone();
+
+        // Parse filter if provided
+        let parsed_filter = if let Some(ref filter) = options.filter {
+            Some(Query::from_json(filter)?)
+        } else {
+            None
+        };
+
+        // Prepare highlight tokenization if enabled
+        let query_tokens = if options.highlight {
+            tokenize(query, &fts_options)
+        } else {
+            Vec::new()
+        };
+
+        let highlight_opts = options.highlight_options.clone().unwrap_or_default();
+
+        // Determine candidate limit - if we have a filter, request more candidates
+        let candidate_limit = if parsed_filter.is_some() || parsed.has_phrases() {
+            effective_limit.saturating_mul(10).max(100)
+        } else {
+            effective_limit
+        };
+
+        // Perform TF-IDF search
+        let search_results = if !parsed.has_phrases() {
+            // Fast path: no phrases
+            fulltext_index.search_with_ctx(
+                query,
+                candidate_limit,
+                if parsed_filter.is_none() {
+                    effective_skip
+                } else {
+                    0
+                }, // Skip in TF-IDF only if no filter
+                options.min_score,
+                ctx.as_ref(),
+            )?
+        } else {
+            // Phrase search: use all terms
+            let all_terms = parsed.all_search_terms(&fts_options);
+            fulltext_index.search_with_ctx(
+                &all_terms.join(" "),
+                candidate_limit,
+                0, // Skip handled manually after phrase filtering
+                options.min_score,
+                ctx.as_ref(),
+            )?
+        };
+
+        // Build phrase regexes if needed
+        let phrase_regexes: Vec<_> = if parsed.has_phrases() {
+            parsed
+                .phrases
+                .iter()
+                .map(|p| build_phrase_regex(p))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+
+        drop(indexes);
+
+        // Process results: load doc, filter, project, highlight
+        let mut results = Vec::new();
+        let mut skipped = 0;
+
+        for (iteration, fts_result) in search_results.into_iter().enumerate() {
+            // Cancellation check
+            if let Some(ref exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
+            // Load document
+            let doc = match self.read_document_by_id(&fts_result.doc_id)? {
+                Some(d) => d,
+                None => continue, // Deleted doc, skip
+            };
+
+            // Phrase check (if applicable)
+            if !phrase_regexes.is_empty() {
+                let text = doc.get(field).and_then(|v| v.as_str()).unwrap_or("");
+                let all_phrases_match = phrase_regexes.iter().all(|re| re.is_match(text));
+                if !all_phrases_match {
+                    continue;
+                }
+            }
+
+            // Apply MongoDB filter (if provided)
+            if let Some(ref filter) = parsed_filter {
+                match Document::from_value(&doc) {
+                    Ok(document) => {
+                        if !filter.matches(&document)? {
+                            continue; // Doesn't match filter, skip
+                        }
+                    }
+                    Err(_) => continue, // Invalid document, skip
+                }
+            }
+
+            // Handle skip (manual skip when filter/phrase was used)
+            if (parsed_filter.is_some() || parsed.has_phrases()) && skipped < effective_skip {
+                skipped += 1;
+                continue;
+            }
+
+            // Apply projection
+            let projected_doc = if let Some(ref proj) = options.projection {
+                crate::find_options::apply_projection(&doc, proj)?
+            } else {
+                doc.clone()
+            };
+
+            // Generate highlights if enabled
+            let highlights = if options.highlight {
+                let field_value = get_nested_value(&doc, field)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if !field_value.is_empty() && !query_tokens.is_empty() {
+                    let result = generate_highlights(
+                        field_value,
+                        &query_tokens,
+                        field,
+                        &fts_options,
+                        &highlight_opts,
+                    );
+
+                    if !result.snippets.is_empty() {
+                        Some(vec![result])
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Build result
+            results.push(FulltextSearchResultExt {
+                document: projected_doc,
+                score: fts_result.score,
+                matched_tokens: fts_result.matched_tokens,
+                highlights,
+            });
+
+            // Early exit when limit reached
+            if results.len() >= effective_limit {
+                break;
             }
         }
 
