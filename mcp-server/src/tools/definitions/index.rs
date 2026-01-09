@@ -180,7 +180,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "index_stats_refresh",
             "title": "Refresh Index Statistics",
-            "description": "Recompute statistics (distinct_count, null_count) for all B+ tree indexes. The query planner uses these statistics to choose the best index. Run this after bulk inserts or when explain shows distinct_count: 0.",
+            "description": "Recompute statistics for all B+ tree indexes: distinct_count, null_count, and histograms. For indexes with 100k+ keys, equi-depth histograms (64 buckets) are built for accurate range query selectivity estimation. The query planner uses these statistics to choose the best index. Run this after bulk inserts for optimal query plans.",
             "inputSchema": schemas::collection_only()
         }),
         json!({
