@@ -1,7 +1,7 @@
 // src/query_planner.rs
 // Query planner and optimizer - index selection
 
-use crate::index::{IndexKey, IndexPrefixInfo};
+use crate::index::{Histogram, IndexKey, IndexPrefixInfo};
 use serde_json::Value;
 
 const DEFAULT_DOC_ESTIMATE: u64 = 1000;
@@ -103,6 +103,52 @@ impl CandidatePlan {
         let reason = format!(
             "Index {} on field {} (distinct: {}, est. rows: {:.0})",
             index_name, field, distinct_count, estimated_cost
+        );
+        Self::new(plan, field, estimated_cost, reason)
+    }
+
+    /// Create a candidate with histogram-based range selectivity
+    ///
+    /// For range queries ($gt, $gte, $lt, $lte), use histogram to estimate selectivity
+    /// instead of uniform 1/distinct_count assumption. This provides much more accurate
+    /// estimates for skewed distributions.
+    ///
+    /// Falls back to uniform estimate (0.33) if histogram is not available.
+    pub fn with_range_selectivity(
+        plan: QueryPlan,
+        field: String,
+        index_name: &str,
+        histogram: Option<&Histogram>,
+        start: Option<&IndexKey>,
+        end: Option<&IndexKey>,
+        total_docs: u64,
+        multikey_ratio: f32,
+    ) -> Self {
+        let total_docs = total_docs.max(DEFAULT_DOC_ESTIMATE);
+
+        // Use histogram if available, otherwise fall back to uniform estimate
+        let (selectivity, estimation_method) = if let Some(hist) = histogram {
+            let sel = hist.estimate_range_selectivity(start, end);
+            (sel, "histogram")
+        } else {
+            // Fallback: assume range covers 33% of values (uniform distribution)
+            (0.33, "uniform")
+        };
+
+        // Estimated rows = total_docs * selectivity
+        let base_cost = (total_docs as f64) * selectivity;
+
+        // Apply multikey overhead
+        let multikey_overhead = 1.0 + (multikey_ratio as f64 * 0.5);
+        let estimated_cost = base_cost * multikey_overhead;
+
+        let reason = format!(
+            "Index {} on field {} (range, sel: {:.1}%, est. rows: {:.0}, method: {})",
+            index_name,
+            field,
+            selectivity * 100.0,
+            estimated_cost,
+            estimation_method
         );
         Self::new(plan, field, estimated_cost, reason)
     }
@@ -363,6 +409,9 @@ impl QueryPlanner {
     }
 
     /// Collect candidates from range queries ($gt, $gte, $lt, $lte)
+    ///
+    /// Uses histogram-based selectivity estimation when available for more accurate
+    /// row count estimates. Falls back to uniform 33% estimate otherwise.
     fn collect_range_candidates(
         query_json: &Value,
         index_fields: &[IndexPrefixInfo],
@@ -373,12 +422,22 @@ impl QueryPlanner {
                 .iter()
                 .find(|i| i.prefix_field == field && !i.is_compound)
             {
-                candidates.push(CandidatePlan::with_selectivity(
+                // Extract start/end from the plan for histogram-based estimation
+                // Clone the keys since we need to move plan later
+                let (start_key, end_key) = match &plan {
+                    QueryPlan::IndexRangeScan { start, end, .. } => (start.clone(), end.clone()),
+                    _ => (None, None),
+                };
+
+                // Use histogram-based range selectivity estimation
+                candidates.push(CandidatePlan::with_range_selectivity(
                     plan,
                     field,
                     &info.index_name,
-                    info.distinct_count,
-                    DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
+                    info.histogram.as_ref(),
+                    start_key.as_ref(),
+                    end_key.as_ref(),
+                    info.num_keys, // Use actual key count for better estimate
                     info.multikey_ratio,
                 ));
             }
@@ -981,6 +1040,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
             IndexPrefixInfo {
                 index_name: "users_id".to_string(),
@@ -994,6 +1054,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
         ];
 
@@ -1033,6 +1094,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1075,6 +1137,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1112,6 +1175,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1133,6 +1197,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1154,6 +1219,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1175,6 +1241,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         // Complex queries not yet supported
@@ -1206,6 +1273,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1249,6 +1317,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1278,6 +1347,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1307,6 +1377,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1374,6 +1445,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
             IndexPrefixInfo {
                 index_name: "users_email_ci".to_string(),
@@ -1387,6 +1459,7 @@ mod tests {
                 case_insensitive: true, // This is the CI index!
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
         ];
 
@@ -1426,6 +1499,7 @@ mod tests {
             case_insensitive: false, // Not a CI index
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         // No CI index available - should return None (collection scan)
@@ -1456,6 +1530,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1479,6 +1554,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1492,6 +1568,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
         ];
 
@@ -1529,6 +1606,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
             IndexPrefixInfo {
                 index_name: "products_category_brand".to_string(),
@@ -1542,6 +1620,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
         ];
 
@@ -1631,6 +1710,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1644,6 +1724,7 @@ mod tests {
                 case_insensitive: false,
                 null_count: 0,
                 multikey_ratio: 0.0,
+                histogram: None,
             },
         ];
 
@@ -1688,6 +1769,7 @@ mod tests {
             case_insensitive: false,
             null_count: 0,
             multikey_ratio: 0.0,
+            histogram: None,
         }];
 
         let explain = QueryPlanner::explain_query_with_fields(&query, &index_fields);

@@ -329,6 +329,7 @@ impl IndexManager {
                 case_insensitive: index.metadata.case_insensitive,
                 null_count: index.metadata.stats.null_count,
                 multikey_ratio: index.metadata.stats.multikey_ratio,
+                histogram: index.metadata.stats.histogram.clone(),
             });
         }
 
@@ -346,6 +347,7 @@ impl IndexManager {
                 case_insensitive: false, // Legacy indexes are case-sensitive
                 null_count: 0,           // No null count for legacy indexes
                 multikey_ratio: 0.0,     // No multikey tracking for legacy indexes
+                histogram: None,         // No histogram for legacy indexes
             });
         }
 

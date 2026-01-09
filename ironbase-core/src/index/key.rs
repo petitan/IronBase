@@ -1,5 +1,6 @@
 // Index key types and ordering
 
+use super::btree::Histogram;
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
@@ -189,4 +190,7 @@ pub struct IndexPrefixInfo {
     /// Ratio of documents with multikey arrays (0.0-1.0)
     /// Higher values indicate more index entries per document
     pub multikey_ratio: f32,
+    /// Histogram for range query selectivity estimation
+    /// Only populated for large indexes (100k+ entries) with single field
+    pub histogram: Option<Histogram>,
 }

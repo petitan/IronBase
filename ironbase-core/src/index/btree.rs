@@ -211,6 +211,11 @@ pub struct IndexStats {
     /// 1.0 means full scan, 0.1 means 10% sample
     #[serde(default)]
     pub sample_rate: f32,
+
+    /// Histogram for range query selectivity estimation
+    /// Only populated for indexes with 100k+ entries
+    #[serde(default)]
+    pub histogram: Option<Histogram>,
 }
 
 impl IndexStats {
@@ -273,6 +278,92 @@ impl IndexStats {
         }
 
         fixed
+    }
+}
+
+// ============================================================================
+// Histogram for Range Query Selectivity Estimation
+// ============================================================================
+
+/// Default number of histogram buckets
+fn default_bucket_count() -> u32 {
+    64
+}
+
+/// Equi-depth histogram for range selectivity estimation
+///
+/// Each bucket contains approximately the same number of values.
+/// Used by query planner to estimate selectivity for range queries
+/// when uniform distribution assumption would be too inaccurate.
+///
+/// Only built for indexes with 100,000+ entries (below that, uniform is acceptable).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Histogram {
+    /// Bucket boundaries (sorted) - contains bucket_count-1 values
+    /// bucket[i] contains values where boundaries[i-1] <= v < boundaries[i]
+    #[serde(default)]
+    pub boundaries: Vec<IndexKey>,
+
+    /// Minimum value in the index
+    #[serde(default)]
+    pub min_value: Option<IndexKey>,
+
+    /// Maximum value in the index
+    #[serde(default)]
+    pub max_value: Option<IndexKey>,
+
+    /// Number of buckets (default: 64)
+    #[serde(default = "default_bucket_count")]
+    pub bucket_count: u32,
+}
+
+impl Histogram {
+    /// Minimum number of entries required to build a histogram
+    pub const MIN_ENTRIES_FOR_HISTOGRAM: usize = 100_000;
+
+    /// Estimate selectivity for a range query
+    ///
+    /// Returns the fraction of data that falls within the given range [start, end).
+    /// If histogram is empty, falls back to uniform distribution assumption (0.33).
+    ///
+    /// # Arguments
+    /// * `start` - Range start bound (None = unbounded)
+    /// * `end` - Range end bound (None = unbounded)
+    ///
+    /// # Returns
+    /// Selectivity estimate between 0.0 and 1.0
+    pub fn estimate_range_selectivity(
+        &self,
+        start: Option<&IndexKey>,
+        end: Option<&IndexKey>,
+    ) -> f64 {
+        if self.boundaries.is_empty() || self.bucket_count == 0 {
+            return 0.33; // Fallback to uniform assumption
+        }
+
+        let start_bucket = match start {
+            Some(v) => self.find_bucket(v),
+            None => 0,
+        };
+
+        let end_bucket = match end {
+            Some(v) => self.find_bucket(v),
+            None => self.bucket_count as usize,
+        };
+
+        // Ensure at least 1 bucket is counted
+        let covered = end_bucket.saturating_sub(start_bucket).max(1);
+        covered as f64 / self.bucket_count as f64
+    }
+
+    /// Find which bucket a value falls into using binary search
+    fn find_bucket(&self, value: &IndexKey) -> usize {
+        self.boundaries.binary_search(value).unwrap_or_else(|i| i)
+    }
+
+    /// Check if histogram has valid data
+    pub fn is_valid(&self) -> bool {
+        !self.boundaries.is_empty() && self.bucket_count > 0
     }
 }
 
@@ -1531,16 +1622,50 @@ impl BPlusTree {
     /// assert_eq!(tree.metadata.stats.distinct_count, 2);
     /// ```
     /// Refresh index statistics by streaming through all keys.
-    /// O(n) time, O(1) memory (no Vec collection of leaves).
+    ///
+    /// For indexes with >= 100,000 entries, also builds an equi-depth histogram
+    /// for better range query selectivity estimation.
+    ///
+    /// - Small indexes (<100k): O(n) time, O(1) memory
+    /// - Large indexes (>=100k): O(n log n) time, O(n) memory (for histogram sort)
     pub fn refresh_stats(&mut self) {
         use std::time::{SystemTime, UNIX_EPOCH};
 
+        // First pass: count total keys to decide if histogram is needed
+        let total_keys = self.metadata.num_keys as usize;
+        let build_histogram = total_keys >= Histogram::MIN_ENTRIES_FOR_HISTOGRAM
+            && !self.metadata.is_compound()
+            && !self.metadata.multikey;
+
+        if build_histogram {
+            // Large index: collect all values for histogram (O(n) memory)
+            self.refresh_stats_with_histogram();
+        } else {
+            // Small index: streaming stats only (O(1) memory)
+            self.refresh_stats_streaming();
+        }
+
+        // Update timestamp
+        self.metadata.stats.last_analyzed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.metadata.stats.sample_rate = 1.0;
+
+        // Multikey ratio heuristic
+        if self.metadata.multikey {
+            self.metadata.stats.multikey_ratio = 0.25;
+        } else {
+            self.metadata.stats.multikey_ratio = 0.0;
+        }
+    }
+
+    /// Streaming stats refresh - O(1) memory, no histogram
+    fn refresh_stats_streaming(&mut self) {
         let mut distinct_count: u64 = 0;
         let mut null_count: u64 = 0;
-        // Clone last_key across leaf boundaries (one key at a time, O(1) memory)
         let mut last_key: Option<IndexKey> = None;
 
-        // Stream through leaves in ascending order (left-to-right)
         Self::walk_leaves_asc(&self.root, &mut |leaf| {
             for key in &leaf.keys {
                 if last_key.as_ref() != Some(key) {
@@ -1555,24 +1680,63 @@ impl BPlusTree {
 
         self.metadata.stats.distinct_count = distinct_count;
         self.metadata.stats.null_count = null_count;
-        self.metadata.stats.last_analyzed = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        self.metadata.stats.sample_rate = 1.0;
+        self.metadata.stats.histogram = None;
+    }
 
-        // Note: multikey_ratio cannot be accurately calculated in streaming mode
-        // (would require O(n) memory to track unique doc_ids).
-        // Instead, use heuristic based on multikey flag:
-        // - If index has seen multikey docs (arrays), assume moderate ratio
-        // - Otherwise, keep at 0.0
-        if self.metadata.multikey {
-            // Rough estimate: if index is multikey, assume ~25% of docs have arrays
-            // This is conservative - real value could be higher or lower
-            self.metadata.stats.multikey_ratio = 0.25;
+    /// Stats refresh with histogram building - O(n) memory
+    fn refresh_stats_with_histogram(&mut self) {
+        let mut all_keys: Vec<IndexKey> = Vec::new();
+        let mut null_count: u64 = 0;
+
+        // Collect all keys (O(n) memory)
+        Self::walk_leaves_asc(&self.root, &mut |leaf| {
+            for key in &leaf.keys {
+                if matches!(key, IndexKey::Null) {
+                    null_count += 1;
+                } else {
+                    all_keys.push(key.clone());
+                }
+            }
+        });
+
+        // Count distinct values (keys are already sorted in B+ tree leaves)
+        let distinct_count = {
+            let mut count = 0u64;
+            let mut last_key: Option<&IndexKey> = None;
+            for key in &all_keys {
+                if last_key != Some(key) {
+                    count += 1;
+                    last_key = Some(key);
+                }
+            }
+            count
+        };
+
+        // Build equi-depth histogram with 64 buckets
+        let histogram = if all_keys.len() >= Histogram::MIN_ENTRIES_FOR_HISTOGRAM {
+            // Keys from B+ tree leaves are already sorted!
+            // No need to sort again - this is a key optimization
+            let bucket_count = 64u32;
+            let bucket_size = all_keys.len() / bucket_count as usize;
+
+            // Collect bucket boundaries (63 boundaries for 64 buckets)
+            let boundaries: Vec<IndexKey> = (1..bucket_count as usize)
+                .map(|i| all_keys[i * bucket_size].clone())
+                .collect();
+
+            Some(Histogram {
+                boundaries,
+                min_value: all_keys.first().cloned(),
+                max_value: all_keys.last().cloned(),
+                bucket_count,
+            })
         } else {
-            self.metadata.stats.multikey_ratio = 0.0;
-        }
+            None
+        };
+
+        self.metadata.stats.distinct_count = distinct_count;
+        self.metadata.stats.null_count = null_count;
+        self.metadata.stats.histogram = histogram;
     }
 
     /// Walk all leaf nodes in ASCENDING order (left-to-right traversal).
