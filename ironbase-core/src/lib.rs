@@ -93,11 +93,14 @@ pub use wal::{
 };
 
 // Fuzzy text index exports
-pub use index::{FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata};
+pub use index::{
+    FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata, FuzzySearchOptions, FuzzySearchResult,
+};
 
 // Full-text search exports
 pub use fulltext::{
     FtsLanguage, FtsOptions, FtsSearchResult, FulltextIndex, FulltextIndexMetadata,
+    FulltextSearchOptions, FulltextSearchResultExt, HighlightOptions, HighlightResult,
 };
 
 // Aggregation context exports (for memory-aware aggregation)

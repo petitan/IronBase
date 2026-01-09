@@ -75,7 +75,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "fulltext_search",
             "title": "Full-Text Search",
-            "description": "Search documents using TF-IDF relevance scoring. Requires index_create_fulltext first. Set highlight=true to get <mark>...</mark> snippets around matches. IMPORTANT: The searched field must be included in projection for highlights to work.",
+            "description": "Search documents using TF-IDF relevance scoring. Requires index_create_fulltext first. Use 'filter' to apply MongoDB-style filtering on results (fast, applies AFTER TF-IDF scoring). Set highlight=true for <mark>...</mark> snippets. Searched field must be in projection for highlights.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -92,6 +92,7 @@ pub fn tools() -> Vec<Value> {
                     "skip": fields::skip_results(),
                     "min_score": fields::min_score(),
                     "projection": fields::projection_simple(),
+                    "filter": fields::fulltext_filter(),
                     "highlight": fields::highlight(),
                     "highlight_context": fields::highlight_context(),
                     "highlight_max_snippets": fields::highlight_max_snippets()
@@ -117,7 +118,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "fuzzy_search",
             "title": "Fuzzy String Search",
-            "description": "Find documents with approximate string matching. Requires index_create_fuzzy first.",
+            "description": "Find documents with approximate string matching. Requires index_create_fuzzy first. Supports filter, projection, and highlight.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -142,7 +143,17 @@ pub fn tools() -> Vec<Value> {
                         "maximum": 1
                     },
                     "limit": fields::limit(None),
-                    "projection": fields::projection_simple()
+                    "skip": fields::skip(),
+                    "projection": fields::projection_simple(),
+                    "filter": {
+                        "type": "object",
+                        "description": "MongoDB-style filter applied AFTER fuzzy matching. Example: {\"status\": \"active\"}"
+                    },
+                    "highlight": {
+                        "type": "boolean",
+                        "description": "Enable highlighting of matched value with <mark> tags",
+                        "default": false
+                    }
                 },
                 "required": ["collection", "field", "query"]
             }

@@ -5,7 +5,6 @@
 use crate::adapter::{FindOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
 use crate::scripting::ScriptLimits;
-use ironbase_core::find_options::apply_projection;
 use serde_json::{json, Value};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
@@ -174,24 +173,18 @@ fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
     let p: FindOneParams = FindOneParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let document = adapter.find_one(&p.collection, p.query)?;
-
-    // Apply projection if specified
-    let result = match (document, p.projection) {
-        (Some(doc), Some(proj)) => {
-            // Parse projection to HashMap
-            let proj_map: std::collections::HashMap<String, i32> = serde_json::from_value(proj)
-                .map_err(|e| {
-                    McpError::invalid_params(format!("Invalid projection format: {}", e))
-                })?;
-            Some(
-                apply_projection(&doc, &proj_map)
-                    .map_err(|e| McpError::invalid_params(e.to_string()))?,
-            )
-        }
-        (doc, _) => doc,
+    // Build FindOptions with projection (core handles projection)
+    let options = if let Some(proj) = p.projection {
+        let proj_map: std::collections::HashMap<String, i32> = serde_json::from_value(proj)
+            .map_err(|e| McpError::invalid_params(format!("Invalid projection format: {}", e)))?;
+        ironbase_core::find_options::FindOptions::new().with_projection(proj_map)
+    } else {
+        ironbase_core::find_options::FindOptions::new()
     };
-    Ok(json!({"document": result}))
+
+    // Core handles projection - consistent with find_with_options
+    let document = adapter.find_one_with_options(&p.collection, p.query, options)?;
+    Ok(json!({"document": document}))
 }
 
 fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

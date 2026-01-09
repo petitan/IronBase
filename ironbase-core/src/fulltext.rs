@@ -720,6 +720,124 @@ pub struct HighlightResult {
     pub snippets: Vec<String>,
 }
 
+// ============================================================================
+// Extended Fulltext Search API (Core-level options and results)
+// ============================================================================
+
+use serde_json::Value;
+use std::collections::HashMap as StdHashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::time::Instant;
+
+/// Unified fulltext search options - CORE LEVEL
+///
+/// This struct consolidates all fulltext search parameters including:
+/// - Pagination (limit, skip)
+/// - Scoring (min_score)
+/// - Projection (field filtering)
+/// - Post-filter (MongoDB-style query on results)
+/// - Highlighting (snippet generation)
+/// - Cancellation/timeout support
+#[derive(Debug, Clone, Default)]
+pub struct FulltextSearchOptions {
+    /// Maximum results to return (default: 10)
+    pub limit: Option<usize>,
+    /// Results to skip for pagination
+    pub skip: Option<usize>,
+    /// Minimum TF-IDF score threshold
+    pub min_score: Option<f64>,
+    /// Field projection (include/exclude): {"field": 1} or {"field": 0}
+    pub projection: Option<StdHashMap<String, i32>>,
+    /// MongoDB-style post-filter applied to fulltext results
+    /// Example: {"from.email": {"$regex": "@company\\.com$"}}
+    pub filter: Option<Value>,
+    /// Enable highlight/snippet generation (default: false)
+    pub highlight: bool,
+    /// Highlight configuration (context chars, max snippets)
+    pub highlight_options: Option<HighlightOptions>,
+    /// Cancellation flag for cooperative cancellation
+    pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Deadline for timeout support
+    pub deadline: Option<Instant>,
+}
+
+impl FulltextSearchOptions {
+    /// Create new options with defaults
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set result limit
+    pub fn with_limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    /// Set skip for pagination
+    pub fn with_skip(mut self, skip: usize) -> Self {
+        self.skip = Some(skip);
+        self
+    }
+
+    /// Set minimum score threshold
+    pub fn with_min_score(mut self, score: f64) -> Self {
+        self.min_score = Some(score);
+        self
+    }
+
+    /// Set field projection
+    pub fn with_projection(mut self, projection: StdHashMap<String, i32>) -> Self {
+        self.projection = Some(projection);
+        self
+    }
+
+    /// Set MongoDB-style post-filter
+    pub fn with_filter(mut self, filter: Value) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Enable highlighting with custom options
+    pub fn with_highlight(mut self, context_chars: usize, max_snippets: usize) -> Self {
+        self.highlight = true;
+        self.highlight_options = Some(HighlightOptions {
+            context_chars,
+            max_snippets,
+            ..Default::default()
+        });
+        self
+    }
+
+    /// Set cancellation flag
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Set timeout deadline
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+}
+
+/// Extended fulltext search result - CORE LEVEL
+///
+/// Includes document, score, matched tokens, and optional highlights.
+/// This is the return type for `fulltext_search_ext()`.
+#[derive(Debug, Clone)]
+pub struct FulltextSearchResultExt {
+    /// The matched document (with projection applied if specified)
+    pub document: Value,
+    /// TF-IDF relevance score
+    pub score: f64,
+    /// Query tokens that matched in the document
+    pub matched_tokens: Vec<String>,
+    /// Optional highlight snippets (if highlight=true)
+    pub highlights: Option<Vec<HighlightResult>>,
+}
+
 /// Generate highlighted snippets from text containing matched tokens
 ///
 /// # Arguments

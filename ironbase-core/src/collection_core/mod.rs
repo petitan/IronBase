@@ -270,41 +270,41 @@ pub struct InsertManyResult {
 /// **ACID Safety**: Only READ operations support deadline (find, count, distinct).
 /// WRITE operations (insert, update, delete) pass `None` to preserve atomicity.
 #[derive(Debug)]
-struct QueryExecutionContext {
+pub(crate) struct QueryExecutionContext {
     /// Single-field sort optimization info
-    sort_field: Option<String>,
-    sort_descending: bool,
+    pub(crate) sort_field: Option<String>,
+    pub(crate) sort_descending: bool,
 
     /// Whether to defer limit/skip until after sorting
-    apply_limit_after_sort: bool,
+    pub(crate) apply_limit_after_sort: bool,
 
     /// Pre-fetch parameters (0/None if deferred)
-    fetch_skip: usize,
-    fetch_limit: Option<usize>,
+    pub(crate) fetch_skip: usize,
+    pub(crate) fetch_limit: Option<usize>,
 
     /// Original user options for post-processing
-    original_skip: usize,
-    original_limit: Option<usize>,
+    pub(crate) original_skip: usize,
+    pub(crate) original_limit: Option<usize>,
 
     /// Original sort specification
-    sort_spec: Option<Vec<(String, i32)>>,
+    pub(crate) sort_spec: Option<Vec<(String, i32)>>,
 
     /// Projection specification
-    projection: Option<HashMap<String, i32>>,
+    pub(crate) projection: Option<HashMap<String, i32>>,
 
     /// Maximum response size in bytes (OOM protection)
-    max_response_bytes: Option<usize>,
+    pub(crate) max_response_bytes: Option<usize>,
 
     /// Cancellation flag for cooperative timeout
-    cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) cancel_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 
     /// Deadline for timeout enforcement
-    deadline: Option<std::time::Instant>,
+    pub(crate) deadline: Option<std::time::Instant>,
 }
 
 impl QueryExecutionContext {
     /// Build execution context from FindOptions
-    fn from_options(options: &crate::find_options::FindOptions) -> Self {
+    pub(crate) fn from_options(options: &crate::find_options::FindOptions) -> Self {
         let original_skip = options.skip.unwrap_or(0);
         let original_limit = options.limit;
 
@@ -344,12 +344,12 @@ impl QueryExecutionContext {
     }
 
     /// Get sort field reference (for collect_doc_ids_with_options)
-    fn sort_field_ref(&self) -> Option<&str> {
+    pub(crate) fn sort_field_ref(&self) -> Option<&str> {
         self.sort_field.as_deref()
     }
 
     /// Determine if in-memory sort is needed (when index didn't sort for us)
-    fn needs_memory_sort(&self, index_sorted: bool) -> bool {
+    pub(crate) fn needs_memory_sort(&self, index_sorted: bool) -> bool {
         match &self.sort_spec {
             Some(sort) => !(index_sorted && sort.len() == 1),
             None => false,
@@ -357,7 +357,7 @@ impl QueryExecutionContext {
     }
 
     /// Apply pagination after sorting (returns owned docs)
-    fn apply_post_sort_pagination(&self, docs: Vec<Value>) -> Vec<Value> {
+    pub(crate) fn apply_post_sort_pagination(&self, docs: Vec<Value>) -> Vec<Value> {
         if self.apply_limit_after_sort {
             crate::find_options::apply_limit_skip(
                 docs,
@@ -370,7 +370,10 @@ impl QueryExecutionContext {
     }
 
     /// Apply projection to documents (returns owned docs)
-    fn apply_projection_to_docs(&self, docs: Vec<Value>) -> crate::error::Result<Vec<Value>> {
+    pub(crate) fn apply_projection_to_docs(
+        &self,
+        docs: Vec<Value>,
+    ) -> crate::error::Result<Vec<Value>> {
         match &self.projection {
             Some(proj) => docs
                 .into_iter()
@@ -1276,6 +1279,45 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             self.read_document_by_id(doc_id)
         } else {
             Ok(None)
+        }
+    }
+
+    /// Find one document matching query with options (projection support).
+    ///
+    /// This is the extended version of `find_one` that supports projection
+    /// at the core level, consistent with `find_with_options`.
+    ///
+    /// # Arguments
+    /// * `query_json` - MongoDB-style query filter
+    /// * `options` - FindOptions (only projection is used; sort/limit/skip are ignored for find_one)
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::find_options::FindOptions;
+    /// use std::collections::HashMap;
+    ///
+    /// let mut projection = HashMap::new();
+    /// projection.insert("name".to_string(), 1);
+    /// projection.insert("email".to_string(), 1);
+    ///
+    /// let options = FindOptions::new().with_projection(projection);
+    /// let doc = collection.find_one_with_options(&query, options)?;
+    /// ```
+    pub fn find_one_with_options(
+        &self,
+        query_json: &Value,
+        options: crate::find_options::FindOptions,
+    ) -> Result<Option<Value>> {
+        // Get the document using existing find_one logic
+        let doc = self.find_one(query_json)?;
+
+        // Apply projection if specified and document found
+        match (doc, options.projection) {
+            (Some(d), Some(ref proj)) => {
+                let projected = crate::find_options::apply_projection(&d, proj)?;
+                Ok(Some(projected))
+            }
+            (doc, _) => Ok(doc),
         }
     }
 

@@ -3,7 +3,6 @@
 use crate::error::Result;
 use crate::execution;
 use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
-use ironbase_core::value_utils::get_nested_value;
 use ironbase_core::ExecutionContext;
 use ironbase_core::{storage::StorageEngine, DatabaseCore};
 use parking_lot::RwLock;
@@ -125,6 +124,8 @@ pub struct FulltextSearchOptions {
     pub skip: Option<usize>,
     pub min_score: Option<f64>,
     pub projection: Option<HashMap<String, i32>>,
+    /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering)
+    pub filter: Option<Value>,
     /// Enable highlight/snippet generation
     pub highlight: bool,
     /// Characters of context around each match (default: 100)
@@ -147,6 +148,38 @@ pub struct FulltextSearchResult {
 pub struct HighlightResultJson {
     pub field: String,
     pub snippets: Vec<String>,
+}
+
+/// Options for extended fuzzy search (adapter-level)
+#[derive(Debug, Default)]
+pub struct FuzzySearchOptions {
+    /// Algorithm to use (default: from index metadata)
+    pub algorithm: Option<ironbase_core::FuzzyAlgorithm>,
+    /// Minimum similarity threshold (0.0-1.0, default: from index metadata)
+    pub threshold: Option<f64>,
+    /// Maximum results to return (default: 10)
+    pub limit: Option<usize>,
+    /// Results to skip for pagination
+    pub skip: Option<usize>,
+    /// Field projection (include/exclude): {"field": 1} or {"field": 0}
+    pub projection: Option<HashMap<String, i32>>,
+    /// MongoDB-style post-filter applied to fuzzy results
+    pub filter: Option<Value>,
+    /// Enable highlight of matched value (default: false)
+    pub highlight: bool,
+}
+
+/// Result from extended fuzzy search (adapter-level)
+#[derive(Debug)]
+pub struct FuzzySearchResult {
+    /// The matched document (with projection applied if specified)
+    pub document: Value,
+    /// Similarity score (0.0-1.0)
+    pub score: f64,
+    /// The original value that matched the query
+    pub matched_value: String,
+    /// Optional highlight showing the matched value with <mark> tags
+    pub highlight: Option<String>,
 }
 
 /// IronBase Adapter
@@ -881,6 +914,19 @@ impl IronBaseAdapter {
         Ok(result)
     }
 
+    /// Find a single document with projection support (projection applied in core)
+    pub fn find_one_with_options(
+        &self,
+        collection: &str,
+        query: Value,
+        options: ironbase_core::find_options::FindOptions,
+    ) -> Result<Option<Value>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let result = coll.find_one_with_options(&query, options)?;
+        Ok(result)
+    }
+
     /// Update a single document (with WAL durability)
     pub fn update_one(
         &self,
@@ -1053,10 +1099,32 @@ impl IronBaseAdapter {
     }
 
     /// Find documents with index hint (uses get_collection - no implicit creation)
+    #[deprecated(
+        since = "1.0.199",
+        note = "Use find_with_hint_ext for sort/skip/limit/projection support"
+    )]
     pub fn find_with_hint(&self, collection: &str, query: Value, hint: &str) -> Result<Vec<Value>> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
+        #[allow(deprecated)]
         let documents = coll.find_with_hint(&query, hint)?;
+        Ok(documents)
+    }
+
+    /// Find documents with index hint and full options support
+    ///
+    /// Extended version that supports sort, skip, limit, projection, and OOM protection.
+    /// All post-processing is done in core (not in the tools layer).
+    pub fn find_with_hint_ext(
+        &self,
+        collection: &str,
+        query: Value,
+        hint: &str,
+        options: ironbase_core::find_options::FindOptions,
+    ) -> Result<Vec<Value>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let documents = coll.find_with_hint_ext(&query, hint, options)?;
         Ok(documents)
     }
 
@@ -1109,6 +1177,53 @@ impl IronBaseAdapter {
         Ok(results)
     }
 
+    /// Extended fuzzy search with filter, projection, highlight support (CORE LEVEL)
+    ///
+    /// All logic (similarity matching, filter, projection) is handled in core via `fuzzy_search_ext()`.
+    /// This adapter method simply converts options and returns results.
+    pub fn fuzzy_search_ext(
+        &self,
+        collection: &str,
+        field: &str,
+        query_str: &str,
+        options: FuzzySearchOptions,
+    ) -> Result<Vec<FuzzySearchResult>> {
+        use ironbase_core::FuzzySearchOptions as CoreOptions;
+
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+
+        // Convert adapter options to core options
+        let core_options = CoreOptions {
+            algorithm: options.algorithm,
+            threshold: options.threshold,
+            limit: options.limit,
+            skip: options.skip,
+            projection: options.projection,
+            filter: options.filter,
+            highlight: options.highlight,
+            cancel_flag: ctx.cancel_flag().cloned(),
+            deadline: ctx.deadline(),
+        };
+
+        // Execute search in core
+        let core_results = coll.fuzzy_search_ext(field, query_str, core_options)?;
+
+        // Convert core results to adapter results
+        let results = core_results
+            .into_iter()
+            .map(|r| FuzzySearchResult {
+                document: r.document,
+                score: r.score,
+                matched_value: r.matched_value,
+                highlight: r.highlight,
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     // ============================================================
     // Full-Text Search
     // ============================================================
@@ -1135,6 +1250,9 @@ impl IronBaseAdapter {
 
     /// Full-text search using the fulltext index (with cancellation/timeout support)
     /// Returns results with optional highlights/snippets
+    ///
+    /// All logic (TF-IDF, filter, highlight) is now handled in core via `fulltext_search_ext()`.
+    /// This adapter method simply converts options and returns results.
     pub fn fulltext_search(
         &self,
         collection: &str,
@@ -1142,77 +1260,53 @@ impl IronBaseAdapter {
         query_str: &str,
         options: FulltextSearchOptions,
     ) -> Result<Vec<FulltextSearchResult>> {
-        use ironbase_core::fulltext::{generate_highlights, tokenize, HighlightOptions};
+        use ironbase_core::fulltext::{
+            FulltextSearchOptions as CoreOptions, HighlightOptions,
+        };
 
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         let ctx = self.create_execution_context();
 
-        // Get FTS options from the index (needed for highlight generation)
-        let fts_options = if options.highlight {
-            coll.get_fulltext_index_options(field).ok()
-        } else {
-            None
+        // Convert adapter options to core options
+        let core_options = CoreOptions {
+            limit: options.limit,
+            skip: options.skip,
+            min_score: options.min_score,
+            projection: options.projection,
+            filter: options.filter, // NEW: MongoDB-style post-filter
+            highlight: options.highlight,
+            highlight_options: if options.highlight {
+                Some(HighlightOptions {
+                    context_chars: options.highlight_context.unwrap_or(100),
+                    max_snippets: options.highlight_max_snippets.unwrap_or(3),
+                    ..Default::default()
+                })
+            } else {
+                None
+            },
+            cancel_flag: ctx.cancel_flag().cloned(),
+            deadline: ctx.deadline(),
         };
 
-        let results = coll.fulltext_search_with_ctx(
-            field,
-            query_str,
-            options.limit,
-            options.skip,
-            options.min_score,
-            options.projection.clone(),
-            Some(&ctx),
-        )?;
+        // Call the unified core API - all logic (filter, highlight) handled there
+        let results = coll.fulltext_search_ext(field, query_str, core_options)?;
 
-        // Convert results and optionally generate highlights
+        // Convert core results to adapter results
         let results = results
             .into_iter()
-            .map(|(doc, score, matched_tokens)| {
-                let highlights = if options.highlight {
-                    if let Some(ref fts_opts) = fts_options {
-                        // Get the field value from the document for highlighting
-                        let field_value = get_nested_value(&doc, field)
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
-
-                        if !field_value.is_empty() {
-                            // Tokenize query to get stemmed tokens for matching
-                            let query_tokens = tokenize(query_str, fts_opts);
-
-                            let highlight_opts = HighlightOptions {
-                                context_chars: options.highlight_context.unwrap_or(100),
-                                max_snippets: options.highlight_max_snippets.unwrap_or(3),
-                                ..Default::default()
-                            };
-
-                            let result =
-                                generate_highlights(field_value, &query_tokens, field, fts_opts, &highlight_opts);
-
-                            if !result.snippets.is_empty() {
-                                Some(vec![HighlightResultJson {
-                                    field: result.field,
-                                    snippets: result.snippets,
-                                }])
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                FulltextSearchResult {
-                    document: doc,
-                    score,
-                    matched_tokens,
-                    highlights,
-                }
+            .map(|r| FulltextSearchResult {
+                document: r.document,
+                score: r.score,
+                matched_tokens: r.matched_tokens,
+                highlights: r.highlights.map(|hs| {
+                    hs.into_iter()
+                        .map(|h| HighlightResultJson {
+                            field: h.field,
+                            snippets: h.snippets,
+                        })
+                        .collect()
+                }),
             })
             .collect();
 

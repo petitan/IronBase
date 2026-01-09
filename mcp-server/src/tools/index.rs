@@ -4,7 +4,6 @@
 
 use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
-use ironbase_core::find_options::{apply_projection, apply_sort};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -212,45 +211,54 @@ fn handle_index_stats_refresh(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
 }
 
 fn handle_fuzzy_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    use crate::adapter::FuzzySearchOptions;
+
     let p: FuzzySearchParams = FuzzySearchParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let threshold = p.threshold;
-    let algorithm = p.algorithm.as_deref();
-    let limit = p
-        .limit
-        .unwrap_or(DEFAULT_QUERY_LIMIT)
-        .min(DEFAULT_QUERY_LIMIT);
+    // Parse algorithm string to enum
+    let algorithm = p.algorithm.as_deref().and_then(|algo| {
+        use ironbase_core::FuzzyAlgorithm;
+        match algo {
+            "levenshtein" => Some(FuzzyAlgorithm::Levenshtein),
+            "damerau_levenshtein" => Some(FuzzyAlgorithm::DamerauLevenshtein),
+            "jaro_winkler" => Some(FuzzyAlgorithm::JaroWinkler),
+            _ => None,
+        }
+    });
+
     let projection = parse_projection_value(p.projection)?;
 
-    // Use the real fuzzy search with index (limit passed for cost estimation)
-    let mut results = adapter.fuzzy_search(
-        &p.collection,
-        &p.field,
-        &p.query,
-        threshold,
+    // Build FuzzySearchOptions - all processing happens in core
+    let options = FuzzySearchOptions {
         algorithm,
-        Some(limit),
-    )?;
+        threshold: p.threshold,
+        limit: Some(p.limit.unwrap_or(DEFAULT_QUERY_LIMIT).min(DEFAULT_QUERY_LIMIT)),
+        skip: p.skip,
+        projection,
+        filter: p.filter,
+        highlight: p.highlight,
+    };
 
-    // Apply limit (safety net - already limited in cost estimation)
-    results.truncate(limit);
+    // Core handles everything: filter, projection, highlight
+    let results = adapter.fuzzy_search_ext(&p.collection, &p.field, &p.query, options)?;
 
-    // Format results with scores, applying projection if specified
+    // Format results
     let documents: Vec<Value> = results
         .into_iter()
-        .map(|(doc, score)| {
-            let projected_doc = if let Some(ref proj) = projection {
-                apply_projection(&doc, proj).map_err(|e| McpError::invalid_params(e.to_string()))
-            } else {
-                Ok(doc)
-            }?;
-            Ok(json!({
-                "document": projected_doc,
-                "score": score
-            }))
+        .map(|r| {
+            let mut result = json!({
+                "document": r.document,
+                "score": r.score,
+                "matched_value": r.matched_value
+            });
+            // Add highlight if present
+            if let Some(highlight) = r.highlight {
+                result["highlight"] = json!(highlight);
+            }
+            result
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
     Ok(json!({"results": documents, "count": documents.len()}))
 }
@@ -266,6 +274,7 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         skip: p.skip,
         min_score: p.min_score,
         projection,
+        filter: p.filter, // NEW: MongoDB-style post-filter
         highlight: p.highlight,
         highlight_context: p.highlight_context,
         highlight_max_snippets: p.highlight_max_snippets,
@@ -325,44 +334,35 @@ fn handle_explain(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
 }
 
 fn handle_find_with_hint(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    use ironbase_core::find_options::FindOptions;
+
     let p: FindWithHintParams = FindWithHintParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let projection = parse_projection_value(p.projection)?;
-    let sort = parse_sort_value(p.sort)?;
+    // Build FindOptions - all processing happens in core
+    let mut options = FindOptions::with_safe_defaults();
 
-    let mut documents = adapter.find_with_hint(&p.collection, p.query, &p.hint)?;
-
-    // Apply sort if specified
-    if let Some(ref sort_spec) = sort {
-        apply_sort(&mut documents, sort_spec)
-            .map_err(|e| McpError::invalid_params(e.to_string()))?;
+    // Set projection if specified
+    if let Some(proj) = parse_projection_value(p.projection)? {
+        options = options.with_projection(proj);
     }
 
-    // Apply skip
+    // Set sort if specified
+    if let Some(sort_spec) = parse_sort_value(p.sort)? {
+        options = options.with_sort(sort_spec);
+    }
+
+    // Set skip if specified
     if let Some(s) = p.skip {
-        if s < documents.len() {
-            documents = documents.into_iter().skip(s).collect();
-        } else {
-            documents = Vec::new();
-        }
+        options = options.with_skip(s);
     }
 
-    // Apply limit
-    if let Some(l) = p.limit {
-        documents.truncate(l.min(DEFAULT_QUERY_LIMIT));
-    }
+    // Set limit (bounded by DEFAULT_QUERY_LIMIT for safety)
+    let limit = p.limit.map(|l| l.min(DEFAULT_QUERY_LIMIT)).unwrap_or(DEFAULT_QUERY_LIMIT);
+    options = options.with_limit(limit);
 
-    // Apply projection if specified
-    let documents: Vec<Value> = if let Some(ref proj) = projection {
-        documents
-            .into_iter()
-            .map(|doc| apply_projection(&doc, proj))
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| McpError::invalid_params(e.to_string()))?
-    } else {
-        documents
-    };
+    // Core handles everything: sort, skip, limit, projection, OOM protection
+    let documents = adapter.find_with_hint_ext(&p.collection, p.query, &p.hint, options)?;
 
     Ok(json!({"documents": documents, "count": documents.len()}))
 }
