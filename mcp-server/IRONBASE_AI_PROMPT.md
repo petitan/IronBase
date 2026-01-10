@@ -52,7 +52,10 @@ Use this prompt to help AI assistants correctly interact with IronBase MCP serve
 | `Aggregation timed out` | Query too slow (>60s) | Add `$match` stage first, use indexes, add `$limit` |
 | `Script exceeded maximum operations limit` | Infinite loop or >1M operations | Reduce iterations, use `max_operations` param |
 | `Unknown property 'documents' on array` | Already have array, not object | `db_aggregate()` returns array directly, no `.documents` needed |
+| `Unknown property 'documents' on string` | db_find() returned ERROR string! | Always check `is_error()` before accessing `.documents` |
 | `Data type incorrect: i64 expecting string` | Rhai type mismatch | Use explicit conversion: `value.to_string()` |
+| `Response size limit exceeded` | Too many/large documents | Add `limit`, use `projection` to exclude large fields |
+| `Operation timed out` | distinct/aggregate >60s | Use indexes, add filters, limit result set |
 
 ## Supported Query Operators
 
@@ -132,6 +135,22 @@ for doc in db_find("users", #{}) { ... }
 // WRONG - db_aggregate returns array, not object
 let results = db_aggregate("users", pipeline);
 for doc in results.documents { ... }  // Error: 'documents' not on array
+
+// WRONG - no error check before accessing .documents
+let result = db_find("users", #{});
+for doc in result.documents { ... }  // Crashes if db_find returned error!
+```
+
+### ✅ ALWAYS Check for Errors (Most Common Bug!)
+```rhai
+// CORRECT - check error BEFORE accessing .documents
+let result = db_find("users", #{});
+if is_error(result) {
+    return #{error: get_error(result)};
+}
+for doc in result.documents {
+    print(doc.name);
+}
 ```
 
 ### Handle null/error
@@ -226,9 +245,26 @@ This rebuilds equi-depth histograms (64 buckets) for better range query selectiv
 
 ## Response Size Limits
 
-- Default max response: ~100 MB (RAM-based scaling)
+- Default max response: **100 MB** (104,857,600 bytes)
+- Real example from log: 53 large emails = 104 MB → REJECTED
 - Use `limit` and `projection` to stay under limits
-- Large responses trigger: `"Response size limit exceeded..."`
+
+### When You Hit the Limit
+```
+Response size limit exceeded: loaded 53 documents (104249798 bytes)
+Solutions: 1) Add 'limit', 2) Use 'projection' to exclude large fields
+```
+
+### Safe Pattern for Large Documents
+```json
+{
+  "collection": "emails",
+  "query": {},
+  "projection": {"subject": 1, "from": 1, "date": 1},
+  "limit": 100
+}
+```
+Exclude large fields like `body`, `attachments`, `content`.
 
 ## Performance Expectations
 
