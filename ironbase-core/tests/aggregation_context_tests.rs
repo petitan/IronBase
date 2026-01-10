@@ -743,3 +743,119 @@ fn test_optimizer_no_fast_path_for_field_group() {
     // 30 docs with group = group_0..group_9 (10 unique groups)
     assert_eq!(results.len(), 10);
 }
+
+// ========== Cumulative $unwind Limit Tests (2026-01 fix) ==========
+
+#[test]
+fn test_cumulative_unwind_limit_chain() {
+    // Test that multiple $unwind stages share a cumulative limit
+    // Before fix: Each $unwind had independent limit → 2 stages could produce 2x limit
+    // After fix: All $unwind stages share the same limit counter
+    let db = create_test_db();
+
+    // Insert docs with nested arrays
+    // Each doc has: orders (3 items) × items (4 per order) = 12 unwound docs per input doc
+    for i in 0..10 {
+        db.insert_one(
+            "chain_unwind",
+            json_to_hashmap(json!({
+                "id": i,
+                "orders": [
+                    {"order_id": 1, "items": ["a", "b", "c", "d"]},
+                    {"order_id": 2, "items": ["e", "f", "g", "h"]},
+                    {"order_id": 3, "items": ["i", "j", "k", "l"]}
+                ]
+            })),
+        )
+        .unwrap();
+    }
+
+    let coll = db.collection("chain_unwind").unwrap();
+
+    // With cumulative limit of 50:
+    // First $unwind: 10 docs × 3 orders = 30 docs (OK, 30 < 50)
+    // Second $unwind: 30 docs × 4 items = 120 docs (FAIL, 30 + 120 > 50)
+    let limits = AggregationLimits {
+        max_unwind_output: 50, // Low limit to trigger cumulative overflow
+        max_docs_without_match: 100,
+        max_docs_with_match: 100,
+        ..Default::default()
+    };
+    let ctx = AggregationLimitContext::new(limits);
+
+    let result = coll.aggregate_with_context(
+        &json!([
+            {"$unwind": "$orders"},
+            {"$unwind": "$orders.items"}
+        ]),
+        &ctx,
+    );
+
+    // Should fail due to cumulative limit exceeded
+    assert!(
+        result.is_err(),
+        "Chain $unwind should fail when cumulative output exceeds limit"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("$unwind") || err.contains("unwind") || err.contains("limit"),
+        "Error should mention $unwind limit: {}",
+        err
+    );
+}
+
+#[test]
+fn test_cumulative_unwind_limit_passes_when_within_limit() {
+    // Test that chain $unwind works when total output is within limit
+    let db = create_test_db();
+
+    // 5 docs × 2 orders × 2 items = 20 total unwound docs
+    for i in 0..5 {
+        db.insert_one(
+            "chain_unwind_ok",
+            json_to_hashmap(json!({
+                "id": i,
+                "orders": [
+                    {"order_id": 1, "items": ["a", "b"]},
+                    {"order_id": 2, "items": ["c", "d"]}
+                ]
+            })),
+        )
+        .unwrap();
+    }
+
+    let coll = db.collection("chain_unwind_ok").unwrap();
+
+    let limits = AggregationLimits {
+        max_unwind_output: 100, // Total output = 20, well within limit
+        max_docs_without_match: 100,
+        max_docs_with_match: 100,
+        ..Default::default()
+    };
+    let ctx = AggregationLimitContext::new(limits);
+
+    let result = coll.aggregate_with_context(
+        &json!([
+            {"$unwind": "$orders"},
+            {"$unwind": "$orders.items"}
+        ]),
+        &ctx,
+    );
+
+    assert!(
+        result.is_ok(),
+        "Chain $unwind should succeed when cumulative output is within limit: {:?}",
+        result
+    );
+
+    let docs = result.unwrap();
+    // 5 docs × 2 orders × 2 items = 20 docs
+    assert_eq!(docs.len(), 20, "Should have 20 unwound documents");
+
+    // Verify cumulative counter
+    assert!(
+        ctx.unwind_outputs() <= 100,
+        "Cumulative unwind count should be tracked: {}",
+        ctx.unwind_outputs()
+    );
+}

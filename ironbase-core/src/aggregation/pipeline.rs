@@ -289,6 +289,13 @@ impl Pipeline {
                 .collect::<Vec<_>>(),
         );
 
+        // CUMULATIVE UNWIND FIX (2026-01): Create context for remaining stages
+        // This ensures that multiple $unwind stages share a cumulative counter,
+        // preventing OOM when: [$unwind: "$a", $unwind: "$b"] each produce near-limit output.
+        // Before: Each $unwind had independent 1M limit → 2 stages could produce 2M docs
+        // After: All $unwind stages share 1M cumulative limit
+        let ctx = AggregationLimitContext::new(limits);
+
         let mut docs = materialized;
         for (i, stage) in remaining_stages.iter().enumerate() {
             // Check if this is a $sort stage that can use Top-K optimization
@@ -299,8 +306,8 @@ impl Pipeline {
                     continue;
                 }
             }
-            // Use execute_with_limits to pass limits to stages that need them (e.g., $unwind)
-            docs = stage.execute_with_limits(docs, limits)?;
+            // Use execute_with_context for cumulative limit tracking (especially $unwind)
+            docs = stage.execute_with_context(docs, &ctx)?;
         }
 
         Ok(docs)
@@ -699,17 +706,6 @@ impl Stage {
         }
     }
 
-    /// Execute this stage with explicit limits
-    /// Currently only affects $unwind (uses max_unwind_output from limits)
-    pub(crate) fn execute_with_limits(
-        &self,
-        docs: Vec<Value>,
-        limits: AggregationLimits,
-    ) -> Result<Vec<Value>> {
-        match self {
-            Stage::Unwind(stage) => stage.execute_with_limit(docs, limits.max_unwind_output),
-            // Other stages don't currently use limits in execute (they stream or have own limits)
-            _ => self.execute(docs),
-        }
-    }
+    // NOTE: execute_with_limits() removed in 2026-01 cumulative unwind fix.
+    // Use execute_with_context() instead for proper cumulative limit tracking.
 }

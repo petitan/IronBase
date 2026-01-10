@@ -242,8 +242,20 @@ let limits = AggregationLimits::with_memory_budget(256); // 256 MB
 **OOM védelem implementálva (2026-01):**
 - ✅ `$match` NEM kapcsolja ki a limitet (max 1M doc)
 - ✅ `$push`/`$addToSet` limitálva per csoport
-- ✅ `$unwind` output limitálva
+- ✅ `$unwind` output limitálva **KUMULATÍVAN** (több $unwind együtt max 1M)
 - ✅ `try_reserve()` használat allokációk előtt
+
+**Kumulatív $unwind limit (2026-01-10):**
+Több egymást követő `$unwind` stage KÖZÖS számlálón osztozik:
+```json
+// ELŐTTE: 2 × 1M limit → akár 2M doc
+// UTÁNA: Összesen max 1M doc minden $unwind-ból együtt
+[
+  {"$unwind": "$orders"},      // 100K output → OK (100K < 1M)
+  {"$unwind": "$orders.items"} // +500K output → OK (600K < 1M)
+                               // +600K output → HIBA (1.1M > 1M)
+]
+```
 
 **Key files:**
 - `ironbase-core/src/aggregation/memory_info.rs` - RAM detektálás
