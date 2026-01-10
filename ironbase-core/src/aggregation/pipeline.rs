@@ -63,14 +63,17 @@ impl Pipeline {
         self.has_leading_match = value;
     }
 
-    /// Execute pipeline on documents (legacy - loads all into memory)
-    /// DEPRECATED: Use execute_streaming() for memory-efficient execution
+    /// Execute pipeline on documents
+    ///
+    /// SAFETY: This method now uses `execute_streaming_with_limits` internally
+    /// with default limits to prevent OOM. For custom limits, use
+    /// `execute_streaming_with_limits` directly.
     #[allow(dead_code)]
-    pub fn execute(&self, mut docs: Vec<Value>) -> Result<Vec<Value>> {
-        for stage in &self.stages {
-            docs = stage.execute(docs)?;
-        }
-        Ok(docs)
+    pub fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
+        // FIX (2026-01-10): Redirect to safe version with default limits
+        // Previously this method had NO OOM protection!
+        let limits = AggregationLimits::default();
+        self.execute_streaming_with_limits(docs.into_iter().map(Ok), limits)
     }
 
     /// Execute pipeline with streaming document input
@@ -139,11 +142,18 @@ impl Pipeline {
             } else {
                 limits.max_docs_without_match
             };
+            // FIX (2026-01-10): Pre-allocate with try_reserve to fail fast on OOM
+            // Previously Vec grew without bounds until limit check triggered
             let mut results = Vec::new();
+            results.try_reserve(doc_limit.min(10_000)).map_err(|e| {
+                IronBaseError::OutOfMemory(format!(
+                    "Failed to allocate memory for empty pipeline results: {}",
+                    e
+                ))
+            })?;
             for doc_result in docs {
                 let doc = doc_result?;
-                results.push(doc);
-                if results.len() > doc_limit {
+                if results.len() >= doc_limit {
                     return Err(IronBaseError::AggregationError(format!(
                         "Empty pipeline exceeded document limit: {} documents. \
                          Add pipeline stages or use find() instead. Limit: {}",
@@ -151,6 +161,7 @@ impl Pipeline {
                         doc_limit
                     )));
                 }
+                results.push(doc);
             }
             return Ok(results);
         }
