@@ -327,7 +327,7 @@ impl McpClient {
             "field": field
         });
         if let Some(f) = filter {
-            args["filter"] = f.clone();
+            args["query"] = f.clone();
         }
 
         let result = self.call_tool("distinct", args).await?;
@@ -844,6 +844,28 @@ impl McpClient {
             "language": language
         });
         self.call_tool("index_create_fulltext", args).await?;
+        Ok(())
+    }
+
+    /// Create a fuzzy index on a field
+    pub async fn create_fuzzy_index(
+        &self,
+        collection: &str,
+        field: &str,
+        algorithm: Option<&str>,
+        threshold: Option<f64>,
+    ) -> McpResult<()> {
+        let mut args = serde_json::json!({
+            "collection": collection,
+            "field": field
+        });
+        if let Some(alg) = algorithm {
+            args["algorithm"] = serde_json::json!(alg);
+        }
+        if let Some(thresh) = threshold {
+            args["threshold"] = serde_json::json!(thresh);
+        }
+        self.call_tool("index_create_fuzzy", args).await?;
         Ok(())
     }
 

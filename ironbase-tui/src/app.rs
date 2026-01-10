@@ -709,6 +709,8 @@ impl App {
                 self.script_state.dirty = false;
                 self.script_state.message = Some(format!("Script mentve (v{})", new_version));
                 self.script_state.error = None;
+                // Reload script list to show new/updated scripts
+                self.load_scripts_async().await;
             }
             Err(e) => {
                 self.script_state.error = Some(format!("Mentés sikertelen: {}", e));
@@ -1613,6 +1615,8 @@ impl App {
                 self.index_state.message = Some(format!("{} létrehozva", index_desc));
                 self.index_state.cancel_create();
                 self.index_state.indexes = self.get_current_indexes_async().await;
+                // Refresh collection list to update index_count
+                let _ = self.refresh_collections_async().await;
             }
             Err(e) => {
                 self.index_state.error = Some(format!("Hiba: {}", e));
@@ -1644,6 +1648,8 @@ impl App {
                 } else if self.index_state.selected_index >= self.index_state.indexes.len() {
                     self.index_state.selected_index = self.index_state.indexes.len() - 1;
                 }
+                // Refresh collection list to update index_count
+                let _ = self.refresh_collections_async().await;
             }
             Err(e) => {
                 self.index_state.error = Some(format!("Hiba: {}", e));
