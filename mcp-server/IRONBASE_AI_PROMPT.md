@@ -47,9 +47,12 @@ Use this prompt to help AI assistants correctly interact with IronBase MCP serve
 |-------|-------|----------|
 | `Unknown operator: $concat` | Expression operators not supported | Use Rhai script for string manipulation |
 | `Group _id must use supported operator` | Complex _id expression | Use simple field reference: `"_id": "$field"` |
-| `For loop expects iterable type` | Rhai script error | Ensure iteration over array: `db_find()` returns `#{documents: [...]}` |
+| `For loop expects iterable type` | Rhai script error | `db_find()` returns object with `.documents` array - iterate over that |
 | `No fulltext index found for field 'x_fts'` | Wrong field name | Use original field name without `_fts` suffix |
-| `Aggregation timed out` | Query too slow | Add `$match` stage first, use indexes |
+| `Aggregation timed out` | Query too slow (>60s) | Add `$match` stage first, use indexes, add `$limit` |
+| `Script exceeded maximum operations limit` | Infinite loop or >1M operations | Reduce iterations, use `max_operations` param |
+| `Unknown property 'documents' on array` | Already have array, not object | `db_aggregate()` returns array directly, no `.documents` needed |
+| `Data type incorrect: i64 expecting string` | Rhai type mismatch | Use explicit conversion: `value.to_string()` |
 
 ## Supported Query Operators
 
@@ -103,18 +106,32 @@ Use this prompt to help AI assistants correctly interact with IronBase MCP serve
 
 ## Rhai Script Best Practices
 
-### Iterate over find results
+### Function Return Types (CRITICAL!)
 ```rhai
-// ✅ CORRECT - access .documents array
+// db_find() returns OBJECT with .documents array
 let result = db_find("users", #{});
-for doc in result.documents {
+for doc in result.documents {  // ← .documents required!
     print(doc.name);
 }
 
-// ❌ WRONG - result is object, not array
-for doc in db_find("users", #{}) {
-    print(doc.name);
+// db_aggregate() returns ARRAY directly
+let results = db_aggregate("users", pipeline);
+for doc in results {  // ← NO .documents needed!
+    print(doc._id);
 }
+
+// db_find_one() returns document or null
+let doc = db_find_one("users", #{name: "Alice"});
+```
+
+### ❌ Common Mistakes
+```rhai
+// WRONG - db_find returns object, not array
+for doc in db_find("users", #{}) { ... }
+
+// WRONG - db_aggregate returns array, not object
+let results = db_aggregate("users", pipeline);
+for doc in results.documents { ... }  // Error: 'documents' not on array
 ```
 
 ### Handle null/error
@@ -213,6 +230,28 @@ This rebuilds equi-depth histograms (64 buckets) for better range query selectiv
 - Use `limit` and `projection` to stay under limits
 - Large responses trigger: `"Response size limit exceeded..."`
 
+## Performance Expectations
+
+| Operation | Typical Time | Warning Threshold |
+|-----------|--------------|-------------------|
+| `find` (indexed) | 1-10ms | >100ms |
+| `find` (scan) | 100-500ms | >1s |
+| `aggregate` (simple) | 50-100ms | >500ms |
+| `aggregate` (complex) | 100-500ms | >5s |
+| `fulltext_search` | 300-2000ms | >4s |
+| `fuzzy_search` | 200-500ms | >1s |
+| `script_exec` | 100-5000ms | >30s |
+| `count_documents` | 0-10ms | >100ms |
+
+**Timeout:** 60 seconds for all operations.
+
+### Performance Tips
+- Add `$match` FIRST in aggregation pipelines
+- Use `limit` on find queries
+- Create indexes for frequently queried fields
+- Use projection to reduce response size
+- For scripts: keep iterations under 100k
+
 ## Quick Debugging
 
 ```json
@@ -224,4 +263,7 @@ This rebuilds equi-depth histograms (64 buckets) for better range query selectiv
 
 // Explain slow query
 {"name": "explain", "arguments": {"collection": "x", "query": {...}}}
+
+// Debug tokenization (why fulltext search misses)
+{"name": "fulltext_analyze", "arguments": {"text": "your query", "language": "hungarian"}}
 ```
