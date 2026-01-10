@@ -1442,13 +1442,15 @@ async fn handle_fulltext_open(app: &mut App) {
     let indexed_fields = if let Some(ref db) = app.db {
         match db.list_indexes(&collection).await {
             Ok(indexes) => {
-                // Filter to only fulltext indexes (they contain "fulltext" in name)
+                // Filter to only fulltext indexes (format: "{collection}_{field}_fts")
+                let prefix = format!("{}_", collection);
                 indexes
                     .into_iter()
-                    .filter(|idx| idx.contains("fulltext"))
-                    .map(|idx| {
-                        // Extract field name from index name (format: "fieldname_fulltext")
-                        idx.trim_end_matches("_fulltext").to_string()
+                    .filter(|idx| idx.ends_with("_fts"))
+                    .filter_map(|idx| {
+                        // Extract field name: remove "_fts" suffix and collection prefix
+                        let without_suffix = idx.trim_end_matches("_fts");
+                        without_suffix.strip_prefix(&prefix).map(|s| s.to_string())
                     })
                     .collect()
             }
