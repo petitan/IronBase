@@ -598,7 +598,7 @@ fn register_search_functions(
         },
     );
 
-    // db_fulltext_search(collection, field, query, options) -> array of {document, score, matched_tokens}
+    // db_fulltext_search(collection, field, query, options) -> array of {document, score, matched_tokens, highlights?}
     let max_find_documents = limits.max_find_documents;
     let default_limit = max_find_documents.min(ABSOLUTE_MAX_FIND_DOCUMENTS);
     let adapter_ftsrch = adapter;
@@ -609,6 +609,9 @@ fn register_search_functions(
             let mut skip = None;
             let mut min_score = None;
             let mut projection = None;
+            let mut highlight = false;
+            let mut highlight_context = None;
+            let mut highlight_max_snippets = None;
 
             if let Some(limit_val) = options.get("limit") {
                 if let Ok(limit) = limit_val.as_int() {
@@ -639,6 +642,29 @@ fn register_search_functions(
                 }
             }
 
+            // Highlight options
+            if let Some(hl_val) = options.get("highlight") {
+                if let Ok(hl) = hl_val.as_bool() {
+                    highlight = hl;
+                }
+            }
+
+            if let Some(ctx_val) = options.get("highlight_context") {
+                if let Ok(ctx) = ctx_val.as_int() {
+                    if (20..=500).contains(&ctx) {
+                        highlight_context = Some(ctx as usize);
+                    }
+                }
+            }
+
+            if let Some(snip_val) = options.get("highlight_max_snippets") {
+                if let Ok(snip) = snip_val.as_int() {
+                    if (1..=10).contains(&snip) {
+                        highlight_max_snippets = Some(snip as usize);
+                    }
+                }
+            }
+
             let effective_limit = requested_limit
                 .min(max_find_documents)
                 .min(ABSOLUTE_MAX_FIND_DOCUMENTS);
@@ -647,10 +673,10 @@ fn register_search_functions(
                 skip,
                 min_score,
                 projection,
-                filter: None,     // Scripting doesn't support filter yet
-                highlight: false, // Scripting doesn't support highlights yet
-                highlight_context: None,
-                highlight_max_snippets: None,
+                filter: None, // Scripting doesn't support filter yet
+                highlight,
+                highlight_context,
+                highlight_max_snippets,
             };
 
             match adapter_ftsrch.fulltext_search(collection, field, query, options) {
@@ -664,6 +690,24 @@ fn register_search_functions(
                             let token_dyn: Vec<Dynamic> =
                                 res.matched_tokens.into_iter().map(Dynamic::from).collect();
                             map.insert("matched_tokens".into(), Dynamic::from(token_dyn));
+                            // Add highlights if available
+                            if let Some(ref highlights) = res.highlights {
+                                let hl_dyn: Vec<Dynamic> = highlights
+                                    .iter()
+                                    .map(|hl| {
+                                        let mut hl_map = Map::new();
+                                        hl_map.insert("field".into(), Dynamic::from(hl.field.clone()));
+                                        let snippets: Vec<Dynamic> = hl
+                                            .snippets
+                                            .iter()
+                                            .map(|s| Dynamic::from(s.clone()))
+                                            .collect();
+                                        hl_map.insert("snippets".into(), Dynamic::from(snippets));
+                                        Dynamic::from(hl_map)
+                                    })
+                                    .collect();
+                                map.insert("highlights".into(), Dynamic::from(hl_dyn));
+                            }
                             Dynamic::from(map)
                         })
                         .collect();
