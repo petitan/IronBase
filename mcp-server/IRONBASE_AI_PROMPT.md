@@ -268,18 +268,30 @@ Exclude large fields like `body`, `attachments`, `content`.
 
 ## Performance Expectations
 
-| Operation | Typical Time | Warning Threshold |
-|-----------|--------------|-------------------|
-| `find` (indexed) | 1-10ms | >100ms |
-| `find` (scan) | 100-500ms | >1s |
-| `aggregate` (simple) | 50-100ms | >500ms |
-| `aggregate` (complex) | 100-500ms | >5s |
-| `fulltext_search` | 300-2000ms | >4s |
-| `fuzzy_search` | 200-500ms | >1s |
-| `script_exec` | 100-5000ms | >30s |
-| `count_documents` | 0-10ms | >100ms |
+| Operation | Typical Time | Warning | CAN TIMEOUT! |
+|-----------|--------------|---------|--------------|
+| `find` (indexed) | 1-10ms | >100ms | rare |
+| `find` (scan) | 100-500ms | >1s | possible |
+| `aggregate` (simple) | 50-100ms | >500ms | rare |
+| `aggregate` (complex) | 100-500ms | >5s | **YES** |
+| `fulltext_search` | 300ms-4s | >10s | **YES (common!)** |
+| `fuzzy_search` | 200-500ms | >1s | rare |
+| `script_exec` | 100ms-5s | >30s | **YES** |
+| `count_documents` | 0-10ms | >100ms | rare |
+| `distinct` | 10-500ms | >5s | **YES** |
 
-**Timeout:** 60 seconds for all operations.
+**Timeout:** 60 seconds. Real log data shows fulltext_search: 38s, 54s, 60s+ timeouts!
+
+### Fulltext Search Performance Warning
+```
+Real timings from production log:
+- Simple query: 68-500ms
+- Medium query: 1.7-4s
+- Complex/large: 8-17s
+- Very slow: 38-54s ⚠️
+- TIMEOUT: 60s+ (happens regularly!)
+```
+Use `limit` and specific queries to avoid timeout.
 
 ### Performance Tips
 - Add `$match` FIRST in aggregation pipelines
