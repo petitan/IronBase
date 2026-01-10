@@ -172,6 +172,31 @@ let query = #{age: #{`$gt`: 18, `$lt`: 65}};
 let result = db_find("users", query);
 ```
 
+### Fulltext Search with Highlights in Rhai
+```rhai
+let results = db_fulltext_search("articles", "content", "database", #{
+    limit: 10,
+    highlight: true,
+    highlight_context: 100,
+    highlight_max_snippets: 3
+});
+
+for res in results {
+    print("Score: " + res.score);
+    print("Tokens: " + res.matched_tokens);
+
+    // highlights is array of {field, snippets}
+    if res.highlights != () {
+        for hl in res.highlights {
+            print("Field: " + hl.field);
+            for snippet in hl.snippets {
+                print("  " + snippet);  // Contains <mark>...</mark>
+            }
+        }
+    }
+}
+```
+
 ## Tool Availability
 
 | Tool | Description |
