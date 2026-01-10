@@ -382,6 +382,54 @@ impl QueryExecutionContext {
             None => Ok(docs),
         }
     }
+
+    /// Check if early projection is safe (before sort)
+    ///
+    /// Early projection is safe when:
+    /// - There is a projection specified AND
+    /// - Either no sort is specified OR all sort fields are included in projection
+    ///
+    /// This allows applying projection right after document load, reducing memory
+    /// usage and enabling accurate response size estimation.
+    pub(crate) fn can_early_project(&self) -> bool {
+        match (&self.projection, &self.sort_spec) {
+            (Some(_proj), None) => {
+                // No sort - always safe to project early
+                true
+            }
+            (Some(proj), Some(sort)) => {
+                // Sort specified - check if all sort fields are in projection
+                // Include mode: field must have value 1
+                // Exclude mode: field must NOT have value 0
+                let is_include_mode = proj.values().any(|&v| v == 1);
+
+                sort.iter().all(|(field, _)| {
+                    if is_include_mode {
+                        // Include mode: sort field must be explicitly included
+                        proj.get(field).map(|&v| v == 1).unwrap_or(false)
+                    } else {
+                        // Exclude mode: sort field must NOT be excluded
+                        proj.get(field).map(|&v| v != 0).unwrap_or(true)
+                    }
+                })
+            }
+            (None, _) => {
+                // No projection - nothing to apply early
+                false
+            }
+        }
+    }
+
+    /// Apply early projection to a single document
+    ///
+    /// Returns the projected document if early projection is enabled,
+    /// otherwise returns the original document unchanged.
+    pub(crate) fn apply_early_projection(&self, doc: Value) -> crate::error::Result<Value> {
+        match &self.projection {
+            Some(proj) => crate::find_options::apply_projection(&doc, proj),
+            None => Ok(doc),
+        }
+    }
 }
 
 /// Pure Rust Collection - language-independent core logic
@@ -983,6 +1031,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let max_response_bytes = ctx.max_response_bytes;
         let mut total_response_bytes: usize = 0;
 
+        // Early projection optimization:
+        // Apply projection immediately after loading if safe (no sort on excluded fields)
+        // This reduces memory usage and enables accurate response size estimation
+        let early_project = ctx.can_early_project();
+
         // Cancellation flag reference for cooperative timeout
         let cancel_flag = &ctx.cancel_flag;
 
@@ -1011,7 +1064,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                // Apply early projection if safe (reduces memory, enables accurate size check)
+                let doc = if early_project {
+                    ctx.apply_early_projection(doc)?
+                } else {
+                    doc
+                };
+
                 // Track response size if limit is set
+                // NOTE: With early projection, this checks the PROJECTED size (accurate)
+                // Without early projection, this checks the FULL document size
                 if let Some(max_bytes) = max_response_bytes {
                     let doc_size = crate::find_options::estimate_json_size(&doc);
                     if total_response_bytes.saturating_add(doc_size) > max_bytes {
@@ -1059,8 +1121,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             ctx.apply_post_sort_pagination(docs)
         };
 
-        // 4c. Apply projection
-        let docs = ctx.apply_projection_to_docs(docs)?;
+        // 4c. Apply projection (skip if already applied early)
+        let docs = if early_project {
+            // Projection already applied during loading
+            docs
+        } else {
+            ctx.apply_projection_to_docs(docs)?
+        };
 
         Ok(docs)
     }
