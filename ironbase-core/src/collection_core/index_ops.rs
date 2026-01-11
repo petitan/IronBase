@@ -253,7 +253,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         drop(indexes); // Release index lock before batch scanning
 
         // Insert entries in batches to avoid full materialization (memory-safe).
-        const INDEX_BUILD_BATCH_SIZE: usize = 1000; // Increased for better throughput
+        use crate::limits::INDEX_BUILD_BATCH_SIZE;
         const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
         let mut indexed_entries: usize = 0;
         let mut total_scanned: usize = 0;
@@ -448,7 +448,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         drop(indexes);
 
         // Insert index entries in batches to avoid full materialization.
-        const INDEX_BUILD_BATCH_SIZE: usize = 1000; // Increased for better throughput
+        use crate::limits::INDEX_BUILD_BATCH_SIZE;
         const PROGRESS_LOG_INTERVAL: usize = 10000; // Log every 10K docs
         let mut indexed_entries: usize = 0;
         let mut total_scanned: usize = 0;
@@ -632,7 +632,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         drop(indexes);
 
         // Insert index entries in batches - lowercase strings for CI.
-        const INDEX_BUILD_BATCH_SIZE: usize = 1000;
+        use crate::limits::INDEX_BUILD_BATCH_SIZE;
         const PROGRESS_LOG_INTERVAL: usize = 10000;
         let mut indexed_entries: usize = 0;
         let mut total_scanned: usize = 0;

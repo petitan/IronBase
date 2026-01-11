@@ -139,6 +139,9 @@ static NO_TIMEOUT_TOOLS: &[&str] = &[
     "index_create_fulltext",
     "index_create_fuzzy",
     "index_create_compound",
+    "db_compact",
+    "script_run",
+    "script_exec",
 ];
 
 /// Check if a tool should run without timeout

@@ -241,8 +241,8 @@ pub use self::cursor::FindCursor;
 // CONSTANTS
 // ============================================================================
 
-/// Default capacity for the LRU query cache
-const QUERY_CACHE_CAPACITY: usize = 1000;
+// Re-export from central limits module
+use crate::limits::QUERY_CACHE_CAPACITY;
 
 // OOM protection: try_reserve() fails fast on allocation pressure
 

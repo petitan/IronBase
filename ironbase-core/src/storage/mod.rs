@@ -108,8 +108,9 @@ pub struct RecoveredIndexChange {
 }
 
 pub const HEADER_SIZE: u64 = 256; // Fixed header size
-/// Maximum document size in bytes (safety limit)
-pub(crate) const MAX_DOCUMENT_SIZE_BYTES: usize = 64 * 1024 * 1024;
+
+// Re-export from central limits module
+pub(crate) use crate::limits::MAX_DOCUMENT_SIZE_BYTES;
 
 /// Database file header
 #[derive(Serialize, Deserialize, Debug, Clone)]

@@ -51,10 +51,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 
-/// Maximum allowed size for a single collection metadata entry.
-/// Protects against DoS via malicious files with corrupted length fields.
-/// 64 MB allows ~2-4 million documents per collection with ObjectId keys.
-const MAX_METADATA_SIZE: usize = 64 * 1024 * 1024;
+// Re-export from central limits module
+use crate::limits::MAX_METADATA_SIZE;
 
 impl StorageEngine {
     /// Load metadata from file (supports both legacy and dynamic formats)
