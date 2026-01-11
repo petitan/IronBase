@@ -133,13 +133,12 @@ impl RangeQueryResult {
 // Node page constants (for file-based persistence)
 // ============================================================================
 
-pub const NODE_PAGE_SIZE: usize = 16384; // 16KB pages - supports long keys
+// Re-export from central limits module
+use crate::limits::MAX_KEYS_PER_NODE;
+pub use crate::limits::NODE_PAGE_SIZE;
+
 const NODE_TYPE_INTERNAL: u8 = 0;
 const NODE_TYPE_LEAF: u8 = 1;
-
-/// Maximum keys per node before split is triggered
-/// With 16KB pages, we can handle more keys per node
-const MAX_KEYS_PER_NODE: usize = 128;
 
 /// B+ Tree Node types
 #[derive(Debug, Clone, Serialize, Deserialize)]

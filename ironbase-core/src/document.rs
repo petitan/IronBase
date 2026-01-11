@@ -254,8 +254,8 @@ impl Document {
         results: &mut Vec<&'a Value>,
         depth: usize,
     ) {
-        const MAX_DEPTH: usize = 100; // DoS protection
-        if depth > MAX_DEPTH {
+        use crate::limits::MAX_RECURSION_DEPTH;
+        if depth > MAX_RECURSION_DEPTH {
             return;
         }
 

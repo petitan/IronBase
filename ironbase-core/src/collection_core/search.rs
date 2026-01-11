@@ -53,7 +53,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Step 2 & 3: Scan documents IN BATCHES and populate index
         // This is memory-efficient for large collections
-        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        use crate::limits::FULLTEXT_INDEX_BUILD_BATCH_SIZE as INDEX_BUILD_BATCH_SIZE;
 
         let field_clone = field.clone();
         let index_name_clone = index_name.clone();
@@ -439,7 +439,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Step 2 & 3: Scan documents IN BATCHES and populate index
         // This is memory-efficient for large collections (e.g., 10GB+ email databases)
         // Each batch is processed and then dropped before loading the next batch
-        const INDEX_BUILD_BATCH_SIZE: usize = 100;
+        use crate::limits::FULLTEXT_INDEX_BUILD_BATCH_SIZE as INDEX_BUILD_BATCH_SIZE;
 
         let field_clone = field.clone();
         let index_name_clone = index_name.clone();

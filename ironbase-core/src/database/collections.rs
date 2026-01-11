@@ -236,9 +236,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     ) -> Result<u64> {
         use crate::{log_debug, log_warn};
 
-        // Batch size for memory-efficient rebuilding (same as INDEX_BUILD_BATCH_SIZE)
-        // Lower for fulltext/fuzzy (memory intensive), higher for B+ tree (fast)
-        const REBUILD_BATCH_SIZE: usize = 100;
+        // Batch size for memory-efficient rebuilding
+        // Uses smaller batch for safety during warm-up
+        use crate::limits::INDEX_REBUILD_BATCH_SIZE as REBUILD_BATCH_SIZE;
 
         let mut rebuilt_count = 0u64;
 

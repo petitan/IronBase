@@ -1010,8 +1010,11 @@ impl IronBaseAdapter {
         let coll = db.get_collection(collection)?;
         // Convert Vec<Value> to Value::Array
         let pipeline_value = Value::Array(pipeline.clone());
-        // Use centralized limits + cooperative deadline (if any)
-        let mut ctx = AggregationLimitContext::new(AggregationLimits::from_system_memory());
+        // Use high limits for admin operations (duplicate deletion etc.)
+        // from_system_memory() was too restrictive (~8K groups), use unlimited for scripts
+        let mut limits = AggregationLimits::from_system_memory();
+        limits.max_group_count = 100_000; // Allow up to 100K groups for admin tasks
+        let mut ctx = AggregationLimitContext::new(limits);
         if let Some(deadline) = execution::current_deadline() {
             ctx = ctx.with_deadline(deadline);
         }

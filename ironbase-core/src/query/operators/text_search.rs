@@ -17,8 +17,8 @@ use super::traits::OperatorMatcher;
 // REGEX WITH OPTIONS SUPPORT (Full regex crate implementation)
 // ============================================================================
 
-/// Maximum number of compiled regex patterns to cache (prevents memory bloat)
-const REGEX_CACHE_CAPACITY: usize = 100;
+// Re-export from central limits module
+use crate::limits::REGEX_CACHE_CAPACITY;
 
 lazy_static! {
     /// Global cache for compiled regex patterns

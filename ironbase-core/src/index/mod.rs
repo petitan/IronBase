@@ -77,9 +77,9 @@ pub use legacy::{Index, IndexDefinition, IndexType};
 pub use manager::IndexManager;
 pub use traits::{IndexTrait, LazyLoadable};
 
-// Constants for tests
+// Re-export from central limits module for tests
 #[cfg(test)]
-const MAX_KEYS_PER_NODE: usize = 128;
+use crate::limits::MAX_KEYS_PER_NODE;
 
 #[cfg(test)]
 mod tests {

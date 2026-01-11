@@ -38,6 +38,7 @@ pub mod error;
 pub mod execution;
 pub mod find_options;
 pub mod fulltext;
+pub mod limits;
 pub mod query;
 pub mod storage;
 pub mod transaction;

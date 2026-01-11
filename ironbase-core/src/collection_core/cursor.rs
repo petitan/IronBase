@@ -12,8 +12,8 @@ use crate::storage::{RawStorage, Storage, HEADER_SIZE};
 
 use super::CollectionCore;
 
-/// Default batch size for streaming cursor operations
-const DEFAULT_CURSOR_BATCH_SIZE: usize = 100;
+// Re-export from central limits module
+use crate::limits::DEFAULT_CURSOR_BATCH_SIZE;
 
 /// Iterator for streaming query results
 ///

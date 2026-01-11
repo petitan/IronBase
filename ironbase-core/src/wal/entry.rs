@@ -73,11 +73,8 @@ pub struct WALEntry {
     pub checksum: u32,
 }
 
-/// Header size: 8 (tx_id) + 1 (type) + 4 (len) = 13 bytes
-pub const WAL_HEADER_SIZE: usize = 13;
-
-/// Maximum WAL entry size: 64MB (security limit)
-pub const MAX_WAL_ENTRY_SIZE: usize = 64 * 1024 * 1024;
+// Re-export from central limits module
+pub use crate::limits::{MAX_WAL_ENTRY_SIZE, WAL_HEADER_SIZE};
 
 impl WALEntry {
     /// Create a new WAL entry with computed checksum
