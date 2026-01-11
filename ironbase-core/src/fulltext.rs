@@ -2033,7 +2033,6 @@ impl FulltextIndex {
     /// V1: Loads entire inverted_index into memory (backward compatible)
     /// V2: Loads only token_offsets table, lazy loads tokens on demand
     pub fn load_from_file(path: PathBuf) -> Result<Self> {
-        eprintln!("[STARTUP/FTS] Opening file {:?}...", path);
         let mut file = File::open(&path)?;
 
         // Read and validate header
@@ -2050,7 +2049,6 @@ impl FulltextIndex {
 
         file.read_exact(&mut buf4)?;
         let version = u32::from_le_bytes(buf4);
-        eprintln!("[STARTUP/FTS] File version: V{}", version);
 
         if version != FTIDX_VERSION_V1 && version != FTIDX_VERSION_V2 && version != FTIDX_VERSION_V3
         {
