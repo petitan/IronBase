@@ -234,7 +234,7 @@ impl IronBaseService {
         ) {
             Ok(result) => ToolResult::Success(result),
             Err(e) => ToolResult::Error {
-                code: -32000,
+                code: e.code.code(),
                 message: e.to_string(),
             },
         }
