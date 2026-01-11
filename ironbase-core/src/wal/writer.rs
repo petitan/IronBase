@@ -87,18 +87,60 @@ impl WriteAheadLog {
         use std::collections::HashMap;
         use std::io::BufReader;
 
+        eprintln!(
+            "[STARTUP/WAL/RECOVER] Starting WAL recovery from {:?}",
+            self.path
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
+        // Check WAL file size first
+        if let Ok(metadata) = std::fs::metadata(&self.path) {
+            eprintln!(
+                "[STARTUP/WAL/RECOVER] WAL file size: {} bytes ({:.2} MB)",
+                metadata.len(),
+                metadata.len() as f64 / 1_048_576.0
+            );
+            std::io::Write::flush(&mut std::io::stderr()).ok();
+        }
+
         // Reopen file for reading
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
         let iter = WALEntryIterator::new(reader)?;
 
+        eprintln!("[STARTUP/WAL/RECOVER] WALEntryIterator created, reading entries...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         // Group entries by transaction ID
         let mut txs: HashMap<TransactionId, Vec<WALEntry>> = HashMap::new();
+        let mut entry_count = 0usize;
+        let mut total_data_bytes = 0usize;
 
         for entry_result in iter {
             let entry = entry_result?;
+            total_data_bytes += entry.data.len();
             txs.entry(entry.transaction_id).or_default().push(entry);
+            entry_count += 1;
+
+            // Log progress every 10000 entries
+            if entry_count % 10000 == 0 {
+                eprintln!(
+                    "[STARTUP/WAL/RECOVER] Read {} entries, {} transactions, {:.2} MB data",
+                    entry_count,
+                    txs.len(),
+                    total_data_bytes as f64 / 1_048_576.0
+                );
+                std::io::Write::flush(&mut std::io::stderr()).ok();
+            }
         }
+
+        eprintln!(
+            "[STARTUP/WAL/RECOVER] Done reading: {} entries, {} transactions, {:.2} MB data",
+            entry_count,
+            txs.len(),
+            total_data_bytes as f64 / 1_048_576.0
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         // Filter to committed transactions only
         let mut committed = Vec::new();
@@ -111,6 +153,12 @@ impl WriteAheadLog {
             }
             // Else: uncommitted or aborted transaction, discard
         }
+
+        eprintln!(
+            "[STARTUP/WAL/RECOVER] Filtered to {} committed transactions",
+            committed.len()
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         Ok(committed)
     }

@@ -350,14 +350,29 @@ impl IronBaseAdapter {
     /// Create a new adapter with the given database path
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let db_path = path.as_ref().to_path_buf();
+        eprintln!("[STARTUP/ADAPTER] Opening database: {:?}", db_path);
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         let db = DatabaseCore::open(&db_path)?;
+
+        eprintln!("[STARTUP/ADAPTER] Database opened successfully");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         let adapter = Self {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
             collection_stats: CollectionStats::new(),
         };
+
+        eprintln!("[STARTUP/ADAPTER] Ensuring system collections...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
+
+        eprintln!("[STARTUP/ADAPTER] Adapter created successfully");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         Ok(adapter)
     }
 
@@ -491,6 +506,10 @@ impl IronBaseAdapter {
     /// Returns the number of collections warmed up and total time taken.
     pub fn warm_up(&self) -> (usize, std::time::Duration) {
         let start = std::time::Instant::now();
+
+        // DEBUG: immediate stderr output for OOM debugging
+        eprintln!("[STARTUP] warm_up() starting...");
+
         let db = self.db.read();
         // Get ALL collections including system ones for accurate counts
         let all_collections: Vec<String> = db.list_all_collections();
@@ -502,17 +521,21 @@ impl IronBaseAdapter {
         drop(db);
 
         let total = user_collections.len();
+        eprintln!("[STARTUP] Found {} user collections to warm up", total);
         tracing::info!("Starting warm-up for {} collections...", total);
 
         // Warm up user collections and count documents
         for (i, name) in user_collections.iter().enumerate() {
+            eprintln!("[STARTUP] [{}/{}] Opening collection '{}'...", i + 1, total, name);
             let coll_start = std::time::Instant::now();
             let db = self.db.read();
             match db.collection(name) {
                 Ok(coll) => {
+                    eprintln!("[STARTUP] [{}/{}] '{}' opened, counting docs...", i + 1, total, name);
                     // Initialize document count in memory (one-time cost at startup)
                     let count = coll.count_documents(&serde_json::json!({})).unwrap_or(0);
                     self.collection_stats.set(name, count);
+                    eprintln!("[STARTUP] [{}/{}] '{}' has {} docs", i + 1, total, name, count);
 
                     // Refresh index statistics for query planner optimization
                     // This computes distinct_count/null_count for all B+ tree indexes

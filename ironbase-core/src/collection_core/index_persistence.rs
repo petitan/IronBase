@@ -124,8 +124,26 @@ pub fn try_load_fulltext_index_from_file(
         return None;
     }
 
+    // DEBUG: Log file size before loading
+    if let Ok(meta) = std::fs::metadata(&ftidx_path) {
+        let size_mb = meta.len() as f64 / 1024.0 / 1024.0;
+        eprintln!(
+            "[STARTUP] Loading fulltext index '{}' from {:?} ({:.1} MB)...",
+            fts_meta.name, ftidx_path, size_mb
+        );
+    }
+
     match FulltextIndex::load_from_file(ftidx_path.clone()) {
-        Ok(index) => Some(index),
+        Ok(index) => {
+            eprintln!(
+                "[STARTUP] Fulltext index '{}' loaded: {} docs, {} tokens, lazy_mode={}",
+                fts_meta.name,
+                index.doc_count(),
+                index.token_count(),
+                index.is_lazy_mode()
+            );
+            Some(index)
+        }
         Err(e) => {
             eprintln!(
                 "[INFO] Fulltext index cache {:?} is stale or corrupted ({:?}), will rebuild from documents",
