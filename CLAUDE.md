@@ -508,6 +508,32 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 - `49f27a77` - update_one bulk load → streaming fix
 - `88f0a79c` - update_many bulk load → streaming fix
 - `e445b44e` - range_query + Top-K egységesítés
+- `2026-01-11` - **WAL unbounded growth** → Safe módban WAL soha nem ürült, 29GB-ra nőtt
+
+### WAL Unbounded Growth Bug (2026-01-11) - KRITIKUS FIX
+
+**Probléma:** Safe módban a WAL soha nem ürült ki hosszú futás alatt.
+
+**Root cause:**
+- `commit_transaction_internal()` ír WAL-ba és hívja `wal.flush()`-t (fsync)
+- DE `wal.clear()` csak `StorageEngine::flush()`-ban volt, ami csak close/drop-kor hívódott
+- Eredmény: 29GB WAL fájl, OOM startup-kor (`wal.recover()` mindent memóriába tölt)
+
+**Fix:** `commit_transaction_internal()` végén (Step 10) periodikus `wal.clear()` minden 100 commit után:
+```rust
+// storage/mod.rs:1299-1312
+if sync_file {
+    self.wal_ops_since_clear += 1;
+    if self.wal_ops_since_clear >= 100 {
+        self.wal.clear()?;
+        self.wal_ops_since_clear = 0;
+    }
+}
+```
+
+**Tünet:** MCP szerver OOM startup-kor, `[STARTUP/DB] StorageEngine opened, recovering WAL...` után crash.
+
+**Workaround (ha előfordul):** Töröld a .wal fájlt (backup mlite előtte!).
 
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.

@@ -331,10 +331,27 @@ impl DatabaseCore<StorageEngine> {
     /// ```
     pub fn open_with_durability<P: AsRef<Path>>(path: P, mode: DurabilityMode) -> Result<Self> {
         let path_str = path.as_ref().to_string_lossy().to_string();
+
+        eprintln!("[STARTUP/DB] Opening StorageEngine: {}", path_str);
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         let mut storage = StorageEngine::open(&path_str)?;
+
+        eprintln!("[STARTUP/DB] StorageEngine opened, recovering WAL...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         // Recover from WAL (includes both data and index changes)
         let (_wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
+
+        eprintln!(
+            "[STARTUP/DB] WAL recovered: {} entries, {} index changes",
+            _wal_entries.len(),
+            recovered_index_changes.len()
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
+        eprintln!("[STARTUP/DB] Flushing metadata if needed...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         // CRITICAL FIX: Flush metadata after WAL recovery to persist updated data_end_offset
         //
@@ -357,6 +374,9 @@ impl DatabaseCore<StorageEngine> {
         // The document_catalog is loaded from metadata by StorageEngine::open(),
         // and recover_from_wal() properly updates it for any recovered operations.
 
+        eprintln!("[STARTUP/DB] Creating DatabaseCore instance...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         // Create DatabaseCore instance with specified mode
         let db = DatabaseCore {
             storage: Arc::new(RwLock::new(storage)),
@@ -374,6 +394,12 @@ impl DatabaseCore<StorageEngine> {
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
         };
 
+        eprintln!(
+            "[STARTUP/DB] DatabaseCore created, applying {} recovered index changes...",
+            recovered_index_changes.len()
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         // Apply recovered index changes to collections
         // Group index changes by collection name
         let mut changes_by_collection: HashMap<String, Vec<crate::storage::RecoveredIndexChange>> =
@@ -387,8 +413,21 @@ impl DatabaseCore<StorageEngine> {
                 .push(change);
         }
 
+        eprintln!(
+            "[STARTUP/DB] Grouped into {} collections",
+            changes_by_collection.len()
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         // Apply changes to each collection's indexes
         for (collection_name, changes) in changes_by_collection {
+            eprintln!(
+                "[STARTUP/DB] Initializing collection '{}' ({} changes)...",
+                collection_name,
+                changes.len()
+            );
+            std::io::Write::flush(&mut std::io::stderr()).ok();
+
             // Get collection (creates if doesn't exist)
             if let Ok(collection) = db.collection(&collection_name) {
                 for change in changes {

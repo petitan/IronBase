@@ -472,11 +472,17 @@ impl StorageEngine {
         let path_str = path.as_ref().to_string_lossy().to_string();
         let exists = path.as_ref().exists();
 
+        eprintln!("[STARTUP/STORAGE] Opening: {}, exists={}", path_str, exists);
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         // Create separate lock file to allow other processes to READ the DB (hot backup)
         // On Windows, file locks are mandatory and block ALL access including reads
         // By locking a separate .lock file, we allow backup tools to read the DB file
         let lock_path = PathBuf::from(&path_str).with_extension("mlite.lock");
         let lock_file = Self::acquire_lock_with_stale_detection(&lock_path, &path_str)?;
+
+        eprintln!("[STARTUP/STORAGE] Lock acquired");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         let mut file = OpenOptions::new()
             .read(true)
@@ -488,10 +494,22 @@ impl StorageEngine {
         let wal_path = PathBuf::from(&path_str).with_extension("wal");
         let wal = WriteAheadLog::open(wal_path)?;
 
+        eprintln!("[STARTUP/STORAGE] WAL opened, loading metadata...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         let (header, collections, needs_rebuild) = if exists && file.metadata()?.len() > 0 {
             // Try to load existing database
             match Self::load_metadata(&mut file) {
-                Ok((h, c)) => (h, c, false),
+                Ok((h, c)) => {
+                    let total_docs: usize = c.values().map(|m| m.document_catalog.len()).sum();
+                    eprintln!(
+                        "[STARTUP/STORAGE] Metadata loaded: {} collections, {} total docs",
+                        c.len(),
+                        total_docs
+                    );
+                    std::io::Write::flush(&mut std::io::stderr()).ok();
+                    (h, c, false)
+                }
                 Err(e) => {
                     // Check if this is a recoverable corruption error
                     // Magic number corruption is NOT recoverable - file may not be a valid database
@@ -1281,6 +1299,21 @@ impl StorageEngine {
         // Step 9: Mark transaction as committed
         transaction.mark_committed()?;
 
+        // Step 10: Periodically clear WAL to prevent unbounded growth
+        // BUG FIX (2026-01-11): WAL was never cleared in Safe mode because
+        // StorageEngine::flush() is only called on close/drop, not during normal operation.
+        // This caused WAL to grow to 29GB+ in long-running servers.
+        //
+        // FIX: Clear WAL every 100 commits after metadata has been flushed.
+        // Since metadata is already persisted (Step 8), WAL entries are no longer needed.
+        if sync_file {
+            self.wal_ops_since_clear += 1;
+            if self.wal_ops_since_clear >= 100 {
+                self.wal.clear()?;
+                self.wal_ops_since_clear = 0;
+            }
+        }
+
         Ok(())
     }
 
@@ -1451,7 +1484,19 @@ impl StorageEngine {
     pub fn recover_from_wal(
         &mut self,
     ) -> Result<(Vec<Vec<crate::wal::WALEntry>>, Vec<RecoveredIndexChange>)> {
+        eprintln!("[STARTUP/WAL] recover_from_wal() starting...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
+        eprintln!("[STARTUP/WAL] Calling wal.recover()...");
+        std::io::Write::flush(&mut std::io::stderr()).ok();
+
         let recovered = self.wal.recover()?;
+
+        eprintln!(
+            "[STARTUP/WAL] wal.recover() done: {} transactions recovered",
+            recovered.len()
+        );
+        std::io::Write::flush(&mut std::io::stderr()).ok();
 
         if recovered.is_empty() {
             return Ok((vec![], vec![]));
