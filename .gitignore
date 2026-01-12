@@ -19,8 +19,10 @@ build/
 *.db
 *.mlite
 *.mlite.lock
+*.mlite.bak
 *.wal
 *.idx
+*.fzidx
 *.mlite.backup
 *.mlite.backup_fix
 
