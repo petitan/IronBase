@@ -700,13 +700,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                         }
 
                                         // PERSISTENCE FIX: Rebuild fulltext indexes from documents
-                                        // SKIP indexes that already have data (loaded from .ftidx file)
+                                        // FIX #25: Only skip documents already in the index, not the entire index
+                                        // This ensures documents inserted after last flush are indexed on restart
                                         for ft_meta in &persisted_fulltext_indexes {
                                             if let Some(ft_index) =
                                                 index_manager.get_fulltext_index_mut(&ft_meta.name)
                                             {
-                                                // Skip if index was loaded from file (has data)
-                                                if ft_index.doc_count() > 0 {
+                                                // Skip if this specific document is already indexed
+                                                // (loaded from .ftidx file)
+                                                if ft_index.contains_doc(&doc_id) {
                                                     continue;
                                                 }
                                                 // Extract field value using dot notation

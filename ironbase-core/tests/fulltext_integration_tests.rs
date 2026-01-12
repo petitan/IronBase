@@ -897,3 +897,201 @@ fn test_fulltext_index_rebuild_after_ftidx_deletion() {
         assert_eq!(results.len(), 1, "Python search should work after rebuild");
     }
 }
+
+// ============================================================================
+// ISSUE #25 REGRESSION TEST
+// ============================================================================
+
+/// Test for Issue #25: Fulltext indexes not auto-updating on document insert
+///
+/// BUG: Documents inserted after the fulltext index was flushed to disk were
+/// not being indexed on database restart. The rebuild loop was skipping the
+/// entire index if `doc_count() > 0`, meaning documents inserted after the
+/// last flush were lost.
+///
+/// FIX: Check each document individually with `contains_doc()` instead of
+/// skipping the entire index based on `doc_count()`.
+#[test]
+fn test_issue_25_fulltext_index_auto_update_on_restart() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test_issue25.mlite");
+
+    // Phase 1: Create database with fulltext index and some documents
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Insert 5 documents
+        for i in 1..=5 {
+            db.insert_one(
+                "articles",
+                doc! {
+                    "id" => i,
+                    "content" => format!("Document number {} about programming", i)
+                },
+            )
+            .unwrap();
+        }
+
+        let coll = db.collection("articles").unwrap();
+
+        // Create fulltext index (use "none" to avoid stemming issues)
+        coll.create_fulltext_index("content".to_string(), "none", None, None)
+            .unwrap();
+
+        // Verify all 5 documents are searchable
+        let results = coll
+            .fulltext_search("content", "about", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 5, "Phase 1: All 5 docs should be searchable");
+    }
+    // db dropped - fulltext index flushed to .ftidx file
+
+    // Phase 2: Reopen and insert MORE documents (these would be missing in buggy code)
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Insert 3 more documents AFTER the index was loaded from disk
+        for i in 6..=8 {
+            db.insert_one(
+                "articles",
+                doc! {
+                    "id" => i,
+                    "content" => format!("Document number {} about programming", i)
+                },
+            )
+            .unwrap();
+        }
+
+        let coll = db.collection("articles").unwrap();
+
+        // Verify all 8 documents are searchable (5 from disk + 3 new)
+        let results = coll
+            .fulltext_search("content", "about", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            8,
+            "Phase 2: All 8 docs should be searchable (5 loaded + 3 new)"
+        );
+    }
+    // db dropped - fulltext index flushed again (should have all 8 docs)
+
+    // Phase 3: Reopen and verify ALL documents are still searchable
+    // This is the critical test - in the buggy code, the 3 documents from Phase 2
+    // would NOT be indexed because the rebuild loop skipped the entire index
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        let coll = db.collection("articles").unwrap();
+
+        // Verify all 8 documents are searchable
+        let results = coll
+            .fulltext_search("content", "about", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            8,
+            "Phase 3: BUG #25 - All 8 docs should be searchable after restart"
+        );
+
+        // Also verify we can find specific content (Document with capital D)
+        let results = coll
+            .fulltext_search("content", "document", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            8,
+            "Phase 3: Should find 'document' in all 8 documents"
+        );
+    }
+}
+
+/// Test Issue #25 with documents inserted without graceful shutdown
+///
+/// Simulates the case where documents are inserted but the database crashes
+/// before fulltext index is flushed to disk. On restart, these documents
+/// should be re-indexed from the document catalog.
+#[test]
+fn test_issue_25_fulltext_index_without_flush() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("test_issue25_noflush.mlite");
+    let ftidx_path = temp_dir.path().join("articles_content_fts.ftidx");
+
+    // Phase 1: Create database with fulltext index
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Insert initial documents
+        for i in 1..=3 {
+            db.insert_one(
+                "articles",
+                doc! {
+                    "id" => i,
+                    "content" => format!("Initial document {} about science", i)
+                },
+            )
+            .unwrap();
+        }
+
+        let coll = db.collection("articles").unwrap();
+
+        // Create fulltext index (use "none" to avoid stemming issues)
+        coll.create_fulltext_index("content".to_string(), "none", None, None)
+            .unwrap();
+
+        // Verify search works
+        let results = coll
+            .fulltext_search("content", "about", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(results.len(), 3, "Phase 1: Initial 3 docs searchable");
+    }
+    // db dropped - .ftidx file created
+
+    // Phase 2: Reopen, insert docs, then DELETE the .ftidx file to simulate crash
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+
+        // Insert more documents
+        for i in 4..=6 {
+            db.insert_one(
+                "articles",
+                doc! {
+                    "id" => i,
+                    "content" => format!("New document {} about science", i)
+                },
+            )
+            .unwrap();
+        }
+
+        let coll = db.collection("articles").unwrap();
+
+        // Verify all 6 searchable during this session
+        let results = coll
+            .fulltext_search("content", "about", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            6,
+            "Phase 2: All 6 docs searchable in session"
+        );
+
+        // Simulate crash: delete .ftidx file before close
+        // (This simulates documents being persisted but fulltext index not flushed)
+        std::fs::remove_file(&ftidx_path).ok(); // May not exist yet if lazy
+    }
+
+    // Phase 3: Reopen - fulltext index should be rebuilt from ALL documents
+    {
+        let db = DatabaseCore::open(&db_path).unwrap();
+        let coll = db.collection("articles").unwrap();
+
+        // Verify all 6 documents are searchable after full rebuild
+        let results = coll
+            .fulltext_search("content", "about", Some(10), None, None, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            6,
+            "Phase 3: All 6 docs should be searchable after rebuild (no .ftidx)"
+        );
+    }
+}
