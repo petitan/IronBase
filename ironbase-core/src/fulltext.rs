@@ -1868,6 +1868,14 @@ impl FulltextIndex {
         self.doc_tokens_offsets.len()
     }
 
+    /// Check if a document is already indexed
+    ///
+    /// Returns true if the document ID exists in the index (either in memory or loaded from disk).
+    /// Used during startup rebuild to skip documents that are already indexed from .ftidx file.
+    pub fn contains_doc(&self, doc_id: &DocumentId) -> bool {
+        self.doc_tokens_offsets.contains_key(doc_id)
+    }
+
     /// Get number of unique tokens
     pub fn token_count(&self) -> usize {
         self.inverted_index.len()
@@ -2148,6 +2156,12 @@ impl FulltextIndex {
             let metadata_reader = BufReader::new(&file);
             let metadata: FulltextIndexMetadataForSave = serde_json::from_reader(metadata_reader)?;
 
+            // FIX #25: Set write_offset to END of file (after metadata), NOT offsets_offset!
+            // Previously, write_offset was set to offsets_offset, which caused flush()
+            // to overwrite existing token entries before they could be read for merging.
+            // Now we append new content at the end, preserving old data until merge completes.
+            let file_end = file.seek(SeekFrom::End(0))?;
+
             Ok(FulltextIndex {
                 name: metadata.name,
                 field: metadata.field,
@@ -2155,7 +2169,7 @@ impl FulltextIndex {
                 inverted_index: HashMap::new(), // V2/V3: empty, use lazy loading
                 storage_path: Some(path),
                 doc_tokens_offsets,
-                write_offset: offsets_offset,
+                write_offset: file_end, // FIX #25: Use end of file, not offsets_offset
                 file_handle: None,
                 doc_tokens_memory: HashMap::new(),
                 token_offsets,
