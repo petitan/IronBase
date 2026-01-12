@@ -1636,15 +1636,6 @@ impl BPlusTree {
             && !self.metadata.is_compound()
             && !self.metadata.multikey;
 
-        eprintln!(
-            "[STARTUP/STATS] refresh_stats for '{}': {} keys, compound={}, multikey={} -> histogram={}",
-            self.metadata.name,
-            total_keys,
-            self.metadata.is_compound(),
-            self.metadata.multikey,
-            build_histogram
-        );
-
         if build_histogram {
             // Large index: collect all values for histogram (O(n) memory)
             self.refresh_stats_with_histogram();
@@ -1693,27 +1684,13 @@ impl BPlusTree {
 
     /// Stats refresh with histogram building - O(n) memory
     fn refresh_stats_with_histogram(&mut self) {
-        eprintln!(
-            "[STARTUP/HISTOGRAM] Building histogram for index '{}' ({} keys)...",
-            self.metadata.name, self.metadata.num_keys
-        );
-
         let estimated_size = self.metadata.num_keys as usize;
-        let estimated_mb = (estimated_size * 100) / 1024 / 1024; // rough: 100 bytes per key
-        eprintln!(
-            "[STARTUP/HISTOGRAM] Pre-allocating Vec for {} keys (~{} MB estimated)...",
-            estimated_size, estimated_mb
-        );
 
         let mut all_keys: Vec<IndexKey> = Vec::new();
         let mut null_count: u64 = 0;
 
         // Try to pre-allocate, fall back to streaming if OOM
         if all_keys.try_reserve(estimated_size).is_err() {
-            eprintln!(
-                "[STARTUP/HISTOGRAM] WARNING: Cannot allocate {} keys, falling back to streaming stats",
-                estimated_size
-            );
             self.refresh_stats_streaming();
             return;
         }
@@ -1728,12 +1705,6 @@ impl BPlusTree {
                 }
             }
         });
-
-        eprintln!(
-            "[STARTUP/HISTOGRAM] Collected {} keys, {} nulls",
-            all_keys.len(),
-            null_count
-        );
 
         // Count distinct values (keys are already sorted in B+ tree leaves)
         let distinct_count = {
