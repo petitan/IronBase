@@ -21,7 +21,8 @@ pub struct FindParams {
     /// Collection name (required)
     pub collection: String,
     /// Query filter (optional, defaults to {})
-    #[serde(default = "empty_object")]
+    /// Accepts both "query" and "filter" for API consistency with update/delete tools
+    #[serde(default = "empty_object", alias = "filter")]
     pub query: Value,
     /// Fields to include/exclude
     pub projection: Option<Value>,
@@ -40,7 +41,8 @@ pub struct FindParams {
 #[derive(Debug, Deserialize)]
 pub struct FindOneParams {
     pub collection: String,
-    #[serde(default = "empty_object")]
+    /// Accepts both "query" and "filter" for API consistency
+    #[serde(default = "empty_object", alias = "filter")]
     pub query: Value,
     pub projection: Option<Value>,
 }
@@ -80,7 +82,8 @@ pub struct DeleteParams {
 #[derive(Debug, Deserialize)]
 pub struct CountParams {
     pub collection: String,
-    #[serde(default = "empty_object")]
+    /// Accepts both "query" and "filter" for API consistency
+    #[serde(default = "empty_object", alias = "filter")]
     pub query: Value,
 }
 
@@ -89,7 +92,8 @@ pub struct CountParams {
 pub struct DistinctParams {
     pub collection: String,
     pub field: String,
-    #[serde(default = "empty_object")]
+    /// Accepts both "query" and "filter" for API consistency
+    #[serde(default = "empty_object", alias = "filter")]
     pub query: Value,
     pub limit: Option<usize>,
 }
@@ -563,6 +567,40 @@ mod tests {
         let params = json!({"query": {}});
         let result = FindParams::parse(params);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_params_filter_alias() {
+        // Issue #26: "filter" should work as alias for "query"
+        let params = json!({
+            "collection": "emails",
+            "filter": {"from.email": "test@example.com"},
+            "limit": 10
+        });
+        let p: FindParams = FindParams::parse(params).unwrap();
+        assert_eq!(p.collection, "emails");
+        assert_eq!(p.query["from.email"], "test@example.com");
+        assert_eq!(p.limit, Some(10));
+    }
+
+    #[test]
+    fn test_find_one_params_filter_alias() {
+        let params = json!({
+            "collection": "users",
+            "filter": {"_id": 123}
+        });
+        let p: FindOneParams = FindOneParams::parse(params).unwrap();
+        assert_eq!(p.query["_id"], 123);
+    }
+
+    #[test]
+    fn test_count_params_filter_alias() {
+        let params = json!({
+            "collection": "orders",
+            "filter": {"status": "pending"}
+        });
+        let p: CountParams = CountParams::parse(params).unwrap();
+        assert_eq!(p.query["status"], "pending");
     }
 
     #[test]
