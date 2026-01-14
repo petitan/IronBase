@@ -9,10 +9,72 @@ use std::sync::Arc;
 
 use ironbase_core::{
     index::FuzzyAlgorithm, storage::MemoryStorage, CollectionCore, DatabaseCore, DocumentId,
-    DurabilityMode, StorageEngine,
+    DurabilityMode, IronBaseError, StorageEngine,
 };
 
 const DEFAULT_FIND_LIMIT: usize = 10_000;
+
+// ========== CUSTOM PYTHON EXCEPTIONS ==========
+// These allow Python code to catch specific error types:
+//   try:
+//       coll.find(...)
+//   except ironbase.CollectionNotFoundError:
+//       ...
+//   except ironbase.OutOfMemoryError:
+//       ...
+
+pyo3::create_exception!(ironbase, IronBaseException, pyo3::exceptions::PyException);
+pyo3::create_exception!(ironbase, CollectionNotFoundError, IronBaseException);
+pyo3::create_exception!(ironbase, CollectionExistsError, IronBaseException);
+pyo3::create_exception!(ironbase, DocumentNotFoundError, IronBaseException);
+pyo3::create_exception!(ironbase, InvalidQueryError, IronBaseException);
+pyo3::create_exception!(ironbase, CorruptionError, IronBaseException);
+pyo3::create_exception!(ironbase, IndexError, IronBaseException);
+pyo3::create_exception!(ironbase, AggregationError, IronBaseException);
+pyo3::create_exception!(ironbase, SchemaValidationError, IronBaseException);
+pyo3::create_exception!(ironbase, TransactionError, IronBaseException);
+pyo3::create_exception!(ironbase, DatabaseLockedError, IronBaseException);
+pyo3::create_exception!(ironbase, DatabaseClosedError, IronBaseException);
+pyo3::create_exception!(ironbase, OperationNotAllowedError, IronBaseException);
+pyo3::create_exception!(ironbase, OutOfMemoryError, IronBaseException);
+pyo3::create_exception!(ironbase, CancelledError, IronBaseException);
+pyo3::create_exception!(ironbase, TimeoutError, IronBaseException);
+pyo3::create_exception!(ironbase, SerializationError, IronBaseException);
+
+/// Convert IronBaseError to appropriate Python exception
+fn ironbase_error_to_pyerr(e: IronBaseError) -> PyErr {
+    match e {
+        IronBaseError::Io(ref _inner) => {
+            PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string())
+        }
+        IronBaseError::Serialization(_) => PyErr::new::<SerializationError, _>(e.to_string()),
+        IronBaseError::Deserialization(_) => PyErr::new::<SerializationError, _>(e.to_string()),
+        IronBaseError::CollectionNotFound(_) => {
+            PyErr::new::<CollectionNotFoundError, _>(e.to_string())
+        }
+        IronBaseError::CollectionExists(_) => PyErr::new::<CollectionExistsError, _>(e.to_string()),
+        IronBaseError::DocumentNotFound => PyErr::new::<DocumentNotFoundError, _>(e.to_string()),
+        IronBaseError::InvalidQuery(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
+        IronBaseError::Corruption(_) => PyErr::new::<CorruptionError, _>(e.to_string()),
+        IronBaseError::IndexError(_) => PyErr::new::<IndexError, _>(e.to_string()),
+        IronBaseError::AggregationError(_) => PyErr::new::<AggregationError, _>(e.to_string()),
+        IronBaseError::SchemaError(_) => PyErr::new::<SchemaValidationError, _>(e.to_string()),
+        IronBaseError::TransactionCommitted => PyErr::new::<TransactionError, _>(e.to_string()),
+        IronBaseError::TransactionAborted(_) => PyErr::new::<TransactionError, _>(e.to_string()),
+        IronBaseError::WALCorruption => PyErr::new::<CorruptionError, _>(e.to_string()),
+        IronBaseError::DatabaseLocked(_) => PyErr::new::<DatabaseLockedError, _>(e.to_string()),
+        IronBaseError::DatabaseClosed => PyErr::new::<DatabaseClosedError, _>(e.to_string()),
+        IronBaseError::OperationNotAllowed(_) => {
+            PyErr::new::<OperationNotAllowedError, _>(e.to_string())
+        }
+        IronBaseError::Unknown(_) => {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
+        }
+        IronBaseError::OutOfMemory(_) => PyErr::new::<OutOfMemoryError, _>(e.to_string()),
+        IronBaseError::Cancelled(_) => PyErr::new::<CancelledError, _>(e.to_string()),
+        IronBaseError::Timeout(_) => PyErr::new::<TimeoutError, _>(e.to_string()),
+    }
+}
 
 /// Database wrapper enum to support both file and memory storage
 #[derive(Clone)]
@@ -263,10 +325,6 @@ impl CollectionWrapper {
         coll_dispatch!(self, find_with_result, query, options)
     }
 
-    fn find_one(&self, query: &Value) -> Result<Option<Value>, ironbase_core::IronBaseError> {
-        coll_dispatch!(self, find_one, query)
-    }
-
     fn count_documents(&self, query: &Value) -> Result<u64, ironbase_core::IronBaseError> {
         coll_dispatch!(self, count_documents, query)
     }
@@ -384,6 +442,10 @@ impl CollectionWrapper {
     fn aggregate(&self, pipeline: &Value) -> Result<Vec<Value>, ironbase_core::IronBaseError> {
         coll_dispatch!(self, aggregate, pipeline)
     }
+
+    fn aggregate_auto(&self, pipeline: &Value) -> Result<Vec<Value>, ironbase_core::IronBaseError> {
+        coll_dispatch!(self, aggregate_auto, pipeline)
+    }
 }
 
 /// IronBase Database - Python wrapper
@@ -421,8 +483,8 @@ impl IronBase {
             }
         };
 
-        let db = DatabaseCore::open_with_durability(&path, mode)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        let db =
+            DatabaseCore::open_with_durability(&path, mode).map_err(ironbase_error_to_pyerr)?;
 
         Ok(IronBase {
             db: DatabaseWrapper::File(Arc::new(db)),
@@ -440,8 +502,7 @@ impl IronBase {
     ///     >>> coll.insert_one({"name": "Alice"})
     #[staticmethod]
     fn open_memory() -> PyResult<Self> {
-        let db = DatabaseCore::<MemoryStorage>::open_memory()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))?;
+        let db = DatabaseCore::<MemoryStorage>::open_memory().map_err(ironbase_error_to_pyerr)?;
 
         Ok(IronBase {
             db: DatabaseWrapper::Memory(Arc::new(db)),
@@ -450,10 +511,7 @@ impl IronBase {
 
     /// Get or create a collection
     fn collection(&self, name: String) -> PyResult<Collection> {
-        let coll_wrapper = self
-            .db
-            .collection(&name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let coll_wrapper = self.db.collection(&name).map_err(ironbase_error_to_pyerr)?;
 
         Ok(Collection {
             core: coll_wrapper,
@@ -481,14 +539,14 @@ impl IronBase {
 
         self.db
             .set_collection_schema(&name, schema_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Drop a collection
     fn drop_collection(&self, name: String) -> PyResult<()> {
         self.db
             .drop_collection(&name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Close the database: flush all changes and release the file lock.
@@ -496,22 +554,18 @@ impl IronBase {
     /// After calling close(), another process can open the same database file.
     /// The database instance should not be used after calling close().
     fn close(&self) -> PyResult<()> {
-        self.db
-            .close()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+        self.db.close().map_err(ironbase_error_to_pyerr)
     }
 
     /// Checkpoint - Clear WAL
     fn checkpoint(&self) -> PyResult<()> {
-        self.db
-            .checkpoint()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyIOError, _>(e.to_string()))
+        self.db.checkpoint().map_err(ironbase_error_to_pyerr)
     }
 
     /// Get database statistics
     fn stats(&self) -> PyResult<String> {
         serde_json::to_string_pretty(&self.db.stats())
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(|e| PyErr::new::<SerializationError, _>(e.to_string()))
     }
 
     /// Check if database is in-memory
@@ -542,10 +596,7 @@ impl IronBase {
 
     /// Storage compaction
     fn compact<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let stats = self
-            .db
-            .compact()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let stats = self.db.compact().map_err(ironbase_error_to_pyerr)?;
 
         let dict = PyDict::new(py);
         dict.set_item("size_before", stats.size_before)?;
@@ -582,14 +633,14 @@ impl IronBase {
     fn commit_transaction(&self, tx_id: u64) -> PyResult<()> {
         self.db
             .commit_transaction(tx_id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Rollback a transaction
     fn rollback_transaction(&self, tx_id: u64) -> PyResult<()> {
         self.db
             .rollback_transaction(tx_id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Insert one document within a transaction
@@ -610,7 +661,7 @@ impl IronBase {
         let inserted_id = self
             .db
             .insert_one_tx(&collection_name, doc_map, tx_id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -634,7 +685,7 @@ impl IronBase {
         let (matched_count, modified_count) = self
             .db
             .update_one_tx(&collection_name, &query_json, new_doc_json, tx_id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -656,7 +707,187 @@ impl IronBase {
         let deleted_count = self
             .db
             .delete_one_tx(&collection_name, &query_json, tx_id)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
+
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("deleted_count", deleted_count)?;
+        Ok(result)
+    }
+
+    /// Insert many documents within a transaction.
+    ///
+    /// All documents are inserted atomically - if any insert fails,
+    /// the entire transaction can be rolled back.
+    ///
+    /// Example:
+    ///     >>> tx_id = db.begin_transaction()
+    ///     >>> try:
+    ///     ...     result = db.insert_many_tx("users", [
+    ///     ...         {"name": "Alice", "age": 30},
+    ///     ...         {"name": "Bob", "age": 25}
+    ///     ...     ], tx_id)
+    ///     ...     db.commit_transaction(tx_id)
+    ///     ... except Exception:
+    ///     ...     db.rollback_transaction(tx_id)
+    ///     ...     raise
+    fn insert_many_tx<'py>(
+        &self,
+        py: Python<'py>,
+        collection_name: String,
+        documents: Bound<'_, PyList>,
+        tx_id: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let mut inserted_ids = Vec::with_capacity(documents.len());
+
+        for doc in documents.iter() {
+            let doc_dict = doc.downcast::<PyDict>()?;
+            let mut doc_map: HashMap<String, Value> = HashMap::new();
+
+            for (key, value) in doc_dict.iter() {
+                let key_str: String = key.extract()?;
+                let json_value = python_to_json(py, &value)?;
+                doc_map.insert(key_str, json_value);
+            }
+
+            let inserted_id = self
+                .db
+                .insert_one_tx(&collection_name, doc_map, tx_id)
+                .map_err(ironbase_error_to_pyerr)?;
+
+            inserted_ids.push(inserted_id);
+        }
+
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("inserted_count", inserted_ids.len())?;
+
+        let ids_list = PyList::empty(py);
+        for doc_id in inserted_ids {
+            let id_value = doc_id_to_py(py, &doc_id)?;
+            ids_list.append(id_value)?;
+        }
+        result.set_item("inserted_ids", ids_list)?;
+
+        Ok(result)
+    }
+
+    /// Update many documents within a transaction.
+    ///
+    /// Finds all documents matching the query and applies the update.
+    /// All updates happen atomically within the transaction.
+    ///
+    /// Note: This iterates through matching documents and updates each one.
+    /// For very large updates, consider batching or using non-transactional update_many.
+    ///
+    /// Example:
+    ///     >>> tx_id = db.begin_transaction()
+    ///     >>> try:
+    ///     ...     result = db.update_many_tx(
+    ///     ...         "users",
+    ///     ...         {"status": "pending"},
+    ///     ...         {"$set": {"status": "active"}},
+    ///     ...         tx_id
+    ///     ...     )
+    ///     ...     db.commit_transaction(tx_id)
+    ///     ... except Exception:
+    ///     ...     db.rollback_transaction(tx_id)
+    fn update_many_tx<'py>(
+        &self,
+        py: Python<'py>,
+        collection_name: String,
+        query: Bound<'_, PyDict>,
+        update: Bound<'_, PyDict>,
+        tx_id: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
+        let update_json = python_dict_to_json_value(py, &update)?;
+
+        // Get collection to find matching documents
+        let collection = self
+            .db
+            .collection(&collection_name)
+            .map_err(ironbase_error_to_pyerr)?;
+
+        // Find all matching document IDs first
+        let options = ironbase_core::FindOptions::new().with_limit(100_000);
+        let docs = collection
+            .find_with_options(&query_json, options)
+            .map_err(ironbase_error_to_pyerr)?;
+
+        let mut matched_count: u64 = 0;
+        let mut modified_count: u64 = 0;
+
+        // Update each document within the transaction
+        for doc in docs {
+            if let Some(id) = doc.get("_id") {
+                let doc_query = serde_json::json!({"_id": id});
+                let (m, mod_c) = self
+                    .db
+                    .update_one_tx(&collection_name, &doc_query, update_json.clone(), tx_id)
+                    .map_err(ironbase_error_to_pyerr)?;
+                matched_count += m;
+                modified_count += mod_c;
+            }
+        }
+
+        let result = PyDict::new(py);
+        result.set_item("acknowledged", true)?;
+        result.set_item("matched_count", matched_count)?;
+        result.set_item("modified_count", modified_count)?;
+        Ok(result)
+    }
+
+    /// Delete many documents within a transaction.
+    ///
+    /// Finds all documents matching the query and deletes them atomically.
+    ///
+    /// Example:
+    ///     >>> tx_id = db.begin_transaction()
+    ///     >>> try:
+    ///     ...     result = db.delete_many_tx("users", {"status": "inactive"}, tx_id)
+    ///     ...     print(f"Deleted {result['deleted_count']} users")
+    ///     ...     db.commit_transaction(tx_id)
+    ///     ... except Exception:
+    ///     ...     db.rollback_transaction(tx_id)
+    fn delete_many_tx<'py>(
+        &self,
+        py: Python<'py>,
+        collection_name: String,
+        query: Bound<'_, PyDict>,
+        tx_id: u64,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let query_json = python_dict_to_json_value(py, &query)?;
+
+        // Get collection to find matching documents
+        let collection = self
+            .db
+            .collection(&collection_name)
+            .map_err(ironbase_error_to_pyerr)?;
+
+        // Find all matching document IDs first (only need _id)
+        let mut options = ironbase_core::FindOptions::new().with_limit(100_000);
+        let mut projection = HashMap::new();
+        projection.insert("_id".to_string(), 1);
+        options.projection = Some(projection);
+
+        let docs = collection
+            .find_with_options(&query_json, options)
+            .map_err(ironbase_error_to_pyerr)?;
+
+        let mut deleted_count: u64 = 0;
+
+        // Delete each document within the transaction
+        for doc in docs {
+            if let Some(id) = doc.get("_id") {
+                let doc_query = serde_json::json!({"_id": id});
+                let count = self
+                    .db
+                    .delete_one_tx(&collection_name, &doc_query, tx_id)
+                    .map_err(ironbase_error_to_pyerr)?;
+                deleted_count += count;
+            }
+        }
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -684,15 +915,12 @@ impl Collection {
 
         self.core
             .set_schema(schema_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Get current JSON schema
     fn get_schema<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        let schema = self
-            .core
-            .get_schema()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let schema = self.core.get_schema().map_err(ironbase_error_to_pyerr)?;
         match schema {
             Some(v) => json_value_to_python(py, &v),
             None => Ok(py.None()),
@@ -716,7 +944,7 @@ impl Collection {
         let inserted_id = self
             .db
             .insert_one(&self.name, doc_map)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -748,7 +976,7 @@ impl Collection {
         let inserted_ids = self
             .db
             .insert_many(&self.name, docs)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result_dict = PyDict::new(py);
         result_dict.set_item("acknowledged", true)?;
@@ -764,7 +992,30 @@ impl Collection {
         Ok(result_dict)
     }
 
-    /// Find documents with options (default limit: 10,000 if not provided)
+    /// Find documents with options.
+    ///
+    /// **IMPORTANT:** Default limit is 10,000 documents if not specified.
+    /// To fetch more, explicitly set limit (e.g., limit=100000).
+    /// For unlimited results, use find_cursor() for streaming.
+    ///
+    /// Args:
+    ///     query: Filter criteria (default: {} = all documents)
+    ///     projection: Fields to include/exclude (e.g., {"name": 1, "_id": 0})
+    ///     sort: Sort order as list of tuples (e.g., [("age", -1)] for descending)
+    ///     limit: Maximum documents to return (default: 10,000)
+    ///     skip: Number of documents to skip (for pagination)
+    ///
+    /// Returns:
+    ///     List of document dicts
+    ///
+    /// Example:
+    ///     >>> # Get 100 active users, sorted by age, only name and age fields
+    ///     >>> users = coll.find(
+    ///     ...     {"status": "active"},
+    ///     ...     projection={"name": 1, "age": 1},
+    ///     ...     sort=[("age", -1)],
+    ///     ...     limit=100
+    ///     ... )
     #[pyo3(signature = (query=None, projection=None, sort=None, limit=None, skip=None))]
     fn find<'py>(
         &self,
@@ -817,7 +1068,7 @@ impl Collection {
         let results = self
             .core
             .find_with_options(&query_json, options)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_list = PyList::empty(py);
         for doc in results {
@@ -887,7 +1138,7 @@ impl Collection {
         let result = self
             .core
             .find_with_result(&query_json, options)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_dict = PyDict::new(py);
 
@@ -905,23 +1156,73 @@ impl Collection {
         Ok(py_dict)
     }
 
-    /// Find one document
+    /// Find one document with optional projection and sort.
+    ///
+    /// Args:
+    ///     query: Filter criteria (default: {})
+    ///     projection: Fields to include/exclude (e.g., {"name": 1, "_id": 0})
+    ///     sort: Sort order as list of tuples (e.g., [("age", -1)])
+    ///
+    /// Returns:
+    ///     Document dict or None if not found
+    ///
+    /// Example:
+    ///     >>> # Get newest user named Alice, only return name and age
+    ///     >>> coll.find_one(
+    ///     ...     {"name": "Alice"},
+    ///     ...     projection={"name": 1, "age": 1, "_id": 0},
+    ///     ...     sort=[("created_at", -1)]
+    ///     ... )
+    #[pyo3(signature = (query=None, projection=None, sort=None))]
     fn find_one<'py>(
         &self,
         py: Python<'py>,
         query: Option<Bound<'_, PyDict>>,
+        projection: Option<Bound<'_, PyDict>>,
+        sort: Option<Bound<'_, PyList>>,
     ) -> PyResult<PyObject> {
+        use ironbase_core::find_options::FindOptions;
+
         let query_json = match query {
             Some(q) => python_dict_to_json_value(py, &q)?,
             None => serde_json::json!({}),
         };
 
-        let result = self
-            .core
-            .find_one(&query_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+        let mut options = FindOptions::new().with_limit(1);
 
-        match result {
+        if let Some(proj) = projection {
+            let mut projection_map = HashMap::new();
+            for (key, value) in proj.iter() {
+                let field: String = key.extract()?;
+                let action: i32 = value.extract()?;
+                if action != 0 && action != 1 {
+                    return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {}",
+                        field, action
+                    )));
+                }
+                projection_map.insert(field, action);
+            }
+            options.projection = Some(projection_map);
+        }
+
+        if let Some(sort_list) = sort {
+            let mut sort_vec = Vec::new();
+            for item in sort_list.iter() {
+                let tuple = item.downcast::<PyTuple>()?;
+                let field: String = tuple.get_item(0)?.extract()?;
+                let direction: i32 = tuple.get_item(1)?.extract()?;
+                sort_vec.push((field, direction));
+            }
+            options.sort = Some(sort_vec);
+        }
+
+        let results = self
+            .core
+            .find_with_options(&query_json, options)
+            .map_err(ironbase_error_to_pyerr)?;
+
+        match results.into_iter().next() {
             Some(doc) => {
                 let py_dict = json_to_python_dict(py, &doc)?;
                 Ok(py_dict.into_any().unbind())
@@ -939,7 +1240,7 @@ impl Collection {
 
         self.core
             .count_documents(&query_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Distinct values
@@ -957,7 +1258,7 @@ impl Collection {
         let distinct_values = self
             .core
             .distinct(field, &query_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_list = PyList::empty(py);
         for value in distinct_values {
@@ -980,7 +1281,7 @@ impl Collection {
         let (matched_count, modified_count) = self
             .db
             .update_one(&self.name, &query_json, &update_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -1002,7 +1303,7 @@ impl Collection {
         let (matched_count, modified_count) = self
             .db
             .update_many(&self.name, &query_json, &update_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -1022,7 +1323,7 @@ impl Collection {
         let deleted_count = self
             .db
             .delete_one(&self.name, &query_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -1041,7 +1342,7 @@ impl Collection {
         let deleted_count = self
             .db
             .delete_many(&self.name, &query_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
@@ -1059,7 +1360,7 @@ impl Collection {
     fn create_index(&self, field: String, unique: bool, sparse: bool) -> PyResult<String> {
         self.core
             .create_index(field, unique, sparse)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Create a compound index
@@ -1083,21 +1384,19 @@ impl Collection {
 
         self.core
             .create_compound_index(fields, unique, sparse)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Drop an index
     fn drop_index(&self, index_name: String) -> PyResult<()> {
         self.core
             .drop_index(&index_name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// List all indexes
     fn list_indexes(&self) -> PyResult<Vec<String>> {
-        self.core
-            .list_indexes()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+        self.core.list_indexes().map_err(ironbase_error_to_pyerr)
     }
 
     // ========== FUZZY SEARCH ==========
@@ -1135,7 +1434,7 @@ impl Collection {
 
         self.core
             .create_fuzzy_index(field, algo, threshold)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Search for documents using fuzzy text matching.
@@ -1182,7 +1481,7 @@ impl Collection {
         let results = self
             .core
             .fuzzy_search(&field, &query, threshold, algo)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_list = PyList::empty(py);
         for (doc, score) in results {
@@ -1222,7 +1521,7 @@ impl Collection {
     ) -> PyResult<String> {
         self.core
             .create_fulltext_index(field, language, min_word_length, accent_folding)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
+            .map_err(ironbase_error_to_pyerr)
     }
 
     /// Search documents using full-text search with TF-IDF scoring.
@@ -1260,6 +1559,12 @@ impl Collection {
                 for (key, value) in dict.iter() {
                     let k: String = key.extract()?;
                     let v: i32 = value.extract()?;
+                    if v != 0 && v != 1 {
+                        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            k, v
+                        )));
+                    }
                     map.insert(k, v);
                 }
                 Some(map)
@@ -1270,7 +1575,7 @@ impl Collection {
         let results = self
             .core
             .fulltext_search(&field, &query, limit, skip, min_score, proj_map)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_list = PyList::empty(py);
         for (doc, score, tokens) in results {
@@ -1298,7 +1603,7 @@ impl Collection {
         let indexes = self
             .core
             .list_fulltext_indexes()
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_list = PyList::empty(py);
         for idx in indexes {
@@ -1327,7 +1632,7 @@ impl Collection {
         let plan = self
             .core
             .explain(&query_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         json_to_python_dict(py, &plan)
     }
@@ -1344,7 +1649,7 @@ impl Collection {
         let results = self
             .core
             .find_with_hint(&query_json, &hint)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_list = PyList::empty(py);
         for doc in results {
@@ -1373,7 +1678,59 @@ impl Collection {
         let results = self
             .core
             .aggregate(&pipeline_json)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
+
+        let py_list = PyList::empty(py);
+        for doc in results {
+            let py_dict = json_to_python_dict(py, &doc)?;
+            py_list.append(py_dict)?;
+        }
+
+        Ok(py_list)
+    }
+
+    /// Execute aggregation pipeline with automatic memory-safe limits.
+    ///
+    /// This method automatically scales memory limits based on available system RAM.
+    /// Use this instead of aggregate() for large datasets to prevent OOM errors.
+    ///
+    /// Memory scaling (approximate):
+    ///   - < 512 MB RAM: 64 MB limit, 10K docs, 5K groups
+    ///   - 512 MB - 2 GB: 128 MB limit, 50K docs, 25K groups
+    ///   - 2 GB - 8 GB: 256 MB limit, 100K docs, 50K groups
+    ///   - 8 GB - 32 GB: 512 MB limit, 250K docs, 100K groups
+    ///   - > 32 GB: 1024 MB limit, 500K docs, 250K groups
+    ///
+    /// Example:
+    ///     >>> # Safe aggregation that won't OOM
+    ///     >>> results = coll.aggregate_auto([
+    ///     ...     {"$match": {"status": "active"}},
+    ///     ...     {"$group": {"_id": "$category", "count": {"$sum": 1}}},
+    ///     ...     {"$sort": {"count": -1}},
+    ///     ...     {"$limit": 100}
+    ///     ... ])
+    ///
+    /// Raises:
+    ///     OutOfMemoryError: If aggregation exceeds memory limits
+    ///     AggregationError: If pipeline is invalid
+    fn aggregate_auto<'py>(
+        &self,
+        py: Python<'py>,
+        pipeline: Bound<'_, PyList>,
+    ) -> PyResult<Bound<'py, PyList>> {
+        let mut stages = Vec::new();
+        for stage in pipeline.iter() {
+            let stage_dict = stage.downcast::<PyDict>()?;
+            let stage_json = python_dict_to_json_value(py, stage_dict)?;
+            stages.push(stage_json);
+        }
+
+        let pipeline_json = serde_json::Value::Array(stages);
+
+        let results = self
+            .core
+            .aggregate_auto(&pipeline_json)
+            .map_err(ironbase_error_to_pyerr)?;
 
         let py_list = PyList::empty(py);
         for doc in results {
@@ -1453,7 +1810,7 @@ impl Cursor {
         let collection = self
             .db
             .collection(&self.collection_name)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         let options = ironbase_core::FindOptions::new()
             .with_skip(self.position)
@@ -1461,7 +1818,7 @@ impl Cursor {
 
         let results = collection
             .find_with_options(&self.query, options)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))?;
+            .map_err(ironbase_error_to_pyerr)?;
 
         // If we got fewer results than batch_size, we've exhausted the data
         if results.len() < self.batch_size {
@@ -1559,6 +1916,39 @@ impl Cursor {
     /// Check if cursor is exhausted
     fn is_finished(&self) -> bool {
         self.exhausted && self.batch_position >= self.current_batch.len()
+    }
+
+    /// Get total count of documents matching the query.
+    ///
+    /// Note: This runs a separate count query against the database.
+    /// The count is for the original query, not remaining documents.
+    ///
+    /// Example:
+    ///     >>> cursor = coll.find_cursor({"status": "active"})
+    ///     >>> total = cursor.count()  # Total matching documents
+    ///     >>> for doc in cursor:
+    ///     ...     print(f"Processing {cursor.position()} of {total}")
+    fn count(&self) -> PyResult<u64> {
+        let collection = self
+            .db
+            .collection(&self.collection_name)
+            .map_err(ironbase_error_to_pyerr)?;
+
+        collection
+            .count_documents(&self.query)
+            .map_err(ironbase_error_to_pyerr)
+    }
+
+    /// Check if cursor has more documents (for bool() conversion).
+    ///
+    /// Returns True if there are more documents to iterate.
+    ///
+    /// Example:
+    ///     >>> cursor = coll.find_cursor({"status": "active"})
+    ///     >>> if cursor:
+    ///     ...     print("Has documents")
+    fn __bool__(&self) -> bool {
+        !self.is_finished()
     }
 
     /// Reset cursor to beginning
@@ -1665,6 +2055,17 @@ fn python_to_json(py: Python<'_>, value: &Bound<'_, pyo3::PyAny>) -> PyResult<Va
     } else if let Ok(i) = value.extract::<i64>() {
         Ok(Value::Number(i.into()))
     } else if let Ok(f) = value.extract::<f64>() {
+        // JSON does not support NaN or Infinity - raise error instead of silent conversion
+        if f.is_nan() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot convert NaN to JSON. Use None/null instead.",
+            ));
+        }
+        if f.is_infinite() {
+            return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                "Cannot convert Infinity to JSON. Use None/null or a large number instead.",
+            ));
+        }
         Ok(serde_json::Number::from_f64(f)
             .map(Value::Number)
             .unwrap_or(Value::Null))
@@ -1750,8 +2151,53 @@ fn json_value_to_python(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
 /// Python module initialization
 #[pymodule]
 fn ironbase(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Classes
     m.add_class::<IronBase>()?;
     m.add_class::<Collection>()?;
     m.add_class::<Cursor>()?;
+
+    // Exceptions - allows: except ironbase.CollectionNotFoundError
+    m.add("IronBaseException", m.py().get_type::<IronBaseException>())?;
+    m.add(
+        "CollectionNotFoundError",
+        m.py().get_type::<CollectionNotFoundError>(),
+    )?;
+    m.add(
+        "CollectionExistsError",
+        m.py().get_type::<CollectionExistsError>(),
+    )?;
+    m.add(
+        "DocumentNotFoundError",
+        m.py().get_type::<DocumentNotFoundError>(),
+    )?;
+    m.add("InvalidQueryError", m.py().get_type::<InvalidQueryError>())?;
+    m.add("CorruptionError", m.py().get_type::<CorruptionError>())?;
+    m.add("IndexError", m.py().get_type::<IndexError>())?;
+    m.add("AggregationError", m.py().get_type::<AggregationError>())?;
+    m.add(
+        "SchemaValidationError",
+        m.py().get_type::<SchemaValidationError>(),
+    )?;
+    m.add("TransactionError", m.py().get_type::<TransactionError>())?;
+    m.add(
+        "DatabaseLockedError",
+        m.py().get_type::<DatabaseLockedError>(),
+    )?;
+    m.add(
+        "DatabaseClosedError",
+        m.py().get_type::<DatabaseClosedError>(),
+    )?;
+    m.add(
+        "OperationNotAllowedError",
+        m.py().get_type::<OperationNotAllowedError>(),
+    )?;
+    m.add("OutOfMemoryError", m.py().get_type::<OutOfMemoryError>())?;
+    m.add("CancelledError", m.py().get_type::<CancelledError>())?;
+    m.add("TimeoutError", m.py().get_type::<TimeoutError>())?;
+    m.add(
+        "SerializationError",
+        m.py().get_type::<SerializationError>(),
+    )?;
+
     Ok(())
 }
