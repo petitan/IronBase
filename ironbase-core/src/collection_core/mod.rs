@@ -1593,7 +1593,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         return self.adjust_count_for_tombstones(total_count);
                     }
                 }
-                _ => {}
+                QueryPlan::SparseIndexScan { ref index_name, .. } => {
+                    // Sparse index: all entries represent docs where field exists
+                    // Simply count all entries in the index - O(1) operation
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let raw_count = index.metadata.num_keys as usize;
+                        drop(indexes);
+                        return self.adjust_count_for_tombstones(raw_count);
+                    }
+                }
             }
 
             drop(indexes);

@@ -9,7 +9,7 @@ use crate::index::{IndexKey, IndexManager, IndexMetadata, IndexStats};
 use crate::query::Query;
 use crate::query_planner::QueryPlanner;
 use crate::storage::{RawStorage, Storage};
-use crate::value_utils::{get_all_nested_values, path_crosses_array};
+use crate::value_utils::{get_all_nested_values, get_nested_value, path_crosses_array};
 
 use super::index_persistence::persist_index_to_disk;
 use super::{CollectionCore, QueryExecutionContext};
@@ -276,10 +276,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 // Replicate extract_keys logic inline to avoid holding index lock
                 let mut field_values: Vec<Vec<IndexKey>> = Vec::with_capacity(fields_clone.len());
                 let mut missing_field = false;
+                let mut all_fields_exist = true;
                 for field in &fields_clone {
                     let values = get_all_nested_values(&doc, field);
                     if values.is_empty() {
-                        missing_field = true;
+                        // Check if field actually exists (empty array vs truly missing)
+                        // Empty arrays should be indexed (field exists), missing fields should not
+                        let field_exists = get_nested_value(&doc, field).is_some();
+                        if !field_exists {
+                            missing_field = true;
+                            all_fields_exist = false;
+                        }
                         field_values.push(vec![IndexKey::Null]);
                     } else {
                         field_values.push(values.into_iter().map(IndexKey::from).collect());
@@ -310,7 +317,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         continue;
                     }
                     let is_null = IndexManager::is_key_all_null(&index_key);
-                    let should_index = !is_null || (unique && !sparse);
+                    // For sparse index with all fields existing (even empty arrays), always index
+                    let should_index =
+                        (sparse && all_fields_exist) || !is_null || (unique && !sparse);
                     if should_index {
                         index.insert(index_key, doc_id.clone())?;
                         indexed_entries += 1;
@@ -466,13 +475,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
                 let values = get_all_nested_values(&doc, &field_clone);
                 if values.is_empty() {
-                    if sparse {
+                    // Check if field actually exists (empty array vs truly missing)
+                    // Sparse index: skip only if field is truly missing, not for empty arrays
+                    let field_exists = get_nested_value(&doc, &field_clone).is_some();
+                    if sparse && !field_exists {
                         total_scanned += 1;
                         continue;
                     }
                     let index_key = IndexKey::Null;
-                    let should_index =
-                        !IndexManager::is_key_all_null(&index_key) || (unique && !sparse);
+                    // For sparse index with existing field (empty array), always index
+                    // For non-sparse: index null only if unique (to enforce uniqueness)
+                    let should_index = (sparse && field_exists)
+                        || !IndexManager::is_key_all_null(&index_key)
+                        || (unique && !sparse);
                     if should_index {
                         index.insert(index_key, doc_id.clone())?;
                         indexed_entries += 1;
