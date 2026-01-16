@@ -399,8 +399,18 @@ async fn run_http_server_internal(
         .map(|v| v.to_lowercase().contains("debug"))
         .unwrap_or(false);
 
-    // Create logs directory if it doesn't exist
-    let log_dir = std::path::Path::new("./logs");
+    // Create logs directory - use IRONBASE_LOG_DIR or fallback to DB path's parent/logs
+    let log_dir_path = std::env::var("IRONBASE_LOG_DIR").unwrap_or_else(|_| {
+        // Try to use database path's parent directory
+        if let Ok(db_path) = std::env::var("IRONBASE_PATH") {
+            if let Some(parent) = std::path::Path::new(&db_path).parent() {
+                return parent.join("logs").to_string_lossy().to_string();
+            }
+        }
+        // Final fallback to current directory
+        "./logs".to_string()
+    });
+    let log_dir = std::path::Path::new(&log_dir_path);
     if !log_dir.exists() {
         if let Err(e) = std::fs::create_dir_all(log_dir) {
             eprintln!("Warning: Failed to create log directory: {}", e);
@@ -418,7 +428,7 @@ async fn run_http_server_internal(
     if sync_logging {
         // Sync logging: fsync after every write (slow but crash-safe)
         let today = chrono::Local::now().format("%Y-%m-%d");
-        let log_path = format!("./logs/mcp-server.{}.log", today);
+        let log_path = format!("{}/mcp-server.{}.log", log_dir_path, today);
 
         let sync_writer = match SyncFileWriter::new(&log_path) {
             Ok(w) => w,
@@ -452,7 +462,7 @@ async fn run_http_server_internal(
         );
     } else {
         // Normal async logging (fast but may lose last logs on crash)
-        let file_appender = tracing_appender::rolling::daily("./logs", "mcp-server.log");
+        let file_appender = tracing_appender::rolling::daily(&log_dir_path, "mcp-server.log");
         let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
 
         let _ = tracing_subscriber::registry()
@@ -1190,9 +1200,17 @@ fn handle_request(
                     if is_notification {
                         return None;
                     }
-                    // Use JSON-RPC error for ALL tool errors to preserve error code
-                    // This allows clients to programmatically handle different error types
-                    Some(create_error_response(code, &message, request.id.clone()))
+                    // MCP spec: Tool errors MUST be returned as success with isError: true
+                    // JSON-RPC errors are only for protocol-level errors (parse, method not found, etc.)
+                    // See: https://modelcontextprotocol.io/specification/2025-06-18/schema
+                    let response = serde_json::json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("[Error {}] {}", code, message)
+                        }],
+                        "isError": true
+                    });
+                    Some(create_success_response(response, request.id.clone()))
                 }
                 crate::ToolResult::AccessDenied(msg) => {
                     if is_notification {

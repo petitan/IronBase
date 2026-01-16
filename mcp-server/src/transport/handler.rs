@@ -9,7 +9,7 @@ use crate::transport::{
 };
 use crate::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list,
-    get_tools_list_filtered, read_resource, IronBaseAdapter, McpError, VERSION,
+    get_tools_list_filtered, read_resource, IronBaseAdapter, VERSION,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -191,7 +191,17 @@ impl HandlerContext {
                 if is_notification {
                     return None;
                 }
-                Some(create_tool_error_response(e, request.id.clone()))
+                // MCP spec: Tool errors MUST be returned as success with isError: true
+                // JSON-RPC errors are only for protocol-level errors (parse, method not found, etc.)
+                // See: https://modelcontextprotocol.io/specification/2025-06-18/schema
+                let response = json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("[Error {}] {}", e.code.code(), e)
+                    }],
+                    "isError": true
+                });
+                Some(McpResponse::success(response, request.id.clone()))
             }
         }
     }
@@ -282,14 +292,6 @@ impl HandlerContext {
             )),
         }
     }
-}
-
-/// Create a tool error response, wrapping the error appropriately
-fn create_tool_error_response(err: McpError, id: Option<serde_json::Value>) -> McpResponse {
-    let message = err.to_string();
-    // Use JSON-RPC error for ALL errors to preserve error code
-    // This allows clients to programmatically handle different error types
-    McpResponse::error(err.code.code(), &message, id)
 }
 
 #[cfg(test)]

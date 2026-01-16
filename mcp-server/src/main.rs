@@ -22,8 +22,7 @@ use std::sync::Arc;
 
 use mcp_ironbase::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list,
-    get_tools_list_filtered, http_server, read_resource, service, IronBaseAdapter, McpError,
-    VERSION,
+    get_tools_list_filtered, http_server, read_resource, service, IronBaseAdapter, VERSION,
 };
 
 // ============================================================
@@ -515,7 +514,17 @@ fn handle_request(
                     if is_notification {
                         return None;
                     }
-                    Some(create_tool_error_response(e, request.id.clone()))
+                    // MCP spec: Tool errors MUST be returned as success with isError: true
+                    // JSON-RPC errors are only for protocol-level errors (parse, method not found, etc.)
+                    // See: https://modelcontextprotocol.io/specification/2025-06-18/schema
+                    let response = serde_json::json!({
+                        "content": [{
+                            "type": "text",
+                            "text": format!("[Error {}] {}", e.code.code(), e)
+                        }],
+                        "isError": true
+                    });
+                    Some(create_success_response(response, request.id.clone()))
                 }
             }
         }
@@ -635,13 +644,6 @@ fn create_error_response(code: i32, message: &str, id: Option<serde_json::Value>
             data: None,
         },
     }
-}
-
-fn create_tool_error_response(err: McpError, id: Option<serde_json::Value>) -> McpResponse {
-    let message = err.to_string();
-    // Use JSON-RPC error for ALL errors to preserve error code
-    // This allows clients to programmatically handle different error types
-    create_error_response(err.code.code(), &message, id)
 }
 
 // ============================================================
