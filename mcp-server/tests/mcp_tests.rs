@@ -2103,3 +2103,212 @@ fn test_script_run_missing_name() {
     let result = dispatch_tool("script_run", json!({}), &adapter, None, None, None, None);
     assert!(result.is_err());
 }
+
+// ============================================================
+// Deduplication Script Tests
+// ============================================================
+
+#[test]
+fn test_dedup_script_removes_duplicates() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Insert documents with duplicate message_ids
+    let docs = vec![
+        json!({"message_id": "msg001@test.com", "subject": "First"}),
+        json!({"message_id": "msg001@test.com", "subject": "Second (dup)"}),
+        json!({"message_id": "msg001@test.com", "subject": "Third (dup)"}),
+        json!({"message_id": "msg002@test.com", "subject": "Unique"}),
+        json!({"message_id": "msg003@test.com", "subject": "Another"}),
+        json!({"message_id": "msg003@test.com", "subject": "Another (dup)"}),
+    ];
+
+    for doc in docs {
+        dispatch_tool(
+            "insert_one",
+            json!({"collection": "emails", "document": doc}),
+            &adapter,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    // Verify we have 6 documents
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "emails", "filter": {}}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(count_result["count"], 6);
+
+    // Run dedup script for msg001
+    let dedup_script = r#"
+let mid = params.message_id;
+let result = db_find("emails", #{"message_id": mid}, #{"sort": #{"_id": 1}, "limit": 100});
+let docs = result.documents;
+let deleted = 0;
+if docs.len() > 1 {
+    for i in 1..docs.len() {
+        db_delete_one("emails", #{"_id": docs[i]["_id"]});
+        deleted += 1;
+    }
+}
+#{"found": docs.len(), "deleted": deleted}
+"#;
+
+    let result = dispatch_tool(
+        "script_exec",
+        json!({
+            "code": dedup_script,
+            "params": {"message_id": "msg001@test.com"}
+        }),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result["success"], true);
+    assert_eq!(result["result"]["found"], 3);
+    assert_eq!(result["result"]["deleted"], 2);
+
+    // Run dedup script for msg003
+    let result = dispatch_tool(
+        "script_exec",
+        json!({
+            "code": dedup_script,
+            "params": {"message_id": "msg003@test.com"}
+        }),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result["result"]["found"], 2);
+    assert_eq!(result["result"]["deleted"], 1);
+
+    // Verify we now have 3 documents (was 6, deleted 3: 2 from msg001, 1 from msg003)
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "emails", "filter": {}}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(count_result["count"], 3);
+
+    // Verify msg001 now has exactly 1 document
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "emails", "filter": {"message_id": "msg001@test.com"}}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(count_result["count"], 1);
+
+    // Verify the remaining doc is the "First" one (lowest _id)
+    let find_result = dispatch_tool(
+        "find_one",
+        json!({"collection": "emails", "filter": {"message_id": "msg001@test.com"}}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(find_result["document"]["subject"], "First");
+}
+
+#[test]
+fn test_dedup_script_batch_mode() {
+    let (adapter, _temp) = create_test_adapter();
+
+    // Insert documents with multiple duplicate message_ids
+    let docs = vec![
+        json!({"message_id": "a@test.com", "n": 1}),
+        json!({"message_id": "a@test.com", "n": 2}),
+        json!({"message_id": "b@test.com", "n": 1}),
+        json!({"message_id": "b@test.com", "n": 2}),
+        json!({"message_id": "b@test.com", "n": 3}),
+        json!({"message_id": "c@test.com", "n": 1}),
+    ];
+
+    for doc in docs {
+        dispatch_tool(
+            "insert_one",
+            json!({"collection": "emails", "document": doc}),
+            &adapter,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    // Batch dedup script that processes multiple message_ids
+    let batch_dedup_script = r#"
+let total_deleted = 0;
+for mid in params.message_ids {
+    let result = db_find("emails", #{"message_id": mid}, #{"sort": #{"_id": 1}, "limit": 100});
+    let docs = result.documents;
+    if docs.len() > 1 {
+        for i in 1..docs.len() {
+            db_delete_one("emails", #{"_id": docs[i]["_id"]});
+            total_deleted += 1;
+        }
+    }
+}
+#{"deleted": total_deleted}
+"#;
+
+    let result = dispatch_tool(
+        "script_exec",
+        json!({
+            "code": batch_dedup_script,
+            "params": {"message_ids": ["a@test.com", "b@test.com", "c@test.com"]}
+        }),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(result["success"], true);
+    assert_eq!(result["result"]["deleted"], 3); // 1 from a@, 2 from b@, 0 from c@
+
+    // Verify final count
+    let count_result = dispatch_tool(
+        "count_documents",
+        json!({"collection": "emails", "filter": {}}),
+        &adapter,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(count_result["count"], 3); // One per unique message_id
+}

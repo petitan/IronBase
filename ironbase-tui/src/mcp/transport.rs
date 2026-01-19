@@ -68,7 +68,13 @@ impl HttpTransport {
 
     /// Get the MCP endpoint URL
     fn mcp_url(&self) -> String {
-        format!("{}/mcp", self.base_url.trim_end_matches('/'))
+        let base = self.base_url.trim_end_matches('/');
+        // Don't add /mcp if it's already there
+        if base.ends_with("/mcp") {
+            base.to_string()
+        } else {
+            format!("{}/mcp", base)
+        }
     }
 }
 

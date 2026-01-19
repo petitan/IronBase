@@ -509,6 +509,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 - `88f0a79c` - update_many bulk load → streaming fix
 - `e445b44e` - range_query + Top-K egységesítés
 - `2026-01-11` - **WAL unbounded growth** → Safe módban WAL soha nem ürült, 29GB-ra nőtt
+- `a54f29a1` - **Sparse index empty array** → `[]` hibásan "hiányzó mező"-ként kezelve, 300s+ count → 0.059s
 
 ### WAL Unbounded Growth Bug (2026-01-11) - KRITIKUS FIX
 
@@ -534,6 +535,61 @@ if sync_file {
 **Tünet:** MCP szerver OOM startup-kor, `[STARTUP/DB] StorageEngine opened, recovering WAL...` után crash.
 
 **Workaround (ha előfordul):** Töröld a .wal fájlt (backup mlite előtte!).
+
+### Sparse Index Empty Array Bug (2026-01-15) - KRITIKUS FIX
+
+**Probléma:** Sparse index nem indexelte a dokumentumokat ahol a mező üres tömb `[]` volt.
+
+**Tünet:**
+- `create_index("attachments", sparse=true)` → `indexed=0` (94K doc helyett)
+- `count_documents({"attachments": {"$exists": true}})` → 300s+ timeout (collection scan)
+- `explain()` nem mutat `SparseIndexScan`-t
+
+**Root cause:**
+1. `get_all_nested_values(&doc, "attachments")` üres Vec-et ad vissza `attachments: []`-ra
+2. Üres Vec hibásan "hiányzó mező"-ként volt kezelve
+3. Sparse index kihagyta ezeket a dokumentumokat
+
+**Fix (három rész):**
+
+1. **index_ops.rs** - Üres tömb vs hiányzó mező megkülönböztetése:
+```rust
+let values = get_all_nested_values(&doc, &field_clone);
+if values.is_empty() {
+    // get_nested_value() → Some(&[]) üres tömbre, None hiányzó mezőre
+    let field_exists = get_nested_value(&doc, &field_clone).is_some();
+    if sparse && !field_exists {
+        continue;  // Csak VALÓBAN hiányzó mezőnél ugorjuk át
+    }
+    // Üres tömböt indexeljük Null kulccsal
+    let should_index = (sparse && field_exists)
+        || !IndexManager::is_key_all_null(&index_key)
+        || (unique && !sparse);
+    // ...
+}
+```
+
+2. **collection_core/mod.rs** - `SparseIndexScan` kezelése `count_with_plan()`-ben:
+```rust
+QueryPlan::SparseIndexScan { ref index_name, .. } => {
+    if let Some(index) = indexes.get_btree_index(index_name) {
+        let raw_count = index.metadata.num_keys as usize;
+        drop(indexes);
+        return self.adjust_count_for_tombstones(raw_count);
+    }
+}
+```
+
+**Eredmény:**
+- `indexed=94942` (összes doc ahol attachments létezik)
+- `count_documents({"attachments": {"$exists": true}})` → **0.059s** (300s+ helyett)
+- **~5000x gyorsulás**
+
+**Commit:** `a54f29a1`
+
+**Key files:**
+- `ironbase-core/src/collection_core/index_ops.rs` - index creation fix
+- `ironbase-core/src/collection_core/mod.rs` - count_with_plan SparseIndexScan
 
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
