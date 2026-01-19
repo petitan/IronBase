@@ -43,6 +43,9 @@ pub mod query;
 pub mod storage;
 pub mod transaction;
 
+// RAG (Retrieval Augmented Generation) module
+pub mod rag;
+
 // ============================================================================
 // INTERNAL IMPLEMENTATION MODULES - Not part of public API
 // ============================================================================
@@ -107,4 +110,11 @@ pub use fulltext::{
 // Aggregation context exports (for memory-aware aggregation)
 pub use aggregation::{
     limits_from_tier, AggregationLimitContext, AggregationLimits, MemoryTier, Pipeline,
+};
+
+// RAG (Retrieval Augmented Generation) exports
+pub use rag::{
+    estimate_tokens, extract_tables, BlockType, Chunk, ChunkConfig, Chunker, DocumentMeta,
+    FastTextEngine, HnswConfig, HnswIndex, ImportResult, RagError, RagManager, RagResult, RagStats,
+    SearchResult as RagSearchResult, StoredChunk,
 };

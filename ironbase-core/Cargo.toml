@@ -36,6 +36,10 @@ rayon = { version = "1.10", optional = true }  # For parallel iteration (default
 tracing = "0.1"    # For progress logging during long operations
 ahash = "0.8"      # Fast hashing for group/distinct operations
 
+# RAG (Retrieval Augmented Generation)
+memmap2 = "0.9"    # Memory-mapped files for FastText
+byteorder = "1.5"  # Binary format reading
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"       # For process existence check (kill(pid, 0))
 
