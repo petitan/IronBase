@@ -22,6 +22,60 @@ struct CollectionStats {
     counts: RwLock<HashMap<String, u64>>,
 }
 
+// ============================================================================
+// FastText Model Cache (prevents memory leak from repeated Box::leak calls)
+// ============================================================================
+
+/// Global cache for loaded FastText models.
+/// Models are loaded once and kept in memory for the server lifetime.
+/// This prevents the memory leak that would occur if we called Box::leak
+/// for every RAG operation.
+static FASTTEXT_CACHE: std::sync::OnceLock<
+    RwLock<HashMap<String, &'static ironbase_core::rag::FastTextEngine>>,
+> = std::sync::OnceLock::new();
+
+fn get_fasttext_cache(
+) -> &'static RwLock<HashMap<String, &'static ironbase_core::rag::FastTextEngine>> {
+    FASTTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Get or load a FastText model from cache
+fn get_or_load_fasttext(
+    model_path: &str,
+) -> crate::error::Result<&'static ironbase_core::rag::FastTextEngine> {
+    use ironbase_core::rag::FastTextEngine;
+
+    let cache = get_fasttext_cache();
+
+    // Check if already cached
+    if let Some(engine) = cache.read().get(model_path) {
+        return Ok(*engine);
+    }
+
+    // Load and cache the model
+    let mut cache_write = cache.write();
+
+    // Double-check after acquiring write lock
+    if let Some(engine) = cache_write.get(model_path) {
+        return Ok(*engine);
+    }
+
+    tracing::info!("Loading FastText model: {}", model_path);
+    let fasttext = Box::new(FastTextEngine::open(model_path).map_err(|e| {
+        crate::error::McpError::internal(format!("Failed to load FastText model: {}", e))
+    })?);
+    let fasttext_ref: &'static FastTextEngine = Box::leak(fasttext);
+
+    cache_write.insert(model_path.to_string(), fasttext_ref);
+    tracing::info!(
+        "FastText model cached: {} (dim={})",
+        model_path,
+        fasttext_ref.dim()
+    );
+
+    Ok(fasttext_ref)
+}
+
 impl CollectionStats {
     fn new() -> Self {
         Self {
@@ -1486,5 +1540,408 @@ impl IronBaseAdapter {
     pub fn get_write_lock_holder(&self) -> Option<u64> {
         let db = self.db.read();
         db.get_write_lock_holder()
+    }
+
+    // =========================================================================
+    // RAG (Retrieval Augmented Generation) Operations
+    // =========================================================================
+
+    /// Create a new RAG collection
+    ///
+    /// Note: RAG collections require a FastText model to be loaded. The model
+    /// path should point to a .bin file (e.g., "cc.hu.300.bin").
+    ///
+    /// RAG collections store their state in the `_rag` directory relative to
+    /// the database path.
+    ///
+    /// Memory limits are automatically scaled based on available system RAM
+    /// using `RagLimits::from_system_memory()`.
+    pub fn rag_collection_create(
+        &self,
+        name: &str,
+        model_path: &str,
+        chunk_max_tokens: usize,
+        chunk_overlap: usize,
+    ) -> Result<()> {
+        use ironbase_core::rag::{ChunkConfig, HnswConfig, RagLimits, RagManager};
+
+        // Load FastText model from cache
+        let fasttext = get_or_load_fasttext(model_path)?;
+
+        // Get RAG storage path
+        let rag_dir = self.get_rag_directory();
+        std::fs::create_dir_all(&rag_dir).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to create RAG directory: {}", e))
+        })?;
+
+        // Get dynamic RAM-based limits
+        let limits = RagLimits::from_system_memory();
+        tracing::info!(
+            "RAG limits: max_doc={}MB, max_chunks_per_doc={}, max_total={}, max_hnsw={}",
+            limits.max_document_bytes / (1024 * 1024),
+            limits.max_chunks_per_document,
+            limits.max_total_chunks,
+            limits.max_hnsw_vectors
+        );
+
+        // Configure chunking (limits will be synced by RagManager::with_config_and_limits)
+        let chunk_config = ChunkConfig {
+            max_tokens: chunk_max_tokens,
+            overlap_tokens: chunk_overlap,
+            ..Default::default()
+        };
+
+        let hnsw_config = HnswConfig {
+            dim: fasttext.dim(),
+            ..Default::default()
+        };
+
+        // Create RAG manager with dynamic limits
+        let rag =
+            RagManager::with_config_and_limits(name, fasttext, chunk_config, hnsw_config, limits)
+                .map_err(|e| {
+                crate::error::McpError::internal(format!("Failed to create RAG collection: {}", e))
+            })?;
+
+        // Save to disk (this creates the initial state files)
+        let collection_path = rag_dir.join(name);
+        rag.save(&collection_path).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to save RAG collection: {}", e))
+        })?;
+
+        // Also save the model path for later loading
+        let meta_path = format!("{}.meta.json", collection_path.display());
+        let meta = serde_json::json!({
+            "model_path": model_path,
+            "chunk_max_tokens": chunk_max_tokens,
+            "chunk_overlap": chunk_overlap,
+            "created_at": chrono::Utc::now().to_rfc3339()
+        });
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap()).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to save RAG metadata: {}", e))
+        })?;
+
+        tracing::info!(
+            "RAG collection '{}' created with model '{}'",
+            name,
+            model_path
+        );
+        Ok(())
+    }
+
+    /// List all RAG collections
+    pub fn rag_collection_list(&self) -> Result<Vec<Value>> {
+        let rag_dir = self.get_rag_directory();
+        let mut collections = Vec::new();
+
+        if !rag_dir.exists() {
+            return Ok(collections);
+        }
+
+        // Find all .meta.json files
+        for entry in std::fs::read_dir(&rag_dir).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to read RAG directory: {}", e))
+        })? {
+            let entry = entry.map_err(|e| {
+                crate::error::McpError::internal(format!("Failed to read directory entry: {}", e))
+            })?;
+            let path = entry.path();
+
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.ends_with(".meta.json") {
+                    let collection_name = name.trim_end_matches(".meta.json");
+
+                    // Read metadata
+                    if let Ok(meta_content) = std::fs::read_to_string(&path) {
+                        if let Ok(meta) = serde_json::from_str::<Value>(&meta_content) {
+                            collections.push(serde_json::json!({
+                                "name": collection_name,
+                                "model_path": meta.get("model_path").and_then(|v| v.as_str()),
+                                "created_at": meta.get("created_at").and_then(|v| v.as_str())
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(collections)
+    }
+
+    /// Get statistics for a RAG collection
+    pub fn rag_collection_stats(&self, name: &str) -> Result<Value> {
+        let rag_dir = self.get_rag_directory();
+        let meta_path = rag_dir.join(format!("{}.meta.json", name));
+
+        if !meta_path.exists() {
+            return Err(crate::error::McpError::internal(format!(
+                "RAG collection '{}' not found",
+                name
+            )));
+        }
+
+        // Read metadata
+        let meta_content = std::fs::read_to_string(&meta_path).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to read RAG metadata: {}", e))
+        })?;
+        let meta: Value = serde_json::from_str(&meta_content).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to parse RAG metadata: {}", e))
+        })?;
+
+        // Try to load and get stats (without loading full model for basic info)
+        let state_path = rag_dir.join(format!("{}.state.json", name));
+        let state_stats = if state_path.exists() {
+            if let Ok(state_content) = std::fs::read_to_string(&state_path) {
+                if let Ok(state) = serde_json::from_str::<Value>(&state_content) {
+                    Some(serde_json::json!({
+                        "document_count": state.get("documents").and_then(|d| d.as_object()).map(|d| d.len()).unwrap_or(0),
+                        "chunk_count": state.get("chunks").and_then(|c| c.as_object()).map(|c| c.len()).unwrap_or(0)
+                    }))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        Ok(serde_json::json!({
+            "name": name,
+            "model_path": meta.get("model_path"),
+            "chunk_config": {
+                "max_tokens": meta.get("chunk_max_tokens"),
+                "overlap_tokens": meta.get("chunk_overlap")
+            },
+            "created_at": meta.get("created_at"),
+            "stats": state_stats
+        }))
+    }
+
+    /// Delete a RAG collection
+    pub fn rag_collection_delete(&self, name: &str) -> Result<()> {
+        let rag_dir = self.get_rag_directory();
+        let base_path = rag_dir.join(name);
+
+        // Delete all related files
+        let files_to_delete = [
+            format!("{}.state.json", base_path.display()),
+            format!("{}.hnsw.bin", base_path.display()),
+            format!("{}.meta.json", base_path.display()),
+        ];
+
+        let mut deleted_any = false;
+        for file in &files_to_delete {
+            if std::path::Path::new(file).exists() {
+                std::fs::remove_file(file).map_err(|e| {
+                    crate::error::McpError::internal(format!("Failed to delete {}: {}", file, e))
+                })?;
+                deleted_any = true;
+            }
+        }
+
+        if !deleted_any {
+            return Err(crate::error::McpError::internal(format!(
+                "RAG collection '{}' not found",
+                name
+            )));
+        }
+
+        tracing::info!("RAG collection '{}' deleted", name);
+        Ok(())
+    }
+
+    /// Import a document into a RAG collection
+    pub fn rag_document_import(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        title: &str,
+        content: &str,
+    ) -> Result<Value> {
+        // Load the collection (fasttext is kept alive via 'static lifetime)
+        let (_fasttext, mut rag) = self.load_rag_collection(collection)?;
+
+        // Import document
+        let result = rag.import_document(doc_id, title, content).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to import document: {}", e))
+        })?;
+
+        // Save updated state
+        let rag_dir = self.get_rag_directory();
+        let collection_path = rag_dir.join(collection);
+        rag.save(&collection_path).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to save RAG state: {}", e))
+        })?;
+
+        Ok(serde_json::json!({
+            "doc_id": result.doc_id,
+            "chunks_created": result.chunks_created,
+            "tables_extracted": result.tables_extracted,
+            "import_time_ms": result.import_time_ms
+        }))
+    }
+
+    /// List documents in a RAG collection
+    pub fn rag_document_list(&self, collection: &str) -> Result<Vec<Value>> {
+        let rag_dir = self.get_rag_directory();
+        let state_path = rag_dir.join(format!("{}.state.json", collection));
+
+        if !state_path.exists() {
+            return Err(crate::error::McpError::internal(format!(
+                "RAG collection '{}' not found",
+                collection
+            )));
+        }
+
+        // Read state file to get document list (avoiding full model load)
+        let state_content = std::fs::read_to_string(&state_path).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to read RAG state: {}", e))
+        })?;
+        let state: Value = serde_json::from_str(&state_content).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to parse RAG state: {}", e))
+        })?;
+
+        let documents = state
+            .get("documents")
+            .and_then(|d| d.as_object())
+            .map(|docs| {
+                docs.values()
+                    .map(|doc| {
+                        serde_json::json!({
+                            "id": doc.get("id"),
+                            "title": doc.get("title"),
+                            "chunk_count": doc.get("chunk_count"),
+                            "imported_at": doc.get("imported_at")
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(documents)
+    }
+
+    /// Delete a document from a RAG collection
+    pub fn rag_document_delete(&self, collection: &str, doc_id: &str) -> Result<bool> {
+        // Load the collection (fasttext is kept alive via 'static lifetime)
+        let (_fasttext, mut rag) = self.load_rag_collection(collection)?;
+
+        // Remove document
+        let deleted = rag.remove_document(doc_id).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to delete document: {}", e))
+        })?;
+
+        if deleted {
+            // Save updated state
+            let rag_dir = self.get_rag_directory();
+            let collection_path = rag_dir.join(collection);
+            rag.save(&collection_path).map_err(|e| {
+                crate::error::McpError::internal(format!("Failed to save RAG state: {}", e))
+            })?;
+        }
+
+        Ok(deleted)
+    }
+
+    /// Search for relevant chunks in a RAG collection
+    pub fn rag_search(
+        &self,
+        collection: &str,
+        query: &str,
+        limit: usize,
+        min_score: Option<f32>,
+    ) -> Result<Vec<Value>> {
+        // Load the collection (fasttext is kept alive via 'static lifetime)
+        let (_fasttext, rag) = self.load_rag_collection(collection)?;
+
+        // Search
+        let results = if let Some(threshold) = min_score {
+            rag.search_with_threshold(query, limit, threshold)
+        } else {
+            rag.search(query, limit)
+        }
+        .map_err(|e| crate::error::McpError::internal(format!("Search failed: {}", e)))?;
+
+        // Convert to JSON
+        let json_results: Vec<Value> = results
+            .into_iter()
+            .map(|r| {
+                serde_json::json!({
+                    "doc_id": r.doc_id,
+                    "doc_title": r.doc_title,
+                    "chunk_id": r.chunk_id,
+                    "section": r.section,
+                    "text": r.text,
+                    "score": r.score,
+                    "block_type": format!("{:?}", r.block_type).to_lowercase()
+                })
+            })
+            .collect();
+
+        Ok(json_results)
+    }
+
+    /// Get the RAG storage directory
+    fn get_rag_directory(&self) -> std::path::PathBuf {
+        let db_path = self.db_path.read();
+        db_path.parent().unwrap_or(db_path.as_path()).join("_rag")
+    }
+
+    /// Load a RAG collection (FastText + RagManager)
+    ///
+    /// FastText models are cached globally to prevent memory leaks.
+    /// Each unique model path is loaded only once.
+    ///
+    /// Memory limits are automatically scaled based on available system RAM
+    /// using `RagLimits::from_system_memory()`.
+    fn load_rag_collection(
+        &self,
+        name: &str,
+    ) -> Result<(
+        &'static ironbase_core::rag::FastTextEngine,
+        ironbase_core::rag::RagManager<'static>,
+    )> {
+        use ironbase_core::rag::{RagLimits, RagManager};
+
+        let rag_dir = self.get_rag_directory();
+        let meta_path = rag_dir.join(format!("{}.meta.json", name));
+
+        if !meta_path.exists() {
+            return Err(crate::error::McpError::internal(format!(
+                "RAG collection '{}' not found",
+                name
+            )));
+        }
+
+        // Read metadata to get model path
+        let meta_content = std::fs::read_to_string(&meta_path).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to read RAG metadata: {}", e))
+        })?;
+        let meta: Value = serde_json::from_str(&meta_content).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to parse RAG metadata: {}", e))
+        })?;
+
+        let model_path = meta
+            .get("model_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::McpError::internal("Missing model_path in RAG metadata")
+            })?;
+
+        // Get FastText model from cache (loads once, cached forever)
+        let fasttext_ref = get_or_load_fasttext(model_path)?;
+
+        // Get dynamic RAM-based limits
+        let limits = RagLimits::from_system_memory();
+
+        let collection_path = rag_dir.join(name);
+        let rag =
+            RagManager::load_with_limits(&collection_path, fasttext_ref, limits).map_err(|e| {
+                crate::error::McpError::internal(format!("Failed to load RAG collection: {}", e))
+            })?;
+
+        Ok((fasttext_ref, rag))
     }
 }

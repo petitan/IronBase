@@ -28,6 +28,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
+/// Default maximum vectors in HNSW index (used when max_vectors not specified)
+const DEFAULT_MAX_HNSW_VECTORS: usize = 100_000;
+
 /// A node in the HNSW graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HnswNode {
@@ -117,11 +120,23 @@ pub struct HnswIndex {
     id_to_index: HashMap<String, usize>,
     /// Level multiplier for random layer assignment (1/ln(M))
     level_mult: f64,
+    /// Maximum number of vectors (OOM protection, dynamic)
+    #[serde(default = "default_max_vectors")]
+    max_vectors: usize,
+}
+
+fn default_max_vectors() -> usize {
+    DEFAULT_MAX_HNSW_VECTORS
 }
 
 impl HnswIndex {
     /// Create a new HNSW index with the given configuration
     pub fn new(config: HnswConfig) -> Self {
+        Self::with_limits(config, DEFAULT_MAX_HNSW_VECTORS)
+    }
+
+    /// Create a new HNSW index with custom max vectors limit
+    pub fn with_limits(config: HnswConfig, max_vectors: usize) -> Self {
         let level_mult = 1.0 / (config.m as f64).ln();
         Self {
             config,
@@ -130,6 +145,7 @@ impl HnswIndex {
             max_level: 0,
             id_to_index: HashMap::new(),
             level_mult,
+            max_vectors,
         }
     }
 
@@ -139,6 +155,17 @@ impl HnswIndex {
             dim,
             ..Default::default()
         })
+    }
+
+    /// Create with default configuration and custom max vectors
+    pub fn with_dim_and_limits(dim: usize, max_vectors: usize) -> Self {
+        Self::with_limits(
+            HnswConfig {
+                dim,
+                ..Default::default()
+            },
+            max_vectors,
+        )
     }
 
     /// Get the number of vectors in the index
@@ -185,6 +212,29 @@ impl HnswIndex {
                 "ID already exists in index: {}",
                 id
             )));
+        }
+
+        // OOM Protection: Check vector count limit (dynamic, RAM-based)
+        if self.nodes.len() >= self.max_vectors {
+            return Err(RagError::HnswError(format!(
+                "HNSW index full: {} vectors (max: {}). Remove documents or create a new collection.",
+                self.nodes.len(),
+                self.max_vectors
+            )));
+        }
+
+        // OOM Protection: Ensure capacity for new node
+        if self.nodes.len() == self.nodes.capacity() {
+            // Reserve space for more nodes (grow by 25% or at least 100)
+            let additional = (self.nodes.len() / 4)
+                .max(100)
+                .min(self.max_vectors - self.nodes.len());
+            self.nodes.try_reserve(additional).map_err(|_| {
+                RagError::HnswError(format!(
+                    "Failed to allocate memory for {} additional HNSW nodes",
+                    additional
+                ))
+            })?;
         }
 
         let node_index = self.nodes.len();
@@ -387,9 +437,12 @@ impl HnswIndex {
     }
 
     /// Greedy search within a single layer (returns single best node)
+    ///
+    /// Uses squared distance for faster comparison (no sqrt needed for ordering).
     fn search_layer_greedy(&self, query: &[f32], entry: usize, level: usize) -> usize {
         let mut current = entry;
-        let mut current_dist = Self::euclidean_distance(query, &self.nodes[current].vector);
+        // Use squared distance - avoids sqrt, preserves ordering
+        let mut current_dist = Self::squared_euclidean_distance(query, &self.nodes[current].vector);
 
         loop {
             let mut changed = false;
@@ -397,7 +450,8 @@ impl HnswIndex {
 
             if level < neighbors.len() {
                 for &neighbor_idx in &neighbors[level] {
-                    let dist = Self::euclidean_distance(query, &self.nodes[neighbor_idx].vector);
+                    let dist =
+                        Self::squared_euclidean_distance(query, &self.nodes[neighbor_idx].vector);
                     if dist < current_dist {
                         current = neighbor_idx;
                         current_dist = dist;
@@ -489,26 +543,29 @@ impl HnswIndex {
     }
 
     /// Compute Euclidean distance between two vectors
+    ///
+    /// Uses SIMD-optimized implementation from the simd module.
     #[inline]
     fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| (x - y).powi(2))
-            .sum::<f32>()
-            .sqrt()
+        // Use squared distance for comparison (avoid sqrt in inner loop)
+        // The sqrt is only applied once when returning results
+        super::simd::squared_euclidean_distance(a, b).sqrt()
+    }
+
+    /// Compute squared Euclidean distance (faster, for comparisons)
+    ///
+    /// Use this in inner loops where we only need ordering, not actual distance.
+    #[inline]
+    fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
+        super::simd::squared_euclidean_distance(a, b)
     }
 
     /// Compute cosine similarity between two vectors
+    ///
+    /// Uses SIMD-optimized implementation from the simd module.
     #[inline]
     fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-        let norm_a: f32 = a.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
-        let norm_b: f32 = b.iter().map(|x| x.powi(2)).sum::<f32>().sqrt();
-        if norm_a > 0.0 && norm_b > 0.0 {
-            dot / (norm_a * norm_b)
-        } else {
-            0.0
-        }
+        super::simd::cosine_similarity(a, b)
     }
 }
 

@@ -11,7 +11,7 @@
 //!
 //! ```rust,ignore
 //! let chunker = Chunker::new(ChunkConfig::default());
-//! let chunks = chunker.chunk_markdown(markdown_text);
+//! let chunks = chunker.chunk_markdown(markdown_text)?; // Returns Result
 //!
 //! for chunk in chunks {
 //!     println!("Section: {:?}", chunk.section_path);
@@ -21,7 +21,7 @@
 //! }
 //! ```
 
-use super::types::{BlockType, Chunk, ChunkConfig};
+use super::types::{BlockType, Chunk, ChunkConfig, RagError, RagResult};
 use std::collections::VecDeque;
 
 /// Markdown block with metadata
@@ -54,18 +54,45 @@ impl Chunker {
     }
 
     /// Chunk a markdown document into semantic chunks
-    pub fn chunk_markdown(&self, text: &str) -> Vec<Chunk> {
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Document exceeds max_document_bytes limit (OOM protection)
+    /// - Document produces too many chunks (MAX_CHUNKS_PER_DOCUMENT)
+    pub fn chunk_markdown(&self, text: &str) -> RagResult<Vec<Chunk>> {
+        // OOM Protection: Check document size limit
+        if text.len() > self.config.max_document_bytes {
+            return Err(RagError::ChunkError(format!(
+                "Document too large: {} bytes (max: {} bytes = {} MB). Split into smaller documents.",
+                text.len(),
+                self.config.max_document_bytes,
+                self.config.max_document_bytes / (1024 * 1024)
+            )));
+        }
+
         // Step 1: Parse markdown into blocks
-        let blocks = self.parse_blocks(text);
+        let blocks = self.parse_blocks(text)?;
 
         // Step 2: Build section hierarchy and create chunks
         self.process_blocks(blocks)
     }
 
     /// Parse markdown text into blocks
-    fn parse_blocks(&self, text: &str) -> Vec<MarkdownBlock> {
+    fn parse_blocks(&self, text: &str) -> RagResult<Vec<MarkdownBlock>> {
+        // Estimate number of blocks (roughly 1 block per 500 chars)
+        let estimated_blocks = (text.len() / 500).max(16);
         let mut blocks = Vec::new();
+        blocks.try_reserve(estimated_blocks).map_err(|_| {
+            RagError::ChunkError(format!(
+                "Failed to allocate memory for {} estimated blocks",
+                estimated_blocks
+            ))
+        })?;
+
         let mut current_pos = 0;
+        // Note: lines().collect() creates Vec of string slices (references),
+        // not copies. For a 10MB doc limit, this is ~200KB overhead max.
         let lines: Vec<&str> = text.lines().collect();
         let mut i = 0;
 
@@ -256,12 +283,21 @@ impl Chunker {
             current_pos = block_end;
         }
 
-        blocks
+        Ok(blocks)
     }
 
     /// Process blocks into chunks with section tracking
-    fn process_blocks(&self, blocks: Vec<MarkdownBlock>) -> Vec<Chunk> {
+    fn process_blocks(&self, blocks: Vec<MarkdownBlock>) -> RagResult<Vec<Chunk>> {
+        // Estimate chunks: roughly 1 chunk per block, but could be more with splitting
+        let estimated_chunks = (blocks.len() * 2).min(self.config.max_chunks_per_document);
         let mut chunks = Vec::new();
+        chunks.try_reserve(estimated_chunks).map_err(|_| {
+            RagError::ChunkError(format!(
+                "Failed to allocate memory for {} estimated chunks",
+                estimated_chunks
+            ))
+        })?;
+
         let mut section_path: Vec<String> = Vec::new();
         let mut section_levels: Vec<u8> = Vec::new();
         let mut pending_text = String::new();
@@ -348,12 +384,21 @@ impl Chunker {
             );
         }
 
+        // OOM Protection: Check chunk count limit (dynamic, from config)
+        if chunks.len() > self.config.max_chunks_per_document {
+            return Err(RagError::ChunkError(format!(
+                "Document produces too many chunks: {} (max: {}). Use larger chunk size or split the document.",
+                chunks.len(),
+                self.config.max_chunks_per_document
+            )));
+        }
+
         // Recalculate token counts
         for chunk in &mut chunks {
             chunk.token_count = estimate_tokens(&chunk.text);
         }
 
-        chunks
+        Ok(chunks)
     }
 
     /// Add text as one or more chunks (splitting if needed)
@@ -426,8 +471,9 @@ impl Chunker {
                     });
                 }
 
-                // Start new chunk with overlap
-                current_start = current_start + current_chunk.len() - self.overlap_chars();
+                // Start new chunk with overlap (saturating to prevent underflow)
+                current_start =
+                    (current_start + current_chunk.len()).saturating_sub(self.overlap_chars());
                 current_chunk = overlap_buffer.iter().cloned().collect::<Vec<_>>().join(" ");
                 overlap_buffer.clear();
             }
@@ -613,7 +659,7 @@ More details here.
 "#;
 
         let chunker = Chunker::with_defaults();
-        let chunks = chunker.chunk_markdown(md);
+        let chunks = chunker.chunk_markdown(md).unwrap();
 
         assert!(!chunks.is_empty());
         // Should have section path
@@ -635,7 +681,7 @@ Text after table.
 "#;
 
         let chunker = Chunker::with_defaults();
-        let chunks = chunker.chunk_markdown(md);
+        let chunks = chunker.chunk_markdown(md).unwrap();
 
         // Find table chunk
         let table_chunk = chunks.iter().find(|c| c.block_type == BlockType::Table);
@@ -659,7 +705,7 @@ Some text.
 "#;
 
         let chunker = Chunker::with_defaults();
-        let chunks = chunker.chunk_markdown(md);
+        let chunks = chunker.chunk_markdown(md).unwrap();
 
         // Find code chunk
         let code_chunk = chunks.iter().find(|c| c.block_type == BlockType::Code);
@@ -684,7 +730,7 @@ Deep content.
 "#;
 
         let chunker = Chunker::with_defaults();
-        let chunks = chunker.chunk_markdown(md);
+        let chunks = chunker.chunk_markdown(md).unwrap();
 
         // Find deep content chunk
         let deep_chunk = chunks.iter().find(|c| c.text.contains("Deep content"));
@@ -734,7 +780,7 @@ More text.
         };
 
         let chunker = Chunker::new(config);
-        let chunks = chunker.chunk_markdown(&md);
+        let chunks = chunker.chunk_markdown(&md).unwrap();
 
         // Should have multiple chunks
         assert!(chunks.len() > 1);

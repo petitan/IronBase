@@ -233,6 +233,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
 
 [[package]]
+name = "byteorder"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
+
+[[package]]
 name = "bytes"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -743,17 +749,19 @@ dependencies = [
 
 [[package]]
 name = "ironbase-core"
-version = "0.3.62"
+version = "0.3.65"
 dependencies = [
  "ahash",
  "anyhow",
  "bincode",
+ "byteorder",
  "chrono",
  "crc32fast",
  "fs2",
  "lazy_static",
  "libc",
  "lru",
+ "memmap2",
  "parking_lot",
  "rayon",
  "regex",
@@ -848,7 +856,7 @@ checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
 name = "mcp-ironbase-server"
-version = "1.0.216"
+version = "1.0.221"
 dependencies = [
  "axum",
  "axum-server",
@@ -887,6 +895,15 @@ name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
+
+[[package]]
+name = "memmap2"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "744133e4a0e0a658e1374cf3bf8e415c4052a15a111acd372764c55b4177d490"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mime"

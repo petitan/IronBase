@@ -30,7 +30,7 @@ use super::chunker::Chunker;
 use super::fasttext::FastTextEngine;
 use super::hnsw::HnswIndex;
 use super::types::{
-    Chunk, ChunkConfig, HnswConfig, ImportResult, RagError, RagResult, SearchResult,
+    Chunk, ChunkConfig, HnswConfig, ImportResult, RagError, RagLimits, RagResult, SearchResult,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -63,8 +63,8 @@ pub struct StoredChunk {
     pub chunk: Chunk,
 }
 
-/// RAG collection state (for persistence)
-#[derive(Debug, Serialize, Deserialize)]
+/// RAG collection state (for persistence - deserialize)
+#[derive(Debug, Deserialize)]
 struct RagState {
     /// Collection name
     name: String,
@@ -76,6 +76,16 @@ struct RagState {
     chunk_config: ChunkConfig,
     /// HNSW configuration
     hnsw_config: HnswConfig,
+}
+
+/// RAG collection state reference (for save - no clone needed)
+#[derive(Serialize)]
+struct RagStateRef<'a> {
+    name: &'a str,
+    documents: &'a HashMap<String, DocumentMeta>,
+    chunks: &'a HashMap<String, StoredChunk>,
+    chunk_config: &'a ChunkConfig,
+    hnsw_config: &'a HnswConfig,
 }
 
 /// High-level RAG manager
@@ -95,12 +105,27 @@ pub struct RagManager<'a> {
     /// Configuration
     chunk_config: ChunkConfig,
     hnsw_config: HnswConfig,
+    /// Memory limits (dynamic, RAM-based)
+    limits: RagLimits,
 }
 
 impl<'a> RagManager<'a> {
-    /// Create a new RAG collection
+    /// Create a new RAG collection with automatic RAM-based limits
     pub fn new(name: &str, fasttext: &'a FastTextEngine) -> RagResult<Self> {
-        let chunk_config = ChunkConfig::default();
+        Self::with_limits(name, fasttext, RagLimits::from_system_memory())
+    }
+
+    /// Create a new RAG collection with custom limits
+    pub fn with_limits(
+        name: &str,
+        fasttext: &'a FastTextEngine,
+        limits: RagLimits,
+    ) -> RagResult<Self> {
+        let mut chunk_config = ChunkConfig::default();
+        // Sync limits from RagLimits
+        chunk_config.max_document_bytes = limits.max_document_bytes;
+        chunk_config.max_chunks_per_document = limits.max_chunks_per_document;
+
         let hnsw_config = HnswConfig {
             dim: fasttext.dim(),
             ..Default::default()
@@ -109,12 +134,13 @@ impl<'a> RagManager<'a> {
         Ok(Self {
             name: name.to_string(),
             fasttext,
-            hnsw: HnswIndex::new(hnsw_config.clone()),
+            hnsw: HnswIndex::with_limits(hnsw_config.clone(), limits.max_hnsw_vectors),
             documents: HashMap::new(),
             chunks: HashMap::new(),
             chunker: Chunker::new(chunk_config.clone()),
             chunk_config,
             hnsw_config,
+            limits,
         })
     }
 
@@ -125,15 +151,37 @@ impl<'a> RagManager<'a> {
         chunk_config: ChunkConfig,
         hnsw_config: HnswConfig,
     ) -> RagResult<Self> {
+        Self::with_config_and_limits(
+            name,
+            fasttext,
+            chunk_config,
+            hnsw_config,
+            RagLimits::from_system_memory(),
+        )
+    }
+
+    /// Create with custom configuration and limits
+    pub fn with_config_and_limits(
+        name: &str,
+        fasttext: &'a FastTextEngine,
+        mut chunk_config: ChunkConfig,
+        hnsw_config: HnswConfig,
+        limits: RagLimits,
+    ) -> RagResult<Self> {
+        // Sync limits from RagLimits
+        chunk_config.max_document_bytes = limits.max_document_bytes;
+        chunk_config.max_chunks_per_document = limits.max_chunks_per_document;
+
         Ok(Self {
             name: name.to_string(),
             fasttext,
-            hnsw: HnswIndex::new(hnsw_config.clone()),
+            hnsw: HnswIndex::with_limits(hnsw_config.clone(), limits.max_hnsw_vectors),
             documents: HashMap::new(),
             chunks: HashMap::new(),
             chunker: Chunker::new(chunk_config.clone()),
             chunk_config,
             hnsw_config,
+            limits,
         })
     }
 
@@ -150,6 +198,11 @@ impl<'a> RagManager<'a> {
     /// Get number of chunks
     pub fn chunk_count(&self) -> usize {
         self.chunks.len()
+    }
+
+    /// Get current limits
+    pub fn limits(&self) -> &RagLimits {
+        &self.limits
     }
 
     /// Get document by ID
@@ -189,8 +242,21 @@ impl<'a> RagManager<'a> {
             )));
         }
 
-        // Chunk the document
-        let raw_chunks = self.chunker.chunk_markdown(content);
+        // Chunk the document (with OOM protection)
+        let raw_chunks = self.chunker.chunk_markdown(content)?;
+
+        // OOM Protection: Check total chunks limit (dynamic, RAM-based)
+        // Note: Per-document chunk limit is already enforced by Chunker
+        let new_total = self.chunks.len() + raw_chunks.len();
+        if new_total > self.limits.max_total_chunks {
+            return Err(RagError::ChunkError(format!(
+                "Collection would exceed max chunks: {} + {} = {} (max: {}). Remove documents or create a new collection.",
+                self.chunks.len(),
+                raw_chunks.len(),
+                new_total,
+                self.limits.max_total_chunks
+            )));
+        }
 
         // Extract tables for counting
         let tables_extracted = raw_chunks
@@ -366,13 +432,13 @@ impl<'a> RagManager<'a> {
             fs::create_dir_all(parent)?;
         }
 
-        // Save state (documents, chunks, config)
-        let state = RagState {
-            name: self.name.clone(),
-            documents: self.documents.clone(),
-            chunks: self.chunks.clone(),
-            chunk_config: self.chunk_config.clone(),
-            hnsw_config: self.hnsw_config.clone(),
+        // Save state (documents, chunks, config) - using references to avoid cloning
+        let state = RagStateRef {
+            name: &self.name,
+            documents: &self.documents,
+            chunks: &self.chunks,
+            chunk_config: &self.chunk_config,
+            hnsw_config: &self.hnsw_config,
         };
 
         let state_path = format!("{}.state.json", path.display());
@@ -398,8 +464,17 @@ impl<'a> RagManager<'a> {
         Ok(())
     }
 
-    /// Load a RAG collection from disk
+    /// Load a RAG collection from disk with automatic RAM-based limits
     pub fn load<P: AsRef<Path>>(path: P, fasttext: &'a FastTextEngine) -> RagResult<Self> {
+        Self::load_with_limits(path, fasttext, RagLimits::from_system_memory())
+    }
+
+    /// Load a RAG collection from disk with custom limits
+    pub fn load_with_limits<P: AsRef<Path>>(
+        path: P,
+        fasttext: &'a FastTextEngine,
+        limits: RagLimits,
+    ) -> RagResult<Self> {
         let path = path.as_ref();
 
         // Load state
@@ -432,15 +507,21 @@ impl<'a> RagManager<'a> {
             state.chunks.len()
         );
 
+        // Sync chunk config limits from RagLimits
+        let mut chunk_config = state.chunk_config;
+        chunk_config.max_document_bytes = limits.max_document_bytes;
+        chunk_config.max_chunks_per_document = limits.max_chunks_per_document;
+
         Ok(Self {
             name: state.name,
             fasttext,
             hnsw,
             documents: state.documents,
             chunks: state.chunks,
-            chunker: Chunker::new(state.chunk_config.clone()),
-            chunk_config: state.chunk_config,
+            chunker: Chunker::new(chunk_config.clone()),
+            chunk_config,
             hnsw_config: state.hnsw_config,
+            limits,
         })
     }
 

@@ -787,6 +787,73 @@ let results = coll.fulltext_search("content", "query", Some(10), None, None, Som
 }}
 ```
 
+### RAG (Retrieval Augmented Generation) - Semantic Search
+
+RAG provides semantic document search using FastText word embeddings and HNSW vector indexing.
+
+**Key Components:**
+- **FastText**: Memory-mapped word embeddings (~2GB model, ~150ms load time)
+- **HNSW Index**: Hierarchical Navigable Small World graph for fast nearest neighbor search
+- **Smart Chunker**: Markdown-aware document chunking with heading preservation
+
+**MCP Tools:**
+```json
+// Create RAG collection with FastText model
+{"name": "rag_collection_create", "arguments": {
+  "name": "docs",
+  "model_path": "/path/to/cc.hu.300.bin",
+  "chunk_max_tokens": 1000,
+  "chunk_overlap": 100,
+  "admin_key": "..."
+}}
+
+// Import document (auto-chunked)
+{"name": "rag_document_import", "arguments": {
+  "collection": "docs",
+  "doc_id": "readme",
+  "title": "README",
+  "content": "# Markdown content..."
+}}
+
+// Semantic search
+{"name": "rag_search", "arguments": {
+  "collection": "docs",
+  "query": "how to install",
+  "limit": 5,
+  "min_score": 0.6
+}}
+
+// List/delete operations
+{"name": "rag_collection_list"}
+{"name": "rag_collection_stats", "arguments": {"collection": "docs"}}
+{"name": "rag_document_list", "arguments": {"collection": "docs"}}
+{"name": "rag_document_delete", "arguments": {"collection": "docs", "doc_id": "readme"}}
+{"name": "rag_collection_delete", "arguments": {"name": "docs", "admin_key": "..."}}
+```
+
+**Search Result Structure:**
+```json
+{
+  "doc_id": "readme",
+  "doc_title": "README",
+  "chunk_id": 3,
+  "section": "Installation",
+  "text": "To install the package...",
+  "score": 0.847,
+  "block_type": "paragraph"
+}
+```
+
+**Storage:**
+- RAG data stored in `_rag/` directory relative to database file
+- Each collection has: `{name}.meta.json`, `{name}.state.json`, HNSW index files
+- FastText models are loaded once per request (memory-mapped, ~150ms)
+
+**Performance:**
+- Embedding: ~50-100 docs/sec
+- Search: ~1-5ms for 10K chunks
+- Memory: ~50MB per 10K chunks (HNSW index)
+
 ### $** Wildcard Operator (Recursive Descent)
 ```rust
 // Find "name" field at ANY depth in the document

@@ -28,6 +28,8 @@ mod chunker;
 mod fasttext;
 mod hnsw;
 mod manager;
+/// SIMD-optimized vector operations
+pub mod simd;
 mod types;
 
 pub use chunker::{estimate_tokens, extract_tables, Chunker};

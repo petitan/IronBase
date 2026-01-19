@@ -20,6 +20,7 @@ pub mod helpers;
 pub mod index;
 pub mod listener;
 pub mod params;
+pub mod rag;
 pub mod script;
 pub mod transaction;
 
@@ -341,6 +342,16 @@ fn dispatch_tool_inner(
         | "admin_apikey_delete" => {
             admin::dispatch(name, params, adapter, api_key_cache, server_info)
         }
+
+        // RAG operations (semantic search)
+        "rag_collection_create"
+        | "rag_collection_list"
+        | "rag_collection_stats"
+        | "rag_collection_delete"
+        | "rag_document_import"
+        | "rag_document_list"
+        | "rag_document_delete"
+        | "rag_search" => rag::dispatch(name, params, adapter),
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),
     }

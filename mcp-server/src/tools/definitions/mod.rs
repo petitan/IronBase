@@ -21,6 +21,7 @@ mod database;
 mod document;
 mod index;
 mod listener;
+mod rag;
 mod schema;
 mod script;
 mod transaction;
@@ -63,6 +64,9 @@ pub fn get_all_tools_json() -> Value {
 
     // Listener Management
     tools.extend(listener::tools());
+
+    // RAG (Semantic Search)
+    tools.extend(rag::tools());
 
     json!({ "tools": tools })
 }
