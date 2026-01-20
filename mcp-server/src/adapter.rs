@@ -1,6 +1,6 @@
 //! IronBase Adapter - Direct wrapper around IronBase core
 
-use crate::error::Result;
+use crate::error::{McpError, Result};
 use crate::execution;
 use ironbase_core::aggregation::{AggregationLimitContext, AggregationLimits};
 use ironbase_core::ExecutionContext;
@@ -397,17 +397,20 @@ impl IronBaseAdapter {
                 db.create_system_collection(collection_name)?;
                 db.set_collection_flags(collection_name, system_flags)?;
 
-                // Set schema - SECURITY FIX: Log errors instead of ignoring
-                if let Ok(coll) = db.collection(collection_name) {
-                    if let Err(e) = coll.set_schema(Some(schema.clone())) {
-                        tracing::error!(
-                            "SECURITY WARNING: Failed to set schema for {}: {}. \
-                             Collection may accept invalid documents!",
-                            collection_name,
-                            e
-                        );
-                    }
-                }
+                // Set schema - CRITICAL: Schema enforcement is required for security
+                let coll = db.collection(collection_name).map_err(|e| {
+                    McpError::internal(format!(
+                        "Failed to access system collection '{}': {}",
+                        collection_name, e
+                    ))
+                })?;
+                coll.set_schema(Some(schema.clone())).map_err(|e| {
+                    McpError::internal(format!(
+                        "CRITICAL: Failed to set schema for system collection '{}': {}. \
+                         System integrity requires valid schemas.",
+                        collection_name, e
+                    ))
+                })?;
             } else {
                 // Ensure flags are correct
                 let db = self.db.read();
@@ -432,18 +435,21 @@ impl IronBaseAdapter {
                         db.set_collection_flags(collection_name, system_flags)?;
                     }
 
-                    // SECURITY FIX: Log errors instead of ignoring
+                    // CRITICAL: Schema enforcement is required for security
                     if needs_schema {
-                        if let Ok(coll) = db.collection(collection_name) {
-                            if let Err(e) = coll.set_schema(Some(schema.clone())) {
-                                tracing::error!(
-                                    "SECURITY WARNING: Failed to set schema for {}: {}. \
-                                     Collection may accept invalid documents!",
-                                    collection_name,
-                                    e
-                                );
-                            }
-                        }
+                        let coll = db.collection(collection_name).map_err(|e| {
+                            McpError::internal(format!(
+                                "Failed to access system collection '{}': {}",
+                                collection_name, e
+                            ))
+                        })?;
+                        coll.set_schema(Some(schema.clone())).map_err(|e| {
+                            McpError::internal(format!(
+                                "CRITICAL: Failed to set schema for system collection '{}': {}. \
+                                 System integrity requires valid schemas.",
+                                collection_name, e
+                            ))
+                        })?;
                     }
                 }
             }
@@ -778,12 +784,13 @@ impl IronBaseAdapter {
         let new_db = DatabaseCore::open(path)
             .map_err(|e| McpError::internal(format!("Failed to open database: {}", e)))?;
 
+        // Clear old stats BEFORE swapping database (prevents race condition where
+        // concurrent requests see new DB but old stats)
+        self.collection_stats.clear();
+
         // Swap the database (already holding write lock)
         *db_guard = new_db;
-        drop(db_guard); // Explicitly release db lock before acquiring path lock
-
-        // Clear old stats before updating path
-        self.collection_stats.clear();
+        drop(db_guard); // Explicitly release db lock
 
         // Update path
         {

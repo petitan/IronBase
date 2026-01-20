@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Default max body size: 1 GB
-const DEFAULT_MAX_BODY_SIZE: usize = 1024 * 1024 * 1024;
+/// Default max body size: 10 MB (protects against DoS via large requests)
+/// Can be overridden via config.toml or IRONBASE_MAX_BODY_SIZE env var
+const DEFAULT_MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
 
 /// Default tool timeout: 25 seconds
 /// SAFETY: Must be SHORTER than Claude Desktop's client timeout (~30s)

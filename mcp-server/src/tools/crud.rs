@@ -60,8 +60,19 @@ fn parse_sort_value(sort: Option<Value>) -> Result<Option<Vec<(String, i32)>>> {
             // Object format: {"field": 1, "field2": -1}
             let mut result = Vec::new();
             for (key, value) in map {
-                let direction = value.as_i64().unwrap_or(1) as i32;
-                result.push((key, direction));
+                let direction = value.as_i64().ok_or_else(|| {
+                    McpError::invalid_params(format!(
+                        "Sort direction for '{}' must be 1 or -1",
+                        key
+                    ))
+                })?;
+                if direction != 1 && direction != -1 {
+                    return Err(McpError::invalid_params(format!(
+                        "Sort direction for '{}' must be 1 or -1, got {}",
+                        key, direction
+                    )));
+                }
+                result.push((key, direction as i32));
             }
             if result.is_empty() {
                 Ok(None)
@@ -255,7 +266,15 @@ fn handle_distinct(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
     let p: DistinctParams = DistinctParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let values = adapter.distinct(&p.collection, &p.field, p.query)?;
+    let all_values = adapter.distinct(&p.collection, &p.field, p.query)?;
+
+    // Apply limit if specified (bounded by DEFAULT_QUERY_LIMIT for safety)
+    let limit = p
+        .limit
+        .map(|l| l.min(DEFAULT_QUERY_LIMIT))
+        .unwrap_or(all_values.len());
+    let values: Vec<_> = all_values.into_iter().take(limit).collect();
+
     Ok(json!({"values": values, "count": values.len()}))
 }
 
