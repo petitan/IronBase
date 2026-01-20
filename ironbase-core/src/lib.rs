@@ -43,8 +43,8 @@ pub mod query;
 pub mod storage;
 pub mod transaction;
 
-// RAG (Retrieval Augmented Generation) module
-pub mod rag;
+// Vector index module (HNSW-based ANN search)
+pub mod vector;
 
 // ============================================================================
 // INTERNAL IMPLEMENTATION MODULES - Not part of public API
@@ -112,9 +112,8 @@ pub use aggregation::{
     limits_from_tier, AggregationLimitContext, AggregationLimits, MemoryTier, Pipeline,
 };
 
-// RAG (Retrieval Augmented Generation) exports
-pub use rag::{
-    estimate_tokens, extract_tables, BlockType, Chunk, ChunkConfig, Chunker, DocumentMeta,
-    FastTextEngine, HnswConfig, HnswIndex, ImportResult, RagError, RagManager, RagResult, RagStats,
-    SearchResult as RagSearchResult, StoredChunk,
+// Vector index exports (HNSW-based ANN search)
+pub use vector::{
+    DistanceMetric, HnswIndex, VectorConfigError, VectorIndexConfig, VectorIndexMetadata,
+    VectorSearchResult, DEFAULT_MAX_VECTORS, MAX_VECTOR_DIM,
 };

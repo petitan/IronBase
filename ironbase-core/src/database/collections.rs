@@ -278,6 +278,45 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             .map(|idx| (idx.name.clone(), idx.field.clone()))
             .collect();
 
+        // Pre-collect vector index info to avoid repeated lookups in the loop
+        // SKIP indexes that already have data (loaded from .hnsw file)
+        let vector_info: Vec<_> = index_manager
+            .list_vector_indexes()
+            .iter()
+            .filter(|idx| idx.is_empty()) // Only rebuild empty indexes
+            .map(|idx| {
+                let config = idx.config();
+                (
+                    // Extract index name from naming convention: {collection}_vec_{field}
+                    // We need to find the index by iterating over the HashMap
+                    String::new(), // Will be filled below
+                    config.dim,
+                )
+            })
+            .collect();
+
+        // Get actual vector index names that need rebuilding
+        let vector_indexes_to_rebuild: Vec<(String, String, usize)> = {
+            let mut result = Vec::new();
+            // Get all vector index names and their info
+            for name in index_manager.list_indexes() {
+                if let Some(idx) = index_manager.get_vector_index(&name) {
+                    if idx.is_empty() {
+                        // Extract field from index name: {collection}_vec_{field}
+                        let prefix = format!("{}_vec_", collection_name);
+                        let field = if name.starts_with(&prefix) {
+                            name[prefix.len()..].to_string()
+                        } else {
+                            continue; // Skip if name doesn't match convention
+                        };
+                        result.push((name, field, idx.config().dim));
+                    }
+                }
+            }
+            result
+        };
+        drop(vector_info); // Not needed anymore
+
         // Sort offsets for sequential disk reads (optimization)
         let mut sorted_entries: Vec<_> = catalog.iter().collect();
         sorted_entries.sort_by_key(|(_, offset)| *offset);
@@ -404,6 +443,38 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                         }
                     }
                 }
+
+                // Rebuild vector indexes (using pre-collected info from outside the loop)
+                for (index_name, field, dim) in &vector_indexes_to_rebuild {
+                    if let Some(value) = crate::value_utils::get_nested_value(doc, field) {
+                        // Extract f32 vector from JSON array
+                        if let Some(arr) = value.as_array() {
+                            let mut vector = Vec::with_capacity(arr.len());
+                            let mut valid = true;
+                            for v in arr {
+                                if let Some(f) = v.as_f64() {
+                                    vector.push(f as f32);
+                                } else {
+                                    valid = false;
+                                    break;
+                                }
+                            }
+                            if valid && vector.len() == *dim {
+                                let id_str = match doc_id {
+                                    DocumentId::Int(i) => i.to_string(),
+                                    DocumentId::String(s) => s.clone(),
+                                    DocumentId::ObjectId(oid) => oid.clone(),
+                                };
+                                if let Some(index) = index_manager.get_vector_index_mut(index_name)
+                                {
+                                    if index.insert(&id_str, &vector).is_ok() {
+                                        rebuilt_count += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Log progress for large collections
@@ -452,14 +523,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let persisted_indexes = meta.indexes.clone();
         let persisted_fuzzy_indexes = meta.fuzzy_indexes.clone();
         let persisted_fulltext_indexes = meta.fulltext_indexes.clone();
+        let persisted_vector_indexes = meta.vector_indexes.clone();
 
         log_debug!(
-            "Collection '{}' - catalog size: {}, persisted indexes: {}, fuzzy indexes: {}, fulltext indexes: {}",
+            "Collection '{}' - catalog size: {}, persisted indexes: {}, fuzzy indexes: {}, fulltext indexes: {}, vector indexes: {}",
             name,
             catalog.len(),
             persisted_indexes.len(),
             persisted_fuzzy_indexes.len(),
-            persisted_fulltext_indexes.len()
+            persisted_fulltext_indexes.len(),
+            persisted_vector_indexes.len()
         );
 
         // Get db_path for .idx file loading
@@ -588,19 +661,60 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
+        // Load or create vector indexes from persisted metadata
+        for vec_meta in &persisted_vector_indexes {
+            // Try to load from .hnsw file first
+            if let Some(loaded_index) =
+                crate::index::IndexManager::try_load_vector_index(&db_path, &vec_meta.name)
+            {
+                log_debug!(
+                    "Loaded vector index '{}' from .hnsw file ({} vectors)",
+                    vec_meta.name,
+                    loaded_index.len()
+                );
+                index_manager.add_loaded_vector_index(vec_meta.name.clone(), loaded_index);
+            } else {
+                // Create new index (will be rebuilt from documents)
+                log_debug!(
+                    "Vector index '{}' cache not found, creating empty (will rebuild)",
+                    vec_meta.name
+                );
+                let storage_path =
+                    crate::index::IndexManager::build_vector_cache_path(&db_path, &vec_meta.name);
+                if let Err(e) = index_manager.create_vector_index(
+                    vec_meta.name.clone(),
+                    vec_meta.field.clone(),
+                    vec_meta.config.clone(),
+                    Some(storage_path),
+                ) {
+                    log_debug!(
+                        "Warning: Failed to create vector index '{}': {}",
+                        vec_meta.name,
+                        e
+                    );
+                }
+            }
+        }
+
         // Determine what needs rebuilding
         // (was_clean is already known from earlier)
         let fuzzy_indexes = index_manager.list_fuzzy_indexes();
         let has_fuzzy_without_file = fuzzy_indexes.iter().any(|idx| idx.entry_count() == 0);
         let fulltext_indexes = index_manager.list_fulltext_indexes();
         let has_fulltext_without_file = fulltext_indexes.iter().any(|idx| idx.doc_count() == 0);
+        let vector_indexes = index_manager.list_vector_indexes();
+        let has_vector_without_cache = vector_indexes.iter().any(|idx| idx.is_empty());
 
-        // FAST PATH: If clean shutdown AND no empty fuzzy/fulltext indexes, skip rebuild
-        if was_clean && !catalog.is_empty() && !has_fuzzy_without_file && !has_fulltext_without_file
+        // FAST PATH: If clean shutdown AND no empty indexes, skip rebuild
+        if was_clean
+            && !catalog.is_empty()
+            && !has_fuzzy_without_file
+            && !has_fulltext_without_file
+            && !has_vector_without_cache
         {
             log_debug!(
-                "Clean shutdown detected - trusting {} indexes from .idx files (skipping rebuild of {} docs)",
-                persisted_indexes.len(),
+                "Clean shutdown detected - trusting {} indexes from files (skipping rebuild of {} docs)",
+                persisted_indexes.len() + persisted_vector_indexes.len(),
                 catalog.len()
             );
         } else {
@@ -611,6 +725,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 "fuzzy indexes missing .fzidx file"
             } else if has_fulltext_without_file {
                 "fulltext indexes missing .ftidx file"
+            } else if has_vector_without_cache {
+                "vector indexes missing .hnsw file"
             } else {
                 "empty catalog"
             };

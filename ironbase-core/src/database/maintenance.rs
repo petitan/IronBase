@@ -116,7 +116,7 @@ impl DatabaseCore<StorageEngine> {
         storage.release_lock()
     }
 
-    /// Flush all indexes (B+ tree, fulltext, and fuzzy) to disk
+    /// Flush all indexes (B+ tree, fulltext, fuzzy, and vector) to disk
     fn flush_all_indexes(&self) -> Result<()> {
         let db_path = {
             let storage = self.storage.read();
@@ -129,6 +129,7 @@ impl DatabaseCore<StorageEngine> {
             manager.flush_fulltext_indexes()?;
             manager.flush_fuzzy_indexes()?;
             manager.flush_btree_indexes(&db_path)?;
+            manager.flush_vector_indexes(&db_path)?;
         }
         Ok(())
     }
@@ -150,7 +151,7 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
             }
         };
 
-        // 2. Flush all indexes to disk (B+ tree + fulltext + fuzzy)
+        // 2. Flush all indexes to disk (B+ tree + fulltext + fuzzy + vector)
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
@@ -163,6 +164,9 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
             if !db_path.is_empty() {
                 if let Err(e) = manager.flush_btree_indexes(&db_path) {
                     eprintln!("Warning: Failed to flush btree indexes on drop: {}", e);
+                }
+                if let Err(e) = manager.flush_vector_indexes(&db_path) {
+                    eprintln!("Warning: Failed to flush vector indexes on drop: {}", e);
                 }
             }
         }

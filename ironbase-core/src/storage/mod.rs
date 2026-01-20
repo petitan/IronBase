@@ -220,6 +220,11 @@ pub struct CollectionMeta {
     #[serde(default)]
     pub fulltext_indexes: Vec<crate::fulltext::FulltextIndexMetadata>,
 
+    /// Persisted vector index metadata for this collection
+    /// Cache files (.hnsw) are stored separately and rebuilt if missing
+    #[serde(default)]
+    pub vector_indexes: Vec<crate::vector::VectorIndexMetadata>,
+
     /// Optional JSON schema for validation
     #[serde(default)]
     pub schema: Option<serde_json::Value>,
@@ -643,6 +648,7 @@ impl StorageEngine {
             indexes: Vec::new(),          // Initialize empty index list
             fuzzy_indexes: Vec::new(),    // Initialize empty fuzzy index list
             fulltext_indexes: Vec::new(), // Initialize empty fulltext index list
+            vector_indexes: Vec::new(),   // Initialize empty vector index list
             schema: None,
             flags: CollectionFlags::default(),
         };
@@ -943,6 +949,7 @@ impl StorageEngine {
                             indexes: Vec::new(),
                             fuzzy_indexes: Vec::new(),
                             fulltext_indexes: Vec::new(),
+                            vector_indexes: Vec::new(),
                             schema: None,
                             flags: CollectionFlags::default(),
                         });
@@ -1668,6 +1675,7 @@ impl StorageEngine {
                                     indexes: Vec::new(),
                                     fuzzy_indexes: Vec::new(),
                                     fulltext_indexes: Vec::new(),
+                                    vector_indexes: Vec::new(),
                                     schema: None,
                                     flags: CollectionFlags::default(),
                                 });
@@ -2683,6 +2691,7 @@ mod tests {
             indexes: Vec::new(),
             fuzzy_indexes: Vec::new(),
             fulltext_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             schema: None,
             flags: CollectionFlags::default(),
         };

@@ -54,6 +54,7 @@ use crate::error::{IronBaseError, Result};
 use crate::fulltext::{FtsLanguage, FtsOptions, FulltextIndex};
 use crate::log_error;
 use crate::value_utils::{get_all_nested_values, get_nested_value, path_crosses_array};
+use crate::vector::{HnswIndex, VectorIndexConfig};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -70,6 +71,8 @@ pub struct IndexManager {
     fuzzy_indexes: HashMap<String, FuzzyIndex>,
     /// Full-text search indexes with TF-IDF scoring
     fulltext_indexes: HashMap<String, FulltextIndex>,
+    /// HNSW vector indexes for similarity search
+    vector_indexes: HashMap<String, HnswIndex>,
     /// File paths for persistent indexes (for two-phase commit)
     index_file_paths: HashMap<String, PathBuf>,
 }
@@ -81,6 +84,7 @@ impl IndexManager {
             legacy_indexes: HashMap::new(),
             fuzzy_indexes: HashMap::new(),
             fulltext_indexes: HashMap::new(),
+            vector_indexes: HashMap::new(),
             index_file_paths: HashMap::new(),
         }
     }
@@ -215,12 +219,13 @@ impl IndexManager {
         Ok(())
     }
 
-    /// Drop index by name (supports B+ tree, legacy, and fuzzy indexes)
+    /// Drop index by name (supports B+ tree, legacy, fuzzy, fulltext, and vector indexes)
     pub fn drop_index(&mut self, name: &str) -> Result<()> {
         let removed = self.btree_indexes.remove(name).is_some()
             || self.legacy_indexes.remove(name).is_some()
             || self.fuzzy_indexes.remove(name).is_some()
-            || self.fulltext_indexes.remove(name).is_some();
+            || self.fulltext_indexes.remove(name).is_some()
+            || self.vector_indexes.remove(name).is_some();
 
         if !removed {
             return Err(IronBaseError::IndexError(format!(
@@ -267,6 +272,7 @@ impl IndexManager {
             .chain(self.legacy_indexes.keys())
             .chain(self.fuzzy_indexes.keys())
             .chain(self.fulltext_indexes.keys())
+            .chain(self.vector_indexes.keys())
             .cloned()
             .collect();
         names.sort();
@@ -648,6 +654,188 @@ impl IndexManager {
             persist_index_to_disk(db_path, name, |file| tree.save_to_file(file))?;
         }
         Ok(())
+    }
+
+    // ========== VECTOR INDEX METHODS ==========
+
+    /// Create HNSW vector index for similarity search
+    ///
+    /// The index is created with dirty=true. Call `flush_vector_indexes()` before
+    /// database close to persist to .hnsw files.
+    ///
+    /// # Arguments
+    /// * `name` - Unique index name (e.g., "collection_vec_field")
+    /// * `field` - Field containing the embedding vectors
+    /// * `config` - Vector index configuration (dimension, metric, HNSW params)
+    /// * `storage_path` - Path to store the .hnsw cache file (None = memory-only)
+    pub fn create_vector_index(
+        &mut self,
+        name: String,
+        _field: String,
+        config: VectorIndexConfig,
+        storage_path: Option<PathBuf>,
+    ) -> Result<()> {
+        // Check if any index with this name already exists
+        if self.btree_indexes.contains_key(&name)
+            || self.legacy_indexes.contains_key(&name)
+            || self.fuzzy_indexes.contains_key(&name)
+            || self.fulltext_indexes.contains_key(&name)
+            || self.vector_indexes.contains_key(&name)
+        {
+            return Err(IronBaseError::IndexError(format!(
+                "Index already exists: {}",
+                name
+            )));
+        }
+
+        // Validate config
+        config
+            .validate()
+            .map_err(|e| IronBaseError::IndexError(e.to_string()))?;
+
+        let index = HnswIndex::new(config);
+
+        if let Some(path) = storage_path {
+            self.index_file_paths.insert(name.clone(), path);
+        }
+
+        // Store field in the path map for metadata (we use naming convention)
+        // The field is embedded in the index name: {collection}_vec_{field}
+        self.vector_indexes.insert(name, index);
+        Ok(())
+    }
+
+    /// Get vector index by name
+    pub fn get_vector_index(&self, name: &str) -> Option<&HnswIndex> {
+        self.vector_indexes.get(name)
+    }
+
+    /// Get vector index by name (mutable)
+    pub fn get_vector_index_mut(&mut self, name: &str) -> Option<&mut HnswIndex> {
+        self.vector_indexes.get_mut(name)
+    }
+
+    /// Get vector index for a field (if one exists)
+    ///
+    /// # Arguments
+    /// * `collection_name` - Collection name (for building index name)
+    /// * `field` - Field name to search for
+    pub fn get_vector_index_for_field(
+        &self,
+        collection_name: &str,
+        field: &str,
+    ) -> Option<&HnswIndex> {
+        let expected_name = format!("{}_vec_{}", collection_name, field);
+        self.vector_indexes.get(&expected_name)
+    }
+
+    /// Get vector index for a field (mutable)
+    pub fn get_vector_index_for_field_mut(
+        &mut self,
+        collection_name: &str,
+        field: &str,
+    ) -> Option<&mut HnswIndex> {
+        let expected_name = format!("{}_vec_{}", collection_name, field);
+        self.vector_indexes.get_mut(&expected_name)
+    }
+
+    /// List all vector indexes
+    pub fn list_vector_indexes(&self) -> Vec<&HnswIndex> {
+        self.vector_indexes.values().collect()
+    }
+
+    /// Add a pre-loaded HnswIndex (from .hnsw file)
+    pub fn add_loaded_vector_index(&mut self, name: String, index: HnswIndex) {
+        self.vector_indexes.insert(name, index);
+    }
+
+    /// Drop a vector index by name
+    pub fn drop_vector_index(&mut self, name: &str) -> Result<()> {
+        if self.vector_indexes.remove(name).is_some() {
+            self.index_file_paths.remove(name);
+            Ok(())
+        } else {
+            Err(IronBaseError::IndexError(format!(
+                "Vector index not found: {}",
+                name
+            )))
+        }
+    }
+
+    /// Flush all vector indexes to .hnsw files
+    ///
+    /// This should be called before database close to enable fast restart.
+    /// Only dirty indexes (modified since last save) are written.
+    pub fn flush_vector_indexes(&mut self, db_path: &str) -> Result<()> {
+        for (name, index) in self.vector_indexes.iter_mut() {
+            if index.is_dirty() {
+                // Build cache path: {db_dir}/{index_name}.hnsw
+                let cache_path = Self::build_vector_cache_path(db_path, name);
+                let bytes = index.to_bytes()?;
+                std::fs::write(&cache_path, &bytes).map_err(|e| {
+                    IronBaseError::Io(std::io::Error::other(format!(
+                        "Failed to write HNSW cache file '{}': {}",
+                        cache_path.display(),
+                        e
+                    )))
+                })?;
+                index.mark_clean();
+                crate::log_debug!(
+                    "Flushed vector index '{}' to {}",
+                    name,
+                    cache_path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Build the path for HNSW cache file
+    pub fn build_vector_cache_path(db_path: &str, index_name: &str) -> PathBuf {
+        let db_path_buf = PathBuf::from(db_path);
+        let parent = db_path_buf.parent().unwrap_or(&db_path_buf);
+        parent.join(format!("{}.hnsw", index_name))
+    }
+
+    /// Try to load vector index from .hnsw cache file
+    ///
+    /// Returns Some(HnswIndex) if loaded successfully, None if file doesn't exist or is corrupt.
+    pub fn try_load_vector_index(db_path: &str, index_name: &str) -> Option<HnswIndex> {
+        let cache_path = Self::build_vector_cache_path(db_path, index_name);
+        if !cache_path.exists() {
+            return None;
+        }
+
+        match std::fs::read(&cache_path) {
+            Ok(bytes) => match HnswIndex::from_bytes(&bytes) {
+                Ok(index) => {
+                    crate::log_debug!(
+                        "Loaded vector index '{}' from {} ({} vectors)",
+                        index_name,
+                        cache_path.display(),
+                        index.len()
+                    );
+                    Some(index)
+                }
+                Err(e) => {
+                    crate::log_warn!(
+                        "Failed to deserialize vector index '{}' from {}: {}",
+                        index_name,
+                        cache_path.display(),
+                        e
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                crate::log_warn!(
+                    "Failed to read vector index file {}: {}",
+                    cache_path.display(),
+                    e
+                );
+                None
+            }
+        }
     }
 
     // ========== INDEX STATISTICS ==========

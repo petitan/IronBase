@@ -9,13 +9,19 @@
 //! - Memory efficient: stores only graph structure and vector references
 //! - Configurable M (connections per node) and ef (search candidate list size)
 //! - Support for incremental insertions
+//! - Multiple distance metrics: Cosine, Euclidean, DotProduct
 //!
 //! # Example
 //!
 //! ```rust,ignore
-//! let mut hnsw = HnswIndex::new(HnswConfig::default());
-//! hnsw.insert("doc1", &[0.1, 0.2, 0.3, ...]);
-//! hnsw.insert("doc2", &[0.2, 0.3, 0.4, ...]);
+//! use ironbase_core::vector::{HnswIndex, VectorIndexConfig, DistanceMetric};
+//!
+//! let config = VectorIndexConfig::new(300)
+//!     .with_metric(DistanceMetric::Cosine);
+//! let mut hnsw = HnswIndex::new(config);
+//!
+//! hnsw.insert("doc1", &[0.1, 0.2, 0.3, ...])?;
+//! hnsw.insert("doc2", &[0.2, 0.3, 0.4, ...])?;
 //!
 //! let results = hnsw.search(&query_vector, 10);
 //! for (id, score) in results {
@@ -23,13 +29,12 @@
 //! }
 //! ```
 
-use super::types::{HnswConfig, RagError, RagResult};
+use super::config::{DistanceMetric, VectorIndexConfig};
+use super::simd;
+use crate::error::{IronBaseError, Result};
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
-
-/// Default maximum vectors in HNSW index (used when max_vectors not specified)
-const DEFAULT_MAX_HNSW_VECTORS: usize = 100_000;
 
 /// A node in the HNSW graph
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,11 +110,20 @@ impl Ord for NearestCandidate {
     }
 }
 
+/// Result of a vector search
+#[derive(Debug, Clone)]
+pub struct VectorSearchResult {
+    /// Document ID
+    pub id: String,
+    /// Similarity/distance score (meaning depends on metric)
+    pub score: f32,
+}
+
 /// HNSW index for fast approximate nearest neighbor search
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HnswIndex {
     /// Configuration
-    config: HnswConfig,
+    config: VectorIndexConfig,
     /// All nodes in the graph
     nodes: Vec<HnswNode>,
     /// Entry point (top layer node index)
@@ -120,23 +134,14 @@ pub struct HnswIndex {
     id_to_index: HashMap<String, usize>,
     /// Level multiplier for random layer assignment (1/ln(M))
     level_mult: f64,
-    /// Maximum number of vectors (OOM protection, dynamic)
-    #[serde(default = "default_max_vectors")]
-    max_vectors: usize,
-}
-
-fn default_max_vectors() -> usize {
-    DEFAULT_MAX_HNSW_VECTORS
+    /// Whether the index has been modified since last save
+    #[serde(skip)]
+    dirty: bool,
 }
 
 impl HnswIndex {
     /// Create a new HNSW index with the given configuration
-    pub fn new(config: HnswConfig) -> Self {
-        Self::with_limits(config, DEFAULT_MAX_HNSW_VECTORS)
-    }
-
-    /// Create a new HNSW index with custom max vectors limit
-    pub fn with_limits(config: HnswConfig, max_vectors: usize) -> Self {
+    pub fn new(config: VectorIndexConfig) -> Self {
         let level_mult = 1.0 / (config.m as f64).ln();
         Self {
             config,
@@ -145,27 +150,18 @@ impl HnswIndex {
             max_level: 0,
             id_to_index: HashMap::new(),
             level_mult,
-            max_vectors,
+            dirty: false,
         }
     }
 
-    /// Create with default configuration
+    /// Create with specified dimension only (uses default config)
     pub fn with_dim(dim: usize) -> Self {
-        Self::new(HnswConfig {
-            dim,
-            ..Default::default()
-        })
+        Self::new(VectorIndexConfig::new(dim))
     }
 
-    /// Create with default configuration and custom max vectors
+    /// Create with dimension and custom max vectors limit
     pub fn with_dim_and_limits(dim: usize, max_vectors: usize) -> Self {
-        Self::with_limits(
-            HnswConfig {
-                dim,
-                ..Default::default()
-            },
-            max_vectors,
-        )
+        Self::new(VectorIndexConfig::new(dim).with_max_vectors(max_vectors))
     }
 
     /// Get the number of vectors in the index
@@ -183,9 +179,29 @@ impl HnswIndex {
         self.config.dim
     }
 
+    /// Get the distance metric
+    pub fn metric(&self) -> DistanceMetric {
+        self.config.metric
+    }
+
     /// Check if an ID exists in the index
     pub fn contains(&self, id: &str) -> bool {
         self.id_to_index.contains_key(id)
+    }
+
+    /// Check if the index has been modified since last save
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark the index as clean (after saving)
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
+    }
+
+    /// Get the configuration
+    pub fn config(&self) -> &VectorIndexConfig {
+        &self.config
     }
 
     /// Insert a vector into the index
@@ -198,9 +214,9 @@ impl HnswIndex {
     /// # Returns
     ///
     /// Error if dimension mismatch or ID already exists
-    pub fn insert(&mut self, id: &str, vector: &[f32]) -> RagResult<()> {
+    pub fn insert(&mut self, id: &str, vector: &[f32]) -> Result<()> {
         if vector.len() != self.config.dim {
-            return Err(RagError::HnswError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Vector dimension mismatch: expected {}, got {}",
                 self.config.dim,
                 vector.len()
@@ -208,29 +224,28 @@ impl HnswIndex {
         }
 
         if self.id_to_index.contains_key(id) {
-            return Err(RagError::HnswError(format!(
-                "ID already exists in index: {}",
+            return Err(IronBaseError::IndexError(format!(
+                "ID already exists in vector index: {}",
                 id
             )));
         }
 
-        // OOM Protection: Check vector count limit (dynamic, RAM-based)
-        if self.nodes.len() >= self.max_vectors {
-            return Err(RagError::HnswError(format!(
-                "HNSW index full: {} vectors (max: {}). Remove documents or create a new collection.",
+        // OOM Protection: Check vector count limit
+        if self.nodes.len() >= self.config.max_vectors {
+            return Err(IronBaseError::OutOfMemory(format!(
+                "Vector index full: {} vectors (max: {}). Remove documents or increase max_vectors.",
                 self.nodes.len(),
-                self.max_vectors
+                self.config.max_vectors
             )));
         }
 
         // OOM Protection: Ensure capacity for new node
         if self.nodes.len() == self.nodes.capacity() {
-            // Reserve space for more nodes (grow by 25% or at least 100)
             let additional = (self.nodes.len() / 4)
                 .max(100)
-                .min(self.max_vectors - self.nodes.len());
+                .min(self.config.max_vectors - self.nodes.len());
             self.nodes.try_reserve(additional).map_err(|_| {
-                RagError::HnswError(format!(
+                IronBaseError::OutOfMemory(format!(
                     "Failed to allocate memory for {} additional HNSW nodes",
                     additional
                 ))
@@ -254,6 +269,7 @@ impl HnswIndex {
             self.entry_point = Some(node_index);
             self.max_level = node_level;
             self.id_to_index.insert(id.to_string(), node_index);
+            self.dirty = true;
             return Ok(());
         }
 
@@ -303,9 +319,9 @@ impl HnswIndex {
                             .iter()
                             .map(|&idx| {
                                 let dist = if idx == node_index {
-                                    Self::euclidean_distance(&node.vector, &neighbor_vec)
+                                    self.compute_distance(&node.vector, &neighbor_vec)
                                 } else {
-                                    Self::euclidean_distance(&self.nodes[idx].vector, &neighbor_vec)
+                                    self.compute_distance(&self.nodes[idx].vector, &neighbor_vec)
                                 };
                                 (idx, dist)
                             })
@@ -339,6 +355,7 @@ impl HnswIndex {
             self.entry_point = Some(node_index);
         }
 
+        self.dirty = true;
         Ok(())
     }
 
@@ -351,8 +368,8 @@ impl HnswIndex {
     ///
     /// # Returns
     ///
-    /// Vector of (id, similarity_score) pairs, sorted by similarity descending
-    pub fn search(&self, query: &[f32], k: usize) -> Vec<(String, f32)> {
+    /// Vector of results sorted by similarity/distance
+    pub fn search(&self, query: &[f32], k: usize) -> Vec<VectorSearchResult> {
         if self.entry_point.is_none() || query.len() != self.config.dim {
             return Vec::new();
         }
@@ -368,37 +385,76 @@ impl HnswIndex {
         // Search at layer 0 with ef_search candidates
         let candidates = self.search_layer(query, current, self.config.ef_search, 0);
 
-        // Convert to results with similarity scores (cosine similarity)
+        // Convert to results with similarity scores based on metric
         candidates
             .into_iter()
             .take(k)
             .map(|(idx, _distance)| {
                 let node = &self.nodes[idx];
-                let similarity = Self::cosine_similarity(query, &node.vector);
-                (node.id.clone(), similarity)
+                let score = self.compute_similarity(query, &node.vector);
+                VectorSearchResult {
+                    id: node.id.clone(),
+                    score,
+                }
             })
             .collect()
     }
 
+    /// Search with a filter function
+    ///
+    /// Only returns results where the filter returns true for the document ID.
+    pub fn search_with_filter<F>(
+        &self,
+        query: &[f32],
+        k: usize,
+        filter: F,
+    ) -> Vec<VectorSearchResult>
+    where
+        F: Fn(&str) -> bool,
+    {
+        if self.entry_point.is_none() || query.len() != self.config.dim {
+            return Vec::new();
+        }
+
+        let entry_point = self.entry_point.unwrap();
+        let mut current = entry_point;
+
+        // Navigate through layers from top to 1
+        for level in (1..=self.max_level).rev() {
+            current = self.search_layer_greedy(query, current, level);
+        }
+
+        // Search at layer 0 with more candidates to compensate for filtering
+        let ef = self.config.ef_search * 3; // Expand search space
+        let candidates = self.search_layer(query, current, ef, 0);
+
+        // Filter and convert to results
+        candidates
+            .into_iter()
+            .filter_map(|(idx, _distance)| {
+                let node = &self.nodes[idx];
+                if filter(&node.id) {
+                    let score = self.compute_similarity(query, &node.vector);
+                    Some(VectorSearchResult {
+                        id: node.id.clone(),
+                        score,
+                    })
+                } else {
+                    None
+                }
+            })
+            .take(k)
+            .collect()
+    }
+
     /// Batch insert multiple vectors
-    pub fn batch_insert(&mut self, items: &[(&str, &[f32])]) -> RagResult<usize> {
+    pub fn batch_insert(&mut self, items: &[(&str, &[f32])]) -> Result<usize> {
         let mut inserted = 0;
         for (id, vector) in items {
             self.insert(id, vector)?;
             inserted += 1;
         }
         Ok(inserted)
-    }
-
-    /// Remove a vector from the index
-    ///
-    /// Note: This is a lazy removal - the vector is marked as deleted but
-    /// the graph structure is not fully updated until rebuild.
-    pub fn remove(&mut self, id: &str) -> bool {
-        // For now, we don't support removal
-        // A full implementation would mark the node as deleted and
-        // update neighbor lists
-        self.id_to_index.contains_key(id)
     }
 
     /// Upsert a vector - update if exists, insert if not
@@ -410,9 +466,9 @@ impl HnswIndex {
     /// # Returns
     ///
     /// true if updated, false if inserted
-    pub fn upsert(&mut self, id: &str, vector: &[f32]) -> RagResult<bool> {
+    pub fn upsert(&mut self, id: &str, vector: &[f32]) -> Result<bool> {
         if vector.len() != self.config.dim {
-            return Err(RagError::HnswError(format!(
+            return Err(IronBaseError::IndexError(format!(
                 "Vector dimension mismatch: expected {}, got {}",
                 self.config.dim,
                 vector.len()
@@ -422,6 +478,7 @@ impl HnswIndex {
         if let Some(&node_idx) = self.id_to_index.get(id) {
             // Update existing node's vector
             self.nodes[node_idx].vector = vector.to_vec();
+            self.dirty = true;
             Ok(true) // was update
         } else {
             // Insert new
@@ -430,12 +487,28 @@ impl HnswIndex {
         }
     }
 
+    /// Remove a vector from the index (lazy removal)
+    ///
+    /// Note: This marks the node as deleted but doesn't fully update
+    /// the graph structure. Call rebuild() after many deletions.
+    pub fn remove(&mut self, id: &str) -> bool {
+        if let Some(&_idx) = self.id_to_index.get(id) {
+            // For now, just remove from lookup (lazy removal)
+            self.id_to_index.remove(id);
+            self.dirty = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Rebuild the index (useful after many deletions)
-    pub fn rebuild(&mut self) -> RagResult<()> {
-        // Collect all vectors
+    pub fn rebuild(&mut self) -> Result<()> {
+        // Collect all vectors that haven't been removed
         let items: Vec<(String, Vec<f32>)> = self
             .nodes
             .iter()
+            .filter(|n| self.id_to_index.contains_key(&n.id))
             .map(|n| (n.id.clone(), n.vector.clone()))
             .collect();
 
@@ -449,10 +522,64 @@ impl HnswIndex {
             self.insert(&id, &vector)?;
         }
 
+        self.dirty = true;
         Ok(())
     }
 
+    /// Get vector by ID
+    pub fn get_vector(&self, id: &str) -> Option<&[f32]> {
+        self.id_to_index
+            .get(id)
+            .map(|&idx| self.nodes[idx].vector.as_slice())
+    }
+
+    /// Serialize the index to bytes (for cache file)
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(|e| {
+            IronBaseError::Serialization(format!("Failed to serialize HNSW index: {}", e))
+        })
+    }
+
+    /// Deserialize the index from bytes
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        bincode::deserialize(bytes).map_err(|e| {
+            IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Failed to deserialize HNSW index: {}", e),
+            )))
+        })
+    }
+
     // === Private helper methods ===
+
+    /// Compute distance based on configured metric
+    #[inline]
+    fn compute_distance(&self, a: &[f32], b: &[f32]) -> f32 {
+        match self.config.metric {
+            DistanceMetric::Euclidean => simd::squared_euclidean_distance(a, b),
+            DistanceMetric::Cosine => {
+                // Convert cosine similarity to distance (1 - similarity)
+                1.0 - simd::cosine_similarity(a, b)
+            }
+            DistanceMetric::DotProduct => {
+                // Negate dot product (higher is better -> lower distance)
+                -simd::dot_product(a, b)
+            }
+        }
+    }
+
+    /// Compute similarity score for results (higher = more similar)
+    #[inline]
+    fn compute_similarity(&self, a: &[f32], b: &[f32]) -> f32 {
+        match self.config.metric {
+            DistanceMetric::Euclidean => {
+                // Convert distance to similarity: 1 / (1 + distance)
+                1.0 / (1.0 + simd::euclidean_distance(a, b))
+            }
+            DistanceMetric::Cosine => simd::cosine_similarity(a, b),
+            DistanceMetric::DotProduct => simd::dot_product(a, b),
+        }
+    }
 
     /// Generate a random level for a new node
     fn random_level(&self) -> usize {
@@ -466,12 +593,9 @@ impl HnswIndex {
     }
 
     /// Greedy search within a single layer (returns single best node)
-    ///
-    /// Uses squared distance for faster comparison (no sqrt needed for ordering).
     fn search_layer_greedy(&self, query: &[f32], entry: usize, level: usize) -> usize {
         let mut current = entry;
-        // Use squared distance - avoids sqrt, preserves ordering
-        let mut current_dist = Self::squared_euclidean_distance(query, &self.nodes[current].vector);
+        let mut current_dist = self.compute_distance(query, &self.nodes[current].vector);
 
         loop {
             let mut changed = false;
@@ -479,8 +603,7 @@ impl HnswIndex {
 
             if level < neighbors.len() {
                 for &neighbor_idx in &neighbors[level] {
-                    let dist =
-                        Self::squared_euclidean_distance(query, &self.nodes[neighbor_idx].vector);
+                    let dist = self.compute_distance(query, &self.nodes[neighbor_idx].vector);
                     if dist < current_dist {
                         current = neighbor_idx;
                         current_dist = dist;
@@ -509,7 +632,7 @@ impl HnswIndex {
         let mut candidates = BinaryHeap::new(); // Min-heap for nearest
         let mut results = BinaryHeap::new(); // Max-heap for furthest (to maintain top-ef)
 
-        let entry_dist = Self::euclidean_distance(query, &self.nodes[entry].vector);
+        let entry_dist = self.compute_distance(query, &self.nodes[entry].vector);
         visited.insert(entry);
         candidates.push(NearestCandidate {
             index: entry,
@@ -537,8 +660,7 @@ impl HnswIndex {
             if level < neighbors.len() {
                 for &neighbor_idx in &neighbors[level] {
                     if visited.insert(neighbor_idx) {
-                        let dist =
-                            Self::euclidean_distance(query, &self.nodes[neighbor_idx].vector);
+                        let dist = self.compute_distance(query, &self.nodes[neighbor_idx].vector);
 
                         // Add to candidates if promising
                         let dominated = results.len() >= ef
@@ -569,32 +691,6 @@ impl HnswIndex {
             results.into_iter().map(|c| (c.index, c.distance)).collect();
         result_vec.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
         result_vec
-    }
-
-    /// Compute Euclidean distance between two vectors
-    ///
-    /// Uses SIMD-optimized implementation from the simd module.
-    #[inline]
-    fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-        // Use squared distance for comparison (avoid sqrt in inner loop)
-        // The sqrt is only applied once when returning results
-        super::simd::squared_euclidean_distance(a, b).sqrt()
-    }
-
-    /// Compute squared Euclidean distance (faster, for comparisons)
-    ///
-    /// Use this in inner loops where we only need ordering, not actual distance.
-    #[inline]
-    fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-        super::simd::squared_euclidean_distance(a, b)
-    }
-
-    /// Compute cosine similarity between two vectors
-    ///
-    /// Uses SIMD-optimized implementation from the simd module.
-    #[inline]
-    fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-        super::simd::cosine_similarity(a, b)
     }
 }
 
@@ -655,32 +751,74 @@ mod tests {
         let results = hnsw.search(&[1.0, 0.0, 0.0], 2);
         assert_eq!(results.len(), 2);
         // doc1 should be most similar (exact match)
-        assert_eq!(results[0].0, "doc1");
-        assert!((results[0].1 - 1.0).abs() < 0.001);
+        assert_eq!(results[0].id, "doc1");
+        assert!((results[0].score - 1.0).abs() < 0.001);
     }
 
     #[test]
-    fn test_cosine_similarity() {
-        let a = vec![1.0, 0.0, 0.0];
-        let b = vec![1.0, 0.0, 0.0];
-        assert!((HnswIndex::cosine_similarity(&a, &b) - 1.0).abs() < 1e-6);
+    fn test_upsert() {
+        let mut hnsw = HnswIndex::with_dim(3);
 
-        let c = vec![0.0, 1.0, 0.0];
-        assert!(HnswIndex::cosine_similarity(&a, &c).abs() < 1e-6);
+        // First upsert - insert
+        let was_update = hnsw.upsert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+        assert!(!was_update);
+        assert_eq!(hnsw.len(), 1);
+
+        // Second upsert - update
+        let was_update = hnsw.upsert("doc1", &[0.5, 0.5, 0.0]).unwrap();
+        assert!(was_update);
+        assert_eq!(hnsw.len(), 1);
+
+        // Verify vector was updated
+        let vec = hnsw.get_vector("doc1").unwrap();
+        assert!((vec[0] - 0.5).abs() < 0.001);
     }
 
     #[test]
-    fn test_euclidean_distance() {
-        let a = vec![0.0, 0.0, 0.0];
-        let b = vec![3.0, 4.0, 0.0];
-        assert!((HnswIndex::euclidean_distance(&a, &b) - 5.0).abs() < 1e-6);
+    fn test_distance_metrics() {
+        // Test Euclidean
+        let config = VectorIndexConfig::new(3).with_metric(DistanceMetric::Euclidean);
+        let mut hnsw = HnswIndex::new(config);
+        hnsw.insert("doc1", &[0.0, 0.0, 0.0]).unwrap();
+        hnsw.insert("doc2", &[3.0, 4.0, 0.0]).unwrap();
+
+        let results = hnsw.search(&[0.0, 0.0, 0.0], 2);
+        // doc1 should be closest (distance 0)
+        assert_eq!(results[0].id, "doc1");
+
+        // Test DotProduct
+        let config = VectorIndexConfig::new(3).with_metric(DistanceMetric::DotProduct);
+        let mut hnsw = HnswIndex::new(config);
+        hnsw.insert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+        hnsw.insert("doc2", &[0.5, 0.5, 0.0]).unwrap();
+
+        let results = hnsw.search(&[1.0, 0.0, 0.0], 2);
+        // doc1 should have higher dot product with query
+        assert_eq!(results[0].id, "doc1");
+    }
+
+    #[test]
+    fn test_search_with_filter() {
+        let mut hnsw = HnswIndex::with_dim(3);
+        hnsw.insert("doc:1:0", &[1.0, 0.0, 0.0]).unwrap();
+        hnsw.insert("doc:1:1", &[0.9, 0.1, 0.0]).unwrap();
+        hnsw.insert("doc:2:0", &[0.8, 0.2, 0.0]).unwrap();
+        hnsw.insert("doc:2:1", &[0.0, 1.0, 0.0]).unwrap();
+
+        // Search only within doc:1
+        let results = hnsw.search_with_filter(&[1.0, 0.0, 0.0], 10, |id| id.starts_with("doc:1:"));
+
+        assert_eq!(results.len(), 2);
+        for r in &results {
+            assert!(r.id.starts_with("doc:1:"));
+        }
     }
 
     #[test]
     fn test_larger_index() {
         let mut hnsw = HnswIndex::with_dim(10);
 
-        // Insert 100 random vectors
+        // Insert 100 vectors
         for i in 0..100 {
             let vector: Vec<f32> = (0..10).map(|j| ((i + j) % 10) as f32 / 10.0).collect();
             hnsw.insert(&format!("doc{}", i), &vector).unwrap();
@@ -694,8 +832,40 @@ mod tests {
         assert_eq!(results.len(), 5);
 
         // All results should have positive similarity
-        for (_, score) in &results {
-            assert!(*score > 0.0);
+        for r in &results {
+            assert!(r.score > 0.0);
         }
+    }
+
+    #[test]
+    fn test_serialization() {
+        let mut hnsw = HnswIndex::with_dim(3);
+        hnsw.insert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+        hnsw.insert("doc2", &[0.0, 1.0, 0.0]).unwrap();
+
+        // Serialize
+        let bytes = hnsw.to_bytes().unwrap();
+
+        // Deserialize
+        let hnsw2 = HnswIndex::from_bytes(&bytes).unwrap();
+
+        assert_eq!(hnsw2.len(), 2);
+        assert!(hnsw2.contains("doc1"));
+        assert!(hnsw2.contains("doc2"));
+    }
+
+    #[test]
+    fn test_dirty_flag() {
+        let mut hnsw = HnswIndex::with_dim(3);
+        assert!(!hnsw.is_dirty());
+
+        hnsw.insert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+        assert!(hnsw.is_dirty());
+
+        hnsw.mark_clean();
+        assert!(!hnsw.is_dirty());
+
+        hnsw.upsert("doc1", &[0.5, 0.5, 0.0]).unwrap();
+        assert!(hnsw.is_dirty());
     }
 }

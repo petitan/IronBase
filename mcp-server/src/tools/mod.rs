@@ -20,9 +20,9 @@ pub mod helpers;
 pub mod index;
 pub mod listener;
 pub mod params;
-pub mod rag;
 pub mod script;
 pub mod transaction;
+pub mod vector;
 
 use definitions::get_all_tools_json;
 
@@ -343,16 +343,12 @@ fn dispatch_tool_inner(
             admin::dispatch(name, params, adapter, api_key_cache, server_info)
         }
 
-        // RAG operations (semantic search)
-        "rag_collection_create"
-        | "rag_collection_list"
-        | "rag_collection_stats"
-        | "rag_collection_delete"
-        | "rag_document_import"
-        | "rag_document_list"
-        | "rag_document_delete"
-        | "rag_chunk_upsert"
-        | "rag_search" => rag::dispatch(name, params, adapter),
+        // Vector operations (similarity search)
+        "index_create_vector"
+        | "index_list_vector"
+        | "index_drop_vector"
+        | "vector_search"
+        | "vector_search_filter" => vector::dispatch(name, params, adapter),
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),
     }

@@ -311,16 +311,6 @@ fn run_stdio_server(cli: &Cli) {
         }
     };
 
-    // Load config.toml for RAG settings (same as HTTP mode)
-    if let Ok(config) = crate::http_server::load_config() {
-        if let Some(ref model_path) = config.fasttext_model_path {
-            if !model_path.is_empty() {
-                adapter.set_default_fasttext_model(Some(model_path.clone()));
-                eprintln!("RAG default FastText model: {}", model_path);
-            }
-        }
-    }
-
     // Warm up collections (initialize index managers)
     eprintln!("Warming up collections...");
     let (count, elapsed) = adapter.warm_up();

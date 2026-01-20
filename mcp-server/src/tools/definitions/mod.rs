@@ -21,10 +21,10 @@ mod database;
 mod document;
 mod index;
 mod listener;
-mod rag;
 mod schema;
 mod script;
 mod transaction;
+mod vector;
 
 use serde_json::{json, Value};
 
@@ -65,8 +65,8 @@ pub fn get_all_tools_json() -> Value {
     // Listener Management
     tools.extend(listener::tools());
 
-    // RAG (Semantic Search)
-    tools.extend(rag::tools());
+    // Vector Index & Similarity Search
+    tools.extend(vector::tools());
 
     json!({ "tools": tools })
 }

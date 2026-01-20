@@ -207,6 +207,7 @@ pub(crate) mod schema;
 mod search;
 mod topk;
 mod update_operators;
+mod vector_ops;
 
 // Public exports for Top-K algorithm
 pub use topk::{topk_select, topk_select_with_skip};

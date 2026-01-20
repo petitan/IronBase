@@ -211,6 +211,7 @@ impl Storage for MemoryStorage {
             indexes: Vec::new(),
             fuzzy_indexes: Vec::new(),
             fulltext_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
             schema: None,
             flags: CollectionFlags::default(),
         };

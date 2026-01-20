@@ -1,4 +1,4 @@
-//! SIMD-optimized vector operations for RAG
+//! SIMD-optimized vector operations
 //!
 //! This module provides optimized implementations of common vector operations
 //! used in HNSW nearest neighbor search. The code is structured to enable
@@ -10,9 +10,6 @@
 //! 2. **Squared distance**: Avoid sqrt in inner loops where possible
 //! 3. **Pre-computed norms**: Cache vector norms for cosine similarity
 //! 4. **Aligned access patterns**: Predictable memory access for prefetching
-
-// Allow unused functions - these are utility functions that may be used in the future
-#![allow(dead_code)]
 
 /// Compute squared Euclidean distance between two vectors (no sqrt)
 ///
