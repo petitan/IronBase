@@ -246,7 +246,8 @@ impl HnswIndex {
                 .min(self.config.max_vectors - self.nodes.len());
             self.nodes.try_reserve(additional).map_err(|_| {
                 IronBaseError::OutOfMemory(format!(
-                    "Failed to allocate memory for {} additional HNSW nodes",
+                    "Failed to allocate memory for {} additional HNSW nodes. \
+                     Consider: 1) Reduce max_vectors, 2) Increase system memory, 3) Use smaller vectors.",
                     additional
                 ))
             })?;

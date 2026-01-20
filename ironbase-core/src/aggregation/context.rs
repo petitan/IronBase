@@ -228,7 +228,10 @@ impl AggregationLimitContext {
         if inner.groups_created >= inner.limits.max_group_count {
             return Err(IronBaseError::AggregationError(format!(
                 "Aggregation exceeded group limit: {} unique groups (limit: {}). \
-                 Add a $match stage to filter documents or use a lower-cardinality group key.",
+                 High-cardinality $group key detected. Consider:\n\
+                 1. Add a $match stage to filter documents first\n\
+                 2. Use a lower-cardinality group key\n\
+                 3. Increase max_group_count limit",
                 inner.groups_created + 1,
                 inner.limits.max_group_count
             )));
@@ -274,7 +277,8 @@ impl AggregationLimitContext {
             if *push_count > limit {
                 let count = *push_count;
                 return Err(IronBaseError::AggregationError(format!(
-                    "$push accumulator exceeded element limit for group: {} elements (limit: {}).",
+                    "$push accumulator exceeded element limit for group: {} elements (limit: {}). \
+                     Consider using $slice after $push or limiting input documents.",
                     count, limit
                 )));
             }
@@ -321,7 +325,8 @@ impl AggregationLimitContext {
             if *addtoset_count > limit {
                 let count = *addtoset_count;
                 return Err(IronBaseError::AggregationError(format!(
-                    "$addToSet accumulator exceeded element limit for group: {} elements (limit: {}).",
+                    "$addToSet accumulator exceeded element limit for group: {} elements (limit: {}). \
+                     Consider limiting input documents or using a different approach.",
                     count, limit
                 )));
             }

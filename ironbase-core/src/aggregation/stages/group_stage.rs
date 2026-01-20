@@ -350,7 +350,10 @@ impl GroupStage {
         if groups.len() > limits.max_group_count {
             return Err(IronBaseError::AggregationError(format!(
                 "Aggregation exceeded group limit: {} unique groups (limit: {}). \
-                 Add a $match stage to filter documents or use a lower-cardinality group key.",
+                 High-cardinality $group key detected. Consider:\n\
+                 1. Add a $match stage to filter documents first\n\
+                 2. Use a lower-cardinality group key\n\
+                 3. Increase max_group_count limit",
                 groups.len(),
                 limits.max_group_count
             )));

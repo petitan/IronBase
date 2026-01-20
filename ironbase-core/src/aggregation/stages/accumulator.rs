@@ -376,7 +376,8 @@ impl AccumulatorState {
                     // try_reserve for safety
                     values.try_reserve(1).map_err(|_| {
                         IronBaseError::OutOfMemory(format!(
-                            "$push failed to allocate memory for element {} in field '{}'",
+                            "$push failed to allocate memory for element {} in field '{}'. \
+                             Consider reducing input documents or increasing system memory.",
                             values.len(),
                             expr_name
                         ))
@@ -402,7 +403,8 @@ impl AccumulatorState {
                         // try_reserve for safety
                         values.try_reserve(1).map_err(|_| {
                             IronBaseError::OutOfMemory(format!(
-                                "$addToSet failed to allocate memory for element {} in field '{}'",
+                                "$addToSet failed to allocate memory for element {} in field '{}'. \
+                                 Consider reducing input documents or increasing system memory.",
                                 values.len(),
                                 expr_name
                             ))
@@ -538,7 +540,8 @@ impl AccumulatorState {
                     let expr_name = expr_debug_name(expr);
                     values.try_reserve(1).map_err(|_| {
                         IronBaseError::OutOfMemory(format!(
-                            "$push failed to allocate memory for element {} in field '{}'",
+                            "$push failed to allocate memory for element {} in field '{}'. \
+                             Consider reducing input documents or increasing system memory.",
                             values.len(),
                             expr_name
                         ))
@@ -561,7 +564,8 @@ impl AccumulatorState {
                     if seen.insert(key) {
                         values.try_reserve(1).map_err(|_| {
                             IronBaseError::OutOfMemory(format!(
-                                "$addToSet failed to allocate memory for element {} in field '{}'",
+                                "$addToSet failed to allocate memory for element {} in field '{}'. \
+                                 Consider reducing input documents or increasing system memory.",
                                 values.len(),
                                 expr_name
                             ))
