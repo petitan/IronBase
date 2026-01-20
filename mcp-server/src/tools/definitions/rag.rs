@@ -153,6 +153,38 @@ pub fn tools() -> Vec<Value> {
                 "required": ["collection", "doc_id"]
             }
         }),
+        json!({
+            "name": "rag_chunk_upsert",
+            "title": "Upsert RAG Chunk",
+            "description": "Insert or update a single chunk in a RAG collection. If chunk_id exists, updates the text and re-embeds. If not, creates new chunk.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "collection": {
+                        "type": "string",
+                        "description": "RAG collection name"
+                    },
+                    "doc_id": {
+                        "type": "string",
+                        "description": "Document ID this chunk belongs to (must exist)"
+                    },
+                    "chunk_id": {
+                        "type": "string",
+                        "description": "Chunk ID (e.g., '7:13' for doc 7, chunk 13)"
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "New text content for the chunk"
+                    },
+                    "section": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional section path (e.g., ['Chapter 1', 'Section 1.2'])"
+                    }
+                },
+                "required": ["collection", "doc_id", "chunk_id", "text"]
+            }
+        }),
         // =====================================================================
         // Search
         // =====================================================================

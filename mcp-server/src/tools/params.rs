@@ -561,6 +561,16 @@ pub struct RagDocumentDeleteParams {
     pub doc_id: String,
 }
 
+/// Parameters for `rag_chunk_upsert` tool
+#[derive(Debug, Deserialize)]
+pub struct RagChunkUpsertParams {
+    pub collection: String,
+    pub doc_id: String,
+    pub chunk_id: String,
+    pub text: String,
+    pub section: Option<Vec<String>>,
+}
+
 /// Parameters for `rag_search` tool
 #[derive(Debug, Deserialize)]
 pub struct RagSearchParams {

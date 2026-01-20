@@ -401,6 +401,35 @@ impl HnswIndex {
         self.id_to_index.contains_key(id)
     }
 
+    /// Upsert a vector - update if exists, insert if not
+    ///
+    /// For updates, only the vector is changed. The graph structure (edges)
+    /// remains the same, which may slightly reduce accuracy but is much faster
+    /// than removing and re-inserting.
+    ///
+    /// # Returns
+    ///
+    /// true if updated, false if inserted
+    pub fn upsert(&mut self, id: &str, vector: &[f32]) -> RagResult<bool> {
+        if vector.len() != self.config.dim {
+            return Err(RagError::HnswError(format!(
+                "Vector dimension mismatch: expected {}, got {}",
+                self.config.dim,
+                vector.len()
+            )));
+        }
+
+        if let Some(&node_idx) = self.id_to_index.get(id) {
+            // Update existing node's vector
+            self.nodes[node_idx].vector = vector.to_vec();
+            Ok(true) // was update
+        } else {
+            // Insert new
+            self.insert(id, vector)?;
+            Ok(false) // was insert
+        }
+    }
+
     /// Rebuild the index (useful after many deletions)
     pub fn rebuild(&mut self) -> RagResult<()> {
         // Collect all vectors

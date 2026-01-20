@@ -317,6 +317,15 @@ pub struct ImportResult {
     pub import_time_ms: u64,
 }
 
+/// Result of chunk upsert operation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpsertResult {
+    /// Chunk ID that was upserted
+    pub chunk_id: String,
+    /// True if this was an update, false if insert
+    pub is_update: bool,
+}
+
 /// HNSW index configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HnswConfig {

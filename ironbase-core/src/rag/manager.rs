@@ -347,6 +347,85 @@ impl<'a> RagManager<'a> {
         Ok(true)
     }
 
+    /// Upsert a single chunk
+    ///
+    /// If the chunk_id exists, it will be replaced with the new text.
+    /// If it doesn't exist, it will be created.
+    ///
+    /// # Arguments
+    ///
+    /// * `doc_id` - Document ID this chunk belongs to
+    /// * `chunk_id` - Chunk ID (e.g., "7:13")
+    /// * `text` - New text content for the chunk
+    /// * `section` - Optional section path
+    ///
+    /// # Returns
+    ///
+    /// UpsertResult with info about what happened
+    pub fn upsert_chunk(
+        &mut self,
+        doc_id: &str,
+        chunk_id: &str,
+        text: &str,
+        section: Option<Vec<String>>,
+    ) -> RagResult<super::types::UpsertResult> {
+        // Check if document exists
+        if !self.documents.contains_key(doc_id) {
+            return Err(RagError::ChunkError(format!(
+                "Document '{}' not found. Create document first with import_document.",
+                doc_id
+            )));
+        }
+
+        // Check if this is an update or insert
+        let is_update = self.chunks.contains_key(chunk_id);
+
+        // Generate new embedding
+        let embedding = self.fasttext.document_embedding(text);
+
+        // Check for valid embedding
+        if embedding.iter().all(|&v| v == 0.0) {
+            return Err(RagError::ChunkError(
+                "Chunk text has no valid embedding - no known words in model".to_string(),
+            ));
+        }
+
+        // Upsert into HNSW (updates vector if exists, inserts if not)
+        self.hnsw.upsert(chunk_id, &embedding)?;
+
+        // Create chunk struct
+        let chunk = super::types::Chunk {
+            text: text.to_string(),
+            char_range: (0, text.len()),
+            token_count: text.split_whitespace().count(),
+            block_type: super::types::BlockType::Paragraph,
+            section_path: section.unwrap_or_default(),
+            parent_heading: None,
+        };
+
+        // Store chunk
+        self.chunks.insert(
+            chunk_id.to_string(),
+            StoredChunk {
+                id: chunk_id.to_string(),
+                doc_id: doc_id.to_string(),
+                chunk,
+            },
+        );
+
+        // Update document chunk count if this is a new chunk
+        if !is_update {
+            if let Some(doc) = self.documents.get_mut(doc_id) {
+                doc.chunk_count += 1;
+            }
+        }
+
+        Ok(super::types::UpsertResult {
+            chunk_id: chunk_id.to_string(),
+            is_update,
+        })
+    }
+
     /// Search for relevant chunks
     ///
     /// # Arguments

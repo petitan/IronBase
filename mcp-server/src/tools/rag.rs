@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use super::helpers::verify_admin_key_opt;
 use super::params::{
-    ParseParams, RagCollectionCreateParams, RagCollectionDeleteParams, RagCollectionNameParams,
-    RagDocumentDeleteParams, RagDocumentImportParams, RagSearchParams,
+    ParseParams, RagChunkUpsertParams, RagCollectionCreateParams, RagCollectionDeleteParams,
+    RagCollectionNameParams, RagDocumentDeleteParams, RagDocumentImportParams, RagSearchParams,
 };
 
 /// SECURITY: Validate collection/document name to prevent path traversal attacks
@@ -34,6 +34,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "rag_document_import" => handle_document_import(params, adapter),
         "rag_document_list" => handle_document_list(params, adapter),
         "rag_document_delete" => handle_document_delete(params, adapter),
+        "rag_chunk_upsert" => handle_chunk_upsert(params, adapter),
         "rag_search" => handle_search(params, adapter),
         _ => Err(McpError::invalid_params(format!(
             "Unknown RAG tool: {}",
@@ -188,6 +189,27 @@ fn handle_document_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
             format!("Document '{}' not found in '{}'", p.doc_id, p.collection)
         }
     }))
+}
+
+/// Upsert a single chunk in a RAG collection
+fn handle_chunk_upsert(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    let p: RagChunkUpsertParams = RagChunkUpsertParams::parse(params)?;
+
+    // SECURITY: Prevent path traversal
+    validate_name(&p.collection, "Collection name")?;
+    validate_name(&p.doc_id, "Document ID")?;
+
+    // Validate inputs
+    if p.chunk_id.is_empty() {
+        return Err(McpError::invalid_params("chunk_id cannot be empty"));
+    }
+    if p.text.trim().is_empty() {
+        return Err(McpError::invalid_params("text cannot be empty"));
+    }
+
+    let result = adapter.rag_chunk_upsert(&p.collection, &p.doc_id, &p.chunk_id, &p.text, p.section)?;
+
+    Ok(result)
 }
 
 /// Search for relevant chunks in a RAG collection

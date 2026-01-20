@@ -351,6 +351,7 @@ fn dispatch_tool_inner(
         | "rag_document_import"
         | "rag_document_list"
         | "rag_document_delete"
+        | "rag_chunk_upsert"
         | "rag_search" => rag::dispatch(name, params, adapter),
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),

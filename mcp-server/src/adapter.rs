@@ -1858,6 +1858,37 @@ impl IronBaseAdapter {
         Ok(deleted)
     }
 
+    /// Upsert a single chunk in a RAG collection
+    pub fn rag_chunk_upsert(
+        &self,
+        collection: &str,
+        doc_id: &str,
+        chunk_id: &str,
+        text: &str,
+        section: Option<Vec<String>>,
+    ) -> Result<Value> {
+        // Load the collection
+        let (_fasttext, mut rag) = self.load_rag_collection(collection)?;
+
+        // Upsert chunk
+        let result = rag.upsert_chunk(doc_id, chunk_id, text, section).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to upsert chunk: {}", e))
+        })?;
+
+        // Save updated state
+        let rag_dir = self.get_rag_directory();
+        let collection_path = rag_dir.join(collection);
+        rag.save(&collection_path).map_err(|e| {
+            crate::error::McpError::internal(format!("Failed to save RAG state: {}", e))
+        })?;
+
+        Ok(serde_json::json!({
+            "chunk_id": result.chunk_id,
+            "is_update": result.is_update,
+            "action": if result.is_update { "updated" } else { "inserted" }
+        }))
+    }
+
     /// Search for relevant chunks in a RAG collection
     pub fn rag_search(
         &self,
