@@ -6,6 +6,7 @@ pub mod acl;
 pub mod adapter;
 pub mod api_keys;
 pub mod cancellation;
+pub mod embedding;
 pub mod engine;
 pub mod error;
 pub mod execution;
@@ -24,6 +25,7 @@ pub mod transport;
 // Re-export main types
 pub use acl::{AclConfig, AclManager, CallerContext, InterfaceType, RequiredPermission};
 pub use adapter::{FindOptions, IronBaseAdapter, UpdateResult};
+pub use embedding::{EmbeddingManager, EmbeddingProvider, EmbeddingError, ModelInfo};
 pub use api_keys::ApiKeyCache;
 pub use engine::{IronBaseService, ServiceContext, ToolRequest, ToolResult};
 pub use error::{ErrorCode, McpError, OperationContext, Result};

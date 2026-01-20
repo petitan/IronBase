@@ -16,6 +16,7 @@ pub mod admin;
 pub mod collection;
 pub mod crud;
 mod definitions;
+pub mod embedding;
 pub mod helpers;
 pub mod index;
 pub mod listener;
@@ -28,6 +29,7 @@ use definitions::get_all_tools_json;
 
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
+use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use crate::scripting::ScriptLimits;
 use crate::ServerInfo;
@@ -87,6 +89,7 @@ const MAX_UNINDEXED_SORT_DOCS: usize = 100_000;
 /// * `server_info` - Optional server info for admin operations
 /// * `limits` - Optional script limits for unified resource limiting
 /// * `cancel_flag` - Optional cancellation flag for cooperative timeout
+#[allow(clippy::too_many_arguments)]
 pub fn dispatch_tool(
     name: &str,
     params: Value,
@@ -95,6 +98,7 @@ pub fn dispatch_tool(
     server_info: Option<&ServerInfo>,
     limits: Option<&ScriptLimits>,
     cancel_flag: Option<Arc<AtomicBool>>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
 ) -> Result<Value> {
     let tool_start = std::time::Instant::now();
 
@@ -124,6 +128,7 @@ pub fn dispatch_tool(
             server_info,
             limits,
             cancel_flag,
+            embedding_manager,
         )
     }));
 
@@ -268,6 +273,7 @@ fn preflight_check(name: &str, params: &Value, adapter: &Arc<IronBaseAdapter>) -
 }
 
 /// Inner dispatch function (called inside catch_unwind)
+#[allow(clippy::too_many_arguments)]
 fn dispatch_tool_inner(
     name: &str,
     params: Value,
@@ -276,6 +282,7 @@ fn dispatch_tool_inner(
     server_info: Option<&ServerInfo>,
     limits: Option<&ScriptLimits>,
     cancel_flag: Option<Arc<AtomicBool>>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
 ) -> Result<Value> {
     match name {
         // CRUD operations
@@ -349,6 +356,11 @@ fn dispatch_tool_inner(
         | "index_drop_vector"
         | "vector_search"
         | "vector_search_filter" => vector::dispatch(name, params, adapter),
+
+        // Embedding operations
+        "embed_text" | "embed_batch" | "embed_list_models" => {
+            embedding::dispatch(name, params, embedding_manager)
+        }
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),
     }

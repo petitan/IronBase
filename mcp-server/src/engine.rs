@@ -13,6 +13,7 @@ use crate::acl::{
 };
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
+use crate::embedding::EmbeddingManager;
 use crate::scripting::LimitsManager;
 use crate::tools::dispatch_tool;
 use crate::ServerInfo;
@@ -141,6 +142,7 @@ pub struct IronBaseService {
     server_info: ServerInfo,
     require_api_key: bool,
     limits_manager: Arc<LimitsManager>,
+    embedding_manager: Option<Arc<EmbeddingManager>>,
 }
 
 impl IronBaseService {
@@ -152,6 +154,7 @@ impl IronBaseService {
         server_info: ServerInfo,
         require_api_key: bool,
         limits_manager: Arc<LimitsManager>,
+        embedding_manager: Option<Arc<EmbeddingManager>>,
     ) -> Self {
         Self {
             adapter,
@@ -160,6 +163,7 @@ impl IronBaseService {
             server_info,
             require_api_key,
             limits_manager,
+            embedding_manager,
         }
     }
 
@@ -191,6 +195,11 @@ impl IronBaseService {
     /// Check if API key is required
     pub fn require_api_key(&self) -> bool {
         self.require_api_key
+    }
+
+    /// Get the embedding manager
+    pub fn embedding_manager(&self) -> &Option<Arc<EmbeddingManager>> {
+        &self.embedding_manager
     }
 
     /// Execute a tool with full authentication and authorization checks
@@ -231,6 +240,7 @@ impl IronBaseService {
             Some(&self.server_info),
             Some(&script_limits),
             ctx.cancel_flag.clone(),
+            &self.embedding_manager,
         ) {
             Ok(result) => ToolResult::Success(result),
             Err(e) => ToolResult::Error {

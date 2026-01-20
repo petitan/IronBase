@@ -9,7 +9,7 @@ use crate::transport::{
 };
 use crate::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list,
-    get_tools_list_filtered, read_resource, IronBaseAdapter, VERSION,
+    get_tools_list_filtered, read_resource, EmbeddingManager, IronBaseAdapter, VERSION,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -18,6 +18,8 @@ use std::sync::Arc;
 pub struct HandlerContext {
     /// Database adapter
     pub adapter: Arc<IronBaseAdapter>,
+    /// Embedding manager (optional - may not be configured)
+    pub embedding_manager: Option<Arc<EmbeddingManager>>,
     /// Whether the server has been initialized
     pub initialized: bool,
     /// Whether this is a localhost connection (affects tool visibility)
@@ -29,6 +31,21 @@ impl HandlerContext {
     pub fn new(adapter: Arc<IronBaseAdapter>, is_localhost: bool) -> Self {
         Self {
             adapter,
+            embedding_manager: None,
+            initialized: false,
+            is_localhost,
+        }
+    }
+
+    /// Create a new handler context with embedding manager
+    pub fn with_embedding(
+        adapter: Arc<IronBaseAdapter>,
+        embedding_manager: Option<Arc<EmbeddingManager>>,
+        is_localhost: bool,
+    ) -> Self {
+        Self {
+            adapter,
+            embedding_manager,
             initialized: false,
             is_localhost,
         }
@@ -174,6 +191,7 @@ impl HandlerContext {
             None,
             None,
             None,
+            &self.embedding_manager,
         ) {
             Ok(result) => {
                 if is_notification {

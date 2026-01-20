@@ -20,6 +20,7 @@ mod collection;
 pub mod common;
 mod database;
 mod document;
+mod embedding;
 mod index;
 mod listener;
 mod schema;
@@ -68,6 +69,9 @@ pub fn get_all_tools_json() -> Value {
 
     // Vector Index & Similarity Search
     tools.extend(vector::tools());
+
+    // Embedding Generation
+    tools.extend(embedding::tools());
 
     json!({ "tools": tools })
 }

@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.231"
+version = "1.0.232"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
@@ -58,6 +58,12 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 
 # IronBase integration
 ironbase-core = { path = "../ironbase-core" }
+
+# Embedding support
+memmap2 = "0.9"                    # Memory-mapped files for FastText
+ureq = { version = "2.9", features = ["json"] }  # Blocking HTTP client for Ollama/OpenAI
+rayon = "1.10"                     # Parallel processing for batch embeddings
+log = "0.4"                        # Logging
 
 # Platform-specific service support
 [target.'cfg(windows)'.dependencies]

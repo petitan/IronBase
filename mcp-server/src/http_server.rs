@@ -376,7 +376,7 @@ async fn run_http_server_internal(
         Json, Router,
     };
     use tokio::net::TcpListener;
-    use tracing::info;
+    use tracing::{info, warn};
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -525,6 +525,28 @@ async fn run_http_server_internal(
     // Create dynamic limits manager (calculates limits based on available memory)
     let limits_manager = crate::LimitsManager::new();
 
+    // Initialize embedding manager if FastText model is configured
+    let embedding_manager: Option<Arc<crate::EmbeddingManager>> =
+        if let Ok(model_path) = std::env::var("IRONBASE_FASTTEXT_MODEL") {
+            match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+                Ok(manager) if manager.has_providers() => {
+                    info!("Embedding manager initialized with FastText model: {}", model_path);
+                    Some(Arc::new(manager))
+                }
+                Ok(_) => {
+                    warn!("FastText model configured but failed to load, embeddings disabled");
+                    None
+                }
+                Err(e) => {
+                    warn!("Failed to initialize embedding manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            info!("No IRONBASE_FASTTEXT_MODEL configured, embeddings disabled");
+            None
+        };
+
     // Initialize listener configuration in database
     {
         use crate::listener::ListenerManager;
@@ -554,6 +576,7 @@ async fn run_http_server_internal(
         server_info,
         config.require_api_key,
         limits_manager.clone(),
+        embedding_manager,
     ));
 
     // Spawn periodic limits refresh task (every 5 minutes)

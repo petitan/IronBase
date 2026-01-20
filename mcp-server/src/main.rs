@@ -497,7 +497,8 @@ fn handle_request(
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
             // Note: stdio mode doesn't support cancellation (None cancel_flag)
-            match dispatch_tool(&params.name, arguments, adapter, None, None, None, None) {
+            // TODO: Add embedding_manager initialization for stdio mode
+            match dispatch_tool(&params.name, arguments, adapter, None, None, None, None, &None) {
                 Ok(result) => {
                     if is_notification {
                         return None;
