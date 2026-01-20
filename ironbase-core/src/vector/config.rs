@@ -54,6 +54,10 @@ pub struct VectorIndexConfig {
     /// Vector dimension (REQUIRED)
     pub dim: usize,
 
+    /// Field name containing the vector (for auto-indexing on insert/update)
+    #[serde(default)]
+    pub field: String,
+
     /// Maximum number of vectors in this index
     #[serde(default = "default_max_vectors")]
     pub max_vectors: usize,
@@ -101,6 +105,7 @@ impl Default for VectorIndexConfig {
     fn default() -> Self {
         Self {
             dim: 0, // Must be set explicitly
+            field: String::new(),
             max_vectors: DEFAULT_MAX_VECTORS,
             metric: DistanceMetric::default(),
             m: 16,
@@ -117,6 +122,12 @@ impl VectorIndexConfig {
             dim,
             ..Default::default()
         }
+    }
+
+    /// Set the field name for auto-indexing
+    pub fn with_field(mut self, field: impl Into<String>) -> Self {
+        self.field = field.into();
+        self
     }
 
     /// Set the maximum number of vectors

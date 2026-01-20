@@ -94,8 +94,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
-        // Create the HNSW index
-        let mut hnsw = HnswIndex::new(config.clone());
+        // Create the HNSW index with field info for auto-indexing
+        let config_with_field = VectorIndexConfig {
+            field: field.to_string(),
+            ..config
+        };
+        let mut hnsw = HnswIndex::new(config_with_field.clone());
 
         // Scan documents and build the index
         use crate::limits::INDEX_BUILD_BATCH_SIZE;
@@ -201,7 +205,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let metadata = VectorIndexMetadata {
             name: index_name.clone(),
             field: field.to_string(),
-            config,
+            config: config_with_field,
             cache_file: cache_file_name,
             vector_count: indexed_count,
             created_at: chrono::Utc::now().to_rfc3339(),

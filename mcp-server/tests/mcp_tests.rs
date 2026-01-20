@@ -783,7 +783,14 @@ fn test_dispatch_index_list() {
     );
     assert!(result.is_ok());
     let value = result.unwrap();
-    assert!(value.get("indexes").is_some());
+    // index_list now returns btree_indexes, fulltext_indexes, vector_indexes, and summary
+    assert!(value.get("btree_indexes").is_some());
+    assert!(value.get("fulltext_indexes").is_some());
+    assert!(value.get("vector_indexes").is_some());
+    assert!(value.get("summary").is_some());
+    // Check that the created index is in btree_indexes
+    let btree = value.get("btree_indexes").unwrap().as_array().unwrap();
+    assert!(btree.iter().any(|idx| idx.as_str().is_some_and(|s| s.contains("name"))));
 }
 
 // ============================================================

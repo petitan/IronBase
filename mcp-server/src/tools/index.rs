@@ -142,8 +142,22 @@ fn handle_index_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     let p: IndexListParams = IndexListParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let indexes = adapter.list_indexes(&p.collection)?;
-    Ok(json!({"indexes": indexes}))
+    // Get all index types
+    let btree_indexes = adapter.list_indexes(&p.collection)?;
+    let fulltext_indexes = adapter.list_fulltext_indexes(&p.collection).unwrap_or_default();
+    let vector_indexes = adapter.list_vector_indexes(&p.collection).unwrap_or_default();
+
+    Ok(json!({
+        "btree_indexes": btree_indexes,
+        "fulltext_indexes": fulltext_indexes,
+        "vector_indexes": vector_indexes,
+        "summary": {
+            "btree_count": btree_indexes.len(),
+            "fulltext_count": fulltext_indexes.len(),
+            "vector_count": vector_indexes.len(),
+            "total": btree_indexes.len() + fulltext_indexes.len() + vector_indexes.len()
+        }
+    }))
 }
 
 fn handle_index_create_fuzzy(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

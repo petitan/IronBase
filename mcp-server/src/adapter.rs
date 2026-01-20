@@ -627,17 +627,42 @@ impl IronBaseAdapter {
                 // This was the bottleneck: 89s lock time for 78K docs
                 let doc_count = self.collection_stats.get(&name);
 
-                let indexes = db
+                let btree_indexes = db
                     .collection(&name)
                     .ok()
                     .and_then(|c| c.list_indexes().ok())
                     .unwrap_or_default();
 
+                let vector_index_list = db
+                    .collection(&name)
+                    .ok()
+                    .and_then(|c| c.list_vector_indexes().ok())
+                    .unwrap_or_default();
+
+                let vector_count: usize = vector_index_list.iter().map(|idx| idx.vector_count).sum();
+
+                // Convert VectorIndexMetadata to JSON for the response
+                let vector_indexes: Vec<Value> = vector_index_list
+                    .iter()
+                    .map(|idx| {
+                        serde_json::json!({
+                            "name": idx.name,
+                            "field": idx.field,
+                            "dim": idx.config.dim,
+                            "metric": format!("{:?}", idx.config.metric).to_lowercase(),
+                            "vector_count": idx.vector_count,
+                        })
+                    })
+                    .collect();
+
                 serde_json::json!({
                     "name": name,
                     "document_count": doc_count,
-                    "index_count": indexes.len(),
-                    "indexes": indexes,
+                    "btree_index_count": btree_indexes.len(),
+                    "btree_indexes": btree_indexes,
+                    "vector_index_count": vector_indexes.len(),
+                    "vector_indexes": vector_indexes,
+                    "total_vectors": vector_count,
                 })
             })
             .collect();
@@ -650,9 +675,21 @@ impl IronBaseAdapter {
             .filter_map(|c| c.get("document_count").and_then(|v| v.as_u64()))
             .sum();
 
-        let total_indexes: usize = collections
+        let total_btree_indexes: usize = collections
             .iter()
-            .filter_map(|c| c.get("index_count").and_then(|v| v.as_u64()))
+            .filter_map(|c| c.get("btree_index_count").and_then(|v| v.as_u64()))
+            .map(|v| v as usize)
+            .sum();
+
+        let total_vector_indexes: usize = collections
+            .iter()
+            .filter_map(|c| c.get("vector_index_count").and_then(|v| v.as_u64()))
+            .map(|v| v as usize)
+            .sum();
+
+        let total_vectors: usize = collections
+            .iter()
+            .filter_map(|c| c.get("total_vectors").and_then(|v| v.as_u64()))
             .map(|v| v as usize)
             .sum();
 
@@ -666,7 +703,9 @@ impl IronBaseAdapter {
             "summary": {
                 "collection_count": collections.len(),
                 "total_documents": total_documents,
-                "total_indexes": total_indexes,
+                "total_btree_indexes": total_btree_indexes,
+                "total_vector_indexes": total_vector_indexes,
+                "total_vectors": total_vectors,
             }
         })
     }

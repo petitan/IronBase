@@ -31,8 +31,8 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "index_list",
-            "title": "List Indexes",
-            "description": "List all indexes defined on a collection.",
+            "title": "List All Indexes",
+            "description": "List all indexes on a collection: B+ tree, fulltext, and vector indexes with details.",
             "inputSchema": schemas::collection_only()
         }),
         json!({

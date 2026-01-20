@@ -1007,6 +1007,52 @@ impl IndexManager {
             }
         }
 
+        // Vector indexes - auto-index documents with vector fields
+        let vector_names: Vec<String> = self.vector_indexes.keys().cloned().collect();
+
+        for index_name in vector_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.vector_indexes.get_mut(&index_name) {
+                let field = &index.config().field;
+                if field.is_empty() {
+                    continue; // Skip if no field configured (legacy index)
+                }
+
+                // Get vector field value
+                if let Some(value) = get_nested_value(doc, field) {
+                    if let Some(arr) = value.as_array() {
+                        // Convert to f32 vector
+                        let vector: Vec<f32> = arr
+                            .iter()
+                            .filter_map(|v| v.as_f64().map(|f| f as f32))
+                            .collect();
+
+                        // Check dimension matches
+                        if vector.len() == index.config().dim {
+                            let id_str = match doc_id {
+                                DocumentId::Int(i) => i.to_string(),
+                                DocumentId::String(s) => s.clone(),
+                                DocumentId::ObjectId(oid) => oid.clone(),
+                            };
+                            // Insert into HNSW - log error but don't fail (document already persisted)
+                            if let Err(e) = index.insert(&id_str, &vector) {
+                                log_error!(
+                                    "Failed to insert into vector index '{}': {:?}",
+                                    index_name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1099,6 +1145,26 @@ impl IndexManager {
                         e
                     );
                 }
+            }
+        }
+
+        // Vector indexes - remove by document ID
+        let vector_names: Vec<String> = self.vector_indexes.keys().cloned().collect();
+
+        for index_name in vector_names {
+            if let Some(excluded) = exclude_index {
+                if index_name == excluded {
+                    continue;
+                }
+            }
+
+            if let Some(index) = self.vector_indexes.get_mut(&index_name) {
+                let id_str = match doc_id {
+                    DocumentId::Int(i) => i.to_string(),
+                    DocumentId::String(s) => s.clone(),
+                    DocumentId::ObjectId(oid) => oid.clone(),
+                };
+                index.remove(&id_str);
             }
         }
 
