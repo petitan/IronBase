@@ -114,6 +114,10 @@ pub fn parse_skip(params: &Value) -> Option<usize> {
 /// Accepts two formats:
 /// - Array: [["field", 1], ["field2", -1]]
 /// - Object: {"field": 1, "field2": -1}
+///
+/// NOTE: This is the legacy version that doesn't validate direction values.
+/// For new code, use `parse_sort_value` which returns Result and validates that
+/// direction is exactly 1 or -1.
 pub fn parse_sort(params: &Value) -> Option<Vec<(String, i32)>> {
     let sort_value = params.get("sort")?;
 
@@ -153,6 +157,129 @@ pub fn parse_sort(params: &Value) -> Option<Vec<(String, i32)>> {
     }
 }
 
+/// Parse sort specification from Value to Vec<(String, i32)> with validation.
+/// Supports both array format [["field", 1]] and object format {"field": 1}.
+/// Returns error if direction is not exactly 1 or -1.
+///
+/// This is the canonical implementation - use this in all tool handlers.
+pub fn parse_sort_value(sort: Option<Value>) -> Result<Option<Vec<(String, i32)>>> {
+    match sort {
+        None => Ok(None),
+        Some(Value::Null) => Ok(None),
+        Some(Value::Array(arr)) => {
+            // Array format: [["field", 1], ["field2", -1]]
+            let mut result = Vec::new();
+            for item in arr {
+                let pair = item.as_array().ok_or_else(|| {
+                    McpError::invalid_params("Sort array items must be [field, direction] pairs")
+                })?;
+                if pair.len() != 2 {
+                    return Err(McpError::invalid_params(
+                        "Sort array items must have exactly 2 elements: [field, direction]",
+                    ));
+                }
+                let field = pair[0]
+                    .as_str()
+                    .ok_or_else(|| McpError::invalid_params("Sort field name must be a string"))?;
+                let direction = pair[1]
+                    .as_i64()
+                    .ok_or_else(|| McpError::invalid_params("Sort direction must be 1 or -1"))?;
+                if direction != 1 && direction != -1 {
+                    return Err(McpError::invalid_params(format!(
+                        "Sort direction for '{}' must be 1 or -1, got {}",
+                        field, direction
+                    )));
+                }
+                result.push((field.to_string(), direction as i32));
+            }
+            if result.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(result))
+            }
+        }
+        Some(Value::Object(map)) => {
+            // Object format: {"field": 1, "field2": -1}
+            let mut result = Vec::new();
+            for (key, value) in map {
+                let direction = value.as_i64().ok_or_else(|| {
+                    McpError::invalid_params(format!(
+                        "Sort direction for '{}' must be 1 or -1",
+                        key
+                    ))
+                })?;
+                if direction != 1 && direction != -1 {
+                    return Err(McpError::invalid_params(format!(
+                        "Sort direction for '{}' must be 1 or -1, got {}",
+                        key, direction
+                    )));
+                }
+                result.push((key, direction as i32));
+            }
+            if result.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(result))
+            }
+        }
+        Some(_) => Err(McpError::invalid_params(
+            "Sort must be an array [[\"field\", 1]] or object {\"field\": 1}",
+        )),
+    }
+}
+
+/// Parse projection Value to HashMap<String, i32> with validation.
+/// Accepts object format like {"field": 1} or {"field": 0}.
+/// Returns error if values are not 0 or 1.
+///
+/// This is the canonical implementation - use this in all tool handlers.
+pub fn parse_projection_value(proj: Option<Value>) -> Result<Option<HashMap<String, i32>>> {
+    match proj {
+        None => Ok(None),
+        Some(Value::Null) => Ok(None),
+        Some(Value::Object(map)) => {
+            let mut result = HashMap::new();
+            for (key, value) in map {
+                let v = if let Some(i) = value.as_i64() {
+                    if i != 0 && i != 1 {
+                        return Err(McpError::invalid_params(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            key, i
+                        )));
+                    }
+                    i as i32
+                } else if let Some(f) = value.as_f64() {
+                    // Use epsilon-based comparison for floating point values
+                    if f.abs() < f64::EPSILON {
+                        0
+                    } else if (f - 1.0).abs() < f64::EPSILON {
+                        1
+                    } else {
+                        return Err(McpError::invalid_params(format!(
+                            "Invalid projection value for '{}': expected 0 or 1, got {}",
+                            key, f
+                        )));
+                    }
+                } else {
+                    return Err(McpError::invalid_params(format!(
+                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
+                        key, value
+                    )));
+                };
+                result.insert(key, v);
+            }
+            if result.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(result))
+            }
+        }
+        Some(_) => Err(McpError::invalid_params(
+            "Projection must be an object like {\"field\": 1} or {\"field\": 0}",
+        )),
+    }
+}
+
 /// Validate threshold is in range [0.0, 1.0]
 pub fn parse_threshold(params: &Value) -> Result<Option<f64>> {
     match params.get("threshold").and_then(|v| v.as_f64()) {
@@ -165,49 +292,9 @@ pub fn parse_threshold(params: &Value) -> Result<Option<f64>> {
 }
 
 /// Parse projection: {"field": 1} or {"field": 0}
+/// This wraps the params and calls parse_projection_value.
 pub fn parse_projection(params: &Value) -> Result<Option<HashMap<String, i32>>> {
-    if let Some(proj_value) = params.get("projection") {
-        if proj_value.is_null() {
-            Ok(None)
-        } else if let Some(obj) = proj_value.as_object() {
-            let mut map = HashMap::new();
-            for (k, v) in obj {
-                let int_val = if let Some(i) = v.as_i64() {
-                    if i != 0 && i != 1 {
-                        return Err(McpError::invalid_params(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {}",
-                            k, i
-                        )));
-                    }
-                    i as i32
-                } else if let Some(f) = v.as_f64() {
-                    if f == 0.0 {
-                        0
-                    } else if f == 1.0 {
-                        1
-                    } else {
-                        return Err(McpError::invalid_params(format!(
-                            "Invalid projection value for '{}': expected 0 or 1, got {}",
-                            k, f
-                        )));
-                    }
-                } else {
-                    return Err(McpError::invalid_params(format!(
-                        "Invalid projection value for '{}': expected 0 or 1, got {:?}",
-                        k, v
-                    )));
-                };
-                map.insert(k.clone(), int_val);
-            }
-            Ok(Some(map))
-        } else {
-            Err(McpError::invalid_params(
-                "projection must be an object like {\"field\": 1} or {\"field\": 0}",
-            ))
-        }
-    } else {
-        Ok(None)
-    }
+    parse_projection_value(params.get("projection").cloned())
 }
 
 /// Validate collection name

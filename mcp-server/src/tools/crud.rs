@@ -10,81 +10,13 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use super::helpers::{
-    check_cancelled, validate_collection_name, validate_document, validate_filter, validate_update,
-    DEFAULT_QUERY_LIMIT,
+    check_cancelled, parse_sort_value, validate_collection_name, validate_document,
+    validate_filter, validate_update, DEFAULT_QUERY_LIMIT,
 };
 use super::params::{
     AggregateParams, CountParams, DeleteParams, DistinctParams, FindOneParams, FindParams,
     InsertManyParams, InsertOneParams, ParseParams, UpdateParams,
 };
-
-/// Parse sort specification from Value to Vec<(String, i32)>
-/// Supports both array format [["field", 1]] and object format {"field": 1}
-fn parse_sort_value(sort: Option<Value>) -> Result<Option<Vec<(String, i32)>>> {
-    match sort {
-        None => Ok(None),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Array(arr)) => {
-            // Array format: [["field", 1], ["field2", -1]]
-            let mut result = Vec::new();
-            for item in arr {
-                let pair = item.as_array().ok_or_else(|| {
-                    McpError::invalid_params("Sort array items must be [field, direction] pairs")
-                })?;
-                if pair.len() != 2 {
-                    return Err(McpError::invalid_params(
-                        "Sort array items must have exactly 2 elements: [field, direction]",
-                    ));
-                }
-                let field = pair[0]
-                    .as_str()
-                    .ok_or_else(|| McpError::invalid_params("Sort field name must be a string"))?;
-                let direction = pair[1]
-                    .as_i64()
-                    .ok_or_else(|| McpError::invalid_params("Sort direction must be 1 or -1"))?;
-                if direction != 1 && direction != -1 {
-                    return Err(McpError::invalid_params(format!(
-                        "Sort direction for '{}' must be 1 or -1, got {}",
-                        field, direction
-                    )));
-                }
-                result.push((field.to_string(), direction as i32));
-            }
-            if result.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(result))
-            }
-        }
-        Some(Value::Object(map)) => {
-            // Object format: {"field": 1, "field2": -1}
-            let mut result = Vec::new();
-            for (key, value) in map {
-                let direction = value.as_i64().ok_or_else(|| {
-                    McpError::invalid_params(format!(
-                        "Sort direction for '{}' must be 1 or -1",
-                        key
-                    ))
-                })?;
-                if direction != 1 && direction != -1 {
-                    return Err(McpError::invalid_params(format!(
-                        "Sort direction for '{}' must be 1 or -1, got {}",
-                        key, direction
-                    )));
-                }
-                result.push((key, direction as i32));
-            }
-            if result.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(result))
-            }
-        }
-        Some(_) => Err(McpError::invalid_params(
-            "Sort must be an array [[\"field\", 1]] or object {\"field\": 1}",
-        )),
-    }
-}
 
 /// Dispatch CRUD tool calls
 pub fn dispatch(

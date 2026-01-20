@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::helpers::validate_collection_name;
+use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::ParseParams;
 
 // ============================================================================
@@ -227,35 +227,17 @@ fn results_to_json(results: Vec<(Value, f32)>) -> Vec<Value> {
         .collect()
 }
 
-/// Parse projection Value to HashMap<String, i32>
-fn parse_projection_value(proj: Option<Value>) -> Result<Option<HashMap<String, i32>>> {
-    match proj {
-        None => Ok(None),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Object(map)) => {
-            let mut result = HashMap::new();
-            for (key, value) in map {
-                let v = value.as_i64().unwrap_or(1) as i32;
-                result.insert(key, v);
-            }
-            if result.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(result))
-            }
-        }
-        Some(_) => Err(McpError::invalid_params(
-            "Projection must be an object like {\"field\": 1} or {\"field\": 0}",
-        )),
-    }
-}
-
 /// Apply projection to vector search results
+/// Follows MongoDB projection semantics:
+/// - In include mode: only include specified fields; _id is included by default unless explicitly excluded
+/// - In exclude mode: exclude specified fields; _id is always included
 fn apply_projection_to_results(
     results: Vec<(Value, f32)>,
     projection: &HashMap<String, i32>,
 ) -> Vec<Value> {
     let is_include_mode = projection.values().any(|&v| v == 1);
+    // Check if _id is explicitly excluded ({"_id": 0})
+    let id_explicitly_excluded = projection.get("_id").copied() == Some(0);
 
     results
         .into_iter()
@@ -265,10 +247,14 @@ fn apply_projection_to_results(
                 for (key, value) in obj {
                     let should_include = if is_include_mode {
                         // Include mode: only include specified fields
-                        projection.get(&key).copied().unwrap_or(0) == 1
-                            || key == "_id" // Always include _id unless excluded
+                        // _id is included by default UNLESS explicitly excluded with {"_id": 0}
+                        if key == "_id" {
+                            !id_explicitly_excluded
+                        } else {
+                            projection.get(&key).copied().unwrap_or(0) == 1
+                        }
                     } else {
-                        // Exclude mode: exclude specified fields
+                        // Exclude mode: exclude specified fields, _id always included
                         projection.get(&key).copied().unwrap_or(1) != 0
                     };
                     if should_include {

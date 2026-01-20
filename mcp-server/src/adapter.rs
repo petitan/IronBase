@@ -48,7 +48,16 @@ impl CollectionStats {
     fn increment(&self, collection: &str, delta: i64) {
         let mut counts = self.counts.write();
         let current = counts.get(collection).copied().unwrap_or(0);
-        let new_count = (current as i64 + delta).max(0) as u64;
+        let new_count_raw = current as i64 + delta;
+        if new_count_raw < 0 {
+            // Log warning when count goes negative - indicates stats are out of sync
+            tracing::warn!(
+                "Collection '{}' stats count went negative: {} + {} = {} (clamping to 0). \
+                 Stats may be out of sync with actual document count.",
+                collection, current, delta, new_count_raw
+            );
+        }
+        let new_count = new_count_raw.max(0) as u64;
         counts.insert(collection.to_string(), new_count);
     }
 
@@ -412,45 +421,42 @@ impl IronBaseAdapter {
                     ))
                 })?;
             } else {
-                // Ensure flags are correct
-                let db = self.db.read();
+                // Use write lock directly to avoid TOCTOU race condition
+                // (checking with read lock, then acting with write lock could allow
+                // state changes between the check and the action)
+                let db = self.db.write();
+
+                // Check and set flags if needed
                 let needs_flags = db
                     .get_collection_flags(collection_name)
                     .map(|f| !f.hidden || !f.protected || !f.is_system)
                     .unwrap_or(true);
 
-                // Check if schema is set
+                if needs_flags {
+                    db.set_collection_flags(collection_name, system_flags)?;
+                }
+
+                // Check and set schema if needed
                 let needs_schema = db
                     .get_collection(collection_name)
                     .ok()
                     .and_then(|c| c.get_schema().ok().flatten())
                     .is_none();
 
-                drop(db);
-
-                if needs_flags || needs_schema {
-                    let db = self.db.write();
-
-                    if needs_flags {
-                        db.set_collection_flags(collection_name, system_flags)?;
-                    }
-
-                    // CRITICAL: Schema enforcement is required for security
-                    if needs_schema {
-                        let coll = db.collection(collection_name).map_err(|e| {
-                            McpError::internal(format!(
-                                "Failed to access system collection '{}': {}",
-                                collection_name, e
-                            ))
-                        })?;
-                        coll.set_schema(Some(schema.clone())).map_err(|e| {
-                            McpError::internal(format!(
-                                "CRITICAL: Failed to set schema for system collection '{}': {}. \
-                                 System integrity requires valid schemas.",
-                                collection_name, e
-                            ))
-                        })?;
-                    }
+                if needs_schema {
+                    let coll = db.collection(collection_name).map_err(|e| {
+                        McpError::internal(format!(
+                            "Failed to access system collection '{}': {}",
+                            collection_name, e
+                        ))
+                    })?;
+                    coll.set_schema(Some(schema.clone())).map_err(|e| {
+                        McpError::internal(format!(
+                            "CRITICAL: Failed to set schema for system collection '{}': {}. \
+                             System integrity requires valid schemas.",
+                            collection_name, e
+                        ))
+                    })?;
                 }
             }
         }
@@ -500,6 +506,10 @@ impl IronBaseAdapter {
     /// Returns the number of collections warmed up and total time taken.
     pub fn warm_up(&self) -> (usize, std::time::Duration) {
         let start = std::time::Instant::now();
+
+        // Clear stale stats from previous warm_up or deleted collections
+        // This ensures we don't report counts for collections that no longer exist
+        self.collection_stats.clear();
 
         let db = self.db.read();
         // Get ALL collections including system ones for accurate counts
@@ -656,13 +666,31 @@ impl IronBaseAdapter {
                 let btree_indexes = db
                     .collection(&name)
                     .ok()
-                    .and_then(|c| c.list_indexes().ok())
+                    .and_then(|c| match c.list_indexes() {
+                        Ok(indexes) => Some(indexes),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to list B-tree indexes for collection '{}': {}",
+                                name, e
+                            );
+                            None
+                        }
+                    })
                     .unwrap_or_default();
 
                 let vector_index_list = db
                     .collection(&name)
                     .ok()
-                    .and_then(|c| c.list_vector_indexes().ok())
+                    .and_then(|c| match c.list_vector_indexes() {
+                        Ok(indexes) => Some(indexes),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to list vector indexes for collection '{}': {}",
+                                name, e
+                            );
+                            None
+                        }
+                    })
                     .unwrap_or_default();
 
                 let vector_count: usize = vector_index_list.iter().map(|idx| idx.vector_count).sum();
@@ -931,9 +959,11 @@ impl IronBaseAdapter {
                     }
                     i as i32
                 } else if let Some(f) = v.as_f64() {
-                    if f == 0.0 {
+                    // Use epsilon-based comparison for floating point values
+                    // to handle potential precision issues in JSON parsing
+                    if f.abs() < f64::EPSILON {
                         0
-                    } else if f == 1.0 {
+                    } else if (f - 1.0).abs() < f64::EPSILON {
                         1
                     } else {
                         return Err(crate::error::McpError::invalid_params(format!(

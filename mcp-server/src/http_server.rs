@@ -44,14 +44,22 @@ impl SyncFileWriter {
 
 impl std::io::Write for SyncFileWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mut file = self.file.lock().unwrap();
+        // Handle mutex poisoning gracefully - recover the data and continue
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let n = file.write(buf)?;
         file.sync_all()?; // fsync after every write
         Ok(n)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut file = self.file.lock().unwrap();
+        // Handle mutex poisoning gracefully - recover the data and continue
+        let mut file = match self.file.lock() {
+            Ok(f) => f,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         file.flush()?;
         file.sync_all()
     }
@@ -580,13 +588,23 @@ async fn run_http_server_internal(
         embedding_manager,
     ));
 
-    // Spawn periodic limits refresh task (every 5 minutes)
+    // Spawn periodic limits refresh task (every 5 minutes) with shutdown support
     let limits_for_refresh = limits_manager.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+        // Create a separate shutdown signal listener for this task
+        let shutdown = shutdown::shutdown_signal();
+        tokio::pin!(shutdown);
         loop {
-            interval.tick().await;
-            limits_for_refresh.refresh_if_needed();
+            tokio::select! {
+                _ = interval.tick() => {
+                    limits_for_refresh.refresh_if_needed();
+                }
+                _ = &mut shutdown => {
+                    tracing::debug!("Limits refresh task received shutdown signal");
+                    break;
+                }
+            }
         }
     });
 
@@ -723,6 +741,8 @@ async fn run_http_server_internal(
                     // Timeout - signal cancellation and abort
                     cancel_flag.store(true, std::sync::atomic::Ordering::SeqCst);
                     handle.abort();
+                    // Wait for task to fully stop to ensure resource cleanup
+                    let _ = handle.await;
                     Err(())
                 }
             }
@@ -1058,18 +1078,29 @@ fn is_client_initialized(
     initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
     client_id: &str,
 ) -> bool {
-    initialized_clients
-        .lock()
-        .map(|set| set.contains(client_id))
-        .unwrap_or(false)
+    match initialized_clients.lock() {
+        Ok(set) => set.contains(client_id),
+        Err(poisoned) => {
+            // Recover from poisoned mutex - log warning and check the data
+            tracing::warn!("Client initialized set mutex was poisoned, recovering");
+            poisoned.into_inner().contains(client_id)
+        }
+    }
 }
 
 fn mark_client_initialized(
     initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
     client_id: &str,
 ) {
-    if let Ok(mut set) = initialized_clients.lock() {
-        set.insert(client_id.to_string());
+    match initialized_clients.lock() {
+        Ok(mut set) => {
+            set.insert(client_id.to_string());
+        }
+        Err(poisoned) => {
+            // Recover from poisoned mutex - log warning and insert anyway
+            tracing::warn!("Client initialized set mutex was poisoned, recovering");
+            poisoned.into_inner().insert(client_id.to_string());
+        }
     }
 }
 
@@ -1126,23 +1157,30 @@ fn handle_request(
                 return None;
             }
             mark_client_initialized(initialized_clients, &client_id);
-            Some(create_success_response(
-                serde_json::to_value(InitializeResult {
-                    protocol_version: "2025-06-18".to_string(),
-                    capabilities: Capabilities {
-                        tools: serde_json::json!({"listChanged": false}),
-                        prompts: serde_json::json!({"listChanged": false}),
-                        resources: serde_json::json!({"subscribe": false, "listChanged": true}),
-                    },
-                    server_info: McpServerInfo {
-                        name: "ironbase-mcp".to_string(),
-                        version: VERSION.to_string(),
-                    },
-                    instructions: Some(get_server_instructions()),
-                })
-                .unwrap(),
-                request.id.clone(),
-            ))
+            let init_result = InitializeResult {
+                protocol_version: "2025-06-18".to_string(),
+                capabilities: Capabilities {
+                    tools: serde_json::json!({"listChanged": false}),
+                    prompts: serde_json::json!({"listChanged": false}),
+                    resources: serde_json::json!({"subscribe": false, "listChanged": true}),
+                },
+                server_info: McpServerInfo {
+                    name: "ironbase-mcp".to_string(),
+                    version: VERSION.to_string(),
+                },
+                instructions: Some(get_server_instructions()),
+            };
+            match serde_json::to_value(init_result) {
+                Ok(value) => Some(create_success_response(value, request.id.clone())),
+                Err(e) => {
+                    tracing::error!("Failed to serialize initialize response: {}", e);
+                    Some(create_error_response(
+                        -32603,
+                        &format!("Internal error: failed to serialize response: {}", e),
+                        request.id.clone(),
+                    ))
+                }
+            }
         }
 
         "initialized" | "notifications/initialized" => None,

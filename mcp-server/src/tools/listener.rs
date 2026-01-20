@@ -95,7 +95,7 @@ fn handle_listener_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     let deleted = manager.delete(&p.id).unwrap_or(false);
 
     Ok(json!({
-        "success": true,
+        "success": deleted,
         "id": p.id,
         "deleted": deleted,
         "note": if deleted {
@@ -112,7 +112,7 @@ fn handle_listener_enable(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     let updated = manager.enable(&p.id).unwrap_or(false);
 
     Ok(json!({
-        "success": true,
+        "success": updated,
         "id": p.id,
         "enabled": updated,
         "note": if updated {
@@ -129,7 +129,7 @@ fn handle_listener_disable(params: Value, adapter: &Arc<IronBaseAdapter>) -> Res
     let updated = manager.disable(&p.id).unwrap_or(false);
 
     Ok(json!({
-        "success": true,
+        "success": updated,
         "id": p.id,
         "disabled": updated,
         "note": if updated {

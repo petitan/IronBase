@@ -5,10 +5,9 @@
 use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
 use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use super::helpers::{validate_collection_name, DEFAULT_QUERY_LIMIT};
+use super::helpers::{parse_projection_value, parse_sort_value, validate_collection_name, DEFAULT_QUERY_LIMIT};
 use super::params::{
     ExplainParams, FindWithHintParams, FulltextAnalyzeParams, FulltextIndexParams,
     FulltextSearchParams, FuzzyIndexParams, FuzzySearchParams, IndexCreateParams, IndexDropParams,
@@ -34,92 +33,6 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
             "Unknown index tool: {}",
             name
         ))),
-    }
-}
-
-/// Parse projection Value to HashMap<String, i32>
-fn parse_projection_value(proj: Option<Value>) -> Result<Option<HashMap<String, i32>>> {
-    match proj {
-        None => Ok(None),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Object(map)) => {
-            let mut result = HashMap::new();
-            for (key, value) in map {
-                let v = value.as_i64().unwrap_or(1) as i32;
-                result.insert(key, v);
-            }
-            if result.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(result))
-            }
-        }
-        Some(_) => Err(McpError::invalid_params(
-            "Projection must be an object like {\"field\": 1} or {\"field\": 0}",
-        )),
-    }
-}
-
-/// Parse sort specification from Value to Vec<(String, i32)>
-fn parse_sort_value(sort: Option<Value>) -> Result<Option<Vec<(String, i32)>>> {
-    match sort {
-        None => Ok(None),
-        Some(Value::Null) => Ok(None),
-        Some(Value::Array(arr)) => {
-            let mut result = Vec::new();
-            for item in arr {
-                let pair = item.as_array().ok_or_else(|| {
-                    McpError::invalid_params("Sort array items must be [field, direction] pairs")
-                })?;
-                if pair.len() != 2 {
-                    return Err(McpError::invalid_params(
-                        "Sort array items must have exactly 2 elements",
-                    ));
-                }
-                let field = pair[0]
-                    .as_str()
-                    .ok_or_else(|| McpError::invalid_params("Sort field must be a string"))?;
-                let direction = pair[1]
-                    .as_i64()
-                    .ok_or_else(|| McpError::invalid_params("Sort direction must be 1 or -1"))?;
-                if direction != 1 && direction != -1 {
-                    return Err(McpError::invalid_params(format!(
-                        "Sort direction for '{}' must be 1 or -1, got {}",
-                        field, direction
-                    )));
-                }
-                result.push((field.to_string(), direction as i32));
-            }
-            if result.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(result))
-            }
-        }
-        Some(Value::Object(map)) => {
-            let mut result = Vec::new();
-            for (key, value) in map {
-                let direction = value.as_i64().ok_or_else(|| {
-                    McpError::invalid_params(format!(
-                        "Sort direction for '{}' must be 1 or -1",
-                        key
-                    ))
-                })?;
-                if direction != 1 && direction != -1 {
-                    return Err(McpError::invalid_params(format!(
-                        "Sort direction for '{}' must be 1 or -1, got {}",
-                        key, direction
-                    )));
-                }
-                result.push((key, direction as i32));
-            }
-            if result.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(result))
-            }
-        }
-        Some(_) => Err(McpError::invalid_params("Sort must be an array or object")),
     }
 }
 
