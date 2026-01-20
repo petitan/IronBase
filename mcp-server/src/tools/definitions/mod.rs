@@ -5,7 +5,8 @@
 //! - `database` - Database management (db_open, db_stats, etc.)
 //! - `collection` - Collection management
 //! - `document` - Document CRUD operations
-//! - `index` - Index management and search
+//! - `index` - Index management (B+ tree, fuzzy, fulltext)
+//! - `vector` - Vector index and similarity search (HNSW)
 //! - `schema` - Schema validation
 //! - `script` - Rhai script management
 //! - `transaction` - Transaction management

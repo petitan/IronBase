@@ -109,7 +109,7 @@ pub fn tools() -> Vec<Value> {
                 "properties": {
                     "code": {
                         "type": "string",
-                        "description": "Rhai code. Database API: db_find(coll, query, opts?), db_find_one(coll, query), db_count(coll, query), db_aggregate(coll, pipeline), db_insert_one(coll, doc), db_update_one(coll, filter, update), db_delete_one(coll, filter), db_fulltext_search(coll, field, query, opts)"
+                        "description": "Rhai code. Database API: db_find(coll, query, opts?), db_find_one(coll, query), db_count(coll, query), db_aggregate(coll, pipeline), db_insert_one(coll, doc), db_update_one(coll, filter, update), db_delete_one(coll, filter), db_fulltext_search(coll, field, query, opts), db_vector_search(coll, field, vector, limit), db_vector_search_filter(coll, field, vector, filter, limit)"
                     },
                     "params": {
                         "type": "object",
