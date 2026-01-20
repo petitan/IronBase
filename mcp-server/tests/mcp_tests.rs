@@ -2312,3 +2312,6 @@ for mid in params.message_ids {
     .unwrap();
     assert_eq!(count_result["count"], 3); // One per unique message_id
 }
+
+// Note: RAG tool tests require FastText models and are tested via integration tests
+// See: ironbase-core/tests/rag_integration_tests.rs for HNSW upsert tests

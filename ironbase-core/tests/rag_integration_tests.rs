@@ -269,6 +269,75 @@ fn test_hnsw_duplicate_id() {
 }
 
 #[test]
+fn test_hnsw_upsert_insert() {
+    let mut hnsw = HnswIndex::with_dim(3);
+
+    // Upsert on empty index = insert
+    let was_update = hnsw.upsert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+    assert!(!was_update, "First upsert should be an insert");
+    assert_eq!(hnsw.len(), 1);
+    assert!(hnsw.contains("doc1"));
+}
+
+#[test]
+fn test_hnsw_upsert_update() {
+    let mut hnsw = HnswIndex::with_dim(3);
+
+    // First insert
+    hnsw.insert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+
+    // Search before update
+    let results_before = hnsw.search(&[0.0, 1.0, 0.0], 1);
+    let score_before = results_before[0].1;
+
+    // Upsert with new vector (closer to [0, 1, 0])
+    let was_update = hnsw.upsert("doc1", &[0.0, 1.0, 0.0]).unwrap();
+    assert!(was_update, "Second upsert should be an update");
+    assert_eq!(hnsw.len(), 1, "Should still have only 1 vector");
+
+    // Search after update - should now have higher similarity
+    let results_after = hnsw.search(&[0.0, 1.0, 0.0], 1);
+    let score_after = results_after[0].1;
+    assert!(
+        score_after > score_before,
+        "Updated vector should have higher similarity to query"
+    );
+}
+
+#[test]
+fn test_hnsw_upsert_dimension_mismatch() {
+    let mut hnsw = HnswIndex::with_dim(3);
+    hnsw.insert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+
+    // Try to upsert with wrong dimension
+    let result = hnsw.upsert("doc1", &[1.0, 0.0]); // 2D instead of 3D
+    assert!(result.is_err(), "Should reject mismatched dimension");
+}
+
+#[test]
+fn test_hnsw_upsert_multiple() {
+    let mut hnsw = HnswIndex::with_dim(3);
+
+    // Multiple upserts on same ID
+    let r1 = hnsw.upsert("doc1", &[1.0, 0.0, 0.0]).unwrap();
+    let r2 = hnsw.upsert("doc1", &[0.0, 1.0, 0.0]).unwrap();
+    let r3 = hnsw.upsert("doc1", &[0.0, 0.0, 1.0]).unwrap();
+
+    assert!(!r1, "First should be insert");
+    assert!(r2, "Second should be update");
+    assert!(r3, "Third should be update");
+    assert_eq!(hnsw.len(), 1, "Should still have only 1 vector");
+
+    // Verify final vector
+    let results = hnsw.search(&[0.0, 0.0, 1.0], 1);
+    assert_eq!(results[0].0, "doc1");
+    assert!(
+        results[0].1 > 0.99,
+        "Should find exact match after final update"
+    );
+}
+
+#[test]
 fn test_hnsw_search_limit() {
     let mut hnsw = HnswIndex::with_dim(3);
 
