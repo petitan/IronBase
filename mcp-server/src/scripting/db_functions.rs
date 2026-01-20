@@ -3,8 +3,8 @@
 //! Provides database operations accessible from scripts:
 //! - CRUD operations (find, insert, update, delete)
 //! - Aggregation
-//! - Index management
-//! - Fuzzy and fulltext search
+//! - Index management (B+ tree, fuzzy, fulltext, vector)
+//! - Fuzzy, fulltext, and vector similarity search
 //!
 //! All functions include safety limits to prevent OOM attacks.
 
@@ -94,6 +94,14 @@ fn projection_from_dynamic(value: &Dynamic) -> Result<Option<HashMap<String, i32
 /// - `db_create_fulltext_index(collection, field, language)` - Create fulltext index
 /// - `db_fulltext_search(collection, field, query, options)` - Fulltext search with options
 ///
+/// ## Vector Index Operations
+/// - `db_create_vector_index(collection, field, dim, metric)` - Create vector index
+/// - `db_create_vector_index(collection, field, dim, metric, options)` - Create with HNSW options
+/// - `db_list_vector_indexes(collection)` - List vector indexes
+/// - `db_drop_vector_index(collection, index_name)` - Drop vector index
+/// - `db_vector_search(collection, field, query_vector, limit)` - Vector similarity search
+/// - `db_vector_search_filter(collection, field, query_vector, filter, limit)` - Vector search with filter
+///
 /// # Arguments
 ///
 /// * `engine` - The Rhai engine to register functions into
@@ -112,7 +120,8 @@ pub fn register_db_functions(
     register_read_functions(engine, adapter.clone(), limits);
     register_write_functions(engine, adapter.clone());
     register_index_functions(engine, adapter.clone());
-    register_search_functions(engine, adapter, limits);
+    register_search_functions(engine, adapter.clone(), limits);
+    register_vector_functions(engine, adapter, limits);
 }
 
 // ============================================================
@@ -503,16 +512,29 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
         },
     );
 
-    // db_list_indexes(collection) -> array of index names
+    // db_list_indexes(collection) -> #{btree_indexes: [...], fulltext_indexes: [...], vector_indexes: [...], summary: {...}}
     let adapter_lidx = adapter.clone();
     engine.register_fn("db_list_indexes", move |collection: &str| -> Dynamic {
-        match adapter_lidx.list_indexes(collection) {
-            Ok(indexes) => {
-                let result: Vec<Dynamic> = indexes.into_iter().map(Dynamic::from).collect();
-                Dynamic::from(result)
-            }
-            Err(e) => Dynamic::from(format!("Error: {}", e)),
-        }
+        let btree = adapter_lidx.list_indexes(collection).unwrap_or_default();
+        let fulltext = adapter_lidx.list_fulltext_indexes(collection).unwrap_or_default();
+        let vector = adapter_lidx.list_vector_indexes(collection).unwrap_or_default();
+
+        let btree_dyn: Vec<Dynamic> = btree.iter().map(|s| Dynamic::from(s.clone())).collect();
+        let fulltext_dyn: Vec<Dynamic> = fulltext.iter().map(json_to_dynamic).collect();
+        let vector_dyn: Vec<Dynamic> = vector.iter().map(json_to_dynamic).collect();
+
+        let mut summary = Map::new();
+        summary.insert("btree_count".into(), Dynamic::from(btree.len() as i64));
+        summary.insert("fulltext_count".into(), Dynamic::from(fulltext.len() as i64));
+        summary.insert("vector_count".into(), Dynamic::from(vector.len() as i64));
+        summary.insert("total".into(), Dynamic::from((btree.len() + fulltext.len() + vector.len()) as i64));
+
+        let mut result = Map::new();
+        result.insert("btree_indexes".into(), Dynamic::from(btree_dyn));
+        result.insert("fulltext_indexes".into(), Dynamic::from(fulltext_dyn));
+        result.insert("vector_indexes".into(), Dynamic::from(vector_dyn));
+        result.insert("summary".into(), Dynamic::from(summary));
+        Dynamic::from(result)
     });
 
     // db_drop_index(collection, index_name) -> bool
@@ -711,6 +733,196 @@ fn register_search_functions(
                                     .collect();
                                 map.insert("highlights".into(), Dynamic::from(hl_dyn));
                             }
+                            Dynamic::from(map)
+                        })
+                        .collect();
+                    Dynamic::from(result)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+}
+
+// ============================================================
+// Vector Index Operations
+// ============================================================
+
+fn register_vector_functions(
+    engine: &mut Engine,
+    adapter: Arc<IronBaseAdapter>,
+    limits: &ScriptLimits,
+) {
+    // db_create_vector_index(collection, field, dim, metric) -> index_name
+    // metric: "cosine" | "euclidean" | "dot_product"
+    let adapter_vidx = adapter.clone();
+    engine.register_fn(
+        "db_create_vector_index",
+        move |collection: &str, field: &str, dim: i64, metric: &str| -> Dynamic {
+            match adapter_vidx.create_vector_index(
+                collection,
+                field,
+                dim as usize,
+                metric,
+                100_000, // max_vectors default
+                16,      // m default
+                200,     // ef_construction default
+                50,      // ef_search default
+            ) {
+                Ok(name) => Dynamic::from(name),
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_create_vector_index(collection, field, dim, metric, options) -> index_name
+    // options: { max_vectors: int, m: int, ef_construction: int, ef_search: int }
+    let adapter_vidx_opts = adapter.clone();
+    engine.register_fn(
+        "db_create_vector_index",
+        move |collection: &str, field: &str, dim: i64, metric: &str, options: Map| -> Dynamic {
+            let max_vectors = options
+                .get("max_vectors")
+                .and_then(|v| v.as_int().ok())
+                .map(|v| v as usize)
+                .unwrap_or(100_000);
+            let m = options
+                .get("m")
+                .and_then(|v| v.as_int().ok())
+                .map(|v| v as usize)
+                .unwrap_or(16);
+            let ef_construction = options
+                .get("ef_construction")
+                .and_then(|v| v.as_int().ok())
+                .map(|v| v as usize)
+                .unwrap_or(200);
+            let ef_search = options
+                .get("ef_search")
+                .and_then(|v| v.as_int().ok())
+                .map(|v| v as usize)
+                .unwrap_or(50);
+
+            match adapter_vidx_opts.create_vector_index(
+                collection,
+                field,
+                dim as usize,
+                metric,
+                max_vectors,
+                m,
+                ef_construction,
+                ef_search,
+            ) {
+                Ok(name) => Dynamic::from(name),
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_list_vector_indexes(collection) -> array of index info
+    let adapter_lvidx = adapter.clone();
+    engine.register_fn(
+        "db_list_vector_indexes",
+        move |collection: &str| -> Dynamic {
+            match adapter_lvidx.list_vector_indexes(collection) {
+                Ok(indexes) => {
+                    let result: Vec<Dynamic> =
+                        indexes.into_iter().map(|v| json_to_dynamic(&v)).collect();
+                    Dynamic::from(result)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_drop_vector_index(collection, index_name) -> bool
+    let adapter_dvidx = adapter.clone();
+    engine.register_fn(
+        "db_drop_vector_index",
+        move |collection: &str, index_name: &str| -> Dynamic {
+            match adapter_dvidx.drop_vector_index(collection, index_name) {
+                Ok(()) => Dynamic::from(true),
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_vector_search(collection, field, query_vector, limit) -> array of {document, score}
+    let max_find_documents = limits.max_find_documents;
+    let adapter_vsrch = adapter.clone();
+    engine.register_fn(
+        "db_vector_search",
+        move |collection: &str, field: &str, query_vector: rhai::Array, limit: i64| -> Dynamic {
+            // Convert Rhai array to Vec<f32>
+            let vector: Vec<f32> = query_vector
+                .iter()
+                .filter_map(|v| v.as_float().ok().map(|f| f as f32))
+                .collect();
+
+            if vector.is_empty() {
+                return Dynamic::from(
+                    "Error: query_vector must be a non-empty array of numbers".to_string(),
+                );
+            }
+
+            let effective_limit = (limit as usize).min(max_find_documents);
+
+            match adapter_vsrch.vector_search(collection, field, &vector, effective_limit) {
+                Ok(results) => {
+                    let result: Vec<Dynamic> = results
+                        .into_iter()
+                        .map(|(doc, score)| {
+                            let mut map = Map::new();
+                            map.insert("document".into(), json_to_dynamic(&doc));
+                            map.insert("score".into(), Dynamic::from(score as f64));
+                            Dynamic::from(map)
+                        })
+                        .collect();
+                    Dynamic::from(result)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_vector_search_filter(collection, field, query_vector, filter, limit) -> array of {document, score}
+    let adapter_vsrchf = adapter;
+    engine.register_fn(
+        "db_vector_search_filter",
+        move |collection: &str,
+              field: &str,
+              query_vector: rhai::Array,
+              filter: Map,
+              limit: i64|
+              -> Dynamic {
+            // Convert Rhai array to Vec<f32>
+            let vector: Vec<f32> = query_vector
+                .iter()
+                .filter_map(|v| v.as_float().ok().map(|f| f as f32))
+                .collect();
+
+            if vector.is_empty() {
+                return Dynamic::from(
+                    "Error: query_vector must be a non-empty array of numbers".to_string(),
+                );
+            }
+
+            let filter_json = map_to_json(&filter);
+            let effective_limit = (limit as usize).min(max_find_documents);
+
+            match adapter_vsrchf.vector_search_with_filter(
+                collection,
+                field,
+                &vector,
+                &filter_json,
+                effective_limit,
+            ) {
+                Ok(results) => {
+                    let result: Vec<Dynamic> = results
+                        .into_iter()
+                        .map(|(doc, score)| {
+                            let mut map = Map::new();
+                            map.insert("document".into(), json_to_dynamic(&doc));
+                            map.insert("score".into(), Dynamic::from(score as f64));
                             Dynamic::from(map)
                         })
                         .collect();
