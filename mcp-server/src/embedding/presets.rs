@@ -5,6 +5,7 @@
 //! settings as needed.
 
 use super::http_provider::{AuthMethod, HttpProviderConfig, RequestFormat, ResponseFormat};
+use serde_json::json;
 use std::collections::HashMap;
 
 impl HttpProviderConfig {
@@ -42,6 +43,7 @@ impl HttpProviderConfig {
             max_batch_size: 1,
             timeout_secs: 60,
             error_path: Some("error".to_string()),
+            extra_body_fields: HashMap::new(),
         }
     }
 
@@ -81,6 +83,7 @@ impl HttpProviderConfig {
             max_batch_size: 2048,
             timeout_secs: 30,
             error_path: Some("error.message".to_string()),
+            extra_body_fields: HashMap::new(),
         }
     }
 
@@ -118,6 +121,12 @@ impl HttpProviderConfig {
             max_batch_size: 96,
             timeout_secs: 30,
             error_path: Some("message".to_string()),
+            extra_body_fields: {
+                let mut extra = HashMap::new();
+                // Cohere v2 API requires input_type
+                extra.insert("input_type".to_string(), json!("search_document"));
+                extra
+            },
         }
     }
 
@@ -154,6 +163,7 @@ impl HttpProviderConfig {
             max_batch_size: 100,
             timeout_secs: 30,
             error_path: Some("message".to_string()),
+            extra_body_fields: HashMap::new(),
         }
     }
 
@@ -191,6 +201,7 @@ impl HttpProviderConfig {
             max_batch_size: 16,
             timeout_secs: 30,
             error_path: Some("error.message".to_string()),
+            extra_body_fields: HashMap::new(),
         }
     }
 
@@ -223,6 +234,7 @@ impl HttpProviderConfig {
             max_batch_size: 1,
             timeout_secs: 60,
             error_path: Some("error".to_string()),
+            extra_body_fields: HashMap::new(),
         }
     }
 
@@ -261,6 +273,7 @@ impl HttpProviderConfig {
             max_batch_size: 128,
             timeout_secs: 30,
             error_path: Some("detail".to_string()),
+            extra_body_fields: HashMap::new(),
         }
     }
 }

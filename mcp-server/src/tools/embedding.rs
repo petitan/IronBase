@@ -17,7 +17,6 @@ use super::params::ParseParams;
 pub struct EmbedTextParams {
     pub text: String,
     pub provider: Option<String>,
-    pub model: Option<String>,
 }
 
 /// Parameters for `embed_batch` tool
@@ -25,7 +24,6 @@ pub struct EmbedTextParams {
 pub struct EmbedBatchParams {
     pub texts: Vec<String>,
     pub provider: Option<String>,
-    pub model: Option<String>,
 }
 
 /// Parameters for `embed_list_models` tool (no params needed)

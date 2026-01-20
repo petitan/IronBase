@@ -69,6 +69,11 @@ pub trait EmbeddingProvider: Send + Sync {
 
     /// Get the provider name
     fn provider_name(&self) -> &str;
+
+    /// Get the display name for UI/logs (defaults to provider_name)
+    fn display_name(&self) -> &str {
+        self.provider_name()
+    }
 }
 
 /// Information about an available model
@@ -267,7 +272,7 @@ impl EmbeddingManager {
                 provider: name.clone(),
                 model: provider.model_name().to_string(),
                 dimension: provider.dimension(),
-                description: format!("{} provider", provider.provider_name()),
+                description: format!("{} embedding provider", provider.display_name()),
                 available: true,
             })
             .collect()

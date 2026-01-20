@@ -144,6 +144,10 @@ pub struct HttpProviderConfig {
     /// Error response path (to extract error message)
     #[serde(default)]
     pub error_path: Option<String>,
+
+    /// Extra fields to include in request body (e.g., Cohere's input_type)
+    #[serde(default)]
+    pub extra_body_fields: HashMap<String, serde_json::Value>,
 }
 
 fn default_max_batch() -> usize {
@@ -197,7 +201,7 @@ impl HttpEmbeddingProvider {
 
     /// Build request body for single text
     fn build_single_body(&self, text: &str) -> serde_json::Value {
-        match &self.config.request_format {
+        let mut body = match &self.config.request_format {
             RequestFormat::SingleText {
                 model_field,
                 text_field,
@@ -226,12 +230,14 @@ impl HttpEmbeddingProvider {
                     );
                 serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({}))
             }
-        }
+        };
+        self.merge_extra_fields(&mut body);
+        body
     }
 
     /// Build request body for batch texts
     fn build_batch_body(&self, texts: &[&str]) -> serde_json::Value {
-        match &self.config.request_format {
+        let mut body = match &self.config.request_format {
             RequestFormat::SingleText {
                 model_field,
                 text_field,
@@ -260,6 +266,17 @@ impl HttpEmbeddingProvider {
                     .replace("{model}", &self.model)
                     .replace("{texts}", &format!("[{}]", texts_json.join(",")));
                 serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({}))
+            }
+        };
+        self.merge_extra_fields(&mut body);
+        body
+    }
+
+    /// Merge extra_body_fields into the request body
+    fn merge_extra_fields(&self, body: &mut serde_json::Value) {
+        if let serde_json::Value::Object(map) = body {
+            for (key, value) in &self.config.extra_body_fields {
+                map.insert(key.clone(), value.clone());
             }
         }
     }
@@ -479,6 +496,13 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
     fn provider_name(&self) -> &str {
         &self.config.name
     }
+
+    fn display_name(&self) -> &str {
+        self.config
+            .display_name
+            .as_deref()
+            .unwrap_or(&self.config.name)
+    }
 }
 
 // ============================================================================
@@ -575,9 +599,43 @@ mod tests {
             max_batch_size: 1,
             timeout_secs: 30,
             error_path: None,
+            extra_body_fields: HashMap::new(),
         };
 
         let provider = HttpEmbeddingProvider::new(config);
         assert_eq!(provider.build_url(), "http://localhost:8080/api/embed");
+    }
+
+    #[test]
+    fn test_extra_body_fields_merged() {
+        let mut extra = HashMap::new();
+        extra.insert("input_type".to_string(), serde_json::json!("search_document"));
+
+        let config = HttpProviderConfig {
+            name: "test".to_string(),
+            display_name: None,
+            base_url: "http://localhost:8080".to_string(),
+            endpoint: None,
+            default_model: "test-model".to_string(),
+            auth: AuthMethod::None,
+            request_format: RequestFormat::TextArray {
+                model_field: "model".to_string(),
+                texts_field: "texts".to_string(),
+            },
+            response_format: ResponseFormat::default(),
+            model_dimensions: HashMap::new(),
+            default_dimension: 384,
+            supports_batch: false,
+            max_batch_size: 1,
+            timeout_secs: 30,
+            error_path: None,
+            extra_body_fields: extra,
+        };
+
+        let provider = HttpEmbeddingProvider::new(config);
+        let body = provider.build_single_body("test text");
+
+        assert_eq!(body.get("input_type"), Some(&serde_json::json!("search_document")));
+        assert_eq!(body.get("model"), Some(&serde_json::json!("test-model")));
     }
 }

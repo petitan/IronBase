@@ -9,7 +9,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "embed_text",
             "title": "Generate Text Embedding",
-            "description": "Generate an embedding vector for a single text. Default: FastText (Hungarian, offline). Supports Ollama and OpenAI as alternative providers.",
+            "description": "Generate an embedding vector for a single text. Default: FastText (Hungarian, offline). Auto-detects available providers from environment variables.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -19,13 +19,8 @@ pub fn tools() -> Vec<Value> {
                     },
                     "provider": {
                         "type": "string",
-                        "description": "Embedding provider: fasttext (default, offline), ollama (local LLM), openai (cloud)",
-                        "enum": ["fasttext", "ollama", "openai"],
+                        "description": "Embedding provider. Available: fasttext (default, offline), ollama (local), openai, cohere, mistral, azure-openai, voyage. Use embed_list_models to see configured providers.",
                         "default": "fasttext"
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Model name. For fasttext: cc.hu.300 (default). For ollama: nomic-embed-text, snowflake-arctic-embed. For openai: text-embedding-3-small."
                     }
                 },
                 "required": ["text"]
@@ -46,13 +41,8 @@ pub fn tools() -> Vec<Value> {
                     },
                     "provider": {
                         "type": "string",
-                        "description": "Embedding provider",
-                        "enum": ["fasttext", "ollama", "openai"],
+                        "description": "Embedding provider (use embed_list_models to see available)",
                         "default": "fasttext"
-                    },
-                    "model": {
-                        "type": "string",
-                        "description": "Model name (optional)"
                     }
                 },
                 "required": ["texts"]
