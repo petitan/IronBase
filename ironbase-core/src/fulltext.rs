@@ -1289,7 +1289,7 @@ impl FulltextIndex {
             min_word_length: self.options.min_word_length,
             accent_folding: self.options.accent_folding,
             num_documents: self.doc_tokens_offsets.len(),
-            num_tokens: self.inverted_index.len(),
+            num_tokens: self.unique_token_count(),
             building: self.building,
         }
     }
