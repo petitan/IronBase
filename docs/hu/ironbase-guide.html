@@ -1992,7 +1992,80 @@ Page size: 1,000 docs
           <td><code>db_aggregate(coll, pipeline)</code></td>
           <td>Aggregation</td>
         </tr>
+        <tr>
+          <td><code>db_fulltext_search(coll, field, query, opts?)</code></td>
+          <td>Full-text keresés</td>
+        </tr>
+        <tr>
+          <td><code>db_fuzzy_search(coll, field, query, threshold)</code></td>
+          <td>Fuzzy keresés</td>
+        </tr>
       </table>
+
+      <h3>RAG (Szemantikus Keresés) API</h3>
+
+      <table>
+        <tr>
+          <th>Függvény</th>
+          <th>Leírás</th>
+        </tr>
+        <tr>
+          <td><code>db_rag_collection_list()</code></td>
+          <td>RAG collection-ök listázása</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_collection_stats(name)</code></td>
+          <td>Collection statisztikák (doc/chunk count)</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_document_list(coll)</code></td>
+          <td>Dokumentumok listázása</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_document_import(coll, id, title, content)</code></td>
+          <td>Dokumentum importálása (auto-chunk + embed)</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_document_delete(coll, doc_id)</code></td>
+          <td>Dokumentum törlése</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_search(coll, query)</code></td>
+          <td>Szemantikus keresés (default limit: 5)</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_search(coll, query, opts)</code></td>
+          <td>Keresés opciókkal: <code>#{limit: 10, min_score: 0.5}</code></td>
+        </tr>
+      </table>
+
+      <div class="tool-card">
+        <h4>RAG Példa - Szemantikus keresés scriptből</h4>
+
+        <div class="code-block">
+          <pre><code class="language-javascript">// RAG keresés
+let results = db_rag_search("knowledge_base", "magyar főváros");
+for r in results {
+    print("[" + r.score + "] " + r.doc_title + ": " + r.text);
+}
+
+// Dokumentum importálás
+let result = db_rag_document_import(
+    "knowledge_base",
+    "budapest_info",
+    "Budapest",
+    "Budapest Magyarország fővárosa..."
+);
+print("Created " + result.chunks_created + " chunks");
+
+// Keresés min_score szűréssel
+let filtered = db_rag_search("knowledge_base", "történelem", #{
+    limit: 10,
+    min_score: 0.6
+});</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
 
       <div class="tool-card">
         <h4><code>script_save</code> - Script mentése</h4>

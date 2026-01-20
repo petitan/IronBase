@@ -1795,7 +1795,80 @@ Page size: 1,000 docs
           <td><code>db_aggregate(coll, pipeline)</code></td>
           <td>Aggregation</td>
         </tr>
+        <tr>
+          <td><code>db_fulltext_search(coll, field, query, opts?)</code></td>
+          <td>Full-text search</td>
+        </tr>
+        <tr>
+          <td><code>db_fuzzy_search(coll, field, query, threshold)</code></td>
+          <td>Fuzzy search</td>
+        </tr>
       </table>
+
+      <h3>RAG (Semantic Search) API</h3>
+
+      <table>
+        <tr>
+          <th>Function</th>
+          <th>Description</th>
+        </tr>
+        <tr>
+          <td><code>db_rag_collection_list()</code></td>
+          <td>List RAG collections</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_collection_stats(name)</code></td>
+          <td>Collection statistics (doc/chunk count)</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_document_list(coll)</code></td>
+          <td>List documents in collection</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_document_import(coll, id, title, content)</code></td>
+          <td>Import document (auto-chunk + embed)</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_document_delete(coll, doc_id)</code></td>
+          <td>Delete document</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_search(coll, query)</code></td>
+          <td>Semantic search (default limit: 5)</td>
+        </tr>
+        <tr>
+          <td><code>db_rag_search(coll, query, opts)</code></td>
+          <td>Search with options: <code>#{limit: 10, min_score: 0.5}</code></td>
+        </tr>
+      </table>
+
+      <div class="tool-card">
+        <h4>RAG Example - Semantic Search from Script</h4>
+
+        <div class="code-block">
+          <pre><code class="language-javascript">// RAG search
+let results = db_rag_search("knowledge_base", "capital of Hungary");
+for r in results {
+    print("[" + r.score + "] " + r.doc_title + ": " + r.text);
+}
+
+// Import document
+let result = db_rag_document_import(
+    "knowledge_base",
+    "budapest_info",
+    "Budapest",
+    "Budapest is the capital of Hungary..."
+);
+print("Created " + result.chunks_created + " chunks");
+
+// Search with min_score filter
+let filtered = db_rag_search("knowledge_base", "history", #{
+    limit: 10,
+    min_score: 0.6
+});</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
 
       <h1 id="tools-admin">Admin Tools</h1>
 
