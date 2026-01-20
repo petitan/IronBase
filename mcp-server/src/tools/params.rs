@@ -517,7 +517,8 @@ pub struct ApiKeyListParams {
 #[derive(Debug, Deserialize)]
 pub struct RagCollectionCreateParams {
     pub name: String,
-    pub model_path: String,
+    /// Path to FastText .bin model. If not provided, uses default from config.toml [rag] section.
+    pub model_path: Option<String>,
     pub chunk_max_tokens: Option<usize>,
     pub chunk_overlap: Option<usize>,
     pub admin_key: Option<String>,

@@ -57,10 +57,23 @@ fn handle_collection_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     }
     validate_name(&p.name, "Collection name")?;
 
+    // Get model_path: explicit parameter or default from config.toml
+    let model_path = match p.model_path {
+        Some(ref path) if !path.is_empty() => path.clone(),
+        Some(_) => {
+            return Err(McpError::invalid_params("model_path cannot be empty"));
+        }
+        None => adapter.get_default_fasttext_model().ok_or_else(|| {
+            McpError::invalid_params(
+                "model_path not provided and no default configured in config.toml [rag] section",
+            )
+        })?,
+    };
+
     // Create RAG collection
     adapter.rag_collection_create(
         &p.name,
-        &p.model_path,
+        &model_path,
         p.chunk_max_tokens.unwrap_or(1000),
         p.chunk_overlap.unwrap_or(100),
     )?;

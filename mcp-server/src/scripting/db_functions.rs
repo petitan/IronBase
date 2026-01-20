@@ -696,7 +696,10 @@ fn register_search_functions(
                                     .iter()
                                     .map(|hl| {
                                         let mut hl_map = Map::new();
-                                        hl_map.insert("field".into(), Dynamic::from(hl.field.clone()));
+                                        hl_map.insert(
+                                            "field".into(),
+                                            Dynamic::from(hl.field.clone()),
+                                        );
                                         let snippets: Vec<Dynamic> = hl
                                             .snippets
                                             .iter()

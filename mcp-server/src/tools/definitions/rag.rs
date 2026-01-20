@@ -13,7 +13,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "rag_collection_create",
             "title": "Create RAG Collection",
-            "description": "Create a new RAG collection for semantic document search. Requires FastText model path.",
+            "description": "Create a new RAG collection for semantic document search. Uses FastText model from config.toml [rag] section by default.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -23,7 +23,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "model_path": {
                         "type": "string",
-                        "description": "Path to FastText .bin model file (e.g., 'models/cc.hu.300.bin')"
+                        "description": "Path to FastText .bin model file. Optional if configured in config.toml [rag] fasttext_model"
                     },
                     "chunk_max_tokens": {
                         "type": "integer",
@@ -37,7 +37,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "admin_key": fields::admin_key()
                 },
-                "required": ["name", "model_path", "admin_key"]
+                "required": ["name", "admin_key"]
             }
         }),
         json!({

@@ -243,6 +243,8 @@ pub struct IronBaseAdapter {
     db_path: RwLock<std::path::PathBuf>,
     /// In-memory document counts for fast stats() without lock contention
     collection_stats: CollectionStats,
+    /// Default FastText model path (from config.toml [rag] section)
+    default_fasttext_model: RwLock<Option<String>>,
 }
 
 /// Scripts collection name
@@ -410,12 +412,23 @@ impl IronBaseAdapter {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
             collection_stats: CollectionStats::new(),
+            default_fasttext_model: RwLock::new(None),
         };
 
         // Ensure system collections exist
         adapter.ensure_system_collections()?;
 
         Ok(adapter)
+    }
+
+    /// Set the default FastText model path (from config.toml)
+    pub fn set_default_fasttext_model(&self, path: Option<String>) {
+        *self.default_fasttext_model.write() = path;
+    }
+
+    /// Get the default FastText model path
+    pub fn get_default_fasttext_model(&self) -> Option<String> {
+        self.default_fasttext_model.read().clone()
     }
 
     /// Ensure system collections exist with correct flags and schemas

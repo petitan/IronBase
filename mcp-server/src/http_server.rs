@@ -86,6 +86,8 @@ pub struct Config {
     pub tool_timeout_secs: u64,
     /// If true, use synchronous (fsync) logging for crash debugging
     pub sync_logging: bool,
+    /// Default FastText model path for RAG operations
+    pub fasttext_model_path: Option<String>,
 }
 
 /// Parse human-readable size strings like "1GB", "500MB", "10KB"
@@ -250,6 +252,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_key_file: toml_config.tls.key_file,
             tool_timeout_secs: toml_config.server.tool_timeout_secs,
             sync_logging: toml_config.logging.sync,
+            fasttext_model_path: toml_config.rag.fasttext_model,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -267,6 +270,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_key_file: None,
             tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
             sync_logging: false,
+            fasttext_model_path: None,
         }
     };
 
@@ -296,6 +300,8 @@ struct TomlConfig {
     tls: TlsConfig,
     #[serde(default)]
     logging: LoggingConfig,
+    #[serde(default)]
+    rag: RagConfig,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -352,6 +358,14 @@ struct LoggingConfig {
     /// WARNING: This significantly impacts performance but guarantees log writes before crash
     #[serde(default)]
     sync: bool,
+}
+
+#[derive(Debug, serde::Deserialize, Default, Clone)]
+struct RagConfig {
+    /// Default path to FastText .bin model file
+    /// Used when rag_collection_create is called without explicit model_path
+    #[serde(default)]
+    fasttext_model: Option<String>,
 }
 
 /// Run HTTP server with default signal-based shutdown
@@ -502,6 +516,14 @@ async fn run_http_server_internal(
             std::process::exit(1);
         }
     };
+
+    // Configure default FastText model path from config.toml [rag] section
+    if let Some(ref model_path) = config.fasttext_model_path {
+        if !model_path.is_empty() {
+            adapter.set_default_fasttext_model(Some(model_path.clone()));
+            info!("RAG default FastText model: {}", model_path);
+        }
+    }
 
     // Warm up collections (initialize index managers)
     // This moves the index rebuild cost from first query to startup
