@@ -94,6 +94,15 @@ fn projection_from_dynamic(value: &Dynamic) -> Result<Option<HashMap<String, i32
 /// - `db_create_fulltext_index(collection, field, language)` - Create fulltext index
 /// - `db_fulltext_search(collection, field, query, options)` - Fulltext search with options
 ///
+/// ## RAG (Semantic Search) Operations
+/// - `db_rag_collection_list()` - List all RAG collections
+/// - `db_rag_collection_stats(name)` - Get statistics for a RAG collection
+/// - `db_rag_document_list(collection)` - List documents in a RAG collection
+/// - `db_rag_document_import(collection, doc_id, title, content)` - Import document
+/// - `db_rag_document_delete(collection, doc_id)` - Delete document from RAG collection
+/// - `db_rag_search(collection, query)` - Semantic search (default limit: 5)
+/// - `db_rag_search(collection, query, options)` - Semantic search with options (limit, min_score)
+///
 /// # Arguments
 ///
 /// * `engine` - The Rhai engine to register functions into
@@ -112,7 +121,8 @@ pub fn register_db_functions(
     register_read_functions(engine, adapter.clone(), limits);
     register_write_functions(engine, adapter.clone());
     register_index_functions(engine, adapter.clone());
-    register_search_functions(engine, adapter, limits);
+    register_search_functions(engine, adapter.clone(), limits);
+    register_rag_functions(engine, adapter, limits);
 }
 
 // ============================================================
@@ -713,6 +723,144 @@ fn register_search_functions(
                             }
                             Dynamic::from(map)
                         })
+                        .collect();
+                    Dynamic::from(result)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+}
+
+// ============================================================
+// RAG (Semantic Search) Operations
+// ============================================================
+
+fn register_rag_functions(
+    engine: &mut Engine,
+    adapter: Arc<IronBaseAdapter>,
+    limits: &ScriptLimits,
+) {
+    // db_rag_collection_list() -> array of collections
+    let adapter_list = adapter.clone();
+    engine.register_fn("db_rag_collection_list", move || -> Dynamic {
+        match adapter_list.rag_collection_list() {
+            Ok(collections) => {
+                let result: Vec<Dynamic> = collections
+                    .into_iter()
+                    .map(|c| json_to_dynamic(&c))
+                    .collect();
+                Dynamic::from(result)
+            }
+            Err(e) => Dynamic::from(format!("Error: {}", e)),
+        }
+    });
+
+    // db_rag_collection_stats(name) -> stats object
+    let adapter_stats = adapter.clone();
+    engine.register_fn(
+        "db_rag_collection_stats",
+        move |name: &str| -> Dynamic {
+            match adapter_stats.rag_collection_stats(name) {
+                Ok(stats) => json_to_dynamic(&stats),
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_rag_document_list(collection) -> array of documents
+    let adapter_doc_list = adapter.clone();
+    engine.register_fn(
+        "db_rag_document_list",
+        move |collection: &str| -> Dynamic {
+            match adapter_doc_list.rag_document_list(collection) {
+                Ok(documents) => {
+                    let result: Vec<Dynamic> = documents
+                        .into_iter()
+                        .map(|d| json_to_dynamic(&d))
+                        .collect();
+                    Dynamic::from(result)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_rag_document_import(collection, doc_id, title, content) -> import result
+    let adapter_import = adapter.clone();
+    engine.register_fn(
+        "db_rag_document_import",
+        move |collection: &str, doc_id: &str, title: &str, content: &str| -> Dynamic {
+            match adapter_import.rag_document_import(collection, doc_id, title, content) {
+                Ok(result) => json_to_dynamic(&result),
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_rag_document_delete(collection, doc_id) -> bool
+    let adapter_delete = adapter.clone();
+    engine.register_fn(
+        "db_rag_document_delete",
+        move |collection: &str, doc_id: &str| -> Dynamic {
+            match adapter_delete.rag_document_delete(collection, doc_id) {
+                Ok(deleted) => Dynamic::from(deleted),
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_rag_search(collection, query) -> array of search results (default limit: 5)
+    let max_results = limits.max_find_documents.min(100); // Cap at 100 for RAG
+    let adapter_search = adapter.clone();
+    engine.register_fn(
+        "db_rag_search",
+        move |collection: &str, query: &str| -> Dynamic {
+            let limit = 5.min(max_results); // Default limit: 5
+            match adapter_search.rag_search(collection, query, limit, None) {
+                Ok(results) => {
+                    let result: Vec<Dynamic> = results
+                        .into_iter()
+                        .map(|r| json_to_dynamic(&r))
+                        .collect();
+                    Dynamic::from(result)
+                }
+                Err(e) => Dynamic::from(format!("Error: {}", e)),
+            }
+        },
+    );
+
+    // db_rag_search(collection, query, options) -> array of search results
+    // Options: { limit: int, min_score: float }
+    let max_results = limits.max_find_documents.min(100);
+    let adapter_search_opts = adapter;
+    engine.register_fn(
+        "db_rag_search",
+        move |collection: &str, query: &str, options: Map| -> Dynamic {
+            let mut limit = 5usize;
+            let mut min_score: Option<f32> = None;
+
+            if let Some(limit_val) = options.get("limit") {
+                if let Ok(l) = limit_val.as_int() {
+                    if l > 0 {
+                        limit = (l as usize).min(max_results);
+                    }
+                }
+            }
+
+            if let Some(score_val) = options.get("min_score") {
+                if let Ok(s) = score_val.as_float() {
+                    if (0.0..=1.0).contains(&s) {
+                        min_score = Some(s as f32);
+                    }
+                }
+            }
+
+            match adapter_search_opts.rag_search(collection, query, limit, min_score) {
+                Ok(results) => {
+                    let result: Vec<Dynamic> = results
+                        .into_iter()
+                        .map(|r| json_to_dynamic(&r))
                         .collect();
                     Dynamic::from(result)
                 }
