@@ -306,6 +306,59 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
     }
 
+    /// Ensure all vector indexes are loaded into IndexManager for auto-indexing on insert/update.
+    ///
+    /// This should be called during warm-up to enable auto-indexing of new documents.
+    /// Without this, vector indexes are lazily loaded only during search, which means
+    /// documents inserted before the first search won't be auto-indexed.
+    ///
+    /// # Returns
+    /// Number of vector indexes loaded
+    pub fn ensure_vector_indexes_loaded(&self) -> Result<usize> {
+        self.check_not_closed()?;
+
+        let vec_indexes = self.list_vector_indexes()?;
+        let mut loaded_count = 0;
+
+        for meta in vec_indexes {
+            let index_name = meta.name.clone();
+
+            // Check if already loaded
+            {
+                let indexes = self.indexes.read();
+                if indexes.get_vector_index(&index_name).is_some() {
+                    continue;
+                }
+            }
+
+            // Load from file and add to IndexManager
+            match self.load_hnsw_index_from_file(&meta) {
+                Ok(hnsw) => {
+                    let vector_count = hnsw.len();
+                    let mut indexes = self.indexes.write();
+                    indexes.add_loaded_vector_index(index_name.clone(), hnsw);
+                    tracing::info!(
+                        collection = %self.name,
+                        index = %index_name,
+                        vectors = vector_count,
+                        "Loaded vector index for auto-indexing"
+                    );
+                    loaded_count += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        collection = %self.name,
+                        index = %index_name,
+                        error = %e,
+                        "Failed to load vector index"
+                    );
+                }
+            }
+        }
+
+        Ok(loaded_count)
+    }
+
     /// Perform vector similarity search
     ///
     /// # Arguments
@@ -781,5 +834,106 @@ mod tests {
         let wrong_dim_query: Vec<f32> = vec![0.1, 0.2, 0.3]; // 3 dims instead of 5
         let result = coll.vector_search("embedding", &wrong_dim_query, 5);
         assert!(result.is_err());
+    }
+
+    /// Test that documents inserted AFTER creating a vector index are automatically indexed.
+    /// This is the critical auto-indexing feature.
+    #[test]
+    fn test_vector_auto_index_on_insert() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // 1. Create vector index FIRST (empty, no documents yet)
+        let config = VectorIndexConfig::new(4); // 4-dim vectors
+        let _index_name = coll.create_vector_index("embedding", config).unwrap();
+
+        // Verify index is created but empty
+        let indexes = coll.list_vector_indexes().unwrap();
+        assert_eq!(indexes.len(), 1);
+        assert_eq!(
+            indexes[0].vector_count, 0,
+            "Index should be empty initially"
+        );
+
+        // 2. Insert a document with embedding AFTER index creation
+        db.insert_one(
+            "test",
+            json_to_hashmap(json!({
+                "name": "doc1",
+                "embedding": [0.1, 0.2, 0.3, 0.4]
+            })),
+        )
+        .unwrap();
+
+        // 3. Verify vector search finds the document
+        // vector_search returns Vec<(Value, f32)> - (doc, score)
+        let query: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4];
+        let results = coll.vector_search("embedding", &query, 10).unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Auto-indexing failed: document inserted after index creation should be searchable"
+        );
+        assert_eq!(
+            results[0].0.get("name").and_then(|v| v.as_str()),
+            Some("doc1")
+        );
+
+        // 4. Insert more documents and verify they're all indexed
+        for i in 2..=5 {
+            let vector: Vec<f64> = (0..4).map(|j| (i + j) as f64 / 10.0).collect();
+            db.insert_one(
+                "test",
+                json_to_hashmap(json!({
+                    "name": format!("doc{}", i),
+                    "embedding": vector
+                })),
+            )
+            .unwrap();
+        }
+
+        // Search should return all 5 documents
+        let results = coll.vector_search("embedding", &query, 10).unwrap();
+        assert_eq!(
+            results.len(),
+            5,
+            "All 5 documents should be searchable after auto-indexing"
+        );
+    }
+
+    /// Test auto-indexing with DatabaseCore API (like MCP adapter uses)
+    #[test]
+    fn test_vector_auto_index_via_database_api() {
+        let db = create_test_db();
+
+        // 1. Get collection and create vector index
+        let coll = db.collection("test").unwrap();
+        let config = VectorIndexConfig::new(3);
+        coll.create_vector_index("vec", config).unwrap();
+
+        // 2. Use DatabaseCore::insert_one (not collection.insert_one)
+        // This is what MCP adapter does
+        db.insert_one(
+            "test",
+            json_to_hashmap(json!({
+                "data": "test",
+                "vec": [1.0, 2.0, 3.0]
+            })),
+        )
+        .unwrap();
+
+        // 3. Get collection again (simulating separate MCP request)
+        let coll2 = db.collection("test").unwrap();
+
+        // 4. Vector search should find the document
+        let query: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let results = coll2.vector_search("vec", &query, 10).unwrap();
+
+        assert_eq!(
+            results.len(),
+            1,
+            "Document inserted via db.insert_one() should be auto-indexed"
+        );
     }
 }

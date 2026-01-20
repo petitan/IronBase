@@ -524,6 +524,26 @@ impl IronBaseAdapter {
                         tracing::warn!("Failed to refresh index stats for '{}': {}", name, e);
                     }
 
+                    // Load vector indexes into IndexManager for auto-indexing on insert/update
+                    // Without this, vector indexes are lazily loaded only during search
+                    match coll.ensure_vector_indexes_loaded() {
+                        Ok(loaded) if loaded > 0 => {
+                            tracing::info!(
+                                "Loaded {} vector index(es) for collection '{}'",
+                                loaded,
+                                name
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to load vector indexes for '{}': {}",
+                                name,
+                                e
+                            );
+                        }
+                        _ => {}
+                    }
+
                     let elapsed = coll_start.elapsed();
                     if elapsed.as_millis() > 100 {
                         // Only log slow collections
