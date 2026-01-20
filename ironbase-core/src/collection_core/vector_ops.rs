@@ -406,8 +406,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Pre-filter: get matching document IDs
+        // OOM PROTECTION: Use projection to only fetch _id field + limit based on system RAM
         let allowed_ids: std::collections::HashSet<String> = {
-            let matching_docs = self.find(filter)?;
+            use crate::find_options::FindOptions;
+            use std::collections::HashMap;
+
+            // Only fetch _id field to minimize memory usage
+            let mut projection = HashMap::new();
+            projection.insert("_id".to_string(), 1);
+
+            // Use safe defaults for RAM-based limits + reasonable pre-filter limit
+            // Even with projection, we cap at 100K documents for the pre-filter
+            let options = FindOptions::with_safe_defaults()
+                .with_projection(projection)
+                .with_limit(100_000);
+
+            let matching_docs = self.find_with_options(filter, options)?;
             matching_docs
                 .iter()
                 .filter_map(|doc| {
