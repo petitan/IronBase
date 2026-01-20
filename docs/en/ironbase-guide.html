@@ -1,0 +1,2003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IronBase Documentation</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="#" class="header-logo">
+      <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="32" height="32" rx="6" fill="#3b82f6"/>
+        <path d="M8 10h16M8 16h16M8 22h12" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>
+      IronBase <span class="version-badge">v1.0.222</span>
+    </a>
+    <div class="header-controls">
+      <div class="lang-switch">
+        <a href="../hu/ironbase-guide.html">HU</a>
+        <a href="#" class="active">EN</a>
+      </div>
+      <button class="theme-toggle" onclick="toggleTheme()">
+        <span id="theme-icon">🌙</span> Theme
+      </button>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-nav">
+        <div class="nav-section open">
+          <div class="nav-section-title">Introduction</div>
+          <div class="nav-items">
+            <a href="#intro" class="nav-item">What is IronBase?</a>
+            <a href="#features" class="nav-item">Key Features</a>
+            <a href="#installation" class="nav-item">Installation</a>
+          </div>
+        </div>
+
+        <div class="nav-section open">
+          <div class="nav-section-title">Quick Start</div>
+          <div class="nav-items">
+            <a href="#quickstart" class="nav-item">Getting Started</a>
+            <a href="#crud-basics" class="nav-item">CRUD Basics</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">MCP Tools</div>
+          <div class="nav-items">
+            <a href="#tools-database" class="nav-item">Database (4)</a>
+            <a href="#tools-collection" class="nav-item">Collection (3)</a>
+            <a href="#tools-crud" class="nav-item">CRUD (11)</a>
+            <a href="#tools-index" class="nav-item">Indexes (11)</a>
+            <a href="#tools-schema" class="nav-item">Schema (2)</a>
+            <a href="#tools-script" class="nav-item">Scripts (12)</a>
+            <a href="#tools-transaction" class="nav-item">Transactions (7)</a>
+            <a href="#tools-admin" class="nav-item">Admin (8)</a>
+            <a href="#tools-acl" class="nav-item">ACL (5)</a>
+            <a href="#tools-listener" class="nav-item">Listeners (6)</a>
+            <a href="#tools-rag" class="nav-item">RAG (8)</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Query Operators</div>
+          <div class="nav-items">
+            <a href="#op-comparison" class="nav-item">Comparison</a>
+            <a href="#op-logical" class="nav-item">Logical</a>
+            <a href="#op-element" class="nav-item">Element</a>
+            <a href="#op-array" class="nav-item">Array</a>
+            <a href="#op-string" class="nav-item">String</a>
+            <a href="#op-special" class="nav-item">Special</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Update Operators</div>
+          <div class="nav-items">
+            <a href="#update-ops" class="nav-item">All Operators</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Aggregation</div>
+          <div class="nav-items">
+            <a href="#agg-stages" class="nav-item">Pipeline Stages</a>
+            <a href="#agg-accumulators" class="nav-item">Accumulators</a>
+            <a href="#agg-examples" class="nav-item">Examples</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Indexing</div>
+          <div class="nav-items">
+            <a href="#index-btree" class="nav-item">B+ Tree</a>
+            <a href="#index-compound" class="nav-item">Compound</a>
+            <a href="#index-explain" class="nav-item">Query Planning</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Search</div>
+          <div class="nav-items">
+            <a href="#search-fuzzy" class="nav-item">Fuzzy Search</a>
+            <a href="#search-fulltext" class="nav-item">Full-Text Search</a>
+            <a href="#search-rag" class="nav-item">Semantic (RAG)</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Other</div>
+          <div class="nav-items">
+            <a href="#transactions" class="nav-item">Transactions</a>
+            <a href="#scripting" class="nav-item">Scripting (Rhai)</a>
+            <a href="#config" class="nav-item">Configuration</a>
+            <a href="#best-practices" class="nav-item">Best Practices</a>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main">
+
+      <!-- ============================================================== -->
+      <!-- INTRODUCTION -->
+      <!-- ============================================================== -->
+
+      <h1 id="intro">What is IronBase?</h1>
+
+      <p><strong>IronBase</strong> is a high-performance, embedded NoSQL document database written in Rust. It provides a MongoDB-compatible API with SQLite's simplicity - single file, serverless, zero configuration.</p>
+
+      <div class="feature-grid">
+        <div class="feature-card">
+          <h4><span class="feature-icon">📄</span> Single-File</h4>
+          <p>A single <code>.mlite</code> file contains all data, indexes, and metadata.</p>
+        </div>
+        <div class="feature-card">
+          <h4><span class="feature-icon">🚀</span> Fast</h4>
+          <p>~200K insert/sec, ~500K indexed query/sec performance.</p>
+        </div>
+        <div class="feature-card">
+          <h4><span class="feature-icon">🔍</span> Search</h4>
+          <p>B+ tree, fuzzy, full-text and semantic (RAG) search.</p>
+        </div>
+        <div class="feature-card">
+          <h4><span class="feature-icon">🔒</span> ACID</h4>
+          <p>Transactions with WAL, crash recovery, Read Committed isolation.</p>
+        </div>
+      </div>
+
+      <h2 id="features">Key Features</h2>
+
+      <table>
+        <tr>
+          <th>Category</th>
+          <th>Features</th>
+        </tr>
+        <tr>
+          <td>Query</td>
+          <td>21 query operators ($eq, $gt, $regex, $fuzzy, etc.)</td>
+        </tr>
+        <tr>
+          <td>Update</td>
+          <td>7 update operators ($set, $inc, $push, etc.)</td>
+        </tr>
+        <tr>
+          <td>Aggregation</td>
+          <td>$match, $group, $project, $sort, $limit, $skip</td>
+        </tr>
+        <tr>
+          <td>Indexes</td>
+          <td>B+ tree, compound, sparse, unique, fuzzy, fulltext</td>
+        </tr>
+        <tr>
+          <td>Search</td>
+          <td>Fuzzy (3 algorithms), Full-text (TF-IDF), RAG (FastText+HNSW)</td>
+        </tr>
+        <tr>
+          <td>Languages</td>
+          <td>Rust, Python (PyO3), C# (.NET 8)</td>
+        </tr>
+        <tr>
+          <td>MCP</td>
+          <td>70+ tools for AI assistants (HTTP + stdio)</td>
+        </tr>
+      </table>
+
+      <h2 id="installation">Installation and Startup</h2>
+
+      <h3>HTTP Mode (Server)</h3>
+
+      <div class="code-block">
+        <pre><code class="language-bash"># Build
+cd mcp-server && cargo build --release
+
+# Start
+./target/release/mcp-ironbase-server
+
+# Result:
+# Server listening on https://0.0.0.0:8080 (TLS enabled)</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Stdio Mode (Claude Desktop)</h3>
+
+      <div class="code-block">
+        <pre><code class="language-bash">./target/release/mcp-ironbase-server --stdio</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Environment Variables</h3>
+
+      <table>
+        <tr>
+          <th>Variable</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+        <tr>
+          <td><code>IRONBASE_PATH</code></td>
+          <td>Database file path</td>
+          <td><code>./data.mlite</code></td>
+        </tr>
+        <tr>
+          <td><code>IRONBASE_ADMIN_KEY</code></td>
+          <td>Admin operations key</td>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td><code>IRONBASE_PORT</code></td>
+          <td>HTTP port</td>
+          <td><code>8080</code></td>
+        </tr>
+      </table>
+
+      <!-- ============================================================== -->
+      <!-- QUICK START -->
+      <!-- ============================================================== -->
+
+      <h1 id="quickstart">Quick Start</h1>
+
+      <h2 id="crud-basics">CRUD Basics</h2>
+
+      <p>IronBase uses MongoDB-style JSON queries. Here are the most important operations:</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                        CRUD Operations                          │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  INSERT                    FIND                                 │
+│  ───────                   ─────                                │
+│  insert_one(doc)           find(filter)                         │
+│  insert_many([docs])       find_one(filter)                     │
+│                            count_documents(filter)              │
+│                                                                 │
+│  UPDATE                    DELETE                               │
+│  ───────                   ───────                              │
+│  update_one(filter, upd)   delete_one(filter)                   │
+│  update_many(filter, upd)  delete_many(filter)                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h3>Insert Document</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "insert_one",
+  "arguments": {
+    "collection": "users",
+    "document": {
+      "name": "John Smith",
+      "email": "john@example.com",
+      "age": 32,
+      "city": "New York"
+    }
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <p><strong>Result:</strong></p>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "inserted_id": "550e8400-e29b-41d4-a716-446655440000"
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Find Documents</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "find",
+  "arguments": {
+    "collection": "users",
+    "filter": {"city": "New York", "age": {"$gte": 18}},
+    "projection": {"name": 1, "email": 1},
+    "sort": [["name", 1]],
+    "limit": 10
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Update Document</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "update_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"email": "john@example.com"},
+    "update": {
+      "$set": {"city": "Boston"},
+      "$inc": {"age": 1}
+    }
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Delete Document</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "delete_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"email": "john@example.com"}
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <!-- ============================================================== -->
+      <!-- MCP TOOLS -->
+      <!-- ============================================================== -->
+
+      <h1 id="tools-database">Database Management</h1>
+
+      <p>Database-level operations: open, statistics, maintenance.</p>
+
+      <div class="tool-card">
+        <h4><code>db_open</code> - Open Database</h4>
+        <p>Opens or creates a database file.</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>path</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> File path (.mlite)</td>
+          </tr>
+          <tr>
+            <td>admin_key</td>
+            <td>string</td>
+            <td><span class="badge badge-admin">admin</span> Admin key</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "db_open",
+  "arguments": {
+    "path": "/data/myapp.mlite",
+    "admin_key": "secret123"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>db_stats</code> - Statistics</h4>
+        <p>Database size, collection count, documents.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "db_stats",
+  "arguments": {}
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "file_size_bytes": 52428800,
+  "file_size_mb": 50.0,
+  "collections_count": 6,
+  "total_documents": 187000
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>db_compact</code> - Compaction</h4>
+        <p>Removes deleted document space (tombstones).</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>admin_key</td>
+            <td>string</td>
+            <td><span class="badge badge-admin">admin</span> Admin key</td>
+          </tr>
+        </table>
+
+        <div class="info-box warning">
+          <div class="info-box-title">⚠️ Warning</div>
+          <p>The database is read-only during compaction. May take minutes for large databases.</p>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>db_checkpoint</code> - Checkpoint</h4>
+        <p>Immediately flushes pending changes to disk.</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>admin_key</td>
+            <td>string</td>
+            <td><span class="badge badge-admin">admin</span> Admin key</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Collection Management -->
+      <h1 id="tools-collection">Collection Management</h1>
+
+      <div class="tool-card">
+        <h4><code>collection_list</code> - List Collections</h4>
+        <p>Returns all user collection names.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "collection_list",
+  "arguments": {}
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "collections": ["users", "products", "orders"]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>collection_create</code> - Create Collection</h4>
+        <p>Creates empty collection (also auto-created on first insert).</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>name</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>collection_drop</code> - Drop Collection</h4>
+        <p>Deletes the collection, all documents, indexes, and schema.</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>name</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+        </table>
+
+        <div class="info-box danger">
+          <div class="info-box-title">🚨 Dangerous Operation</div>
+          <p>This operation is irreversible! All data will be lost.</p>
+        </div>
+      </div>
+
+      <!-- CRUD Tools -->
+      <h1 id="tools-crud">Document CRUD (11 tools)</h1>
+
+      <div class="tool-card">
+        <h4><code>insert_one</code> - Insert Document</h4>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+          <tr>
+            <td>document</td>
+            <td>object</td>
+            <td><span class="badge badge-required">required</span> JSON document</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "insert_one",
+  "arguments": {
+    "collection": "products",
+    "document": {
+      "name": "Laptop",
+      "price": 999,
+      "category": "electronics",
+      "specs": {
+        "cpu": "Intel i7",
+        "ram": 16
+      }
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>insert_many</code> - Bulk Insert</h4>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+          <tr>
+            <td>documents</td>
+            <td>array</td>
+            <td><span class="badge badge-required">required</span> Array of documents</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "insert_many",
+  "arguments": {
+    "collection": "logs",
+    "documents": [
+      {"level": "info", "message": "App started"},
+      {"level": "warn", "message": "High memory usage"},
+      {"level": "error", "message": "Connection failed"}
+    ]
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>find</code> - Query Documents</h4>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+          <tr>
+            <td>filter</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Query filter (default: {})</td>
+          </tr>
+          <tr>
+            <td>projection</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Field filtering {field: 1} or {field: 0}</td>
+          </tr>
+          <tr>
+            <td>sort</td>
+            <td>array</td>
+            <td><span class="badge badge-optional">optional</span> Sort order [["field", 1]] (1=ASC, -1=DESC)</td>
+          </tr>
+          <tr>
+            <td>limit</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Maximum documents to return</td>
+          </tr>
+          <tr>
+            <td>skip</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Documents to skip (pagination)</td>
+          </tr>
+          <tr>
+            <td>include_total</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Include total match count</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "find",
+  "arguments": {
+    "collection": "products",
+    "filter": {
+      "category": "electronics",
+      "price": {"$lte": 2000}
+    },
+    "projection": {"name": 1, "price": 1, "_id": 1},
+    "sort": [["price", -1]],
+    "limit": 20,
+    "skip": 0,
+    "include_total": true
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "documents": [
+    {"_id": "...", "name": "Laptop", "price": 999},
+    {"_id": "...", "name": "Tablet", "price": 499}
+  ],
+  "count": 2,
+  "total": 47
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>find_one</code> - First Match</h4>
+        <p>Returns the first matching document.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "find_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"email": "admin@example.com"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>update_one</code> - Update Document</h4>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+          <tr>
+            <td>filter</td>
+            <td>object</td>
+            <td><span class="badge badge-required">required</span> Which document</td>
+          </tr>
+          <tr>
+            <td>update</td>
+            <td>object</td>
+            <td><span class="badge badge-required">required</span> With update operators</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "update_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"_id": "550e8400-..."},
+    "update": {
+      "$set": {"status": "active", "updated_at": "2024-01-15"},
+      "$inc": {"login_count": 1},
+      "$push": {"roles": "editor"}
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>update_many</code> - Bulk Update</h4>
+        <p>Updates all matching documents.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "update_many",
+  "arguments": {
+    "collection": "products",
+    "filter": {"category": "electronics"},
+    "update": {
+      "$inc": {"price": -50}
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "matched_count": 150,
+  "modified_count": 150
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>delete_one</code> / <code>delete_many</code> - Delete</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Delete one document
+{
+  "name": "delete_one",
+  "arguments": {
+    "collection": "sessions",
+    "filter": {"expired": true}
+  }
+}
+
+// Delete all matching
+{
+  "name": "delete_many",
+  "arguments": {
+    "collection": "logs",
+    "filter": {"created_at": {"$lt": "2024-01-01"}}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>count_documents</code> - Document Count</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "count_documents",
+  "arguments": {
+    "collection": "orders",
+    "filter": {"status": "pending"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong> <code>{"count": 42}</code></p>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>distinct</code> - Unique Values</h4>
+        <p>Returns all unique values for a field.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "distinct",
+  "arguments": {
+    "collection": "users",
+    "field": "city",
+    "filter": {"status": "active"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "values": ["New York", "Los Angeles", "Chicago", "Houston"]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>aggregate</code> - Aggregation Pipeline</h4>
+        <p>Complex data processing with pipeline. Details: <a href="#agg-stages">Aggregation section</a></p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "aggregate",
+  "arguments": {
+    "collection": "orders",
+    "pipeline": [
+      {"$match": {"status": "completed"}},
+      {"$group": {
+        "_id": "$customer_id",
+        "total": {"$sum": "$amount"},
+        "count": {"$sum": 1}
+      }},
+      {"$sort": {"total": -1}},
+      {"$limit": 10}
+    ]
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <!-- Index Tools -->
+      <h1 id="tools-index">Index Management (11 tools)</h1>
+
+      <div class="tool-card">
+        <h4><code>index_create</code> - Create B+ Tree Index</h4>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+          <tr>
+            <td>field</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Single field index</td>
+          </tr>
+          <tr>
+            <td>fields</td>
+            <td>array</td>
+            <td><span class="badge badge-optional">optional</span> Compound index fields</td>
+          </tr>
+          <tr>
+            <td>unique</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Unique constraint</td>
+          </tr>
+          <tr>
+            <td>sparse</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Exclude missing/null values</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Simple index
+{
+  "name": "index_create",
+  "arguments": {
+    "collection": "users",
+    "field": "email",
+    "unique": true
+  }
+}
+
+// Compound index
+{
+  "name": "index_create",
+  "arguments": {
+    "collection": "orders",
+    "fields": ["customer_id", "created_at"],
+    "unique": false
+  }
+}
+
+// Sparse index (skips missing fields)
+{
+  "name": "index_create",
+  "arguments": {
+    "collection": "profiles",
+    "field": "phone",
+    "sparse": true
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>index_list</code> - List Indexes</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "index_list",
+  "arguments": {
+    "collection": "users"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "indexes": [
+    {"name": "idx_email", "fields": ["email"], "unique": true, "sparse": false},
+    {"name": "idx_city_age", "fields": ["city", "age"], "unique": false, "sparse": false}
+  ]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>explain</code> - Query Plan</h4>
+        <p>Shows which index will be used.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "explain",
+  "arguments": {
+    "collection": "orders",
+    "filter": {"customer_id": "123", "status": "pending"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "plan": "IndexScan",
+  "index": "idx_customer_id_status",
+  "estimated_docs": 15
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <!-- Query Operators -->
+      <h1 id="op-comparison">Query Operators - Comparison</h1>
+
+      <p>Comparison operators for filtering values.</p>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+        <tr>
+          <td><code>$eq</code></td>
+          <td>Equals</td>
+          <td><code>{"age": {"$eq": 25}}</code> or <code>{"age": 25}</code></td>
+        </tr>
+        <tr>
+          <td><code>$ne</code></td>
+          <td>Not equals</td>
+          <td><code>{"status": {"$ne": "deleted"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$gt</code></td>
+          <td>Greater than</td>
+          <td><code>{"price": {"$gt": 1000}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$gte</code></td>
+          <td>Greater or equal</td>
+          <td><code>{"age": {"$gte": 18}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$lt</code></td>
+          <td>Less than</td>
+          <td><code>{"score": {"$lt": 50}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$lte</code></td>
+          <td>Less or equal</td>
+          <td><code>{"quantity": {"$lte": 10}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$in</code></td>
+          <td>In array</td>
+          <td><code>{"status": {"$in": ["active", "pending"]}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$nin</code></td>
+          <td>Not in array</td>
+          <td><code>{"role": {"$nin": ["banned", "deleted"]}}</code></td>
+        </tr>
+      </table>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Complex example: Active users aged 18-65
+{
+  "filter": {
+    "age": {"$gte": 18, "$lte": 65},
+    "status": {"$in": ["active", "verified"]},
+    "deleted_at": {"$eq": null}
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h1 id="op-logical">Query Operators - Logical</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+        <tr>
+          <td><code>$and</code></td>
+          <td>All conditions true</td>
+          <td><code>{"$and": [{...}, {...}]}</code></td>
+        </tr>
+        <tr>
+          <td><code>$or</code></td>
+          <td>At least one true</td>
+          <td><code>{"$or": [{...}, {...}]}</code></td>
+        </tr>
+        <tr>
+          <td><code>$not</code></td>
+          <td>Negation</td>
+          <td><code>{"age": {"$not": {"$lt": 18}}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$nor</code></td>
+          <td>None true</td>
+          <td><code>{"$nor": [{...}, {...}]}</code></td>
+        </tr>
+      </table>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Admin OR moderator AND active
+{
+  "filter": {
+    "$and": [
+      {"$or": [
+        {"role": "admin"},
+        {"role": "moderator"}
+      ]},
+      {"status": "active"}
+    ]
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h1 id="op-element">Query Operators - Element</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+        <tr>
+          <td><code>$exists</code></td>
+          <td>Field exists</td>
+          <td><code>{"phone": {"$exists": true}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$type</code></td>
+          <td>Field type</td>
+          <td><code>{"age": {"$type": "number"}}</code></td>
+        </tr>
+      </table>
+
+      <p><strong>Types:</strong> <code>string</code>, <code>number</code>, <code>boolean</code>, <code>array</code>, <code>object</code>, <code>null</code></p>
+
+      <h1 id="op-array">Query Operators - Array</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+        <tr>
+          <td><code>$all</code></td>
+          <td>Contains all elements</td>
+          <td><code>{"tags": {"$all": ["rust", "db"]}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$elemMatch</code></td>
+          <td>At least one element matches</td>
+          <td><code>{"items": {"$elemMatch": {"qty": {"$gt": 5}}}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$size</code></td>
+          <td>Array length</td>
+          <td><code>{"tags": {"$size": 3}}</code></td>
+        </tr>
+      </table>
+
+      <h1 id="op-string">Query Operators - String</h1>
+
+      <div class="tool-card">
+        <h4><code>$regex</code> - Regular Expression</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Email domain filter
+{"email": {"$regex": "@gmail\\.com$"}}
+
+// Name starting with (case sensitive)
+{"name": {"$regex": "^J"}}
+
+// Contains (case insensitive workaround: lowercase index)
+{"name_lower": {"$regex": "smith"}}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="op-special">Query Operators - Special</h1>
+
+      <div class="tool-card">
+        <h4><code>$fuzzy</code> - Fuzzy Search</h4>
+        <p>Similarity-based search for handling typos and variations.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Simple fuzzy (default: jaro_winkler, threshold: 0.8)
+{"name": {"$fuzzy": "jhon"}}
+
+// Full configuration
+{"name": {"$fuzzy": {
+  "value": "john",
+  "algorithm": "levenshtein",
+  "threshold": 0.7
+}}}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Algorithms:</strong></p>
+        <table>
+          <tr>
+            <th>Algorithm</th>
+            <th>Description</th>
+            <th>Best For</th>
+          </tr>
+          <tr>
+            <td><code>jaro_winkler</code></td>
+            <td>Fast, prefix-sensitive</td>
+            <td>Names, short text</td>
+          </tr>
+          <tr>
+            <td><code>levenshtein</code></td>
+            <td>Edit distance</td>
+            <td>General typos</td>
+          </tr>
+          <tr>
+            <td><code>damerau_levenshtein</code></td>
+            <td>Edit distance + transposition</td>
+            <td>Letter swaps ("john" vs "jhon")</td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>$**</code> - Wildcard (Recursive Descent)</h4>
+        <p>Find field at any depth in the document.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Find "status" field ANYWHERE in document
+{"$**.status": "active"}
+
+// Matches:
+// {"status": "active"}                    ✓
+// {"user": {"status": "active"}}          ✓
+// {"data": {"info": {"status": "active"}}} ✓</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <div class="info-box warning">
+          <div class="info-box-title">⚠️ Performance</div>
+          <p><code>$**</code> always performs a collection scan, cannot use indexes. Avoid on large collections.</p>
+        </div>
+      </div>
+
+      <!-- Update Operators -->
+      <h1 id="update-ops">Update Operators</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+        <tr>
+          <td><code>$set</code></td>
+          <td>Set field</td>
+          <td><code>{"$set": {"name": "new name"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$inc</code></td>
+          <td>Increment number</td>
+          <td><code>{"$inc": {"counter": 1, "score": -5}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$unset</code></td>
+          <td>Remove field</td>
+          <td><code>{"$unset": {"temp_field": ""}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$push</code></td>
+          <td>Add to array</td>
+          <td><code>{"$push": {"tags": "new_tag"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$pull</code></td>
+          <td>Remove from array</td>
+          <td><code>{"$pull": {"tags": "old_tag"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$addToSet</code></td>
+          <td>Add unique to array</td>
+          <td><code>{"$addToSet": {"roles": "editor"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$pop</code></td>
+          <td>Remove first/last</td>
+          <td><code>{"$pop": {"queue": 1}}</code> (1=last, -1=first)</td>
+        </tr>
+      </table>
+
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Dot notation</div>
+        <p>Modify nested fields: <code>{"$set": {"address.city": "Boston"}}</code></p>
+      </div>
+
+      <!-- Aggregation -->
+      <h1 id="agg-stages">Aggregation Pipeline</h1>
+
+      <p>Aggregation pipeline enables multi-step data processing.</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                    Aggregation Pipeline                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Documents  ─▶  $match  ─▶  $group  ─▶  $sort  ─▶  $limit      │
+│                   │           │          │           │          │
+│                filter      group       sort       truncate     │
+│                                                                 │
+│  Example:                                                       │
+│  100K docs  ─▶  50K docs  ─▶  1K groups  ─▶  1K sort  ─▶  10   │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h2>Pipeline Stages</h2>
+
+      <table>
+        <tr>
+          <th>Stage</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+        <tr>
+          <td><code>$match</code></td>
+          <td>Filter documents</td>
+          <td><code>{"$match": {"status": "active"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$group</code></td>
+          <td>Group and aggregate</td>
+          <td><code>{"$group": {"_id": "$city", "count": {"$sum": 1}}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$project</code></td>
+          <td>Select/rename fields</td>
+          <td><code>{"$project": {"name": 1, "total": "$amount"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$sort</code></td>
+          <td>Sort results</td>
+          <td><code>{"$sort": {"total": -1}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$limit</code></td>
+          <td>Limit results</td>
+          <td><code>{"$limit": 10}</code></td>
+        </tr>
+        <tr>
+          <td><code>$skip</code></td>
+          <td>Skip results</td>
+          <td><code>{"$skip": 20}</code></td>
+        </tr>
+      </table>
+
+      <h2 id="agg-accumulators">Accumulators</h2>
+
+      <table>
+        <tr>
+          <th>Accumulator</th>
+          <th>Description</th>
+          <th>Example</th>
+        </tr>
+        <tr>
+          <td><code>$sum</code></td>
+          <td>Sum</td>
+          <td><code>{"$sum": "$amount"}</code> or <code>{"$sum": 1}</code> (count)</td>
+        </tr>
+        <tr>
+          <td><code>$avg</code></td>
+          <td>Average</td>
+          <td><code>{"$avg": "$price"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$min</code></td>
+          <td>Minimum</td>
+          <td><code>{"$min": "$score"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$max</code></td>
+          <td>Maximum</td>
+          <td><code>{"$max": "$score"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$first</code></td>
+          <td>First value</td>
+          <td><code>{"$first": "$name"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$last</code></td>
+          <td>Last value</td>
+          <td><code>{"$last": "$name"}</code></td>
+        </tr>
+      </table>
+
+      <h2 id="agg-examples">Aggregation Examples</h2>
+
+      <h3>Top 10 Customers Summary</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "aggregate",
+  "arguments": {
+    "collection": "orders",
+    "pipeline": [
+      {"$match": {"status": "completed"}},
+      {"$group": {
+        "_id": "$customer_id",
+        "total_spent": {"$sum": "$amount"},
+        "order_count": {"$sum": 1},
+        "avg_order": {"$avg": "$amount"}
+      }},
+      {"$sort": {"total_spent": -1}},
+      {"$limit": 10}
+    ]
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <!-- Transactions -->
+      <h1 id="transactions">Transactions</h1>
+
+      <p>IronBase supports ACID transactions based on WAL (Write-Ahead Log).</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                     Transaction Lifecycle                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  begin_transaction  ─▶  operations  ─▶  commit/rollback         │
+│         │                  │                   │                │
+│    WAL start           WAL write          WAL flush/clear       │
+│                                                                 │
+│  Isolation level: Read Committed                                │
+│  Timeout: 5 seconds (write lock)                                │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h3>Transaction Example</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">// 1. Start transaction
+{"name": "begin_transaction", "arguments": {}}
+
+// 2. Operations
+{
+  "name": "update_one_tx",
+  "arguments": {
+    "collection": "accounts",
+    "filter": {"_id": "acc1"},
+    "update": {"$inc": {"balance": -1000}}
+  }
+}
+
+{
+  "name": "update_one_tx",
+  "arguments": {
+    "collection": "accounts",
+    "filter": {"_id": "acc2"},
+    "update": {"$inc": {"balance": 1000}}
+  }
+}
+
+// 3a. Success: commit
+{"name": "commit_transaction", "arguments": {}}
+
+// 3b. Error: rollback
+{"name": "rollback_transaction", "arguments": {}}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>ACID Properties</h3>
+
+      <table>
+        <tr>
+          <th>Property</th>
+          <th>Implementation</th>
+        </tr>
+        <tr>
+          <td><strong>A</strong>tomicity</td>
+          <td>WAL + rollback support</td>
+        </tr>
+        <tr>
+          <td><strong>C</strong>onsistency</td>
+          <td>Schema validation, unique constraints</td>
+        </tr>
+        <tr>
+          <td><strong>I</strong>solation</td>
+          <td>Read Committed (one writer, multiple readers)</td>
+        </tr>
+        <tr>
+          <td><strong>D</strong>urability</td>
+          <td>fsync + WAL CRC32 checksums</td>
+        </tr>
+      </table>
+
+      <!-- Search -->
+      <h1 id="search-fuzzy">Fuzzy Search</h1>
+
+      <p>Similarity-based search for handling typos and variations.</p>
+
+      <div class="tool-card">
+        <h4><code>fuzzy_search</code> tool</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "fuzzy_search",
+  "arguments": {
+    "collection": "contacts",
+    "field": "name",
+    "query": "john smith",
+    "algorithm": "jaro_winkler",
+    "threshold": 0.8,
+    "limit": 10
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "results": [
+    {"doc": {"_id": "...", "name": "John Smith"}, "score": 0.95},
+    {"doc": {"_id": "...", "name": "Jon Smith"}, "score": 0.87},
+    {"doc": {"_id": "...", "name": "John Smyth"}, "score": 0.85}
+  ]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="search-fulltext">Full-Text Search</h1>
+
+      <p>TF-IDF based search with stemming and language support.</p>
+
+      <div class="tool-card">
+        <h4><code>fulltext_search</code> tool</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "fulltext_search",
+  "arguments": {
+    "collection": "articles",
+    "field": "content",
+    "query": "database management",
+    "limit": 10,
+    "min_score": 0.1,
+    "projection": {"title": 1, "_id": 1}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h3>Supported Languages</h3>
+
+      <table>
+        <tr>
+          <th>Language</th>
+          <th>Stemming</th>
+          <th>Stop Words</th>
+        </tr>
+        <tr>
+          <td>hungarian</td>
+          <td>✓ Snowball</td>
+          <td>✓ 200+ words</td>
+        </tr>
+        <tr>
+          <td>english</td>
+          <td>✓ Snowball</td>
+          <td>✓ 170+ words</td>
+        </tr>
+        <tr>
+          <td>german</td>
+          <td>✓ Snowball</td>
+          <td>✓ 230+ words</td>
+        </tr>
+        <tr>
+          <td>none</td>
+          <td>✗</td>
+          <td>✗</td>
+        </tr>
+      </table>
+
+      <h1 id="search-rag">RAG - Semantic Search</h1>
+
+      <p>Semantic search with FastText embeddings and HNSW indexing.</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                      RAG Pipeline                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Document  ─▶  Chunking  ─▶  Embedding  ─▶  HNSW Index         │
+│     │            │              │               │               │
+│   markdown    1000 token    FastText       vectors             │
+│              100 overlap     300-dim                            │
+│                                                                 │
+│  Query  ─▶  Embedding  ─▶  HNSW Search  ─▶  Top-K chunks       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h3>Create RAG Collection</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "rag_collection_create",
+  "arguments": {
+    "name": "knowledge_base",
+    "chunk_max_tokens": 1000,
+    "chunk_overlap": 100,
+    "admin_key": "..."
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Import Document</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "rag_document_import",
+  "arguments": {
+    "collection": "knowledge_base",
+    "doc_id": "guide_001",
+    "title": "IronBase User Guide",
+    "content": "# Introduction\n\nIronBase is a..."
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Semantic Search</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "rag_search",
+  "arguments": {
+    "collection": "knowledge_base",
+    "query": "how to create an index",
+    "limit": 5,
+    "min_score": 0.3
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <!-- Configuration -->
+      <h1 id="config">Configuration</h1>
+
+      <h3>config.toml</h3>
+
+      <div class="code-block">
+        <pre><code class="language-toml">[server]
+port = 8080
+host = "0.0.0.0"
+max_body_size = "1GB"
+
+[tls]
+enabled = true
+cert_path = "/etc/ssl/cert.pem"
+key_path = "/etc/ssl/key.pem"
+
+[database]
+path = "/data/ironbase.mlite"
+durability = "safe"  # safe | batch | unsafe
+
+[rag]
+fasttext_model = "/models/cc.en.300.bin"
+
+[logging]
+level = "info"  # trace | debug | info | warn | error
+format = "json"</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Durability Modes</h3>
+
+      <table>
+        <tr>
+          <th>Mode</th>
+          <th>fsync</th>
+          <th>Speed</th>
+          <th>Data Loss on Crash</th>
+        </tr>
+        <tr>
+          <td><code>safe</code></td>
+          <td>✓ every op</td>
+          <td>~1-5K ops/sec</td>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td><code>batch</code></td>
+          <td>✓ every N ops</td>
+          <td>~20-50K ops/sec</td>
+          <td>Max N operations</td>
+        </tr>
+        <tr>
+          <td><code>unsafe</code></td>
+          <td>✗</td>
+          <td>~50-100K ops/sec</td>
+          <td>All uncommitted</td>
+        </tr>
+      </table>
+
+      <!-- Best Practices -->
+      <h1 id="best-practices">Best Practices</h1>
+
+      <h2>Pagination for Large Datasets</h2>
+
+      <div class="ascii-diagram">
+        <pre>
+Collection: users (100,000 docs)
+Page size: 1,000 docs
+
+┌─────────────────────────────────────────────────────────────────┐
+│ skip=0      │ skip=1000   │ skip=2000   │ ... │ skip=99000      │
+│ limit=1000  │ limit=1000  │ limit=1000  │     │ limit=1000      │
+├─────────────┼─────────────┼─────────────┼─────┼─────────────────┤
+│ doc 0-999   │ doc 1K-1999 │ doc 2K-2999 │ ... │ doc 99K-100K    │
+│ Page 1      │ Page 2      │ Page 3      │     │ Page 100        │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Skip/Limit pagination
+{"filter": {}, "limit": 1000, "skip": 0}       // Page 1
+{"filter": {}, "limit": 1000, "skip": 1000}    // Page 2
+{"filter": {}, "limit": 1000, "skip": 2000}    // Page 3
+
+// Cursor-based (faster for large skips)
+{"filter": {"_id": {"$gt": "last_id"}}, "limit": 1000, "sort": [["_id", 1]]}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h2>Index Strategy</h2>
+
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Index Tips</div>
+        <ul>
+          <li>Index frequently filtered fields</li>
+          <li>Compound index: left-prefix rule (a, b) → can use for (a) too</li>
+          <li>Use <code>explain()</code> to check query plans</li>
+          <li>Sparse index for optional fields</li>
+          <li>Unique index for email, username fields</li>
+        </ul>
+      </div>
+
+      <h2>Avoiding OOM</h2>
+
+      <div class="info-box danger">
+        <div class="info-box-title">🚨 Avoid</div>
+        <ul>
+          <li><code>find({}, {})</code> on large collection without limit</li>
+          <li>Aggregation without <code>$match</code> on 100K+ documents</li>
+          <li><code>$push</code> for unlimited array growth</li>
+        </ul>
+      </div>
+
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Recommended</div>
+        <ul>
+          <li>Always use <code>limit</code> with find</li>
+          <li>Put <code>$match</code> at start of aggregation pipeline</li>
+          <li>Use <code>projection</code> for large results to select only needed fields</li>
+          <li>Stream processing with pagination</li>
+        </ul>
+      </div>
+
+      <!-- Additional Tools -->
+      <h1 id="tools-schema">Schema Management</h1>
+
+      <div class="tool-card">
+        <h4><code>schema_set</code> - Set Schema</h4>
+        <p>JSON Schema validation for collection.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "schema_set",
+  "arguments": {
+    "collection": "users",
+    "schema": {
+      "type": "object",
+      "required": ["email", "name"],
+      "properties": {
+        "email": {"type": "string", "format": "email"},
+        "name": {"type": "string", "minLength": 1},
+        "age": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="tools-script">Scripting (Rhai)</h1>
+
+      <p>Rhai is a fast, embeddable scripting language. IronBase allows running scripts on the database.</p>
+
+      <div class="tool-card">
+        <h4><code>script_exec</code> - Execute Script</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "script_exec",
+  "arguments": {
+    "code": "let users = db_find(\"users\", #{\"status\": \"active\"}, #{\"limit\": 10});\nlet count = users.len();\n#{\"active_users\": count}"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h3>Database API in Scripts</h3>
+
+      <table>
+        <tr>
+          <th>Function</th>
+          <th>Description</th>
+        </tr>
+        <tr>
+          <td><code>db_find(coll, query, opts?)</code></td>
+          <td>Query documents</td>
+        </tr>
+        <tr>
+          <td><code>db_find_one(coll, query)</code></td>
+          <td>First match</td>
+        </tr>
+        <tr>
+          <td><code>db_count(coll, query)</code></td>
+          <td>Count documents</td>
+        </tr>
+        <tr>
+          <td><code>db_insert_one(coll, doc)</code></td>
+          <td>Insert</td>
+        </tr>
+        <tr>
+          <td><code>db_update_one(coll, filter, update)</code></td>
+          <td>Update</td>
+        </tr>
+        <tr>
+          <td><code>db_delete_one(coll, filter)</code></td>
+          <td>Delete</td>
+        </tr>
+        <tr>
+          <td><code>db_aggregate(coll, pipeline)</code></td>
+          <td>Aggregation</td>
+        </tr>
+      </table>
+
+      <h1 id="tools-admin">Admin Tools</h1>
+
+      <p>Admin operations are protected by the <code>IRONBASE_ADMIN_KEY</code> environment variable.</p>
+
+      <table>
+        <tr>
+          <th>Tool</th>
+          <th>Description</th>
+        </tr>
+        <tr>
+          <td><code>admin_list_all_collections</code></td>
+          <td>All collections (system + hidden too)</td>
+        </tr>
+        <tr>
+          <td><code>admin_create_system_collection</code></td>
+          <td>Protected system collection</td>
+        </tr>
+        <tr>
+          <td><code>admin_set_collection_flags</code></td>
+          <td>is_system, protected, hidden flags</td>
+        </tr>
+        <tr>
+          <td><code>admin_drop_protected</code></td>
+          <td>Force-delete protected collection</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_create</code></td>
+          <td>Generate API key</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_list</code></td>
+          <td>List API keys (masked)</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_revoke</code></td>
+          <td>Disable API key</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_delete</code></td>
+          <td>Delete API key</td>
+        </tr>
+      </table>
+
+      <h1 id="tools-acl">Access Control (ACL)</h1>
+
+      <p>Collection-level access management.</p>
+
+      <div class="tool-card">
+        <h4><code>acl_set</code> - Set ACL</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "acl_set",
+  "arguments": {
+    "collection": "sensitive_data",
+    "rules": {
+      "read": ["admin", "analyst"],
+      "write": ["admin"],
+      "delete": ["admin"]
+    },
+    "admin_key": "..."
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="tools-listener">HTTP Listeners</h1>
+
+      <p>Multiple HTTP/HTTPS endpoint management.</p>
+
+      <div class="tool-card">
+        <h4><code>listener_add</code> - Add Listener</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "listener_add",
+  "arguments": {
+    "name": "public_api",
+    "host": "0.0.0.0",
+    "port": 8081,
+    "tls": false,
+    "admin_key": "..."
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="tools-rag">RAG Tools (8 tools)</h1>
+
+      <table>
+        <tr>
+          <th>Tool</th>
+          <th>Description</th>
+        </tr>
+        <tr>
+          <td><code>rag_collection_create</code></td>
+          <td>Create RAG collection</td>
+        </tr>
+        <tr>
+          <td><code>rag_collection_list</code></td>
+          <td>List collections</td>
+        </tr>
+        <tr>
+          <td><code>rag_collection_stats</code></td>
+          <td>Statistics</td>
+        </tr>
+        <tr>
+          <td><code>rag_collection_delete</code></td>
+          <td>Delete collection</td>
+        </tr>
+        <tr>
+          <td><code>rag_document_import</code></td>
+          <td>Import document</td>
+        </tr>
+        <tr>
+          <td><code>rag_document_list</code></td>
+          <td>List documents</td>
+        </tr>
+        <tr>
+          <td><code>rag_document_delete</code></td>
+          <td>Delete document</td>
+        </tr>
+        <tr>
+          <td><code>rag_search</code></td>
+          <td>Semantic search</td>
+        </tr>
+      </table>
+
+      <!-- Footer -->
+      <hr style="margin-top: 60px;">
+      <p style="text-align: center; color: var(--text-muted);">
+        IronBase Documentation v1.0.222<br>
+        &copy; 2024 PeTitan Kft.
+      </p>
+
+    </main>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
+  <script>
+    // Theme toggle
+    function toggleTheme() {
+      const html = document.documentElement;
+      const currentTheme = html.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+      document.getElementById('theme-icon').textContent = newTheme === 'dark' ? '☀️' : '🌙';
+    }
+
+    // Load saved theme
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    document.getElementById('theme-icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+
+    // Copy button
+    function copyCode(btn) {
+      const code = btn.previousElementSibling.textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+          btn.classList.remove('copied');
+        }, 2000);
+      });
+    }
+
+    // Collapsible nav sections
+    document.querySelectorAll('.nav-section-title').forEach(title => {
+      title.addEventListener('click', () => {
+        title.parentElement.classList.toggle('open');
+      });
+    });
+
+    // Active nav item on scroll
+    const sections = document.querySelectorAll('h1[id], h2[id]');
+    const navItems = document.querySelectorAll('.nav-item');
+
+    window.addEventListener('scroll', () => {
+      let current = '';
+      sections.forEach(section => {
+        const sectionTop = section.offsetTop - 100;
+        if (scrollY >= sectionTop) {
+          current = section.getAttribute('id');
+        }
+      });
+
+      navItems.forEach(item => {
+        item.classList.remove('active');
+        if (item.getAttribute('href') === '#' + current) {
+          item.classList.add('active');
+        }
+      });
+    });
+  </script>
+</body>
+</html>

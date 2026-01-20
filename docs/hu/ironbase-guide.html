@@ -1,0 +1,2218 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IronBase Dokumentáció</title>
+  <link rel="stylesheet" href="../assets/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <a href="#" class="header-logo">
+      <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="32" height="32" rx="6" fill="#3b82f6"/>
+        <path d="M8 10h16M8 16h16M8 22h12" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+      </svg>
+      IronBase <span class="version-badge">v1.0.222</span>
+    </a>
+    <div class="header-controls">
+      <div class="lang-switch">
+        <a href="#" class="active">HU</a>
+        <a href="../en/ironbase-guide.html">EN</a>
+      </div>
+      <button class="theme-toggle" onclick="toggleTheme()">
+        <span id="theme-icon">🌙</span> Téma
+      </button>
+    </div>
+  </header>
+
+  <div class="container">
+    <!-- Sidebar -->
+    <nav class="sidebar">
+      <div class="sidebar-nav">
+        <div class="nav-section open">
+          <div class="nav-section-title">Bevezetés</div>
+          <div class="nav-items">
+            <a href="#intro" class="nav-item">Mi az IronBase?</a>
+            <a href="#features" class="nav-item">Főbb jellemzők</a>
+            <a href="#installation" class="nav-item">Telepítés</a>
+          </div>
+        </div>
+
+        <div class="nav-section open">
+          <div class="nav-section-title">Gyors kezdés</div>
+          <div class="nav-items">
+            <a href="#quickstart" class="nav-item">Első lépések</a>
+            <a href="#crud-basics" class="nav-item">CRUD alapok</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">MCP Tools</div>
+          <div class="nav-items">
+            <a href="#tools-database" class="nav-item">Database (4)</a>
+            <a href="#tools-collection" class="nav-item">Collection (3)</a>
+            <a href="#tools-crud" class="nav-item">CRUD (11)</a>
+            <a href="#tools-index" class="nav-item">Indexek (11)</a>
+            <a href="#tools-schema" class="nav-item">Schema (2)</a>
+            <a href="#tools-script" class="nav-item">Scripts (12)</a>
+            <a href="#tools-transaction" class="nav-item">Transactions (7)</a>
+            <a href="#tools-admin" class="nav-item">Admin (8)</a>
+            <a href="#tools-acl" class="nav-item">ACL (5)</a>
+            <a href="#tools-listener" class="nav-item">Listeners (6)</a>
+            <a href="#tools-rag" class="nav-item">RAG (8)</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Query Operators</div>
+          <div class="nav-items">
+            <a href="#op-comparison" class="nav-item">Comparison</a>
+            <a href="#op-logical" class="nav-item">Logical</a>
+            <a href="#op-element" class="nav-item">Element</a>
+            <a href="#op-array" class="nav-item">Array</a>
+            <a href="#op-string" class="nav-item">String</a>
+            <a href="#op-special" class="nav-item">Special</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Update Operators</div>
+          <div class="nav-items">
+            <a href="#update-ops" class="nav-item">Összes operator</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Aggregation</div>
+          <div class="nav-items">
+            <a href="#agg-stages" class="nav-item">Pipeline Stages</a>
+            <a href="#agg-accumulators" class="nav-item">Accumulators</a>
+            <a href="#agg-examples" class="nav-item">Példák</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Indexelés</div>
+          <div class="nav-items">
+            <a href="#index-btree" class="nav-item">B+ Tree</a>
+            <a href="#index-compound" class="nav-item">Compound</a>
+            <a href="#index-explain" class="nav-item">Query Planning</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Keresés</div>
+          <div class="nav-items">
+            <a href="#search-fuzzy" class="nav-item">Fuzzy Search</a>
+            <a href="#search-fulltext" class="nav-item">Full-Text Search</a>
+            <a href="#search-rag" class="nav-item">Semantic (RAG)</a>
+          </div>
+        </div>
+
+        <div class="nav-section">
+          <div class="nav-section-title">Egyéb</div>
+          <div class="nav-items">
+            <a href="#transactions" class="nav-item">Tranzakciók</a>
+            <a href="#scripting" class="nav-item">Scripting (Rhai)</a>
+            <a href="#config" class="nav-item">Konfiguráció</a>
+            <a href="#best-practices" class="nav-item">Best Practices</a>
+          </div>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="main">
+
+      <!-- ============================================================== -->
+      <!-- BEVEZETÉS -->
+      <!-- ============================================================== -->
+
+      <h1 id="intro">Mi az IronBase?</h1>
+
+      <p>Az <strong>IronBase</strong> egy nagy teljesítményű, beágyazott NoSQL dokumentum adatbázis, Rust nyelven írva. MongoDB-kompatibilis API-t biztosít SQLite egyszerűségével - egyetlen fájl, szerver nélkül, nulla konfiguráció.</p>
+
+      <div class="feature-grid">
+        <div class="feature-card">
+          <h4><span class="feature-icon">📄</span> Single-File</h4>
+          <p>Egyetlen <code>.mlite</code> fájl tartalmazza az összes adatot, indexet és metaadatot.</p>
+        </div>
+        <div class="feature-card">
+          <h4><span class="feature-icon">🚀</span> Gyors</h4>
+          <p>~200K insert/sec, ~500K indexed query/sec teljesítmény.</p>
+        </div>
+        <div class="feature-card">
+          <h4><span class="feature-icon">🔍</span> Keresés</h4>
+          <p>B+ tree, fuzzy, full-text és semantic (RAG) keresés.</p>
+        </div>
+        <div class="feature-card">
+          <h4><span class="feature-icon">🔒</span> ACID</h4>
+          <p>Tranzakciók WAL-lal, crash recovery, Read Committed izolációval.</p>
+        </div>
+      </div>
+
+      <h2 id="features">Főbb jellemzők</h2>
+
+      <table>
+        <tr>
+          <th>Kategória</th>
+          <th>Jellemzők</th>
+        </tr>
+        <tr>
+          <td>Query</td>
+          <td>21 query operator ($eq, $gt, $regex, $fuzzy, stb.)</td>
+        </tr>
+        <tr>
+          <td>Update</td>
+          <td>7 update operator ($set, $inc, $push, stb.)</td>
+        </tr>
+        <tr>
+          <td>Aggregation</td>
+          <td>$match, $group, $project, $sort, $limit, $skip</td>
+        </tr>
+        <tr>
+          <td>Indexek</td>
+          <td>B+ tree, compound, sparse, unique, fuzzy, fulltext</td>
+        </tr>
+        <tr>
+          <td>Keresés</td>
+          <td>Fuzzy (3 algoritmus), Full-text (TF-IDF), RAG (FastText+HNSW)</td>
+        </tr>
+        <tr>
+          <td>Nyelvek</td>
+          <td>Rust, Python (PyO3), C# (.NET 8)</td>
+        </tr>
+        <tr>
+          <td>MCP</td>
+          <td>70+ tool AI asszisztenseknek (HTTP + stdio)</td>
+        </tr>
+      </table>
+
+      <h2 id="installation">Telepítés és indítás</h2>
+
+      <h3>HTTP mód (szerver)</h3>
+
+      <div class="code-block">
+        <pre><code class="language-bash"># Build
+cd mcp-server && cargo build --release
+
+# Indítás
+./target/release/mcp-ironbase-server
+
+# Eredmény:
+# Server listening on https://0.0.0.0:8080 (TLS enabled)</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Stdio mód (Claude Desktop)</h3>
+
+      <div class="code-block">
+        <pre><code class="language-bash">./target/release/mcp-ironbase-server --stdio</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Környezeti változók</h3>
+
+      <table>
+        <tr>
+          <th>Változó</th>
+          <th>Leírás</th>
+          <th>Default</th>
+        </tr>
+        <tr>
+          <td><code>IRONBASE_PATH</code></td>
+          <td>Adatbázis fájl útvonala</td>
+          <td><code>./data.mlite</code></td>
+        </tr>
+        <tr>
+          <td><code>IRONBASE_ADMIN_KEY</code></td>
+          <td>Admin műveletek kulcsa</td>
+          <td>-</td>
+        </tr>
+        <tr>
+          <td><code>IRONBASE_PORT</code></td>
+          <td>HTTP port</td>
+          <td><code>8080</code></td>
+        </tr>
+      </table>
+
+      <!-- ============================================================== -->
+      <!-- GYORS KEZDÉS -->
+      <!-- ============================================================== -->
+
+      <h1 id="quickstart">Gyors kezdés</h1>
+
+      <h2 id="crud-basics">CRUD alapok</h2>
+
+      <p>Az IronBase MongoDB-stílusú JSON query-ket használ. Íme a legfontosabb műveletek:</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                        CRUD Műveletek                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  INSERT                    FIND                                 │
+│  ───────                   ─────                                │
+│  insert_one(doc)           find(filter)                         │
+│  insert_many([docs])       find_one(filter)                     │
+│                            count_documents(filter)              │
+│                                                                 │
+│  UPDATE                    DELETE                               │
+│  ───────                   ───────                              │
+│  update_one(filter, upd)   delete_one(filter)                   │
+│  update_many(filter, upd)  delete_many(filter)                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h3>Dokumentum beszúrás</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "insert_one",
+  "arguments": {
+    "collection": "users",
+    "document": {
+      "name": "Kovács János",
+      "email": "janos@example.com",
+      "age": 32,
+      "city": "Budapest"
+    }
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <p><strong>Eredmény:</strong></p>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "inserted_id": "550e8400-e29b-41d4-a716-446655440000"
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Dokumentumok keresése</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "find",
+  "arguments": {
+    "collection": "users",
+    "filter": {"city": "Budapest", "age": {"$gte": 18}},
+    "projection": {"name": 1, "email": 1},
+    "sort": [["name", 1]],
+    "limit": 10
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Dokumentum frissítése</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "update_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"email": "janos@example.com"},
+    "update": {
+      "$set": {"city": "Szeged"},
+      "$inc": {"age": 1}
+    }
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Dokumentum törlése</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "delete_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"email": "janos@example.com"}
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <!-- ============================================================== -->
+      <!-- MCP TOOLS -->
+      <!-- ============================================================== -->
+
+      <h1 id="tools-database">Database Management</h1>
+
+      <p>Adatbázis szintű műveletek: megnyitás, statisztikák, karbantartás.</p>
+
+      <div class="tool-card">
+        <h4><code>db_open</code> - Adatbázis megnyitása</h4>
+        <p>Megnyit vagy létrehoz egy adatbázis fájlt.</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>path</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Fájl útvonala (.mlite)</td>
+          </tr>
+          <tr>
+            <td>admin_key</td>
+            <td>string</td>
+            <td><span class="badge badge-admin">admin</span> Admin kulcs</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "db_open",
+  "arguments": {
+    "path": "/data/myapp.mlite",
+    "admin_key": "secret123"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>db_stats</code> - Statisztikák</h4>
+        <p>Adatbázis méret, collection-ök száma, dokumentumok.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "db_stats",
+  "arguments": {}
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "file_size_bytes": 52428800,
+  "file_size_mb": 50.0,
+  "collections_count": 6,
+  "total_documents": 187000
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>db_compact</code> - Tömörítés</h4>
+        <p>Eltávolítja a törölt dokumentumok helyét (tombstone-ok).</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>admin_key</td>
+            <td>string</td>
+            <td><span class="badge badge-admin">admin</span> Admin kulcs</td>
+          </tr>
+        </table>
+
+        <div class="info-box warning">
+          <div class="info-box-title">⚠️ Figyelem</div>
+          <p>A tömörítés alatt az adatbázis írásvédett. Nagy adatbázisoknál percekig tarthat.</p>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>db_checkpoint</code> - Checkpoint</h4>
+        <p>Azonnal lemezre írja a függőben lévő változásokat.</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>admin_key</td>
+            <td>string</td>
+            <td><span class="badge badge-admin">admin</span> Admin kulcs</td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Collection Management -->
+      <h1 id="tools-collection">Collection Management</h1>
+
+      <div class="tool-card">
+        <h4><code>collection_list</code> - Collection-ök listázása</h4>
+        <p>Visszaadja az összes felhasználói collection nevét.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "collection_list",
+  "arguments": {}
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "collections": ["users", "products", "orders"]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>collection_create</code> - Collection létrehozása</h4>
+        <p>Üres collection létrehozása (automatikusan is létrejön első insert-nél).</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>name</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>collection_drop</code> - Collection törlése</h4>
+        <p>Törli a collection-t, összes dokumentumot, indexet és sémát.</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>name</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+        </table>
+
+        <div class="info-box danger">
+          <div class="info-box-title">🚨 Veszélyes művelet</div>
+          <p>Ez a művelet visszavonhatatlan! Minden adat elvész.</p>
+        </div>
+      </div>
+
+      <!-- CRUD Tools -->
+      <h1 id="tools-crud">Document CRUD (11 tool)</h1>
+
+      <div class="tool-card">
+        <h4><code>insert_one</code> - Dokumentum beszúrása</h4>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>document</td>
+            <td>object</td>
+            <td><span class="badge badge-required">required</span> JSON dokumentum</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "insert_one",
+  "arguments": {
+    "collection": "products",
+    "document": {
+      "name": "Laptop",
+      "price": 299000,
+      "category": "electronics",
+      "specs": {
+        "cpu": "Intel i7",
+        "ram": 16
+      }
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>insert_many</code> - Tömeges beszúrás</h4>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>documents</td>
+            <td>array</td>
+            <td><span class="badge badge-required">required</span> Dokumentumok tömbje</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "insert_many",
+  "arguments": {
+    "collection": "logs",
+    "documents": [
+      {"level": "info", "message": "App started"},
+      {"level": "warn", "message": "High memory usage"},
+      {"level": "error", "message": "Connection failed"}
+    ]
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>find</code> - Dokumentumok keresése</h4>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>filter</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Query filter (default: {})</td>
+          </tr>
+          <tr>
+            <td>projection</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Mezők szűrése {field: 1} vagy {field: 0}</td>
+          </tr>
+          <tr>
+            <td>sort</td>
+            <td>array</td>
+            <td><span class="badge badge-optional">optional</span> Rendezés [["field", 1]] (1=ASC, -1=DESC)</td>
+          </tr>
+          <tr>
+            <td>limit</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Maximum visszaadott dokumentumok</td>
+          </tr>
+          <tr>
+            <td>skip</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Kihagyott dokumentumok (pagination)</td>
+          </tr>
+          <tr>
+            <td>include_total</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Összes találat számát is visszaadja</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "find",
+  "arguments": {
+    "collection": "products",
+    "filter": {
+      "category": "electronics",
+      "price": {"$lte": 500000}
+    },
+    "projection": {"name": 1, "price": 1, "_id": 1},
+    "sort": [["price", -1]],
+    "limit": 20,
+    "skip": 0,
+    "include_total": true
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "documents": [
+    {"_id": "...", "name": "Laptop", "price": 299000},
+    {"_id": "...", "name": "Tablet", "price": 150000}
+  ],
+  "count": 2,
+  "total": 47
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>find_one</code> - Első találat</h4>
+        <p>Visszaadja az első illeszkedő dokumentumot.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "find_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"email": "admin@example.com"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>update_one</code> - Dokumentum frissítése</h4>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>filter</td>
+            <td>object</td>
+            <td><span class="badge badge-required">required</span> Melyik dokumentumot</td>
+          </tr>
+          <tr>
+            <td>update</td>
+            <td>object</td>
+            <td><span class="badge badge-required">required</span> Update operátorokkal</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "update_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"_id": "550e8400-..."},
+    "update": {
+      "$set": {"status": "active", "updated_at": "2024-01-15"},
+      "$inc": {"login_count": 1},
+      "$push": {"roles": "editor"}
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>update_many</code> - Tömeges frissítés</h4>
+        <p>Minden illeszkedő dokumentumot frissít.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "update_many",
+  "arguments": {
+    "collection": "products",
+    "filter": {"category": "electronics"},
+    "update": {
+      "$inc": {"price": -1000}
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "matched_count": 150,
+  "modified_count": 150
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>delete_one</code> / <code>delete_many</code> - Törlés</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Egy dokumentum törlése
+{
+  "name": "delete_one",
+  "arguments": {
+    "collection": "sessions",
+    "filter": {"expired": true}
+  }
+}
+
+// Minden illeszkedő törlése
+{
+  "name": "delete_many",
+  "arguments": {
+    "collection": "logs",
+    "filter": {"created_at": {"$lt": "2024-01-01"}}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>count_documents</code> - Dokumentumok száma</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "count_documents",
+  "arguments": {
+    "collection": "orders",
+    "filter": {"status": "pending"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong> <code>{"count": 42}</code></p>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>distinct</code> - Egyedi értékek</h4>
+        <p>Visszaadja egy mező összes egyedi értékét.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "distinct",
+  "arguments": {
+    "collection": "users",
+    "field": "city",
+    "filter": {"status": "active"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "values": ["Budapest", "Szeged", "Debrecen", "Pécs"]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>aggregate</code> - Aggregation Pipeline</h4>
+        <p>Összetett adatfeldolgozás pipeline-nal. Részletek: <a href="#agg-stages">Aggregation fejezet</a></p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "aggregate",
+  "arguments": {
+    "collection": "orders",
+    "pipeline": [
+      {"$match": {"status": "completed"}},
+      {"$group": {
+        "_id": "$customer_id",
+        "total": {"$sum": "$amount"},
+        "count": {"$sum": 1}
+      }},
+      {"$sort": {"total": -1}},
+      {"$limit": 10}
+    ]
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <!-- Index Tools -->
+      <h1 id="tools-index">Index Management (11 tool)</h1>
+
+      <div class="tool-card">
+        <h4><code>index_create</code> - B+ Tree index létrehozása</h4>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>field</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Egyedi mező index</td>
+          </tr>
+          <tr>
+            <td>fields</td>
+            <td>array</td>
+            <td><span class="badge badge-optional">optional</span> Compound index mezői</td>
+          </tr>
+          <tr>
+            <td>unique</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Egyediségi kényszer</td>
+          </tr>
+          <tr>
+            <td>sparse</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Hiányzó értékek kihagyása</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Egyszerű index
+{
+  "name": "index_create",
+  "arguments": {
+    "collection": "users",
+    "field": "email",
+    "unique": true
+  }
+}
+
+// Compound index
+{
+  "name": "index_create",
+  "arguments": {
+    "collection": "orders",
+    "fields": ["customer_id", "created_at"],
+    "unique": false
+  }
+}
+
+// Sparse index (hiányzó mezőket kihagyja)
+{
+  "name": "index_create",
+  "arguments": {
+    "collection": "profiles",
+    "field": "phone",
+    "sparse": true
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>index_list</code> - Indexek listázása</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "index_list",
+  "arguments": {
+    "collection": "users"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "indexes": [
+    {"name": "idx_email", "fields": ["email"], "unique": true, "sparse": false},
+    {"name": "idx_city_age", "fields": ["city", "age"], "unique": false, "sparse": false}
+  ]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>index_drop</code> - Index törlése</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "index_drop",
+  "arguments": {
+    "collection": "users",
+    "index_name": "idx_email"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>explain</code> - Query plan</h4>
+        <p>Megmutatja, melyik index kerül használatra.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "explain",
+  "arguments": {
+    "collection": "orders",
+    "filter": {"customer_id": "123", "status": "pending"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "plan": "IndexScan",
+  "index": "idx_customer_id_status",
+  "estimated_docs": 15
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>index_create_fuzzy</code> - Fuzzy index</h4>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>field</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Indexelendő mező</td>
+          </tr>
+          <tr>
+            <td>algorithm</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> jaro_winkler | levenshtein | damerau_levenshtein</td>
+          </tr>
+          <tr>
+            <td>threshold</td>
+            <td>number</td>
+            <td><span class="badge badge-optional">optional</span> Hasonlósági küszöb (0.0-1.0, default: 0.8)</td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>index_create_fulltext</code> - Full-text index</h4>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>field</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Indexelendő mező</td>
+          </tr>
+          <tr>
+            <td>language</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> hungarian | english | german | none</td>
+          </tr>
+          <tr>
+            <td>min_word_length</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Min. szóhossz (default: 2)</td>
+          </tr>
+          <tr>
+            <td>accent_folding</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Ékezet eltávolítás (default: true)</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "index_create_fulltext",
+  "arguments": {
+    "collection": "articles",
+    "field": "content",
+    "language": "hungarian"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <!-- Query Operators -->
+      <h1 id="op-comparison">Query Operators - Comparison</h1>
+
+      <p>Összehasonlító operátorok értékek szűrésére.</p>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Leírás</th>
+          <th>Példa</th>
+        </tr>
+        <tr>
+          <td><code>$eq</code></td>
+          <td>Egyenlő</td>
+          <td><code>{"age": {"$eq": 25}}</code> vagy <code>{"age": 25}</code></td>
+        </tr>
+        <tr>
+          <td><code>$ne</code></td>
+          <td>Nem egyenlő</td>
+          <td><code>{"status": {"$ne": "deleted"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$gt</code></td>
+          <td>Nagyobb mint</td>
+          <td><code>{"price": {"$gt": 1000}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$gte</code></td>
+          <td>Nagyobb vagy egyenlő</td>
+          <td><code>{"age": {"$gte": 18}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$lt</code></td>
+          <td>Kisebb mint</td>
+          <td><code>{"score": {"$lt": 50}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$lte</code></td>
+          <td>Kisebb vagy egyenlő</td>
+          <td><code>{"quantity": {"$lte": 10}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$in</code></td>
+          <td>Benne van a listában</td>
+          <td><code>{"status": {"$in": ["active", "pending"]}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$nin</code></td>
+          <td>Nincs benne a listában</td>
+          <td><code>{"role": {"$nin": ["banned", "deleted"]}}</code></td>
+        </tr>
+      </table>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Összetett példa: 18-65 év közötti aktív felhasználók
+{
+  "filter": {
+    "age": {"$gte": 18, "$lte": 65},
+    "status": {"$in": ["active", "verified"]},
+    "deleted_at": {"$eq": null}
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h1 id="op-logical">Query Operators - Logical</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Leírás</th>
+          <th>Példa</th>
+        </tr>
+        <tr>
+          <td><code>$and</code></td>
+          <td>Minden feltétel igaz</td>
+          <td><code>{"$and": [{...}, {...}]}</code></td>
+        </tr>
+        <tr>
+          <td><code>$or</code></td>
+          <td>Legalább egy igaz</td>
+          <td><code>{"$or": [{...}, {...}]}</code></td>
+        </tr>
+        <tr>
+          <td><code>$not</code></td>
+          <td>Tagadás</td>
+          <td><code>{"age": {"$not": {"$lt": 18}}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$nor</code></td>
+          <td>Egyik sem igaz</td>
+          <td><code>{"$nor": [{...}, {...}]}</code></td>
+        </tr>
+      </table>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Admin VAGY moderátor és aktív
+{
+  "filter": {
+    "$and": [
+      {"$or": [
+        {"role": "admin"},
+        {"role": "moderator"}
+      ]},
+      {"status": "active"}
+    ]
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h1 id="op-element">Query Operators - Element</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Leírás</th>
+          <th>Példa</th>
+        </tr>
+        <tr>
+          <td><code>$exists</code></td>
+          <td>Mező létezik-e</td>
+          <td><code>{"phone": {"$exists": true}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$type</code></td>
+          <td>Mező típusa</td>
+          <td><code>{"age": {"$type": "number"}}</code></td>
+        </tr>
+      </table>
+
+      <p><strong>Típusok:</strong> <code>string</code>, <code>number</code>, <code>boolean</code>, <code>array</code>, <code>object</code>, <code>null</code></p>
+
+      <h1 id="op-array">Query Operators - Array</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Leírás</th>
+          <th>Példa</th>
+        </tr>
+        <tr>
+          <td><code>$all</code></td>
+          <td>Minden elem megtalálható</td>
+          <td><code>{"tags": {"$all": ["rust", "db"]}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$elemMatch</code></td>
+          <td>Legalább egy elem illeszkedik</td>
+          <td><code>{"items": {"$elemMatch": {"qty": {"$gt": 5}}}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$size</code></td>
+          <td>Tömb hossza</td>
+          <td><code>{"tags": {"$size": 3}}</code></td>
+        </tr>
+      </table>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Rendelések ahol van 1000 Ft feletti tétel
+{
+  "filter": {
+    "items": {
+      "$elemMatch": {
+        "price": {"$gt": 1000},
+        "quantity": {"$gte": 1}
+      }
+    }
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h1 id="op-string">Query Operators - String</h1>
+
+      <div class="tool-card">
+        <h4><code>$regex</code> - Reguláris kifejezés</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Email domain szűrés
+{"email": {"$regex": "@gmail\\.com$"}}
+
+// Név kezdőbetű (case sensitive)
+{"name": {"$regex": "^K"}}
+
+// Tartalmazza (case insensitive workaround: lowercase index)
+{"name_lower": {"$regex": "kovács"}}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="op-special">Query Operators - Special</h1>
+
+      <div class="tool-card">
+        <h4><code>$fuzzy</code> - Fuzzy keresés</h4>
+        <p>Hasonlósági alapú keresés elgépelések, variációk kezelésére.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Egyszerű fuzzy (default: jaro_winkler, threshold: 0.8)
+{"name": {"$fuzzy": "kovasc"}}
+
+// Teljes konfiguráció
+{"name": {"$fuzzy": {
+  "value": "kovacs",
+  "algorithm": "levenshtein",
+  "threshold": 0.7
+}}}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Algoritmusok:</strong></p>
+        <table>
+          <tr>
+            <th>Algoritmus</th>
+            <th>Leírás</th>
+            <th>Legjobb használat</th>
+          </tr>
+          <tr>
+            <td><code>jaro_winkler</code></td>
+            <td>Gyors, előtag-érzékeny</td>
+            <td>Nevek, rövid szövegek</td>
+          </tr>
+          <tr>
+            <td><code>levenshtein</code></td>
+            <td>Edit distance</td>
+            <td>Általános elgépelések</td>
+          </tr>
+          <tr>
+            <td><code>damerau_levenshtein</code></td>
+            <td>Edit distance + átrendezés</td>
+            <td>Betűcserék is ("kovacs" vs "koavcs")</td>
+          </tr>
+        </table>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>$**</code> - Wildcard (Recursive Descent)</h4>
+        <p>Mező keresése bármilyen mélységben a dokumentumban.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">// Keress "status" mezőt BÁRHOL a dokumentumban
+{"$**.status": "active"}
+
+// Találatok:
+// {"status": "active"}                    ✓
+// {"user": {"status": "active"}}          ✓
+// {"data": {"info": {"status": "active"}}} ✓</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <div class="info-box warning">
+          <div class="info-box-title">⚠️ Teljesítmény</div>
+          <p>A <code>$**</code> mindig collection scan-t végez, nem használ indexet. Nagy collection-öknél kerülendő.</p>
+        </div>
+      </div>
+
+      <!-- Update Operators -->
+      <h1 id="update-ops">Update Operators</h1>
+
+      <table>
+        <tr>
+          <th>Operator</th>
+          <th>Leírás</th>
+          <th>Példa</th>
+        </tr>
+        <tr>
+          <td><code>$set</code></td>
+          <td>Mező beállítása</td>
+          <td><code>{"$set": {"name": "új név"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$inc</code></td>
+          <td>Szám növelése</td>
+          <td><code>{"$inc": {"counter": 1, "score": -5}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$unset</code></td>
+          <td>Mező törlése</td>
+          <td><code>{"$unset": {"temp_field": ""}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$push</code></td>
+          <td>Elem hozzáadása tömbhöz</td>
+          <td><code>{"$push": {"tags": "new_tag"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$pull</code></td>
+          <td>Elem eltávolítása tömbből</td>
+          <td><code>{"$pull": {"tags": "old_tag"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$addToSet</code></td>
+          <td>Egyedi elem hozzáadása</td>
+          <td><code>{"$addToSet": {"roles": "editor"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$pop</code></td>
+          <td>Első/utolsó elem eltávolítása</td>
+          <td><code>{"$pop": {"queue": 1}}</code> (1=utolsó, -1=első)</td>
+        </tr>
+      </table>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Összetett update
+{
+  "name": "update_one",
+  "arguments": {
+    "collection": "users",
+    "filter": {"_id": "..."},
+    "update": {
+      "$set": {
+        "name": "Kovács János",
+        "address.city": "Budapest"
+      },
+      "$inc": {"login_count": 1},
+      "$push": {"activity_log": {"action": "login", "at": "2024-01-15"}},
+      "$addToSet": {"roles": "premium"}
+    }
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Dot notation</div>
+        <p>Beágyazott mezők módosítása: <code>{"$set": {"address.city": "Szeged"}}</code></p>
+      </div>
+
+      <!-- Aggregation -->
+      <h1 id="agg-stages">Aggregation Pipeline</h1>
+
+      <p>Az aggregation pipeline több lépésből álló adatfeldolgozást tesz lehetővé.</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                    Aggregation Pipeline                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Documents  ─▶  $match  ─▶  $group  ─▶  $sort  ─▶  $limit      │
+│                   │           │          │           │          │
+│               szűrés     csoportosít   rendez    levág         │
+│                                                                 │
+│  Példa:                                                         │
+│  100K doc  ─▶  50K doc  ─▶  1K group  ─▶  1K sort  ─▶  10 doc  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h2>Pipeline Stages</h2>
+
+      <table>
+        <tr>
+          <th>Stage</th>
+          <th>Leírás</th>
+          <th>Példa</th>
+        </tr>
+        <tr>
+          <td><code>$match</code></td>
+          <td>Dokumentumok szűrése</td>
+          <td><code>{"$match": {"status": "active"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$group</code></td>
+          <td>Csoportosítás és aggregálás</td>
+          <td><code>{"$group": {"_id": "$city", "count": {"$sum": 1}}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$project</code></td>
+          <td>Mezők kiválasztása/átnevezése</td>
+          <td><code>{"$project": {"name": 1, "total": "$amount"}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$sort</code></td>
+          <td>Rendezés</td>
+          <td><code>{"$sort": {"total": -1}}</code></td>
+        </tr>
+        <tr>
+          <td><code>$limit</code></td>
+          <td>Eredmények korlátozása</td>
+          <td><code>{"$limit": 10}</code></td>
+        </tr>
+        <tr>
+          <td><code>$skip</code></td>
+          <td>Eredmények kihagyása</td>
+          <td><code>{"$skip": 20}</code></td>
+        </tr>
+      </table>
+
+      <h2 id="agg-accumulators">Accumulators</h2>
+
+      <table>
+        <tr>
+          <th>Accumulator</th>
+          <th>Leírás</th>
+          <th>Példa</th>
+        </tr>
+        <tr>
+          <td><code>$sum</code></td>
+          <td>Összeg</td>
+          <td><code>{"$sum": "$amount"}</code> vagy <code>{"$sum": 1}</code> (count)</td>
+        </tr>
+        <tr>
+          <td><code>$avg</code></td>
+          <td>Átlag</td>
+          <td><code>{"$avg": "$price"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$min</code></td>
+          <td>Minimum</td>
+          <td><code>{"$min": "$score"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$max</code></td>
+          <td>Maximum</td>
+          <td><code>{"$max": "$score"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$first</code></td>
+          <td>Első érték</td>
+          <td><code>{"$first": "$name"}</code></td>
+        </tr>
+        <tr>
+          <td><code>$last</code></td>
+          <td>Utolsó érték</td>
+          <td><code>{"$last": "$name"}</code></td>
+        </tr>
+      </table>
+
+      <h2 id="agg-examples">Aggregation példák</h2>
+
+      <h3>Top 10 vásárló összesítés</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "aggregate",
+  "arguments": {
+    "collection": "orders",
+    "pipeline": [
+      {"$match": {"status": "completed"}},
+      {"$group": {
+        "_id": "$customer_id",
+        "total_spent": {"$sum": "$amount"},
+        "order_count": {"$sum": 1},
+        "avg_order": {"$avg": "$amount"}
+      }},
+      {"$sort": {"total_spent": -1}},
+      {"$limit": 10}
+    ]
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Havi bontás</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "aggregate",
+  "arguments": {
+    "collection": "sales",
+    "pipeline": [
+      {"$match": {"year": 2024}},
+      {"$group": {
+        "_id": "$month",
+        "revenue": {"$sum": "$amount"},
+        "transactions": {"$sum": 1}
+      }},
+      {"$sort": {"_id": 1}}
+    ]
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <div class="info-box note">
+        <div class="info-box-title">📊 Memória limitek</div>
+        <p>Az aggregation automatikusan skálázódó memória limitet használ a rendszer RAM alapján.
+        Nagy adathalmazoknál mindig használj <code>$match</code>-et a pipeline elején!</p>
+      </div>
+
+      <!-- Transactions -->
+      <h1 id="transactions">Tranzakciók</h1>
+
+      <p>Az IronBase ACID tranzakciókat támogat WAL (Write-Ahead Log) alapon.</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                     Tranzakció életciklus                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  begin_transaction  ─▶  műveletek  ─▶  commit/rollback          │
+│         │                  │                   │                │
+│    WAL start           WAL write          WAL flush/clear       │
+│                                                                 │
+│  Izolációs szint: Read Committed                                │
+│  Timeout: 5 másodperc (write lock)                              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h3>Tranzakció példa</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">// 1. Tranzakció indítása
+{"name": "begin_transaction", "arguments": {}}
+
+// 2. Műveletek
+{
+  "name": "update_one_tx",
+  "arguments": {
+    "collection": "accounts",
+    "filter": {"_id": "acc1"},
+    "update": {"$inc": {"balance": -1000}}
+  }
+}
+
+{
+  "name": "update_one_tx",
+  "arguments": {
+    "collection": "accounts",
+    "filter": {"_id": "acc2"},
+    "update": {"$inc": {"balance": 1000}}
+  }
+}
+
+// 3a. Sikeres: commit
+{"name": "commit_transaction", "arguments": {}}
+
+// 3b. Hiba esetén: rollback
+{"name": "rollback_transaction", "arguments": {}}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>ACID tulajdonságok</h3>
+
+      <table>
+        <tr>
+          <th>Tulajdonság</th>
+          <th>Implementáció</th>
+        </tr>
+        <tr>
+          <td><strong>A</strong>tomicity</td>
+          <td>WAL + rollback támogatás</td>
+        </tr>
+        <tr>
+          <td><strong>C</strong>onsistency</td>
+          <td>Schema validation, unique constraints</td>
+        </tr>
+        <tr>
+          <td><strong>I</strong>solation</td>
+          <td>Read Committed (egy writer, több reader)</td>
+        </tr>
+        <tr>
+          <td><strong>D</strong>urability</td>
+          <td>fsync + WAL CRC32 checksums</td>
+        </tr>
+      </table>
+
+      <!-- Search -->
+      <h1 id="search-fuzzy">Fuzzy Search</h1>
+
+      <p>Hasonlósági alapú keresés elgépelések és variációk kezelésére.</p>
+
+      <div class="tool-card">
+        <h4><code>fuzzy_search</code> tool</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "fuzzy_search",
+  "arguments": {
+    "collection": "contacts",
+    "field": "name",
+    "query": "kovacs janos",
+    "algorithm": "jaro_winkler",
+    "threshold": 0.8,
+    "limit": 10
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "results": [
+    {"doc": {"_id": "...", "name": "Kovács János"}, "score": 0.95},
+    {"doc": {"_id": "...", "name": "Kováts János"}, "score": 0.87},
+    {"doc": {"_id": "...", "name": "Kovács Janos"}, "score": 0.85}
+  ]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="search-fulltext">Full-Text Search</h1>
+
+      <p>TF-IDF alapú keresés stemminggel és nyelvtámogatással.</p>
+
+      <div class="tool-card">
+        <h4><code>fulltext_search</code> tool</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "fulltext_search",
+  "arguments": {
+    "collection": "articles",
+    "field": "content",
+    "query": "adatbázis kezelés",
+    "limit": 10,
+    "min_score": 0.1,
+    "projection": {"title": 1, "_id": 1}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "results": [
+    {
+      "doc": {"_id": "...", "title": "Adatbázis alapok"},
+      "score": 0.85,
+      "matched_tokens": ["adatbázis", "kezelés"]
+    }
+  ]
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h3>Támogatott nyelvek</h3>
+
+      <table>
+        <tr>
+          <th>Nyelv</th>
+          <th>Stemming</th>
+          <th>Stop words</th>
+        </tr>
+        <tr>
+          <td>hungarian</td>
+          <td>✓ Snowball</td>
+          <td>✓ 200+ szó</td>
+        </tr>
+        <tr>
+          <td>english</td>
+          <td>✓ Snowball</td>
+          <td>✓ 170+ szó</td>
+        </tr>
+        <tr>
+          <td>german</td>
+          <td>✓ Snowball</td>
+          <td>✓ 230+ szó</td>
+        </tr>
+        <tr>
+          <td>none</td>
+          <td>✗</td>
+          <td>✗</td>
+        </tr>
+      </table>
+
+      <h1 id="search-rag">RAG - Semantic Search</h1>
+
+      <p>Szemantikus keresés FastText embeddings és HNSW indexeléssel.</p>
+
+      <div class="ascii-diagram">
+        <pre>
+┌─────────────────────────────────────────────────────────────────┐
+│                      RAG Pipeline                               │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Document  ─▶  Chunking  ─▶  Embedding  ─▶  HNSW Index         │
+│     │            │              │               │               │
+│   markdown    1000 token    FastText       vektorok            │
+│              100 overlap     300-dim                            │
+│                                                                 │
+│  Query  ─▶  Embedding  ─▶  HNSW Search  ─▶  Top-K chunks       │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <h3>RAG Collection létrehozása</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "rag_collection_create",
+  "arguments": {
+    "name": "knowledge_base",
+    "chunk_max_tokens": 1000,
+    "chunk_overlap": 100,
+    "admin_key": "..."
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Dokumentum importálása</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "rag_document_import",
+  "arguments": {
+    "collection": "knowledge_base",
+    "doc_id": "guide_001",
+    "title": "IronBase használati útmutató",
+    "content": "# Bevezetés\n\nAz IronBase egy..."
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Szemantikus keresés</h3>
+
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "name": "rag_search",
+  "arguments": {
+    "collection": "knowledge_base",
+    "query": "hogyan hozzak létre indexet",
+    "limit": 5,
+    "min_score": 0.3
+  }
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <p><strong>Eredmény:</strong></p>
+      <div class="code-block">
+        <pre><code class="language-json">{
+  "results": [
+    {
+      "doc_id": "guide_001",
+      "title": "IronBase használati útmutató",
+      "chunk_index": 5,
+      "content": "## Indexelés\n\nIndex létrehozásához használd...",
+      "score": 0.87
+    }
+  ],
+  "count": 1,
+  "query": "hogyan hozzak létre indexet"
+}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <!-- Configuration -->
+      <h1 id="config">Konfiguráció</h1>
+
+      <h3>config.toml</h3>
+
+      <div class="code-block">
+        <pre><code class="language-toml">[server]
+port = 8080
+host = "0.0.0.0"
+max_body_size = "1GB"
+
+[tls]
+enabled = true
+cert_path = "/etc/ssl/cert.pem"
+key_path = "/etc/ssl/key.pem"
+
+[database]
+path = "/data/ironbase.mlite"
+durability = "safe"  # safe | batch | unsafe
+
+[rag]
+fasttext_model = "/models/cc.hu.300.bin"
+
+[logging]
+level = "info"  # trace | debug | info | warn | error
+format = "json"</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h3>Durability módok</h3>
+
+      <table>
+        <tr>
+          <th>Mód</th>
+          <th>fsync</th>
+          <th>Sebesség</th>
+          <th>Adatvesztés crash-nél</th>
+        </tr>
+        <tr>
+          <td><code>safe</code></td>
+          <td>✓ minden művelet</td>
+          <td>~1-5K ops/sec</td>
+          <td>0</td>
+        </tr>
+        <tr>
+          <td><code>batch</code></td>
+          <td>✓ N műveletenként</td>
+          <td>~20-50K ops/sec</td>
+          <td>Max N művelet</td>
+        </tr>
+        <tr>
+          <td><code>unsafe</code></td>
+          <td>✗</td>
+          <td>~50-100K ops/sec</td>
+          <td>Minden uncommitted</td>
+        </tr>
+      </table>
+
+      <!-- Best Practices -->
+      <h1 id="best-practices">Best Practices</h1>
+
+      <h2>Pagination nagy adathalmazoknál</h2>
+
+      <div class="ascii-diagram">
+        <pre>
+Collection: users (100,000 docs)
+Page size: 1,000 docs
+
+┌─────────────────────────────────────────────────────────────────┐
+│ skip=0      │ skip=1000   │ skip=2000   │ ... │ skip=99000      │
+│ limit=1000  │ limit=1000  │ limit=1000  │     │ limit=1000      │
+├─────────────┼─────────────┼─────────────┼─────┼─────────────────┤
+│ doc 0-999   │ doc 1K-1999 │ doc 2K-2999 │ ... │ doc 99K-100K    │
+│ Page 1      │ Page 2      │ Page 3      │     │ Page 100        │
+└─────────────────────────────────────────────────────────────────┘
+        </pre>
+      </div>
+
+      <div class="code-block">
+        <pre><code class="language-json">// Skip/Limit pagination
+{"filter": {}, "limit": 1000, "skip": 0}       // Page 1
+{"filter": {}, "limit": 1000, "skip": 1000}    // Page 2
+{"filter": {}, "limit": 1000, "skip": 2000}    // Page 3
+
+// Cursor-based (gyorsabb nagy skip-nél)
+{"filter": {"_id": {"$gt": "last_id"}}, "limit": 1000, "sort": [["_id", 1]]}</code></pre>
+        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+      </div>
+
+      <h2>Index stratégia</h2>
+
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Index tippek</div>
+        <ul>
+          <li>Indexelj gyakran szűrt mezőket</li>
+          <li>Compound index: bal-prefix szabály (a, b) → használható (a)-ra is</li>
+          <li><code>explain()</code> használata query plan ellenőrzésre</li>
+          <li>Sparse index opcionális mezőkre</li>
+          <li>Unique index email, username mezőkre</li>
+        </ul>
+      </div>
+
+      <h2>OOM elkerülése</h2>
+
+      <div class="info-box danger">
+        <div class="info-box-title">🚨 Kerülendő</div>
+        <ul>
+          <li><code>find({}, {})</code> nagy collection-ön limit nélkül</li>
+          <li>Aggregation <code>$match</code> nélkül 100K+ dokumentumon</li>
+          <li><code>$push</code> korlátlan tömb növelésre</li>
+        </ul>
+      </div>
+
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Ajánlott</div>
+        <ul>
+          <li>Mindig használj <code>limit</code>-et find-nál</li>
+          <li>Aggregation pipeline elejére <code>$match</code></li>
+          <li>Nagy eredményeknél <code>projection</code> a szükséges mezőkre</li>
+          <li>Streaming feldolgozás pagination-nel</li>
+        </ul>
+      </div>
+
+      <!-- Tools: Schema, Scripts, Admin, ACL, Listeners, RAG -->
+      <h1 id="tools-schema">Schema Management</h1>
+
+      <div class="tool-card">
+        <h4><code>schema_set</code> - Schema beállítása</h4>
+        <p>JSON Schema validáció a collection-re.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "schema_set",
+  "arguments": {
+    "collection": "users",
+    "schema": {
+      "type": "object",
+      "required": ["email", "name"],
+      "properties": {
+        "email": {"type": "string", "format": "email"},
+        "name": {"type": "string", "minLength": 1},
+        "age": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>schema_get</code> - Schema lekérdezése</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "schema_get",
+  "arguments": {
+    "collection": "users"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="tools-script">Scripting (Rhai)</h1>
+
+      <p>A Rhai egy gyors, beágyazható scripting nyelv. Az IronBase lehetővé teszi scriptek futtatását az adatbázison.</p>
+
+      <div class="tool-card">
+        <h4><code>script_exec</code> - Script futtatása</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "script_exec",
+  "arguments": {
+    "code": "let users = db_find(\"users\", #{\"status\": \"active\"}, #{\"limit\": 10});\nlet count = users.len();\n#{\"active_users\": count}"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h3>Database API scripten belül</h3>
+
+      <table>
+        <tr>
+          <th>Függvény</th>
+          <th>Leírás</th>
+        </tr>
+        <tr>
+          <td><code>db_find(coll, query, opts?)</code></td>
+          <td>Dokumentumok keresése</td>
+        </tr>
+        <tr>
+          <td><code>db_find_one(coll, query)</code></td>
+          <td>Első találat</td>
+        </tr>
+        <tr>
+          <td><code>db_count(coll, query)</code></td>
+          <td>Dokumentumok száma</td>
+        </tr>
+        <tr>
+          <td><code>db_insert_one(coll, doc)</code></td>
+          <td>Beszúrás</td>
+        </tr>
+        <tr>
+          <td><code>db_update_one(coll, filter, update)</code></td>
+          <td>Frissítés</td>
+        </tr>
+        <tr>
+          <td><code>db_delete_one(coll, filter)</code></td>
+          <td>Törlés</td>
+        </tr>
+        <tr>
+          <td><code>db_aggregate(coll, pipeline)</code></td>
+          <td>Aggregation</td>
+        </tr>
+      </table>
+
+      <div class="tool-card">
+        <h4><code>script_save</code> - Script mentése</h4>
+        <p>Scriptek verziókezeléssel tárolhatók.</p>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "script_save",
+  "arguments": {
+    "name": "daily_report",
+    "code": "let orders = db_aggregate(\"orders\", [...]);\n#{\"report\": orders}",
+    "description": "Napi rendelés összesítő",
+    "tags": ["report", "daily"]
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="tools-admin">Admin Tools</h1>
+
+      <p>Admin műveletek az <code>IRONBASE_ADMIN_KEY</code> környezeti változóval védettek.</p>
+
+      <table>
+        <tr>
+          <th>Tool</th>
+          <th>Leírás</th>
+        </tr>
+        <tr>
+          <td><code>admin_list_all_collections</code></td>
+          <td>Összes collection (system + hidden is)</td>
+        </tr>
+        <tr>
+          <td><code>admin_create_system_collection</code></td>
+          <td>Védett rendszer collection</td>
+        </tr>
+        <tr>
+          <td><code>admin_set_collection_flags</code></td>
+          <td>is_system, protected, hidden flagek</td>
+        </tr>
+        <tr>
+          <td><code>admin_drop_protected</code></td>
+          <td>Védett collection törlése</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_create</code></td>
+          <td>API kulcs generálás</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_list</code></td>
+          <td>API kulcsok listázása</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_revoke</code></td>
+          <td>API kulcs letiltása</td>
+        </tr>
+        <tr>
+          <td><code>admin_apikey_delete</code></td>
+          <td>API kulcs törlése</td>
+        </tr>
+      </table>
+
+      <h1 id="tools-acl">Access Control (ACL)</h1>
+
+      <p>Collection szintű hozzáférés-kezelés.</p>
+
+      <div class="tool-card">
+        <h4><code>acl_set</code> - ACL beállítása</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "acl_set",
+  "arguments": {
+    "collection": "sensitive_data",
+    "rules": {
+      "read": ["admin", "analyst"],
+      "write": ["admin"],
+      "delete": ["admin"]
+    },
+    "admin_key": "..."
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="tools-listener">HTTP Listeners</h1>
+
+      <p>Több HTTP/HTTPS endpoint kezelése.</p>
+
+      <div class="tool-card">
+        <h4><code>listener_add</code> - Listener hozzáadása</h4>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "listener_add",
+  "arguments": {
+    "name": "public_api",
+    "host": "0.0.0.0",
+    "port": 8081,
+    "tls": false,
+    "admin_key": "..."
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <h1 id="tools-rag">RAG Tools (8 tool)</h1>
+
+      <table>
+        <tr>
+          <th>Tool</th>
+          <th>Leírás</th>
+        </tr>
+        <tr>
+          <td><code>rag_collection_create</code></td>
+          <td>RAG collection létrehozása</td>
+        </tr>
+        <tr>
+          <td><code>rag_collection_list</code></td>
+          <td>Collection-ök listázása</td>
+        </tr>
+        <tr>
+          <td><code>rag_collection_stats</code></td>
+          <td>Statisztikák</td>
+        </tr>
+        <tr>
+          <td><code>rag_collection_delete</code></td>
+          <td>Collection törlése</td>
+        </tr>
+        <tr>
+          <td><code>rag_document_import</code></td>
+          <td>Dokumentum importálás</td>
+        </tr>
+        <tr>
+          <td><code>rag_document_list</code></td>
+          <td>Dokumentumok listázása</td>
+        </tr>
+        <tr>
+          <td><code>rag_document_delete</code></td>
+          <td>Dokumentum törlése</td>
+        </tr>
+        <tr>
+          <td><code>rag_search</code></td>
+          <td>Szemantikus keresés</td>
+        </tr>
+      </table>
+
+      <!-- Footer -->
+      <hr style="margin-top: 60px;">
+      <p style="text-align: center; color: var(--text-muted);">
+        IronBase Documentation v1.0.222<br>
+        &copy; 2024 PeTitan Kft.
+      </p>
+
+    </main>
+  </div>
+
+  <!-- Scripts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-json.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
+  <script>
+    // Theme toggle
+    function toggleTheme() {
+      const html = document.documentElement;
+      const currentTheme = html.getAttribute('data-theme');
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      html.setAttribute('data-theme', newTheme);
+      localStorage.setItem('theme', newTheme);
+      document.getElementById('theme-icon').textContent = newTheme === 'dark' ? '☀️' : '🌙';
+    }
+
+    // Load saved theme
+    const savedTheme = localStorage.getItem('theme') || 'light';
+    document.documentElement.setAttribute('data-theme', savedTheme);
+    document.getElementById('theme-icon').textContent = savedTheme === 'dark' ? '☀️' : '🌙';
+
+    // Copy button
+    function copyCode(btn) {
+      const code = btn.previousElementSibling.textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        btn.textContent = 'Copied!';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.textContent = 'Copy';
+          btn.classList.remove('copied');
+        }, 2000);
+      });
+    }
+
+    // Collapsible nav sections
+    document.querySelectorAll('.nav-section-title').forEach(title => {
+      title.addEventListener('click', () => {
+        title.parentElement.classList.toggle('open');
+      });
+    });
+
+    // Active nav item on scroll
+    const sections = document.querySelectorAll('h1[id], h2[id]');
+    const navItems = document.querySelectorAll('.nav-item');
+
+    window.addEventListener('scroll', () => {
+      let current = '';
+      sections.forEach(section => {
+        const sectionTop = section.offsetTop - 100;
+        if (scrollY >= sectionTop) {
+          current = section.getAttribute('id');
+        }
+      });
+
+      navItems.forEach(item => {
+        item.classList.remove('active');
+        if (item.getAttribute('href') === '#' + current) {
+          item.classList.add('active');
+        }
+      });
+    });
+  </script>
+</body>
+</html>
