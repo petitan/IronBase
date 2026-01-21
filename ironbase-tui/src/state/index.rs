@@ -1,5 +1,53 @@
 //! Index management state
 
+/// Index statistics for a single index
+#[derive(Debug, Clone, Default)]
+pub struct IndexStatistics {
+    /// Index name
+    pub name: String,
+    /// Primary field name
+    pub field: String,
+    /// Total number of keys in the index
+    pub num_keys: u64,
+    /// Distinct value count
+    pub distinct_count: u64,
+    /// Whether histogram data is available (for range queries)
+    pub has_histogram: bool,
+    /// Whether MCV data is available (for equality queries on skewed data)
+    pub has_mcv: bool,
+}
+
+impl IndexStatistics {
+    /// Parse from JSON value returned by MCP
+    pub fn from_value(v: &serde_json::Value) -> Self {
+        Self {
+            name: v.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            field: v.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            num_keys: v.get("num_keys").and_then(|v| v.as_u64()).unwrap_or(0),
+            distinct_count: v.get("distinct_count").and_then(|v| v.as_u64()).unwrap_or(0),
+            has_histogram: v.get("has_histogram").and_then(|v| v.as_bool()).unwrap_or(false),
+            has_mcv: v.get("has_mcv").and_then(|v| v.as_bool()).unwrap_or(false),
+        }
+    }
+
+    /// Calculate staleness indicator (rough estimate)
+    /// Returns a color hint: "green" (good), "yellow" (stale), "red" (very stale)
+    pub fn staleness_hint(&self) -> &'static str {
+        // If we have both histogram and MCV, the index is well-analyzed
+        if self.has_histogram && self.has_mcv {
+            "green"
+        } else if self.has_histogram || self.has_mcv {
+            "yellow"
+        } else if self.num_keys > 0 {
+            // Has keys but no statistics
+            "red"
+        } else {
+            // Empty index, no statistics needed
+            "green"
+        }
+    }
+}
+
 /// Index management state
 #[derive(Debug, Clone, Default)]
 pub struct IndexState {
@@ -18,6 +66,10 @@ pub struct IndexState {
     pub sparse: bool,
     pub error: Option<String>,
     pub message: Option<String>,
+    /// Detailed statistics for each index
+    pub statistics: Vec<IndexStatistics>,
+    /// Whether we're currently analyzing (refreshing stats)
+    pub is_analyzing: bool,
 }
 
 impl IndexState {
@@ -35,7 +87,34 @@ impl IndexState {
             sparse: false,
             error: None,
             message: None,
+            statistics: Vec::new(),
+            is_analyzing: false,
         }
+    }
+
+    /// Update statistics from MCP response
+    pub fn update_statistics(&mut self, stats: Vec<serde_json::Value>) {
+        self.statistics = stats.iter().map(IndexStatistics::from_value).collect();
+        self.is_analyzing = false;
+    }
+
+    /// Get statistics for the currently selected index
+    pub fn selected_statistics(&self) -> Option<&IndexStatistics> {
+        if self.indexes.is_empty() {
+            return None;
+        }
+        let selected_name = &self.indexes[self.selected_index];
+        self.statistics.iter().find(|s| &s.name == selected_name)
+    }
+
+    /// Check if any index needs refresh (has keys but no statistics)
+    pub fn has_stale_indexes(&self) -> bool {
+        self.statistics.iter().any(|s| s.staleness_hint() == "red")
+    }
+
+    /// Count stale indexes
+    pub fn stale_index_count(&self) -> usize {
+        self.statistics.iter().filter(|s| s.staleness_hint() == "red").count()
     }
 
     pub fn select_up(&mut self) {

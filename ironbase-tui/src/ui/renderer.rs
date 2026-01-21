@@ -107,6 +107,9 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
             Modal::Listener => {
                 modals::listener::render(frame, frame.area(), &app.listener_state, &theme);
             }
+            Modal::VectorSearch => {
+                modals::vector::render(frame, frame.area(), &app.vector_state, &theme);
+            }
         }
     }
 }

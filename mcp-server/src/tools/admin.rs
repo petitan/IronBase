@@ -112,9 +112,9 @@ fn handle_admin_create_system_collection(
 ) -> Result<Value> {
     let p: AdminCollectionParams = AdminCollectionParams::parse(params)?;
     verify_admin_key_opt(p.admin_key.as_deref())?;
-    adapter.create_system_collection(&p.name)?;
+    adapter.create_system_collection(&p.collection)?;
     Ok(
-        json!({"success": true, "collection": p.name, "flags": {"is_system": true, "protected": true, "hidden": false}}),
+        json!({"success": true, "collection": p.collection, "flags": {"is_system": true, "protected": true, "hidden": false}}),
     )
 }
 
@@ -133,8 +133,8 @@ fn handle_admin_set_collection_flags(
 fn handle_admin_drop_protected(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: AdminCollectionParams = AdminCollectionParams::parse(params)?;
     verify_admin_key_opt(p.admin_key.as_deref())?;
-    adapter.force_drop_collection(&p.name)?;
-    Ok(json!({"success": true, "dropped": p.name}))
+    adapter.force_drop_collection(&p.collection)?;
+    Ok(json!({"success": true, "dropped": p.collection}))
 }
 
 fn handle_admin_apikey_create(

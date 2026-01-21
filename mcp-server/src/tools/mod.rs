@@ -299,6 +299,7 @@ fn dispatch_tool_inner(
         | "index_list_fulltext"
         | "index_drop"
         | "index_stats_refresh"
+        | "index_stats"
         | "fuzzy_search"
         | "fulltext_search"
         | "fulltext_analyze"

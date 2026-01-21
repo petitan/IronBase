@@ -35,23 +35,23 @@ fn handle_collection_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 
 fn handle_collection_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: CollectionCreateParams = CollectionCreateParams::parse(params)?;
-    adapter.create_collection(&p.name)?;
-    Ok(json!({"success": true, "collection": p.name}))
+    adapter.create_collection(&p.collection)?;
+    Ok(json!({"success": true, "collection": p.collection}))
 }
 
 fn handle_collection_drop(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: CollectionDropParams = CollectionDropParams::parse(params)?;
-    adapter.drop_collection(&p.name)?;
+    adapter.drop_collection(&p.collection)?;
 
     // Also delete ACL for this collection
     let acl_deleted = adapter
-        .delete_one(SYSTEM_ACL_COLLECTION, json!({"collection": &p.name}))
+        .delete_one(SYSTEM_ACL_COLLECTION, json!({"collection": &p.collection}))
         .unwrap_or(0)
         > 0;
 
     Ok(json!({
         "success": true,
-        "dropped": p.name,
+        "dropped": p.collection,
         "acl_deleted": acl_deleted
     }))
 }

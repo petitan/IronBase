@@ -19,6 +19,7 @@ pub mod script;
 pub mod search;
 pub mod server_info;
 pub mod update;
+pub mod vector;
 
 use crate::theme::Theme;
 use ratatui::prelude::*;

@@ -1192,6 +1192,37 @@ impl IronBaseAdapter {
         Ok(())
     }
 
+    /// Get detailed index statistics for a collection
+    ///
+    /// Returns information about each index including:
+    /// - num_keys: Total keys in the index
+    /// - distinct_count: Number of unique values
+    /// - has_histogram: Whether histogram data is available
+    /// - has_mcv: Whether MCV (Most Common Values) data is available
+    pub fn get_index_statistics(&self, collection: &str) -> Result<Vec<Value>> {
+        use serde_json::json;
+
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let stats = coll.get_index_statistics();
+
+        let result: Vec<Value> = stats
+            .into_iter()
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "field": s.field,
+                    "num_keys": s.num_keys,
+                    "distinct_count": s.distinct_count,
+                    "has_histogram": s.has_histogram,
+                    "has_mcv": s.has_mcv
+                })
+            })
+            .collect();
+
+        Ok(result)
+    }
+
     /// Explain query execution plan (uses get_collection - no implicit creation)
     pub fn explain(&self, collection: &str, query: Value) -> Result<Value> {
         let db = self.db.read();

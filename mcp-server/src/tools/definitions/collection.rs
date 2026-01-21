@@ -20,12 +20,12 @@ pub fn tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": {
+                    "collection": {
                         "type": "string",
                         "description": "Collection name. Alphanumeric with underscores allowed."
                     }
                 },
-                "required": ["name"]
+                "required": ["collection"]
             }
         }),
         json!({
@@ -35,12 +35,12 @@ pub fn tools() -> Vec<Value> {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "name": {
+                    "collection": {
                         "type": "string",
                         "description": "Collection name to delete"
                     }
                 },
-                "required": ["name"]
+                "required": ["collection"]
             }
         }),
     ]

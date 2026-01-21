@@ -65,6 +65,8 @@ pub struct InsertManyParams {
 #[derive(Debug, Deserialize)]
 pub struct UpdateParams {
     pub collection: String,
+    /// Accepts both "filter" and "query" for API consistency
+    #[serde(alias = "query")]
     pub filter: Value,
     pub update: Value,
     #[serde(default)]
@@ -75,6 +77,8 @@ pub struct UpdateParams {
 #[derive(Debug, Deserialize)]
 pub struct DeleteParams {
     pub collection: String,
+    /// Accepts both "filter" and "query" for API consistency
+    #[serde(alias = "query")]
     pub filter: Value,
 }
 
@@ -262,13 +266,13 @@ pub struct ListCollectionsParams {}
 /// Parameters for `collection_create` tool
 #[derive(Debug, Deserialize)]
 pub struct CollectionCreateParams {
-    pub name: String,
+    pub collection: String,
 }
 
 /// Parameters for `collection_drop` tool
 #[derive(Debug, Deserialize)]
 pub struct CollectionDropParams {
-    pub name: String,
+    pub collection: String,
 }
 
 /// Parameters for `collection_stats` tool
@@ -313,6 +317,8 @@ pub struct TransactionInsertParams {
 pub struct TransactionUpdateParams {
     pub transaction_id: String,
     pub collection: String,
+    /// Accepts both "filter" and "query" for API consistency
+    #[serde(alias = "query")]
     pub filter: Value,
     pub update: Value,
 }
@@ -322,6 +328,8 @@ pub struct TransactionUpdateParams {
 pub struct TransactionDeleteParams {
     pub transaction_id: String,
     pub collection: String,
+    /// Accepts both "filter" and "query" for API consistency
+    #[serde(alias = "query")]
     pub filter: Value,
 }
 
@@ -460,7 +468,7 @@ pub struct AdminKeyParams {
 /// Parameters for `admin_create_system_collection` and `admin_drop_protected` tools
 #[derive(Debug, Deserialize)]
 pub struct AdminCollectionParams {
-    pub name: String,
+    pub collection: String,
     pub admin_key: Option<String>,
 }
 

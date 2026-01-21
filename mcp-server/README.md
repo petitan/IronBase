@@ -104,7 +104,7 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
   "params": {
     "name": "collection_create",
     "arguments": {
-      "name": "users"
+      "collection": "users"
     }
   }
 }

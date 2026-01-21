@@ -32,6 +32,8 @@ pub use crate::state::{
     QueryState, QUERY_TEMPLATES,
     // Script
     ScriptConfirmAction, ScriptFocus, ScriptInfo, ScriptMode, ScriptResult, ScriptState, ScriptVersion,
+    // Vector
+    VectorSearchState,
 };
 
 // === UI Layout Constants ===
@@ -129,6 +131,9 @@ pub struct App {
     // Listener modal state
     pub listener_state: crate::modals::listener::ListenerState,
 
+    // Vector search state
+    pub vector_state: VectorSearchState,
+
     // Connection type (for permission checks)
     pub connection_type: ConnectionType,
 
@@ -184,6 +189,7 @@ impl App {
             fulltext_state: FulltextState::default(),
             acl_state: crate::modals::acl::AclState::new(),
             listener_state: crate::modals::listener::ListenerState::new(),
+            vector_state: VectorSearchState::default(),
             connection_type: ConnectionType::Unknown,
             config,
             status_message: None,
@@ -1657,6 +1663,54 @@ impl App {
         }
     }
 
+    /// Analyze indexes - refresh statistics (async)
+    pub async fn execute_analyze_index_async(&mut self) {
+        let collection = self.index_state.collection.clone();
+
+        let Some(db) = &self.db else {
+            self.set_error("Nincs megnyitva adatbázis");
+            return;
+        };
+
+        // Set analyzing state
+        self.index_state.is_analyzing = true;
+        self.index_state.message = Some("Analyzing indexes...".to_string());
+
+        // Refresh statistics
+        match db.refresh_index_stats(&collection).await {
+            Ok(()) => {
+                // Load updated statistics
+                match db.get_index_statistics(&collection).await {
+                    Ok(stats) => {
+                        self.index_state.update_statistics(stats);
+                        self.index_state.message = Some("Index statistics frissítve!".to_string());
+                    }
+                    Err(e) => {
+                        self.index_state.is_analyzing = false;
+                        self.index_state.error = Some(format!("Stats load error: {}", e));
+                    }
+                }
+            }
+            Err(e) => {
+                self.index_state.is_analyzing = false;
+                self.index_state.error = Some(format!("Analyze error: {}", e));
+            }
+        }
+    }
+
+    /// Load index statistics (async) - call when opening index modal
+    pub async fn load_index_statistics_async(&mut self) {
+        let collection = self.index_state.collection.clone();
+
+        let Some(db) = &self.db else {
+            return;
+        };
+
+        if let Ok(stats) = db.get_index_statistics(&collection).await {
+            self.index_state.update_statistics(stats);
+        }
+    }
+
     // === Async Query ===
 
     /// Execute the query (async) - max 1000 results
@@ -1697,6 +1751,36 @@ impl App {
             }
             Err(e) => {
                 self.query_state.error = Some(format!("Lekérdezés hiba: {}", e));
+            }
+        }
+    }
+
+    /// Execute query explain (async) - shows query plan
+    pub async fn execute_explain_async(&mut self) {
+        let query = match self.query_state.parse_query() {
+            Ok(q) => q,
+            Err(e) => {
+                self.query_state.error = Some(format!("JSON hiba: {}", e));
+                return;
+            }
+        };
+
+        let collection = self.query_state.collection.clone();
+
+        let Some(db) = &self.db else {
+            self.set_error("Nincs megnyitva adatbázis");
+            return;
+        };
+
+        match db.explain(&collection, &query).await {
+            Ok(plan) => {
+                self.query_state.explain_result = Some(plan);
+                self.query_state.show_explain = true;
+                self.query_state.error = None;
+                self.set_status("Query plan lekérdezve");
+            }
+            Err(e) => {
+                self.query_state.error = Some(format!("Explain hiba: {}", e));
             }
         }
     }

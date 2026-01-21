@@ -19,12 +19,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) 
     ])
     .split(inner);
 
-    // Help text
+    // Help text - include Explain button
     let help = Paragraph::new(Line::from(vec![
         Span::styled("^S", Style::default().fg(theme.accent)),
         Span::raw(" Futtat  "),
-        Span::styled("Enter", Style::default().fg(theme.accent)),
-        Span::raw(" Alkalmaz  "),
+        Span::styled("^E", Style::default().fg(theme.accent)),
+        Span::raw(" Explain  "),
         Span::styled("^j/k", Style::default().fg(theme.accent)),
         Span::raw(" Nav  "),
         Span::styled("^T", Style::default().fg(theme.accent)),
@@ -38,8 +38,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) 
     // Query editor area
     render_editor(frame, chunks[1], state, theme);
 
-    // Results preview
-    render_results(frame, chunks[2], state, theme);
+    // Results or Explain panel
+    if state.show_explain && state.explain_result.is_some() {
+        render_explain(frame, chunks[2], state, theme);
+    } else {
+        render_results(frame, chunks[2], state, theme);
+    }
 
     // Status/error line
     render_status(frame, chunks[3], state, theme);
@@ -234,10 +238,11 @@ fn render_status(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Them
         ])
     } else {
         let (line, col) = (state.cursor_line + 1, state.cursor_col + 1);
+        let view_indicator = if state.show_explain { " [Explain]" } else { "" };
         Line::from(vec![Span::styled(
             format!(
-                "Sor: {} Oszlop: {} | Kollekció: {}",
-                line, col, state.collection
+                "Sor: {} Oszlop: {} | Kollekció: {}{}",
+                line, col, state.collection, view_indicator
             ),
             Style::default().fg(theme.muted),
         )])
@@ -245,4 +250,149 @@ fn render_status(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Them
 
     let status = Paragraph::new(status_text);
     frame.render_widget(status, area);
+}
+
+/// Render query explain panel
+fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) {
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "┌─ Query Plan ─────────────────────────────────┐",
+            Style::default().fg(theme.accent).bold(),
+        )),
+    ];
+
+    if let Some(ref explain) = state.explain_result {
+        // Extract plan details
+        let plan_type = explain
+            .get("plan_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown");
+
+        let index_name = explain
+            .get("index_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+
+        let estimated_rows = explain
+            .get("estimated_rows")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "?".to_string());
+
+        let selectivity = explain
+            .get("selectivity")
+            .and_then(|v| v.as_f64())
+            .map(|s| format!("{:.4}", s))
+            .unwrap_or_else(|| "?".to_string());
+
+        let uses_mcv = explain
+            .get("uses_mcv")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let uses_histogram = explain
+            .get("uses_histogram")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Plan type line with icon
+        let plan_icon = match plan_type {
+            "IndexScan" | "SparseIndexScan" => "🔍",
+            "CollectionScan" => "📋",
+            "CompoundIndexScan" => "🔎",
+            _ => "❓",
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(theme.accent)),
+            Span::styled("Plan: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{} {}", plan_icon, plan_type),
+                Style::default().fg(theme.fg).bold(),
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(theme.accent)),
+            Span::styled("Index: ", Style::default().fg(theme.muted)),
+            Span::styled(
+                index_name,
+                if index_name == "-" {
+                    Style::default().fg(theme.warning)
+                } else {
+                    Style::default().fg(theme.success)
+                },
+            ),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(theme.accent)),
+            Span::styled("Est. rows: ", Style::default().fg(theme.muted)),
+            Span::styled(estimated_rows, Style::default().fg(theme.fg)),
+        ]));
+
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(theme.accent)),
+            Span::styled("Selectivity: ", Style::default().fg(theme.muted)),
+            Span::styled(selectivity, Style::default().fg(theme.fg)),
+        ]));
+
+        // Statistics usage
+        let stats_info = match (uses_mcv, uses_histogram) {
+            (true, true) => "MCV + Histogram",
+            (true, false) => "MCV",
+            (false, true) => "Histogram",
+            (false, false) => "Basic",
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(theme.accent)),
+            Span::styled("Statistics: ", Style::default().fg(theme.muted)),
+            Span::styled(stats_info, Style::default().fg(theme.fg)),
+        ]));
+
+        // Show raw JSON if available (for debugging)
+        if let Some(raw) = explain.get("raw") {
+            let raw_str = serde_json::to_string_pretty(raw).unwrap_or_default();
+            lines.push(Line::from(Span::styled(
+                "│",
+                Style::default().fg(theme.accent),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("│ ", Style::default().fg(theme.accent)),
+                Span::styled("Raw: ", Style::default().fg(theme.muted)),
+            ]));
+            for raw_line in raw_str.lines().take(5) {
+                lines.push(Line::from(vec![
+                    Span::styled("│   ", Style::default().fg(theme.accent)),
+                    Span::styled(
+                        truncate(raw_line, area.width.saturating_sub(6) as usize),
+                        Style::default().fg(theme.muted),
+                    ),
+                ]));
+            }
+        }
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled("│ ", Style::default().fg(theme.accent)),
+            Span::styled(
+                "Nincs explain eredmény. Nyomj ^E-t.",
+                Style::default().fg(theme.muted),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(Span::styled(
+        "└──────────────────────────────────────────────┘",
+        Style::default().fg(theme.accent),
+    )));
+
+    // Toggle hint
+    lines.push(Line::from(Span::styled(
+        "[^E] Váltás eredmények/explain között",
+        Style::default().fg(theme.muted),
+    )));
+
+    let explain_widget = Paragraph::new(lines);
+    frame.render_widget(explain_widget, area);
 }

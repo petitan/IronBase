@@ -33,6 +33,10 @@ pub struct QueryState {
     pub result_index: usize,
     /// Total result count (may be > results.len() if truncated)
     pub total_count: usize,
+    /// Query explain result (plan details)
+    pub explain_result: Option<Value>,
+    /// Show explain panel instead of results
+    pub show_explain: bool,
 }
 
 impl Default for QueryState {
@@ -48,6 +52,8 @@ impl Default for QueryState {
             template_index: 0,
             result_index: 0,
             total_count: 0,
+            explain_result: None,
+            show_explain: false,
         }
     }
 }
@@ -65,6 +71,8 @@ impl QueryState {
             template_index: 0,
             result_index: 0,
             total_count: 0,
+            explain_result: None,
+            show_explain: false,
         }
     }
 
@@ -99,6 +107,15 @@ impl QueryState {
         self.results = None;
         self.result_index = 0;
         self.total_count = 0;
+        self.explain_result = None;
+        self.show_explain = false;
+    }
+
+    /// Toggle between results and explain view
+    pub fn toggle_explain_view(&mut self) {
+        if self.explain_result.is_some() || self.results.is_some() {
+            self.show_explain = !self.show_explain;
+        }
     }
 
     /// Toggle template selector

@@ -24,6 +24,7 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
         "index_list_fulltext" => handle_index_list_fulltext(params, adapter),
         "index_drop" => handle_index_drop(params, adapter),
         "index_stats_refresh" => handle_index_stats_refresh(params, adapter),
+        "index_stats" => handle_index_stats(params, adapter),
         "fuzzy_search" => handle_fuzzy_search(params, adapter),
         "fulltext_search" => handle_fulltext_search(params, adapter),
         "fulltext_analyze" => handle_fulltext_analyze(params),
@@ -151,6 +152,20 @@ fn handle_index_stats_refresh(params: Value, adapter: &Arc<IronBaseAdapter>) -> 
     Ok(json!({
         "success": true,
         "message": format!("Index statistics refreshed for collection '{}'", p.collection)
+    }))
+}
+
+/// Get detailed statistics for all B+ tree indexes in a collection.
+///
+/// Returns num_keys, distinct_count, has_histogram, has_mcv for each index.
+fn handle_index_stats(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    let p: IndexListParams = IndexListParams::parse(params)?;
+    validate_collection_name(&p.collection)?;
+
+    let stats = adapter.get_index_statistics(&p.collection)?;
+    Ok(json!({
+        "indexes": stats,
+        "count": stats.len()
     }))
 }
 

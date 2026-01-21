@@ -290,10 +290,41 @@ impl DbWrapper {
         Ok(())
     }
 
+    /// Refresh index statistics for a collection
+    ///
+    /// Recomputes statistics (distinct_count, histograms, MCV) for all indexes.
+    /// Run this after bulk inserts for optimal query plans.
+    pub async fn refresh_index_stats(&self, collection: &str) -> Result<()> {
+        self.client.refresh_index_stats(collection).await?;
+        Ok(())
+    }
+
+    /// Get detailed index statistics for a collection
+    ///
+    /// Returns statistics for each index including num_keys, distinct_count,
+    /// has_histogram, has_mcv.
+    pub async fn get_index_statistics(&self, collection: &str) -> Result<Vec<Value>> {
+        let stats = self.client.get_index_statistics(collection).await?;
+        Ok(stats)
+    }
+
     /// Run aggregation pipeline
     pub async fn aggregate(&self, collection: &str, pipeline: &Value) -> Result<Vec<Value>> {
         let docs = self.client.aggregate(collection, pipeline).await?;
         Ok(docs)
+    }
+
+    /// Explain query plan
+    ///
+    /// Returns the query execution plan including:
+    /// - plan_type: IndexScan, CollectionScan, etc.
+    /// - index_name: Which index is used (if any)
+    /// - estimated_rows: Estimated number of documents
+    /// - selectivity: Query selectivity estimate
+    /// - uses_mcv/uses_histogram: Whether statistics are used
+    pub async fn explain(&self, collection: &str, query: &Value) -> Result<Value> {
+        let plan = self.client.explain(collection, query).await?;
+        Ok(plan)
     }
 
     /// Delete a document by _id
@@ -533,6 +564,57 @@ impl DbWrapper {
     pub async fn listener_disable(&self, id: &str) -> Result<bool> {
         let success = self.client.listener_disable(id).await?;
         Ok(success)
+    }
+
+    // === Vector Index and Search ===
+
+    /// Create a vector index for similarity search
+    pub async fn create_vector_index(
+        &self,
+        collection: &str,
+        field: &str,
+        dimension: usize,
+        metric: &str,
+    ) -> Result<String> {
+        let name = self.client.create_vector_index(collection, field, dimension, metric).await?;
+        Ok(name)
+    }
+
+    /// List all vector indexes on a collection
+    pub async fn list_vector_indexes(&self, collection: &str) -> Result<Vec<Value>> {
+        let indexes = self.client.list_vector_indexes(collection).await?;
+        Ok(indexes)
+    }
+
+    /// Drop a vector index
+    pub async fn drop_vector_index(&self, collection: &str, index_name: &str) -> Result<()> {
+        self.client.drop_vector_index(collection, index_name).await?;
+        Ok(())
+    }
+
+    /// Perform vector similarity search
+    pub async fn vector_search(
+        &self,
+        collection: &str,
+        field: &str,
+        vector: &[f64],
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let results = self.client.vector_search(collection, field, vector, limit).await?;
+        Ok(results)
+    }
+
+    /// Perform vector similarity search with filter
+    pub async fn vector_search_filter(
+        &self,
+        collection: &str,
+        field: &str,
+        vector: &[f64],
+        filter: &Value,
+        limit: usize,
+    ) -> Result<Vec<Value>> {
+        let results = self.client.vector_search_filter(collection, field, vector, filter, limit).await?;
+        Ok(results)
     }
 }
 

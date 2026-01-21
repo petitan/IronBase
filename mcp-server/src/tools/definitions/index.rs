@@ -184,6 +184,12 @@ pub fn tools() -> Vec<Value> {
             "inputSchema": schemas::collection_only()
         }),
         json!({
+            "name": "index_stats",
+            "title": "Get Index Statistics",
+            "description": "Get detailed statistics for all B+ tree indexes in a collection. Returns num_keys, distinct_count, has_histogram, has_mcv for each index. Use this to monitor index health and decide when to refresh statistics.",
+            "inputSchema": schemas::collection_only()
+        }),
+        json!({
             "name": "explain",
             "title": "Explain Query Plan",
             "description": "Analyze query execution plan showing which indexes will be used.",

@@ -13,6 +13,7 @@ pub mod index;
 pub mod fulltext;
 pub mod query;
 pub mod script;
+pub mod vector;
 
 // Re-export all types for convenience
 pub use types::*;
@@ -25,3 +26,4 @@ pub use index::*;
 pub use fulltext::*;
 pub use query::*;
 pub use script::*;
+pub use vector::*;

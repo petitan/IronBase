@@ -454,6 +454,42 @@ impl McpClient {
         Ok(())
     }
 
+    /// Refresh index statistics for a collection
+    ///
+    /// Recomputes statistics (distinct_count, histograms, MCV) for all indexes.
+    /// Run this after bulk inserts for optimal query plans.
+    pub async fn refresh_index_stats(&self, collection: &str) -> McpResult<()> {
+        let args = serde_json::json!({
+            "collection": collection
+        });
+
+        self.call_tool("index_stats_refresh", args).await?;
+        Ok(())
+    }
+
+    /// Get detailed index statistics for a collection
+    ///
+    /// Returns statistics for each index including:
+    /// - name: Index name
+    /// - field: Primary field
+    /// - num_keys: Total keys in the index
+    /// - distinct_count: Number of unique values
+    /// - has_histogram: Whether histogram data is available
+    /// - has_mcv: Whether MCV data is available
+    pub async fn get_index_statistics(&self, collection: &str) -> McpResult<Vec<Value>> {
+        let args = serde_json::json!({
+            "collection": collection
+        });
+
+        let result = self.call_tool("index_stats", args).await?;
+        // Result is {"indexes": [...], "count": N}
+        let indexes: Vec<Value> = result
+            .get("indexes")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(indexes)
+    }
+
     /// Get database statistics
     pub async fn db_stats(&self) -> McpResult<Value> {
         let result = self.call_tool("db_stats", serde_json::json!({})).await?;
@@ -888,6 +924,116 @@ impl McpClient {
         }
         let result = self.call_tool("fulltext_search", args).await?;
         // Result is {"results": [{"document": {...}, "score": 0.5, "matched_tokens": [...]}]}
+        let results: Vec<Value> = result
+            .get("results")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(results)
+    }
+
+    // === Vector Index and Search operations ===
+
+    /// Create a vector index on a field for similarity search
+    ///
+    /// # Arguments
+    /// * `collection` - Collection name
+    /// * `field` - Field containing embedding vectors
+    /// * `dimension` - Vector dimension (must match embeddings)
+    /// * `metric` - Distance metric: "cosine", "euclidean", or "dot_product"
+    pub async fn create_vector_index(
+        &self,
+        collection: &str,
+        field: &str,
+        dimension: usize,
+        metric: &str,
+    ) -> McpResult<String> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "field": field,
+            "dimension": dimension,
+            "metric": metric
+        });
+        let result = self.call_tool("index_create_vector", args).await?;
+        let name = result.get("index_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        Ok(name)
+    }
+
+    /// List all vector indexes on a collection
+    pub async fn list_vector_indexes(&self, collection: &str) -> McpResult<Vec<Value>> {
+        let args = serde_json::json!({
+            "collection": collection
+        });
+        let result = self.call_tool("index_list_vector", args).await?;
+        let indexes: Vec<Value> = result
+            .get("indexes")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(indexes)
+    }
+
+    /// Drop a vector index
+    pub async fn drop_vector_index(&self, collection: &str, index_name: &str) -> McpResult<()> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "index_name": index_name
+        });
+        self.call_tool("index_drop_vector", args).await?;
+        Ok(())
+    }
+
+    /// Perform vector similarity search
+    ///
+    /// # Arguments
+    /// * `collection` - Collection with vector index
+    /// * `field` - Field with vector index
+    /// * `vector` - Query embedding vector
+    /// * `limit` - Maximum number of results
+    ///
+    /// # Returns
+    /// Vec of {document, distance} pairs sorted by similarity
+    pub async fn vector_search(
+        &self,
+        collection: &str,
+        field: &str,
+        vector: &[f64],
+        limit: usize,
+    ) -> McpResult<Vec<Value>> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "field": field,
+            "vector": vector,
+            "limit": limit
+        });
+        let result = self.call_tool("vector_search", args).await?;
+        let results: Vec<Value> = result
+            .get("results")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        Ok(results)
+    }
+
+    /// Perform vector similarity search with filter
+    ///
+    /// Hybrid search: filter is applied first, then vector search on matching documents.
+    pub async fn vector_search_filter(
+        &self,
+        collection: &str,
+        field: &str,
+        vector: &[f64],
+        filter: &Value,
+        limit: usize,
+    ) -> McpResult<Vec<Value>> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "field": field,
+            "vector": vector,
+            "filter": filter,
+            "limit": limit
+        });
+        let result = self.call_tool("vector_search_filter", args).await?;
         let results: Vec<Value> = result
             .get("results")
             .and_then(|v| serde_json::from_value(v.clone()).ok())

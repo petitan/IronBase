@@ -24,12 +24,12 @@ pub fn tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "admin_key": fields::admin_key(),
-                    "name": {
+                    "collection": {
                         "type": "string",
                         "description": "Collection name (conventionally prefixed with _system.)"
                     }
                 },
-                "required": ["admin_key", "name"]
+                "required": ["admin_key", "collection"]
             }
         }),
         json!({
@@ -65,12 +65,12 @@ pub fn tools() -> Vec<Value> {
                 "type": "object",
                 "properties": {
                     "admin_key": fields::admin_key(),
-                    "name": {
+                    "collection": {
                         "type": "string",
                         "description": "Collection name to delete"
                     }
                 },
-                "required": ["admin_key", "name"]
+                "required": ["admin_key", "collection"]
             }
         }),
         json!({

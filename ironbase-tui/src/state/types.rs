@@ -51,6 +51,7 @@ pub enum Modal {
     Fulltext,
     Acl,
     Listener,
+    VectorSearch,
 }
 
 /// Connection type for permission checks
