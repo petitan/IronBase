@@ -1617,6 +1617,19 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         self.query_cache
             .invalidate_collection(&prepared.collection_name);
 
+        // Auto-refresh stale index statistics after large batch inserts
+        // This keeps query optimizer statistics up-to-date without manual ANALYZE
+        if prepared.prepared_docs.len() >= 100 {
+            let refreshed = self.maybe_refresh_stale_stats();
+            if refreshed > 0 {
+                tracing::debug!(
+                    "Auto-refreshed {} stale index(es) after inserting {} docs",
+                    refreshed,
+                    prepared.prepared_docs.len()
+                );
+            }
+        }
+
         Ok(prepared.inserted_ids)
     }
 

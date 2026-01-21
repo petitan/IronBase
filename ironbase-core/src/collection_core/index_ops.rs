@@ -90,6 +90,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         result
     }
 
+    /// Check and refresh stale index statistics after batch operations
+    ///
+    /// Called automatically after insert_many with 100+ documents.
+    /// Only refreshes indexes that have become stale (>10% change or >10K writes).
+    ///
+    /// # Returns
+    /// Number of indexes that were refreshed
+    pub(crate) fn maybe_refresh_stale_stats(&self) -> usize {
+        let mut indexes = self.indexes.write();
+        indexes.check_and_refresh_stale_stats()
+    }
+
     /// Find with manual index hint (basic version)
     ///
     /// For sort/skip/limit/projection support, use `find_with_hint_ext` instead.
