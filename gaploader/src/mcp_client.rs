@@ -7,17 +7,47 @@ use serde_json::Value;
 /// High-level MCP client with tool wrappers
 pub struct McpClient {
     bridge: BridgeClient,
+    initialized: bool,
 }
 
 impl McpClient {
     /// Create new MCP client from bridge
     pub fn new(bridge: BridgeClient) -> Self {
-        Self { bridge }
+        Self { bridge, initialized: false }
+    }
+
+    /// Initialize the MCP session (must be called before other methods)
+    pub async fn initialize(&mut self) -> Result<()> {
+        if self.initialized {
+            return Ok(());
+        }
+
+        let params = serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": "gaploader",
+                "version": env!("CARGO_PKG_VERSION")
+            }
+        });
+
+        self.bridge.call("initialize", params).await?;
+        self.initialized = true;
+        Ok(())
+    }
+
+    /// Ensure initialized before any operation
+    async fn ensure_initialized(&mut self) -> Result<()> {
+        if !self.initialized {
+            self.initialize().await?;
+        }
+        Ok(())
     }
 
     /// List all collections
     pub async fn list_collections(&mut self) -> Result<Vec<String>> {
-        let result = self.bridge.call_tool("list_collections", Value::Null).await?;
+        self.ensure_initialized().await?;
+        let result = self.bridge.call_tool("collection_list", Value::Null).await?;
 
         let collections = result
             .get("collections")
@@ -34,20 +64,23 @@ impl McpClient {
 
     /// Create a new collection
     pub async fn create_collection(&mut self, name: &str) -> Result<()> {
-        let args = serde_json::json!({ "name": name });
-        self.bridge.call_tool("create_collection", args).await?;
+        self.ensure_initialized().await?;
+        let args = serde_json::json!({ "collection": name });
+        self.bridge.call_tool("collection_create", args).await?;
         Ok(())
     }
 
     /// Drop a collection
     pub async fn drop_collection(&mut self, name: &str) -> Result<()> {
-        let args = serde_json::json!({ "name": name });
-        self.bridge.call_tool("drop_collection", args).await?;
+        self.ensure_initialized().await?;
+        let args = serde_json::json!({ "collection": name });
+        self.bridge.call_tool("collection_drop", args).await?;
         Ok(())
     }
 
     /// Insert multiple documents
     pub async fn insert_many(&mut self, collection: &str, documents: &[Value]) -> Result<Vec<Value>> {
+        self.ensure_initialized().await?;
         let args = serde_json::json!({
             "collection": collection,
             "documents": documents
@@ -66,6 +99,7 @@ impl McpClient {
 
     /// Find documents matching a filter
     pub async fn find(&mut self, collection: &str, filter: &Value) -> Result<Vec<Value>> {
+        self.ensure_initialized().await?;
         let args = serde_json::json!({
             "collection": collection,
             "filter": filter
@@ -84,12 +118,13 @@ impl McpClient {
 
     /// Count documents matching a filter
     pub async fn count(&mut self, collection: &str, filter: &Value) -> Result<u64> {
+        self.ensure_initialized().await?;
         let args = serde_json::json!({
             "collection": collection,
             "filter": filter
         });
 
-        let result = self.bridge.call_tool("count", args).await?;
+        let result = self.bridge.call_tool("count_documents", args).await?;
 
         let count = result
             .get("count")
@@ -101,6 +136,7 @@ impl McpClient {
 
     /// Delete documents matching a filter
     pub async fn delete_many(&mut self, collection: &str, filter: &Value) -> Result<u64> {
+        self.ensure_initialized().await?;
         let args = serde_json::json!({
             "collection": collection,
             "filter": filter
@@ -123,6 +159,7 @@ impl McpClient {
         filter: &Value,
         update: &Value,
     ) -> Result<u64> {
+        self.ensure_initialized().await?;
         let args = serde_json::json!({
             "collection": collection,
             "filter": filter,
@@ -141,6 +178,7 @@ impl McpClient {
 
     /// Create an index on a field
     pub async fn create_index(&mut self, collection: &str, field: &str) -> Result<()> {
+        self.ensure_initialized().await?;
         let args = serde_json::json!({
             "collection": collection,
             "field": field
@@ -158,6 +196,7 @@ impl McpClient {
         dimension: usize,
         metric: &str,
     ) -> Result<()> {
+        self.ensure_initialized().await?;
         let args = serde_json::json!({
             "collection": collection,
             "field": field,
@@ -175,6 +214,7 @@ impl McpClient {
         texts: &[String],
         provider: Option<&str>,
     ) -> Result<Vec<Vec<f64>>> {
+        self.ensure_initialized().await?;
         let mut args = serde_json::json!({ "texts": texts });
 
         if let Some(p) = provider {
@@ -213,6 +253,7 @@ impl McpClient {
 
     /// Get distinct values for a field
     pub async fn distinct(&mut self, collection: &str, field: &str) -> Result<Vec<Value>> {
+        self.ensure_initialized().await?;
         // Use aggregation to get distinct values
         let pipeline = serde_json::json!([
             { "$group": { "_id": format!("${}", field) } },
