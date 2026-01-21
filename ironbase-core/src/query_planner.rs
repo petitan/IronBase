@@ -1,10 +1,8 @@
 // src/query_planner.rs
 // Query planner and optimizer - index selection
 
-use crate::index::{Histogram, IndexKey, IndexPrefixInfo};
+use crate::index::{Histogram, IndexKey, IndexPrefixInfo, MostCommonValues};
 use serde_json::Value;
-
-const DEFAULT_DOC_ESTIMATE: u64 = 1000;
 
 /// Parsed regex prefix information
 #[derive(Debug, Clone, PartialEq)]
@@ -67,9 +65,11 @@ impl CandidatePlan {
     }
 
     /// Create a candidate with default cost and auto-generated reason
+    /// Used when no statistics are available - uses high cost to deprioritize
     pub fn with_default_cost(plan: QueryPlan, field: String, index_name: &str) -> Self {
-        let reason = format!("Index {} on field {}", index_name, field);
-        Self::new(plan, field, DEFAULT_DOC_ESTIMATE as f64, reason)
+        let reason = format!("Index {} on field {} (no stats)", index_name, field);
+        // High cost when no statistics available - prefer indexes with known stats
+        Self::new(plan, field, 1_000_000.0, reason)
     }
 
     /// Create a candidate with selectivity-based cost
@@ -83,14 +83,16 @@ impl CandidatePlan {
         total_docs: u64,
         multikey_ratio: f32,
     ) -> Self {
-        let total_docs = total_docs.max(DEFAULT_DOC_ESTIMATE);
+        // Use actual total_docs - no artificial minimum
+        // If total_docs is 0, use 1 to avoid division by zero issues
+        let total_docs = total_docs.max(1);
         let base_cost = if distinct_count > 0 {
             // Selectivity = 1 / distinct_count
             // Estimated rows = total_docs / distinct_count
             // Cost = estimated rows (lower is better)
             (total_docs as f64) / (distinct_count as f64)
         } else {
-            // Unknown selectivity - use default high cost
+            // Unknown selectivity - use total_docs (worst case: scan all)
             total_docs as f64
         };
 
@@ -103,6 +105,54 @@ impl CandidatePlan {
         let reason = format!(
             "Index {} on field {} (distinct: {}, est. rows: {:.0})",
             index_name, field, distinct_count, estimated_cost
+        );
+        Self::new(plan, field, estimated_cost, reason)
+    }
+
+    /// Create a candidate with MCV-aware selectivity estimation
+    ///
+    /// Uses Most Common Values (MCV) statistics when available for more accurate
+    /// selectivity estimates on skewed distributions. Falls back to uniform
+    /// distribution if MCV is not available.
+    ///
+    /// # Algorithm
+    ///
+    /// 1. If query value is in MCV: selectivity = freq(value) / total_keys
+    /// 2. If not in MCV: uniform estimate over remaining values
+    pub fn with_selectivity_mcv(
+        plan: QueryPlan,
+        field: String,
+        index_name: &str,
+        query_value: &IndexKey,
+        distinct_count: u64,
+        total_docs: u64,
+        multikey_ratio: f32,
+        mcv: Option<&MostCommonValues>,
+    ) -> Self {
+        let total_docs = total_docs.max(1);
+
+        let (selectivity, estimation_method) = if let Some(mcv) = mcv {
+            if mcv.is_valid() {
+                let sel = mcv.estimate_selectivity(query_value, distinct_count);
+                (sel, "mcv")
+            } else if distinct_count > 0 {
+                (1.0 / distinct_count as f64, "uniform")
+            } else {
+                (1.0, "full-scan")
+            }
+        } else if distinct_count > 0 {
+            (1.0 / distinct_count as f64, "uniform")
+        } else {
+            (1.0, "full-scan")
+        };
+
+        let base_cost = selectivity * total_docs as f64;
+        let multikey_overhead = 1.0 + (multikey_ratio as f64 * 0.5);
+        let estimated_cost = base_cost * multikey_overhead;
+
+        let reason = format!(
+            "Index {} on field {} (selectivity: {:.4}, method: {}, est. rows: {:.0})",
+            index_name, field, selectivity, estimation_method, estimated_cost
         );
         Self::new(plan, field, estimated_cost, reason)
     }
@@ -124,7 +174,8 @@ impl CandidatePlan {
         total_docs: u64,
         multikey_ratio: f32,
     ) -> Self {
-        let total_docs = total_docs.max(DEFAULT_DOC_ESTIMATE);
+        // Use actual total_docs - no artificial minimum
+        let total_docs = total_docs.max(1);
 
         // Use histogram if available, otherwise fall back to uniform estimate
         let (selectivity, estimation_method) = if let Some(hist) = histogram {
@@ -358,7 +409,7 @@ impl QueryPlanner {
                     field,
                     &info.index_name,
                     info.distinct_count,
-                    DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
+                    info.num_keys, // Use actual index key count
                     info.multikey_ratio,
                 ));
             } else {
@@ -390,10 +441,12 @@ impl QueryPlanner {
                     QueryPlan::MultiRegexPrefixScan { prefixes, .. } => prefixes.len(),
                     _ => 1,
                 };
+                // Use actual num_keys for cost estimation
+                let total_docs = info.num_keys.max(1);
                 let base_cost = if info.distinct_count > 0 {
-                    (DEFAULT_DOC_ESTIMATE as f64) / info.distinct_count as f64
+                    (total_docs as f64) / info.distinct_count as f64
                 } else {
-                    DEFAULT_DOC_ESTIMATE as f64
+                    total_docs as f64
                 };
                 candidates.push(CandidatePlan::new(
                     plan,
@@ -470,17 +523,20 @@ impl QueryPlanner {
                     let plan = QueryPlan::IndexScan {
                         index_name: info.index_name.clone(),
                         field: field.clone(),
-                        key,
+                        key: key.clone(),
                         is_compound: info.is_compound,
                     };
 
-                    candidates.push(CandidatePlan::with_selectivity(
+                    // Use MCV-aware selectivity estimation for more accurate cost
+                    candidates.push(CandidatePlan::with_selectivity_mcv(
                         plan,
                         field.clone(),
                         &info.index_name,
+                        &key,
                         info.distinct_count,
-                        DEFAULT_DOC_ESTIMATE, // Default estimate if unknown
+                        info.num_keys,
                         info.multikey_ratio,
+                        info.mcv.as_ref(),
                     ));
                 }
             }
@@ -1041,6 +1097,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
             IndexPrefixInfo {
                 index_name: "users_id".to_string(),
@@ -1055,6 +1112,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
         ];
 
@@ -1095,6 +1153,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1138,6 +1197,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1176,6 +1236,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1198,6 +1259,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1220,6 +1282,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1242,6 +1305,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         // Complex queries not yet supported
@@ -1274,6 +1338,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1318,6 +1383,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1348,6 +1414,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1378,6 +1445,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1446,6 +1514,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
             IndexPrefixInfo {
                 index_name: "users_email_ci".to_string(),
@@ -1460,6 +1529,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
         ];
 
@@ -1500,6 +1570,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         // No CI index available - should return None (collection scan)
@@ -1531,6 +1602,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let result = QueryPlanner::analyze_query_with_fields(&query, &index_fields);
@@ -1555,6 +1627,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1569,6 +1642,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
         ];
 
@@ -1607,6 +1681,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
             IndexPrefixInfo {
                 index_name: "products_category_brand".to_string(),
@@ -1621,6 +1696,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
         ];
 
@@ -1689,8 +1765,10 @@ mod tests {
 
         let candidate = CandidatePlan::with_default_cost(plan, "field".to_string(), "test_idx");
 
-        assert_eq!(candidate.estimated_cost, DEFAULT_DOC_ESTIMATE as f64);
+        // High cost (1_000_000) when no statistics available - prefer indexes with known stats
+        assert_eq!(candidate.estimated_cost, 1_000_000.0);
         assert!(candidate.reason.contains("test_idx"));
+        assert!(candidate.reason.contains("no stats"));
     }
 
     #[test]
@@ -1711,6 +1789,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
             IndexPrefixInfo {
                 index_name: "orders_status_date".to_string(),
@@ -1725,6 +1804,7 @@ mod tests {
                 null_count: 0,
                 multikey_ratio: 0.0,
                 histogram: None,
+                mcv: None,
             },
         ];
 
@@ -1770,6 +1850,7 @@ mod tests {
             null_count: 0,
             multikey_ratio: 0.0,
             histogram: None,
+            mcv: None,
         }];
 
         let explain = QueryPlanner::explain_query_with_fields(&query, &index_fields);

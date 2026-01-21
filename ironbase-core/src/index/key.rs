@@ -1,6 +1,6 @@
 // Index key types and ordering
 
-use super::btree::Histogram;
+use super::btree::{Histogram, MostCommonValues};
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
@@ -193,4 +193,7 @@ pub struct IndexPrefixInfo {
     /// Histogram for range query selectivity estimation
     /// Only populated for large indexes (100k+ entries) with single field
     pub histogram: Option<Histogram>,
+    /// Most Common Values for equality selectivity estimation
+    /// Only populated for indexes with 1000+ entries
+    pub mcv: Option<MostCommonValues>,
 }

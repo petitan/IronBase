@@ -336,6 +336,7 @@ impl IndexManager {
                 null_count: index.metadata.stats.null_count,
                 multikey_ratio: index.metadata.stats.multikey_ratio,
                 histogram: index.metadata.stats.histogram.clone(),
+                mcv: index.metadata.stats.mcv.clone(),
             });
         }
 
@@ -354,6 +355,7 @@ impl IndexManager {
                 null_count: 0,           // No null count for legacy indexes
                 multikey_ratio: 0.0,     // No multikey tracking for legacy indexes
                 histogram: None,         // No histogram for legacy indexes
+                mcv: None,               // No MCV for legacy indexes
             });
         }
 
@@ -874,6 +876,31 @@ impl IndexManager {
             "Index not found: {}",
             index_name
         )))
+    }
+
+    /// Check for stale statistics and refresh if needed
+    ///
+    /// Uses staleness heuristic: >10% change OR >10K writes since last refresh.
+    /// Should be called after batch operations for automatic statistics maintenance.
+    ///
+    /// # Returns
+    /// Number of indexes that were refreshed
+    pub fn check_and_refresh_stale_stats(&mut self) -> usize {
+        let mut refreshed_count = 0;
+
+        for (name, index) in self.btree_indexes.iter_mut() {
+            if index.needs_stats_refresh() {
+                tracing::debug!(
+                    "Auto-refreshing stats for index '{}' (staleness: {:.2})",
+                    name,
+                    index.staleness_ratio()
+                );
+                index.refresh_stats();
+                refreshed_count += 1;
+            }
+        }
+
+        refreshed_count
     }
 
     // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========

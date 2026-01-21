@@ -212,6 +212,9 @@ mod vector_ops;
 // Public exports for Top-K algorithm
 pub use topk::{topk_select, topk_select_with_skip};
 
+// Public exports for index statistics
+pub use index_ops::IndexStatisticsInfo;
+
 // Public exports for Query Executor
 pub use query_executor::{
     compare_docs_by_sort, topk_documents, ExecutionMethod, ExecutionStats, QueryOptions,

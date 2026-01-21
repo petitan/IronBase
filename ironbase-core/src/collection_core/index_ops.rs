@@ -14,6 +14,23 @@ use crate::value_utils::{get_all_nested_values, get_nested_value, path_crosses_a
 use super::index_persistence::persist_index_to_disk;
 use super::{CollectionCore, QueryExecutionContext};
 
+/// Index statistics information for monitoring
+#[derive(Debug, Clone)]
+pub struct IndexStatisticsInfo {
+    /// Index name
+    pub name: String,
+    /// Primary field (first field for compound indexes)
+    pub field: String,
+    /// Total number of keys in the index
+    pub num_keys: u64,
+    /// Distinct value count (for selectivity estimation)
+    pub distinct_count: u64,
+    /// Whether histogram data is available (for range queries)
+    pub has_histogram: bool,
+    /// Whether MCV data is available (for equality queries on skewed data)
+    pub has_mcv: bool,
+}
+
 /// Index operations for CollectionCore
 impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Explain query execution plan without executing
@@ -23,6 +40,54 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let plan = QueryPlanner::explain_query_with_fields(query_json, &index_fields);
         Ok(plan)
+    }
+
+    /// ANALYZE - Refresh index statistics for better query planning
+    ///
+    /// Updates selectivity statistics (distinct count, MCV, histogram) for
+    /// improved query optimizer cost estimation.
+    ///
+    /// # Arguments
+    /// * `index_name` - Optional index name. If None, refreshes all indexes.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// // Refresh all indexes
+    /// collection.analyze(None)?;
+    ///
+    /// // Refresh specific index
+    /// collection.analyze(Some("users_email_idx"))?;
+    /// ```
+    pub fn analyze(&self, index_name: Option<&str>) -> Result<()> {
+        let mut indexes = self.indexes.write();
+        if let Some(name) = index_name {
+            indexes.refresh_index_stats(name)
+        } else {
+            indexes.refresh_all_stats();
+            Ok(())
+        }
+    }
+
+    /// Get statistics for all indexes
+    ///
+    /// Returns information about index statistics including staleness,
+    /// distinct counts, and whether MCV/histogram data is available.
+    pub fn get_index_statistics(&self) -> Vec<IndexStatisticsInfo> {
+        let indexes = self.indexes.read();
+        let mut result = Vec::new();
+
+        for info in indexes.list_indexes_with_compound_info() {
+            result.push(IndexStatisticsInfo {
+                name: info.index_name,
+                field: info.prefix_field,
+                num_keys: info.num_keys,
+                distinct_count: info.distinct_count,
+                has_histogram: info.histogram.is_some(),
+                has_mcv: info.mcv.is_some(),
+            });
+        }
+
+        result
     }
 
     /// Find with manual index hint (basic version)

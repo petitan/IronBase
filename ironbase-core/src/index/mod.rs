@@ -66,8 +66,8 @@ pub mod traits;
 
 // Re-export main types for convenience
 pub use btree::{
-    BPlusTree, Histogram, IndexMetadata, IndexStats, RangeQueryMode, RangeQueryResult, ScanOrder,
-    NODE_PAGE_SIZE,
+    BPlusTree, Histogram, IndexMetadata, IndexStats, MostCommonValues, RangeQueryMode,
+    RangeQueryResult, ScanOrder, StatisticsCounters, NODE_PAGE_SIZE,
 };
 pub use fuzzy::{
     FuzzyAlgorithm, FuzzyIndex, FuzzyIndexMetadata, FuzzySearchOptions, FuzzySearchResult,
@@ -703,6 +703,7 @@ mod tests {
             sample_rate: 1.0,
             last_analyzed: 0,
             histogram: None,
+            mcv: None,
         };
         assert!(!stats.validate_and_fix(100)); // No fixes needed
         assert_eq!(stats.distinct_count, 50);
@@ -716,6 +717,7 @@ mod tests {
             sample_rate: 1.0,
             last_analyzed: 0,
             histogram: None,
+            mcv: None,
         };
         assert!(stats.validate_and_fix(100)); // Fixed!
         assert_eq!(stats.distinct_count, 100);
@@ -728,6 +730,7 @@ mod tests {
             sample_rate: 1.0,
             last_analyzed: 0,
             histogram: None,
+            mcv: None,
         };
         assert!(stats.validate_and_fix(100)); // Fixed!
         assert_eq!(stats.null_count, 100);
@@ -740,6 +743,7 @@ mod tests {
             sample_rate: 1.0,
             last_analyzed: 0,
             histogram: None,
+            mcv: None,
         };
         assert!(stats.validate_and_fix(100)); // Fixed!
         assert_eq!(stats.multikey_ratio, 0.0);
@@ -752,6 +756,7 @@ mod tests {
             sample_rate: f32::NAN,
             last_analyzed: 0,
             histogram: None,
+            mcv: None,
         };
         assert!(stats.validate_and_fix(100)); // Fixed!
         assert_eq!(stats.multikey_ratio, 0.0);

@@ -180,6 +180,9 @@ pub(crate) struct LeafNode {
 pub struct BPlusTree {
     root: Box<BTreeNode>,
     pub metadata: IndexMetadata,
+    /// Runtime statistics counters (not persisted)
+    /// Tracks changes since last statistics refresh for staleness detection
+    counters: StatisticsCounters,
 }
 
 /// Index statistics for selectivity estimation
@@ -215,6 +218,12 @@ pub struct IndexStats {
     /// Only populated for indexes with 100k+ entries
     #[serde(default)]
     pub histogram: Option<Histogram>,
+
+    /// Most Common Values for equality selectivity estimation
+    /// Only populated for indexes with 1000+ entries
+    /// See `MostCommonValues` for PostgreSQL-style frequency tracking
+    #[serde(default)]
+    pub mcv: Option<MostCommonValues>,
 }
 
 impl IndexStats {
@@ -277,6 +286,81 @@ impl IndexStats {
         }
 
         fixed
+    }
+}
+
+// ============================================================================
+// Statistics Counters for Staleness Tracking
+// ============================================================================
+
+/// Runtime statistics counters for tracking index changes between full refreshes.
+///
+/// These counters are NOT persisted - they track changes since the last
+/// statistics refresh to determine when statistics become stale.
+///
+/// # Usage
+/// - Incremented on each insert/delete operation
+/// - Checked periodically to determine if refresh is needed
+/// - Reset after each statistics refresh
+#[derive(Debug, Clone, Default)]
+pub struct StatisticsCounters {
+    /// Number of write operations (inserts) since last statistics refresh
+    pub writes_since_refresh: u64,
+
+    /// Number of delete operations since last statistics refresh
+    pub deletes_since_refresh: u64,
+
+    /// Total number of writes for overall tracking
+    pub total_writes: u64,
+
+    /// Snapshot of num_keys at the time of last statistics refresh
+    /// Used to calculate staleness ratio
+    pub num_keys_at_last_refresh: u64,
+}
+
+impl StatisticsCounters {
+    /// Calculate staleness ratio (0.0 = fresh, 1.0 = completely stale)
+    ///
+    /// Staleness is measured as: (writes + deletes) / num_keys_at_last_refresh
+    /// A ratio of 0.1 means 10% of the index has changed since last refresh.
+    pub fn staleness_ratio(&self, _current_num_keys: u64) -> f64 {
+        if self.num_keys_at_last_refresh == 0 {
+            return 1.0; // Never analyzed = completely stale
+        }
+
+        let changes = self.writes_since_refresh + self.deletes_since_refresh;
+        // Staleness = changes / original_size, clamped to [0.0, 1.0]
+        (changes as f64 / self.num_keys_at_last_refresh as f64).min(1.0)
+    }
+
+    /// Check if statistics should be refreshed
+    ///
+    /// Returns true if:
+    /// - More than 10% of the index has changed since last refresh, OR
+    /// - More than 10,000 writes since last refresh (for small indexes)
+    pub fn needs_refresh(&self, current_num_keys: u64) -> bool {
+        let staleness = self.staleness_ratio(current_num_keys);
+        staleness > 0.10 || self.writes_since_refresh > 10_000
+    }
+
+    /// Reset counters after a statistics refresh
+    pub fn mark_refreshed(&mut self, current_num_keys: u64) {
+        self.writes_since_refresh = 0;
+        self.deletes_since_refresh = 0;
+        self.num_keys_at_last_refresh = current_num_keys;
+    }
+
+    /// Increment write counter (called on insert)
+    #[inline]
+    pub fn record_write(&mut self) {
+        self.writes_since_refresh += 1;
+        self.total_writes += 1;
+    }
+
+    /// Increment delete counter (called on delete)
+    #[inline]
+    pub fn record_delete(&mut self) {
+        self.deletes_since_refresh += 1;
     }
 }
 
@@ -366,6 +450,94 @@ impl Histogram {
     }
 }
 
+// ============================================================================
+// Most Common Values (MCV) for Equality Selectivity Estimation
+// ============================================================================
+
+/// Most Common Values (MCV) for equality query selectivity estimation.
+///
+/// Stores the top N most frequent values with their frequencies.
+/// Used by the query planner to estimate selectivity for equality queries
+/// on skewed distributions (e.g., status fields with 90% "active").
+///
+/// # PostgreSQL-style Design
+///
+/// Similar to PostgreSQL's `pg_statistic` MCV arrays, this enables the planner
+/// to distinguish between common values (use frequency) and rare values
+/// (use uniform distribution over remaining values).
+///
+/// # Memory Efficiency
+///
+/// Only stores DEFAULT_MCV_SIZE (20) values, bounded memory usage.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MostCommonValues {
+    /// (value, frequency) pairs sorted by frequency descending
+    #[serde(default)]
+    pub values: Vec<(IndexKey, u64)>,
+
+    /// Total number of keys when MCV was computed
+    /// Used to calculate selectivity: freq / total
+    #[serde(default)]
+    pub total_keys: u64,
+
+    /// Sum of frequencies of all MCV entries
+    /// Remaining frequency = total_keys - mcv_frequency_sum
+    #[serde(default)]
+    pub mcv_frequency_sum: u64,
+}
+
+impl MostCommonValues {
+    /// Default number of MCV entries to track
+    pub const DEFAULT_MCV_SIZE: usize = 20;
+
+    /// Minimum index size to build MCV (smaller indexes use uniform assumption)
+    pub const MIN_ENTRIES_FOR_MCV: usize = 1_000;
+
+    /// Maximum distinct values to track before switching to sampling
+    /// Prevents OOM on high-cardinality fields
+    pub const MAX_TRACKED_DISTINCT: usize = 100_000;
+
+    /// Estimate selectivity for a specific value
+    ///
+    /// Returns:
+    /// - MCV frequency/total if value is in MCV list
+    /// - Uniform distribution estimate for values not in MCV
+    ///
+    /// # Algorithm
+    ///
+    /// For value V:
+    /// 1. If V is in MCV: selectivity = freq(V) / total_keys
+    /// 2. If V is not in MCV: selectivity = (total_keys - mcv_sum) / (distinct - mcv_count) / total_keys
+    pub fn estimate_selectivity(&self, value: &IndexKey, distinct_count: u64) -> f64 {
+        if self.total_keys == 0 {
+            // No data - fallback to uniform based on distinct count
+            return 1.0 / distinct_count.max(1) as f64;
+        }
+
+        // Check if value is in MCV
+        if let Some((_, freq)) = self.values.iter().find(|(k, _)| k == value) {
+            return *freq as f64 / self.total_keys as f64;
+        }
+
+        // Value not in MCV - estimate based on remaining frequency
+        let remaining_keys = self.total_keys.saturating_sub(self.mcv_frequency_sum);
+        let remaining_distinct = distinct_count.saturating_sub(self.values.len() as u64);
+
+        if remaining_distinct == 0 || remaining_keys == 0 {
+            // All distinct values are in MCV - value doesn't exist
+            return 0.0;
+        }
+
+        // Assume uniform distribution among non-MCV values
+        (remaining_keys as f64 / remaining_distinct as f64) / self.total_keys as f64
+    }
+
+    /// Check if MCV data is valid
+    pub fn is_valid(&self) -> bool {
+        !self.values.is_empty() && self.total_keys > 0
+    }
+}
+
 /// Index metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexMetadata {
@@ -435,6 +607,7 @@ impl BPlusTree {
                 stats: IndexStats::default(),
                 building: false,
             },
+            counters: StatisticsCounters::default(),
         }
     }
 
@@ -470,6 +643,7 @@ impl BPlusTree {
                 stats: IndexStats::default(),
                 building: false,
             },
+            counters: StatisticsCounters::default(),
         }
     }
 
@@ -520,6 +694,7 @@ impl BPlusTree {
                 stats: IndexStats::default(),
                 building: false,
             },
+            counters: StatisticsCounters::default(),
         }
     }
 
@@ -531,6 +706,21 @@ impl BPlusTree {
     /// Set the building flag (for index creation lifecycle)
     pub fn set_building(&mut self, building: bool) {
         self.metadata.building = building;
+    }
+
+    /// Get read-only access to statistics counters
+    pub fn counters(&self) -> &StatisticsCounters {
+        &self.counters
+    }
+
+    /// Check if statistics need to be refreshed based on staleness
+    pub fn needs_stats_refresh(&self) -> bool {
+        self.counters.needs_refresh(self.metadata.num_keys)
+    }
+
+    /// Get staleness ratio (0.0 = fresh, 1.0 = completely stale)
+    pub fn staleness_ratio(&self) -> f64 {
+        self.counters.staleness_ratio(self.metadata.num_keys)
     }
 
     /// Extract compound key from a document
@@ -669,6 +859,8 @@ impl BPlusTree {
         }
 
         self.metadata.num_keys += 1;
+        // Track write for staleness detection
+        self.counters.record_write();
         Ok(())
     }
 
@@ -909,6 +1101,8 @@ impl BPlusTree {
         let deleted = Self::delete_from_node(&mut self.root, key, doc_id);
         if deleted {
             self.metadata.num_keys -= 1;
+            // Track delete for staleness detection
+            self.counters.record_delete();
         }
         Ok(())
     }
@@ -1657,6 +1851,16 @@ impl BPlusTree {
         } else {
             self.metadata.stats.multikey_ratio = 0.0;
         }
+
+        // Reset staleness counters after refresh
+        self.counters.mark_refreshed(self.metadata.num_keys);
+
+        // Build MCV for equality selectivity on non-compound indexes
+        if total_keys >= MostCommonValues::MIN_ENTRIES_FOR_MCV && !self.metadata.is_compound() {
+            self.metadata.stats.mcv = self.build_mcv(MostCommonValues::DEFAULT_MCV_SIZE);
+        } else {
+            self.metadata.stats.mcv = None;
+        }
     }
 
     /// Streaming stats refresh - O(1) memory, no histogram
@@ -1744,6 +1948,87 @@ impl BPlusTree {
         self.metadata.stats.distinct_count = distinct_count;
         self.metadata.stats.null_count = null_count;
         self.metadata.stats.histogram = histogram;
+    }
+
+    /// Build Most Common Values (MCV) for equality selectivity estimation
+    ///
+    /// Uses streaming approach with bounded memory:
+    /// - Counts frequency of each distinct value
+    /// - Returns top `mcv_size` values sorted by frequency
+    /// - Uses sampling if distinct count exceeds MAX_TRACKED_DISTINCT
+    ///
+    /// # Memory Efficiency
+    ///
+    /// Memory usage is bounded by O(min(distinct_count, MAX_TRACKED_DISTINCT))
+    fn build_mcv(&self, mcv_size: usize) -> Option<MostCommonValues> {
+        use std::collections::HashMap;
+
+        let num_keys = self.metadata.num_keys as usize;
+        if num_keys < MostCommonValues::MIN_ENTRIES_FOR_MCV {
+            return None;
+        }
+
+        // Use HashMap to count frequencies
+        // B+ tree leaves are sorted, so consecutive equal keys are together
+        // We can use run-length encoding for efficiency
+        let mut freq_map: HashMap<IndexKey, u64> = HashMap::new();
+
+        // Try to reserve capacity (fallback if OOM)
+        let estimated_distinct = self.metadata.stats.distinct_count.max(1) as usize;
+        let capacity = estimated_distinct.min(MostCommonValues::MAX_TRACKED_DISTINCT);
+        if freq_map.try_reserve(capacity).is_err() {
+            // OOM - skip MCV building
+            return None;
+        }
+
+        let mut total_counted: u64 = 0;
+        let mut last_key: Option<IndexKey> = None;
+        let mut current_count: u64 = 0;
+
+        // Single pass through leaves using run-length encoding
+        Self::walk_leaves_asc(&self.root, &mut |leaf| {
+            for key in &leaf.keys {
+                if last_key.as_ref() == Some(key) {
+                    // Same key - increment count
+                    current_count += 1;
+                } else {
+                    // New key - flush previous
+                    if let Some(prev_key) = last_key.take() {
+                        // Check if we're tracking too many distinct values
+                        if freq_map.len() < MostCommonValues::MAX_TRACKED_DISTINCT {
+                            *freq_map.entry(prev_key).or_insert(0) += current_count;
+                        }
+                    }
+                    last_key = Some(key.clone());
+                    current_count = 1;
+                }
+                total_counted += 1;
+            }
+        });
+
+        // Flush last key
+        if let Some(prev_key) = last_key {
+            if freq_map.len() < MostCommonValues::MAX_TRACKED_DISTINCT {
+                *freq_map.entry(prev_key).or_insert(0) += current_count;
+            }
+        }
+
+        if freq_map.is_empty() {
+            return None;
+        }
+
+        // Extract top N by frequency
+        let mut entries: Vec<(IndexKey, u64)> = freq_map.into_iter().collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency DESC
+        entries.truncate(mcv_size);
+
+        let mcv_frequency_sum: u64 = entries.iter().map(|(_, f)| *f).sum();
+
+        Some(MostCommonValues {
+            values: entries,
+            total_keys: total_counted,
+            mcv_frequency_sum,
+        })
     }
 
     /// Walk all leaf nodes in ASCENDING order (left-to-right traversal).
@@ -1926,7 +2211,11 @@ impl BPlusTree {
         // Load root node recursively (includes all children)
         let root = Box::new(Self::load_node_recursive(file, root_offset)?);
 
-        let mut tree = BPlusTree { root, metadata };
+        let mut tree = BPlusTree {
+            root,
+            metadata,
+            counters: StatisticsCounters::default(),
+        };
         // Sync num_keys with actual tree content
         // (metadata from CollectionData may be stale if not synced on every insert/delete)
         tree.sync_num_keys();
