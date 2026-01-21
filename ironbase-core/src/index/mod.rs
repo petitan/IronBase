@@ -762,6 +762,142 @@ mod tests {
         assert_eq!(stats.multikey_ratio, 0.0);
         assert_eq!(stats.sample_rate, 0.0);
     }
+
+    #[test]
+    fn test_mcv_building_skewed_data() {
+        // Test MCV with skewed distribution: 900 "active", 100 "deleted"
+        let mut tree = BPlusTree::new("idx".into(), "status".into(), false, false);
+
+        for i in 0..900 {
+            tree.insert(IndexKey::String("active".into()), DocumentId::Int(i))
+                .unwrap();
+        }
+        for i in 900..1000 {
+            tree.insert(IndexKey::String("deleted".into()), DocumentId::Int(i))
+                .unwrap();
+        }
+
+        tree.refresh_stats();
+
+        // MCV should be built (1000+ entries)
+        assert!(tree.metadata.stats.mcv.is_some());
+
+        let mcv = tree.metadata.stats.mcv.as_ref().unwrap();
+        assert_eq!(mcv.total_keys, 1000);
+        assert_eq!(mcv.values.len(), 2); // Only 2 distinct values
+
+        // First value should be "active" (most common)
+        assert_eq!(mcv.values[0].0, IndexKey::String("active".into()));
+        assert_eq!(mcv.values[0].1, 900);
+
+        // Second value should be "deleted"
+        assert_eq!(mcv.values[1].0, IndexKey::String("deleted".into()));
+        assert_eq!(mcv.values[1].1, 100);
+    }
+
+    #[test]
+    fn test_mcv_selectivity_estimation() {
+        use crate::index::btree::MostCommonValues;
+
+        let mcv = MostCommonValues {
+            values: vec![
+                (IndexKey::String("active".into()), 900),
+                (IndexKey::String("deleted".into()), 100),
+            ],
+            total_keys: 1000,
+            mcv_frequency_sum: 1000,
+        };
+
+        // "active" should have 90% selectivity
+        let sel_active = mcv.estimate_selectivity(&IndexKey::String("active".into()), 2);
+        assert!((sel_active - 0.9).abs() < 0.001);
+
+        // "deleted" should have 10% selectivity
+        let sel_deleted = mcv.estimate_selectivity(&IndexKey::String("deleted".into()), 2);
+        assert!((sel_deleted - 0.1).abs() < 0.001);
+
+        // Unknown value should use uniform distribution over remaining
+        let sel_unknown = mcv.estimate_selectivity(&IndexKey::String("unknown".into()), 3);
+        // All distinct values are in MCV, remaining = 0, so should return 0
+        assert_eq!(sel_unknown, 0.0);
+    }
+
+    #[test]
+    fn test_staleness_tracking() {
+        let mut tree = BPlusTree::new("idx".into(), "field".into(), false, false);
+
+        // A new tree that has never been analyzed is considered completely stale
+        assert!(tree.needs_stats_refresh());
+        assert_eq!(tree.staleness_ratio(), 1.0);
+
+        // Insert some documents
+        for i in 0..100 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+
+        // Still stale (never analyzed)
+        assert!(tree.needs_stats_refresh());
+
+        // Refresh stats should reset counters and mark as fresh
+        tree.refresh_stats();
+        assert!(!tree.needs_stats_refresh());
+        assert_eq!(tree.staleness_ratio(), 0.0);
+
+        // Insert 10 more docs (10% change = threshold)
+        for i in 100..110 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        // 10 writes / 100 keys = 10% change = exactly at threshold, not over
+        assert!(!tree.needs_stats_refresh()); // Still below threshold
+
+        // Insert 1 more to exceed threshold
+        tree.insert(IndexKey::Int(110), DocumentId::Int(110))
+            .unwrap();
+        // 11 writes / 100 keys = 11% change > 10% threshold
+        assert!(tree.needs_stats_refresh());
+
+        // Refresh again
+        tree.refresh_stats();
+        assert!(!tree.needs_stats_refresh());
+
+        // Insert 10K+ to trigger staleness by absolute write count
+        for i in 200..10300 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+        assert!(tree.needs_stats_refresh()); // >10K writes
+    }
+
+    #[test]
+    fn test_mcv_not_built_for_small_index() {
+        // MCV should not be built for indexes with < 1000 entries
+        let mut tree = BPlusTree::new("idx".into(), "field".into(), false, false);
+
+        for i in 0..500 {
+            tree.insert(IndexKey::Int(i), DocumentId::Int(i)).unwrap();
+        }
+
+        tree.refresh_stats();
+
+        // MCV should NOT be built
+        assert!(tree.metadata.stats.mcv.is_none());
+    }
+
+    #[test]
+    fn test_mcv_not_built_for_compound_index() {
+        // MCV should not be built for compound indexes
+        let mut tree =
+            BPlusTree::new_compound("idx".into(), vec!["a".into(), "b".into()], false, false);
+
+        for i in 0..1500 {
+            let key = IndexKey::Compound(vec![IndexKey::Int(i % 10), IndexKey::Int(i)]);
+            tree.insert(key, DocumentId::Int(i)).unwrap();
+        }
+
+        tree.refresh_stats();
+
+        // MCV should NOT be built for compound indexes
+        assert!(tree.metadata.stats.mcv.is_none());
+    }
 }
 
 #[cfg(test)]
