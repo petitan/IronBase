@@ -37,6 +37,10 @@ struct Cli {
     /// API key for MCP server
     #[arg(long, short = 'k', env = "IRONBASE_API_KEY", global = true)]
     api_key: Option<String>,
+
+    /// Accept self-signed TLS certificates
+    #[arg(long, env = "MCP_INSECURE", global = true)]
+    insecure: bool,
 }
 
 #[derive(Subcommand)]
@@ -51,25 +55,25 @@ enum Commands {
         #[arg(long)]
         collection: Option<String>,
 
-        /// Split mode
-        #[arg(long, short, default_value = "auto")]
-        mode: SplitMode,
+        /// Split mode (default: from config or "auto")
+        #[arg(long, short)]
+        mode: Option<SplitMode>,
 
-        /// Chunk size in characters
-        #[arg(long, default_value = "1000")]
-        chunk_size: usize,
+        /// Chunk size in characters (default: from config or 1000)
+        #[arg(long)]
+        chunk_size: Option<usize>,
 
-        /// Overlap size in characters (for text mode only)
-        #[arg(long, default_value = "200")]
-        overlap: usize,
+        /// Overlap size in characters for text mode (default: from config or 200)
+        #[arg(long)]
+        overlap: Option<usize>,
 
-        /// Generate embeddings after insert
+        /// Generate embeddings after insert (default: from config)
         #[arg(long)]
         embed: bool,
 
-        /// Embedding provider
-        #[arg(long, default_value = "fasttext")]
-        provider: String,
+        /// Embedding provider (default: from config or "fasttext")
+        #[arg(long)]
+        provider: Option<String>,
 
         /// Dry run - show chunks without inserting
         #[arg(long)]
@@ -86,17 +90,17 @@ enum Commands {
         /// Input file path
         file: PathBuf,
 
-        /// Split mode
-        #[arg(long, short, default_value = "auto")]
-        mode: SplitMode,
+        /// Split mode (default: from config or "auto")
+        #[arg(long, short)]
+        mode: Option<SplitMode>,
 
-        /// Chunk size in characters
-        #[arg(long, default_value = "1000")]
-        chunk_size: usize,
+        /// Chunk size in characters (default: from config or 1000)
+        #[arg(long)]
+        chunk_size: Option<usize>,
 
-        /// Overlap size in characters
-        #[arg(long, default_value = "200")]
-        overlap: usize,
+        /// Overlap size in characters (default: from config or 200)
+        #[arg(long)]
+        overlap: Option<usize>,
 
         /// Show first N chunks only
         #[arg(long, short, default_value = "5")]
@@ -169,6 +173,9 @@ async fn run(cli: Cli) -> Result<()> {
     if let Some(ref key) = cli.api_key {
         config.bridge.api_key = Some(key.clone());
     }
+    if cli.insecure {
+        config.bridge.insecure = true;
+    }
 
     match cli.command {
         Commands::Load {
@@ -182,6 +189,13 @@ async fn run(cli: Cli) -> Result<()> {
             dry_run,
             clear,
         } => {
+            // Apply config defaults
+            let mode = mode.unwrap_or_else(|| parse_mode(&config.chunking.default_mode));
+            let chunk_size = chunk_size.unwrap_or(config.chunking.chunk_size);
+            let overlap = overlap.unwrap_or(config.chunking.overlap);
+            let embed = embed || config.embedding.enabled;
+            let provider = provider.unwrap_or_else(|| config.embedding.provider.clone());
+
             commands::load::run(
                 &config,
                 file,
@@ -203,10 +217,26 @@ async fn run(cli: Cli) -> Result<()> {
             chunk_size,
             overlap,
             limit,
-        } => commands::preview::run(file, mode, chunk_size, overlap, limit),
+        } => {
+            // Apply config defaults
+            let mode = mode.unwrap_or_else(|| parse_mode(&config.chunking.default_mode));
+            let chunk_size = chunk_size.unwrap_or(config.chunking.chunk_size);
+            let overlap = overlap.unwrap_or(config.chunking.overlap);
+
+            commands::preview::run(file, mode, chunk_size, overlap, limit)
+        }
 
         Commands::List { collection, source } => {
             commands::list::run(&config, collection, source).await
         }
+    }
+}
+
+/// Parse mode string from config
+fn parse_mode(mode_str: &str) -> SplitMode {
+    match mode_str.to_lowercase().as_str() {
+        "markdown" | "md" => SplitMode::Markdown,
+        "text" | "txt" => SplitMode::Text,
+        _ => SplitMode::Auto,
     }
 }

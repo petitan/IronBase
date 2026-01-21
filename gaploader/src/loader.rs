@@ -158,6 +158,7 @@ async fn embed_chunks(
     );
 
     let mut embedded = 0;
+    let mut embedding_dim: Option<usize> = None;
 
     for batch in chunks.chunks(EMBED_BATCH_SIZE) {
         // Extract texts
@@ -172,6 +173,13 @@ async fn embed_chunks(
                 batch.len(),
                 embeddings.len()
             )));
+        }
+
+        // Store dimension from first embedding
+        if embedding_dim.is_none() {
+            if let Some(first) = embeddings.first() {
+                embedding_dim = Some(first.len());
+            }
         }
 
         // Update documents with embeddings
@@ -193,16 +201,8 @@ async fn embed_chunks(
 
     pb.finish_with_message("Embeddings added");
 
-    // Create vector index
-    if let Some(first_embedding) = chunks
-        .first()
-        .and_then(|c| c.embedding.as_ref())
-        .or_else(|| {
-            // We need to get the dimension from the first embedded chunk
-            None
-        })
-    {
-        let dimension = first_embedding.len();
+    // Create vector index with the detected dimension
+    if let Some(dimension) = embedding_dim {
         if dimension > 0 {
             client
                 .create_vector_index(collection, "embedding", dimension, "cosine")
