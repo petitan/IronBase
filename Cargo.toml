@@ -11,6 +11,7 @@ exclude = [
     "mcp-server",
     "ironbase-tui",
     "ironbase-bridge",
+    "gaploader",
 ]
 
 [workspace.package]

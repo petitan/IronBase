@@ -1,0 +1,43 @@
+[package]
+name = "gaploader"
+version = "0.1.0"
+edition = "2021"
+description = "Load text/markdown files into IronBase via MCP"
+license = "MIT"
+authors = ["Petitan"]
+
+[[bin]]
+name = "gaploader"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Text splitting
+text-splitter = { version = "0.18", features = ["markdown"] }
+
+# Async runtime (bridge process kezeléshez)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "process", "io-util", "time"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Config
+dirs = "5.0"
+which = "6.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Progress
+indicatif = "0.17"
+
+# UUID for chunk IDs
+uuid = { version = "1", features = ["v4"] }
