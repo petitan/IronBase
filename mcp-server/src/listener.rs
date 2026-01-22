@@ -279,7 +279,14 @@ impl ListenerManager {
     }
 
     /// Initialize default listener if none exist
-    pub fn init_default(&self, host: &str, port: u16, tls: bool) -> Result<()> {
+    pub fn init_default(
+        &self,
+        host: &str,
+        port: u16,
+        tls: bool,
+        cert_path: Option<String>,
+        key_path: Option<String>,
+    ) -> Result<()> {
         // Check if any listeners exist
         let existing = self.list()?;
         if !existing.is_empty() {
@@ -291,8 +298,8 @@ impl ListenerManager {
             id: "default".to_string(),
             bind: format!("{}:{}", host, port),
             tls,
-            cert_path: None,
-            key_path: None,
+            cert_path,
+            key_path,
             enabled: true,
             description: Some("Default listener (created from startup config)".to_string()),
         };

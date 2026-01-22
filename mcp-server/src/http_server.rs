@@ -580,7 +580,13 @@ async fn run_http_server_internal(
     {
         use crate::listener::ListenerManager;
         let listener_manager = ListenerManager::new(adapter.clone());
-        if let Err(e) = listener_manager.init_default(&host, port, config.tls_enabled) {
+        if let Err(e) = listener_manager.init_default(
+            &host,
+            port,
+            config.tls_enabled,
+            config.tls_cert_file.clone(),
+            config.tls_key_file.clone(),
+        ) {
             tracing::warn!("Failed to initialize default listener: {}", e);
         }
     }
