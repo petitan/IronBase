@@ -21,10 +21,11 @@ from typing import Optional
 
 # ============ KONFIGURÁCIÓ ============
 
-MCP_URL = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:8080/mcp")
+MCP_URL = os.environ.get("MCP_SERVER_URL", "https://127.0.0.1:8080/mcp")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 CLAUDE_MODEL = "claude-sonnet-4-20250514"
 MAX_CONTEXT_CHARS = 12000  # ~3000 token
+MCP_INSECURE = os.environ.get("MCP_INSECURE", "1") == "1"  # Self-signed cert support
 
 
 # ============ MCP KLIENS ============
@@ -59,7 +60,13 @@ class MCPClient:
             data=json.dumps(payload).encode('utf-8'),
             headers={'Content-Type': 'application/json'}
         )
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        # SSL context for self-signed certs
+        import ssl
+        ctx = ssl.create_default_context()
+        if MCP_INSECURE:
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=120, context=ctx) as resp:
             return json.load(resp)
 
     def call_tool(self, tool_name: str, arguments: dict) -> dict:
@@ -696,8 +703,8 @@ Példák:
     )
 
     parser.add_argument("query", help="Keresési kérdés")
-    parser.add_argument("-c", "--collection", default="gazelemzok_kalibralasi",
-                        help="Kollekció neve (default: gazelemzok_kalibralasi)")
+    parser.add_argument("-c", "--collection", default="muhelyvita_lohner_klaudia_a_profilalkotas_pragmatikus_megkozelitese_szexualis_bunelkovetok_mintajan_1026",
+                        help="Kollekció neve")
     parser.add_argument("-k", "--top-k", type=int, default=10,
                         help="Hány kontextus chunk (default: 10)")
     parser.add_argument("--vector-weight", type=float, default=0.4,
