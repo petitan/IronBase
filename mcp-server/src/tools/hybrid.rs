@@ -22,6 +22,10 @@ use super::preprocessing::{available_languages, get_preprocessor, PreprocessResu
 /// RRF constant - empirically optimal value (Cormack et al., 2009)
 const RRF_K: f64 = 60.0;
 
+/// Maximum internal limit to prevent OOM (CLAUDE.md compliance)
+/// Even if user requests limit=100000, we cap internal processing at this value
+const MAX_INTERNAL_LIMIT: usize = 1000;
+
 /// Dispatch hybrid tool calls
 pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     match name {
@@ -81,7 +85,8 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
 
     // Internal limit multiplier for better fusion coverage
     // Need more results when reranking/deduplication will filter some out
-    let internal_limit = p.limit * 3;
+    // Cap at MAX_INTERNAL_LIMIT to prevent OOM (CLAUDE.md compliance)
+    let internal_limit = (p.limit * 3).min(MAX_INTERNAL_LIMIT);
 
     // ========================================================================
     // 2. Vector search → get ranks
@@ -90,26 +95,21 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     let vector_results =
         adapter.vector_search(&p.collection, &p.vector_field, &query_vector, internal_limit)?;
 
-    // Build vector rank map (1-indexed)
-    let vector_ranks: HashMap<String, usize> = vector_results
-        .iter()
-        .enumerate()
-        .filter_map(|(rank, (doc, _score))| {
-            doc.get("_id")
-                .and_then(id_to_string)
-                .map(|id| (id, rank + 1))
-        })
-        .collect();
+    // Build vector rank map (1-indexed) with pre-allocated capacity (OOM protection)
+    let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
+    for (rank, (doc, _score)) in vector_results.iter().enumerate() {
+        if let Some(id) = doc.get("_id").and_then(id_to_string) {
+            vector_ranks.insert(id, rank + 1);
+        }
+    }
 
-    // Store vector docs for later retrieval
-    let vector_docs: HashMap<String, (Value, f32)> = vector_results
-        .into_iter()
-        .filter_map(|(doc, score)| {
-            doc.get("_id")
-                .and_then(id_to_string)
-                .map(|id| (id, (doc, score)))
-        })
-        .collect();
+    // Store vector docs for later retrieval with pre-allocated capacity
+    let mut vector_docs: HashMap<String, (Value, f32)> = HashMap::with_capacity(vector_results.len());
+    for (doc, score) in vector_results.into_iter() {
+        if let Some(id) = doc.get("_id").and_then(id_to_string) {
+            vector_docs.insert(id, (doc, score));
+        }
+    }
 
     // ========================================================================
     // 3. Fulltext search → get ranks (using processed query)
@@ -129,72 +129,68 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     let text_results =
         adapter.fulltext_search(&p.collection, &p.text_field, processed_query, text_options)?;
 
-    // Build fulltext rank map (1-indexed)
-    let text_ranks: HashMap<String, usize> = text_results
-        .iter()
-        .enumerate()
-        .filter_map(|(rank, res)| {
-            res.document
-                .get("_id")
-                .and_then(id_to_string)
-                .map(|id| (id, rank + 1))
-        })
-        .collect();
+    // Build fulltext rank map (1-indexed) with pre-allocated capacity (OOM protection)
+    let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
+    for (rank, res) in text_results.iter().enumerate() {
+        if let Some(id) = res.document.get("_id").and_then(id_to_string) {
+            text_ranks.insert(id, rank + 1);
+        }
+    }
 
-    // Store fulltext docs for later retrieval
-    let text_docs: HashMap<String, (Value, f64)> = text_results
-        .into_iter()
-        .filter_map(|res| {
-            res.document
-                .get("_id")
-                .and_then(id_to_string)
-                .map(|id| (id, (res.document, res.score)))
-        })
-        .collect();
+    // Store fulltext docs for later retrieval with pre-allocated capacity
+    let mut text_docs: HashMap<String, (Value, f64)> = HashMap::with_capacity(text_results.len());
+    for res in text_results.into_iter() {
+        if let Some(id) = res.document.get("_id").and_then(id_to_string) {
+            text_docs.insert(id, (res.document, res.score));
+        }
+    }
 
     // ========================================================================
-    // 4. RRF Fusion
+    // 4. RRF Fusion (with pre-allocated capacity for OOM protection)
     // ========================================================================
-    let all_ids: HashSet<String> = vector_ranks
-        .keys()
-        .chain(text_ranks.keys())
-        .cloned()
-        .collect();
+    // Max unique IDs = vector_ranks + text_ranks (worst case: no overlap)
+    let max_ids = vector_ranks.len() + text_ranks.len();
+    let mut all_ids: HashSet<String> = HashSet::with_capacity(max_ids);
+    all_ids.extend(vector_ranks.keys().cloned());
+    all_ids.extend(text_ranks.keys().cloned());
 
     let default_rank = internal_limit + 1;
 
-    let mut fused: Vec<FusedResult> = all_ids
-        .iter()
-        .filter_map(|id| {
-            let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
-            let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
+    // Pre-allocate fused results vector
+    let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
+    for id in all_ids.iter() {
+        let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
+        let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
 
-            // RRF score formula: weight * 1/(k + rank)
-            let rrf_score = p.vector_weight * (1.0 / (RRF_K + v_rank as f64))
-                + p.fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
+        // RRF score formula: weight * 1/(k + rank)
+        let rrf_score = p.vector_weight * (1.0 / (RRF_K + v_rank as f64))
+            + p.fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
 
-            let v_score = vector_docs.get(id).map(|(_, s)| *s);
-            let t_score = text_docs.get(id).map(|(_, s)| *s);
+        let v_score = vector_docs.get(id).map(|(_, s)| *s);
+        let t_score = text_docs.get(id).map(|(_, s)| *s);
 
-            // Get document from either source (prefer vector for consistency)
-            let doc = vector_docs
-                .get(id)
-                .map(|(d, _)| d.clone())
-                .or_else(|| text_docs.get(id).map(|(d, _)| d.clone()))?;
+        // Get document from either source (prefer vector for consistency)
+        let doc = match vector_docs
+            .get(id)
+            .map(|(d, _)| d.clone())
+            .or_else(|| text_docs.get(id).map(|(d, _)| d.clone()))
+        {
+            Some(d) => d,
+            None => continue, // Skip if no doc found (shouldn't happen)
+        };
 
-            Some(FusedResult {
-                id: id.clone(),
-                doc,
-                rrf_score,
-                final_score: rrf_score, // Will be updated by reranking
-                rerank_boost: 1.0,
-                v_rank,
-                t_rank,
-                v_score,
-                t_score,
-            })
-        })
-        .collect();
+        fused.push(FusedResult {
+            id: id.clone(),
+            doc,
+            rrf_score,
+            final_score: rrf_score, // Will be updated by reranking
+            rerank_boost: 1.0,
+            v_rank,
+            t_rank,
+            v_score,
+            t_score,
+        });
+    }
 
     // Sort by RRF score initially
     fused.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap_or(std::cmp::Ordering::Equal));
