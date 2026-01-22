@@ -1046,3 +1046,139 @@ fn test_compound_index_prefix_query_explain() {
         explain_str
     );
 }
+
+/// BUG FIX (2026-01): B+ tree estimate_node_size() underestimated JSON serialization overhead
+///
+/// Previously, when many documents shared the same long key (e.g., 1200 chunks from the same
+/// source file), the B+ tree leaf node would exceed the page size limit (16KB) because:
+/// - document_id overhead was estimated as 20 bytes (actual: ~40 bytes for JSON enum)
+/// - key overhead was estimated as len+10 (actual: len+20 for JSON wrapper)
+///
+/// This test reproduces the gaploader chunk scenario:
+/// - 1200+ documents with the same `source.file` path (~150 chars)
+/// - Index on `source.file` field
+/// - All chunks reference the same source file
+///
+/// Before fix: "Node size 17129 exceeds page size 16379" error
+/// After fix: Works correctly, splits nodes earlier based on accurate estimates
+#[test]
+fn test_btree_many_docs_same_long_key_chunk_scenario() {
+    use ironbase_core::storage::MemoryStorage;
+    use std::collections::HashMap;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let collection = db.collection("chunks").unwrap();
+
+    // Simulate a realistic file path from gaploader (~150 chars)
+    let long_file_path = "/home/user/documents/projects/my-awesome-project/data/2026/january/imported-files/very-long-filename-with-description-v2.3.1.md";
+    assert!(
+        long_file_path.len() > 100,
+        "File path should be long enough to trigger the bug"
+    );
+
+    // Create index on source.file BEFORE inserting documents
+    // (This is how gaploader works - index exists, then chunks are inserted)
+    let index_name = collection
+        .create_index("source.file".to_string(), false, false)
+        .unwrap();
+    assert_eq!(index_name, "chunks_source.file");
+
+    // Insert 1200 chunks with the SAME source.file value
+    // This should trigger the bug if estimate_node_size() is wrong
+    let chunk_count = 1200;
+    let mut docs: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(chunk_count);
+
+    for i in 0..chunk_count {
+        let mut doc = HashMap::new();
+        doc.insert(
+            "source".to_string(),
+            json!({
+                "file": long_file_path,
+                "chunk_index": i
+            }),
+        );
+        doc.insert(
+            "content".to_string(),
+            json!(format!("Chunk {} content...", i)),
+        );
+        doc.insert("embedding".to_string(), json!([0.1, 0.2, 0.3])); // Simplified
+        docs.push(doc);
+    }
+
+    // This is where the bug manifested: insert_many would fail with
+    // "Node size 17129 exceeds page size 16379"
+    let result = db.insert_many("chunks", docs);
+    assert!(
+        result.is_ok(),
+        "BUG FIX: Should not fail with 'Node size exceeds page size'. Error: {:?}",
+        result.err()
+    );
+
+    let inserted = result.unwrap();
+    assert_eq!(inserted.len(), chunk_count, "All chunks should be inserted");
+
+    // Verify index works correctly
+    let results = collection
+        .find(&json!({"source.file": long_file_path}))
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        chunk_count,
+        "Index should find all {} chunks",
+        chunk_count
+    );
+
+    // Verify document count
+    let count = collection.count_documents(&json!({})).unwrap();
+    assert_eq!(
+        count, chunk_count as u64,
+        "Total document count should match"
+    );
+}
+
+/// Additional test: B+ tree with even longer keys and more documents
+/// Tests the upper bound of the fix - 2000 documents with 200-char keys
+#[test]
+fn test_btree_stress_very_long_keys_many_docs() {
+    use ironbase_core::storage::MemoryStorage;
+    use std::collections::HashMap;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+    let collection = db.collection("stress_test").unwrap();
+
+    // Create a 200-character key (longer than typical file paths)
+    let very_long_key = "a".repeat(200);
+    assert_eq!(very_long_key.len(), 200);
+
+    // Create index first
+    collection
+        .create_index("long_field".to_string(), false, false)
+        .unwrap();
+
+    // Insert 2000 documents with the same 200-char key
+    let doc_count = 2000;
+    let mut docs: Vec<HashMap<String, serde_json::Value>> = Vec::with_capacity(doc_count);
+
+    for i in 0..doc_count {
+        let mut doc = HashMap::new();
+        doc.insert("long_field".to_string(), json!(very_long_key));
+        doc.insert("index".to_string(), json!(i));
+        docs.push(doc);
+    }
+
+    let result = db.insert_many("stress_test", docs);
+    assert!(
+        result.is_ok(),
+        "Should handle 2000 docs with 200-char same key. Error: {:?}",
+        result.err()
+    );
+
+    // Verify
+    let count = collection.count_documents(&json!({})).unwrap();
+    assert_eq!(count, doc_count as u64);
+
+    let found = collection
+        .find(&json!({"long_field": very_long_key}))
+        .unwrap();
+    assert_eq!(found.len(), doc_count);
+}

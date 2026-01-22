@@ -865,32 +865,52 @@ impl BPlusTree {
     }
 
     /// Estimate serialized size of a node (approximate, for early split detection)
+    ///
+    /// JSON serialization overhead is significant:
+    /// - LeafNode: `{"keys":[...],"document_ids":[...],"next_leaf_offset":0}`
+    /// - Each key: `{"String":"value"},` or `{"Int":123},`
+    /// - Each doc_id: `{"String":"ObjectId24chars"},` (~40 bytes)
+    ///
+    /// Bug fix (2026-01): Previous estimates were too low, causing "Node size exceeds
+    /// page size" errors when many documents share the same long key (e.g., chunks
+    /// from the same source file).
     fn estimate_node_size(node: &BTreeNode) -> usize {
         match node {
             BTreeNode::Leaf(leaf) => {
                 let key_sizes: usize = leaf.keys.iter().map(Self::estimate_key_size).sum();
-                let doc_id_overhead = leaf.document_ids.len() * 20;
-                50 + key_sizes + doc_id_overhead
+                // doc_id JSON: {"String":"..."},  or {"Int":...}, - typically ~40 bytes
+                let doc_id_overhead = leaf.document_ids.len() * 40;
+                // Base overhead: {"keys":[],"document_ids":[],"next_leaf_offset":0}
+                80 + key_sizes + doc_id_overhead
             }
             BTreeNode::Internal(internal) => {
                 let key_sizes: usize = internal.keys.iter().map(Self::estimate_key_size).sum();
-                50 + key_sizes + internal.children.len() * 100
+                // children are skipped in serialization, but offsets are stored
+                80 + key_sizes + internal.children_offsets.len() * 12
             }
         }
     }
 
-    /// Estimate serialized size of a key
+    /// Estimate serialized size of a key in JSON format
+    ///
+    /// JSON enum serialization adds wrapper: `{"Variant":"value"}`
+    /// - Null: `{"Null":null}` = 13
+    /// - Bool: `{"Bool":true}` = 13
+    /// - Int: `{"Int":1234567890}` = ~20
+    /// - Float: `{"Float":1.234567890}` = ~25
+    /// - String: `{"String":"..."}` = len + 14 + comma
     fn estimate_key_size(key: &IndexKey) -> usize {
         match key {
-            IndexKey::Null => 4,
-            IndexKey::Bool(_) => 5,
-            IndexKey::Int(_) => 20,
-            IndexKey::Float(_) => 20,
-            IndexKey::String(s) => s.len() + 10,
+            IndexKey::Null => 15,
+            IndexKey::Bool(_) => 15,
+            IndexKey::Int(_) => 25,
+            IndexKey::Float(_) => 30,
+            IndexKey::String(s) => s.len() + 20,
             IndexKey::Compound(keys) => {
-                keys.iter().map(Self::estimate_key_size).sum::<usize>() + 10
+                // {"Compound":[...]}
+                keys.iter().map(Self::estimate_key_size).sum::<usize>() + 15
             }
-            IndexKey::MaxKey => 10,
+            IndexKey::MaxKey => 15,
         }
     }
 
