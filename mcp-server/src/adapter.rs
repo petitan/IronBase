@@ -1110,9 +1110,8 @@ impl IronBaseAdapter {
         let coll = db.get_collection(collection)?;
         // Convert Vec<Value> to Value::Array
         let pipeline_value = Value::Array(pipeline.clone());
-        // Use unlimited for admin operations (duplicate deletion etc.)
-        // Scripts run with explicit user intent and should not be limited
-        let limits = AggregationLimits::unlimited();
+        // Use dynamic limits based on available system RAM (OOM protection)
+        let limits = AggregationLimits::from_system_memory();
         let mut ctx = AggregationLimitContext::new(limits);
         if let Some(deadline) = execution::current_deadline() {
             ctx = ctx.with_deadline(deadline);
