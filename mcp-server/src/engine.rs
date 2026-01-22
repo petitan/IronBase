@@ -299,10 +299,34 @@ impl IronBaseService {
             self.acl_manager
                 .check(&collection, &ctx.caller, required)
                 .map_err(|e| format!("Access denied: {}", e))?;
+
+            // SECURITY FIX: Insert operations on non-existent collections are rejected.
+            // Collections must be created explicitly via collection_create.
+            // This prevents:
+            // 1. Bypassing collection_create permission check through implicit creation
+            // 2. Accidental collection creation due to typos (e.g., "userss" instead of "users")
+            // 3. Transaction rollback inconsistency (collection remains after rollback)
+            if is_collection_creating_insert(&request.name)
+                && !self.adapter.collection_exists(&collection)
+            {
+                return Err(format!(
+                    "Collection '{}' does not exist. Use collection_create to create it first.",
+                    collection
+                ));
+            }
         }
 
         Ok(())
     }
+}
+
+// ============================================================================
+// Helper functions
+// ============================================================================
+
+/// Check if a tool is an insert operation that can implicitly create collections
+fn is_collection_creating_insert(tool_name: &str) -> bool {
+    matches!(tool_name, "insert_one" | "insert_many" | "insert_one_tx")
 }
 
 // ============================================================================
@@ -339,5 +363,21 @@ mod tests {
         assert!(success.is_success());
         assert!(!error.is_success());
         assert!(!denied.is_success());
+    }
+
+    #[test]
+    fn test_is_collection_creating_insert() {
+        // Insert operations that can implicitly create collections
+        assert!(is_collection_creating_insert("insert_one"));
+        assert!(is_collection_creating_insert("insert_many"));
+        assert!(is_collection_creating_insert("insert_one_tx"));
+
+        // Non-insert operations
+        assert!(!is_collection_creating_insert("find"));
+        assert!(!is_collection_creating_insert("update_one"));
+        assert!(!is_collection_creating_insert("delete_one"));
+        assert!(!is_collection_creating_insert("collection_create"));
+        assert!(!is_collection_creating_insert("update_one_tx"));
+        assert!(!is_collection_creating_insert("delete_one_tx"));
     }
 }

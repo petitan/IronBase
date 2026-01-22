@@ -238,17 +238,24 @@ async fn main() {
 fn get_default_db_path() -> String {
     #[cfg(target_os = "windows")]
     {
-        if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-            let mut path = PathBuf::from(local_app_data);
-            path.push("IronBase");
-            path.push("data");
-            // Create directory if it doesn't exist
-            if let Err(e) = std::fs::create_dir_all(&path) {
-                eprintln!("Warning: Failed to create data directory {:?}: {}", path, e);
-            }
-            path.push("ironbase_data.mlite");
-            return path.to_string_lossy().to_string();
+        // Try LOCALAPPDATA first (user context), then PROGRAMDATA (service context)
+        // LocalSystem service account does NOT have LOCALAPPDATA environment variable!
+        let base_path = if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
+            // User context - use LOCALAPPDATA
+            PathBuf::from(local_app_data).join("IronBase").join("data")
+        } else if let Ok(program_data) = std::env::var("PROGRAMDATA") {
+            // Service context (LocalSystem) - use ProgramData
+            PathBuf::from(program_data).join("IronBase")
+        } else {
+            // Ultimate fallback
+            PathBuf::from("C:\\ProgramData\\IronBase")
+        };
+
+        // Create directory if it doesn't exist
+        if let Err(e) = std::fs::create_dir_all(&base_path) {
+            eprintln!("Warning: Failed to create data directory {:?}: {}", base_path, e);
         }
+        return base_path.join("ironbase_data.mlite").to_string_lossy().to_string();
     }
 
     #[cfg(target_os = "macos")]

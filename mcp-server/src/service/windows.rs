@@ -56,7 +56,7 @@ pub fn install_service() -> ServiceResult<()> {
             error_control: ServiceErrorControl::Normal,
             executable_path: exe_path.clone(),
             launch_arguments: vec![OsString::from("--service")],
-            dependencies: vec![],
+            dependencies: vec![OsString::from("Tcpip")],
             account_name: None, // LocalSystem
             account_password: None,
         };
@@ -237,7 +237,7 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
         controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
-        wait_hint: Duration::default(),
+        wait_hint: Duration::from_secs(30),
         process_id: None,
     })?;
 
@@ -260,7 +260,7 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
         controls_accepted: ServiceControlAccept::empty(),
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
-        wait_hint: Duration::default(),
+        wait_hint: Duration::from_secs(30),
         process_id: None,
     })?;
 

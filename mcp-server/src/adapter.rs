@@ -618,6 +618,15 @@ impl IronBaseAdapter {
         db.list_collections()
     }
 
+    /// Check if a collection exists
+    ///
+    /// Used by permission checks to prevent implicit collection creation
+    /// by non-admin clients through insert operations.
+    pub fn collection_exists(&self, name: &str) -> bool {
+        let db = self.db.read();
+        db.list_collections().contains(&name.to_string())
+    }
+
     /// Create a new collection
     pub fn create_collection(&self, name: &str) -> Result<()> {
         let db = self.db.read();

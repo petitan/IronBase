@@ -139,6 +139,7 @@ static NO_TIMEOUT_TOOLS: &[&str] = &[
     "index_create_fulltext",
     "index_create_fuzzy",
     "index_create_compound",
+    "index_create_vector",
     "db_compact",
     "script_run",
     "script_exec",
