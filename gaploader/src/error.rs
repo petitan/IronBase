@@ -8,6 +8,13 @@ pub enum GaploaderError {
     #[error("File not found: {0}")]
     FileNotFound(PathBuf),
 
+    #[error("File too large: {path} is {size_mb:.1} MB (max: {max_mb} MB)")]
+    FileTooLarge {
+        path: PathBuf,
+        size_mb: f64,
+        max_mb: u64,
+    },
+
     #[error("Unsupported file type: {0}")]
     UnsupportedFileType(String),
 

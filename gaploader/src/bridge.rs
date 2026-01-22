@@ -168,8 +168,10 @@ impl BridgeClient {
                         // Parse the text as JSON
                         return serde_json::from_str(text_str).map_err(|e| {
                             GaploaderError::BridgeError(format!(
-                                "Failed to parse tool result: {}",
-                                e
+                                "Failed to parse tool result for '{}': {} (raw text: {:?})",
+                                tool_name,
+                                e,
+                                if text_str.len() > 200 { &text_str[..200] } else { text_str }
                             ))
                         });
                     }

@@ -1,8 +1,8 @@
 //! Load command implementation
 
 use crate::config::Config;
-use crate::error::Result;
-use crate::loader;
+use crate::error::{GaploaderError, Result};
+use crate::loader::{self, MAX_FILE_SIZE_BYTES};
 use crate::splitter;
 use crate::SplitMode;
 use std::path::PathBuf;
@@ -22,7 +22,17 @@ pub async fn run(
 ) -> Result<()> {
     // Check file exists
     if !file.exists() {
-        return Err(crate::error::GaploaderError::FileNotFound(file));
+        return Err(GaploaderError::FileNotFound(file));
+    }
+
+    // OOM Protection: Check file size
+    let metadata = std::fs::metadata(&file)?;
+    if metadata.len() > MAX_FILE_SIZE_BYTES {
+        return Err(GaploaderError::FileTooLarge {
+            path: file.clone(),
+            size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
+            max_mb: MAX_FILE_SIZE_BYTES / (1024 * 1024),
+        });
     }
 
     println!("Loading: {}", file.display());

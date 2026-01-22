@@ -1,7 +1,7 @@
 //! High-level MCP client wrapping BridgeClient
 
 use crate::bridge::BridgeClient;
-use crate::error::{GaploaderError, Result};
+use crate::error::Result;
 use serde_json::Value;
 
 /// High-level MCP client with tool wrappers
@@ -200,7 +200,7 @@ impl McpClient {
         let args = serde_json::json!({
             "collection": collection,
             "field": field,
-            "dimension": dimension,
+            "dim": dimension,
             "metric": metric
         });
 
@@ -209,9 +209,11 @@ impl McpClient {
     }
 
     /// Embed batch of texts
+    ///
+    /// OOM note: Uses references to avoid cloning text content.
     pub async fn embed_batch(
         &mut self,
-        texts: &[String],
+        texts: &[&str],
         provider: Option<&str>,
     ) -> Result<Vec<Vec<f64>>> {
         self.ensure_initialized().await?;

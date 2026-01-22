@@ -16,6 +16,9 @@ const INSERT_BATCH_SIZE: usize = 100;
 /// Batch size for embed_batch
 const EMBED_BATCH_SIZE: usize = 50;
 
+/// Maximum file size in bytes (100 MB) - OOM protection
+pub const MAX_FILE_SIZE_BYTES: u64 = 100 * 1024 * 1024;
+
 /// Load a file into IronBase
 pub async fn load_file(
     config: &Config,
@@ -28,7 +31,24 @@ pub async fn load_file(
     provider: &str,
     clear: bool,
 ) -> Result<LoadResult> {
-    // Read file
+    // OOM Protection: Check file size before reading
+    let metadata = std::fs::metadata(file_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            GaploaderError::FileNotFound(file_path.to_path_buf())
+        } else {
+            GaploaderError::Io(e)
+        }
+    })?;
+
+    if metadata.len() > MAX_FILE_SIZE_BYTES {
+        return Err(GaploaderError::FileTooLarge {
+            path: file_path.to_path_buf(),
+            size_mb: metadata.len() as f64 / (1024.0 * 1024.0),
+            max_mb: MAX_FILE_SIZE_BYTES / (1024 * 1024),
+        });
+    }
+
+    // Read file (safe after size check)
     let content = std::fs::read_to_string(file_path).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             GaploaderError::FileNotFound(file_path.to_path_buf())
@@ -161,8 +181,8 @@ async fn embed_chunks(
     let mut embedding_dim: Option<usize> = None;
 
     for batch in chunks.chunks(EMBED_BATCH_SIZE) {
-        // Extract texts
-        let texts: Vec<String> = batch.iter().map(|c| c.content.clone()).collect();
+        // Extract text references (no cloning - OOM protection)
+        let texts: Vec<&str> = batch.iter().map(|c| c.content.as_str()).collect();
 
         // Get embeddings
         let embeddings = client.embed_batch(&texts, Some(provider)).await?;
