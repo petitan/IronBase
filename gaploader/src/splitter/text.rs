@@ -1,10 +1,12 @@
 //! Plain text splitting with overlap
 
 use crate::chunk::Chunk;
-use crate::error::Result;
+use crate::error::{GaploaderError, Result};
 use text_splitter::TextSplitter;
 
 /// Split plain text into chunks with overlap
+///
+/// OOM Protection: Uses try_reserve() before allocation (CLAUDE.md compliance)
 pub fn split(
     content: &str,
     source_file: &str,
@@ -17,13 +19,20 @@ pub fn split(
     let min_size = chunk_size.saturating_sub(overlap);
     let splitter = TextSplitter::new(min_size..chunk_size);
 
-    let raw_chunks: Vec<&str> = splitter.chunks(content).collect();
-    let total = raw_chunks.len();
+    // First pass: count chunks for try_reserve (CLAUDE.md: streaming count)
+    let total = splitter.chunks(content).count();
 
-    let mut chunks = Vec::with_capacity(total);
+    // OOM Protection: try_reserve before allocation (CLAUDE.md requirement)
+    let mut chunks = Vec::new();
+    chunks.try_reserve(total).map_err(|_| GaploaderError::OutOfMemory {
+        requested: total,
+        context: format!("text chunks for {}", filename),
+    })?;
+
     let mut char_offset = 0;
 
-    for (index, raw_chunk) in raw_chunks.into_iter().enumerate() {
+    // Second pass: create chunks (iterator, no intermediate Vec)
+    for (index, raw_chunk) in splitter.chunks(content).enumerate() {
         let start_char = char_offset;
         let end_char = start_char + raw_chunk.len();
 

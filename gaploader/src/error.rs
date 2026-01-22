@@ -36,6 +36,9 @@ pub enum GaploaderError {
     #[error("Chunking error: {0}")]
     ChunkingError(String),
 
+    #[error("Out of memory: failed to allocate {requested} elements for {context}")]
+    OutOfMemory { requested: usize, context: String },
+
     #[error("Embedding error: {0}")]
     EmbeddingError(String),
 

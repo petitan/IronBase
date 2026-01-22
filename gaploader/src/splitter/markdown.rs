@@ -1,10 +1,12 @@
 //! Markdown splitting at structural boundaries (headings)
 
 use crate::chunk::Chunk;
-use crate::error::Result;
+use crate::error::{GaploaderError, Result};
 use text_splitter::MarkdownSplitter;
 
 /// Split markdown at headings, no overlap
+///
+/// OOM Protection: Uses try_reserve() before allocation (CLAUDE.md compliance)
 pub fn split(
     content: &str,
     source_file: &str,
@@ -14,15 +16,22 @@ pub fn split(
     // MarkdownSplitter respects markdown structure
     let splitter = MarkdownSplitter::new(chunk_size);
 
-    let raw_chunks: Vec<&str> = splitter.chunks(content).collect();
-    let total = raw_chunks.len();
+    // First pass: count chunks for try_reserve (CLAUDE.md: streaming count)
+    let total = splitter.chunks(content).count();
 
-    let mut chunks = Vec::with_capacity(total);
+    // OOM Protection: try_reserve before allocation (CLAUDE.md requirement)
+    let mut chunks = Vec::new();
+    chunks.try_reserve(total).map_err(|_| GaploaderError::OutOfMemory {
+        requested: total,
+        context: format!("markdown chunks for {}", filename),
+    })?;
+
     let mut char_offset = 0;
     let mut section_path: Vec<String> = Vec::new();
     let mut current_heading: Option<(String, u8)> = None;
 
-    for (index, raw_chunk) in raw_chunks.into_iter().enumerate() {
+    // Second pass: create chunks (iterator, no intermediate Vec)
+    for (index, raw_chunk) in splitter.chunks(content).enumerate() {
         let trimmed = raw_chunk.trim();
 
         // Detect heading at start of chunk
