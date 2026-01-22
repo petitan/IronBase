@@ -518,6 +518,72 @@ pub struct ApiKeyListParams {
 }
 
 // ============================================================================
+// Hybrid Search Parameters
+// ============================================================================
+
+/// Parameters for `hybrid_search` tool (RRF-based fusion with preprocessing, reranking, dedup)
+#[derive(Debug, Deserialize)]
+pub struct HybridSearchParams {
+    pub collection: String,
+    /// Field with vector index (e.g., "embedding")
+    pub vector_field: String,
+    /// Field with fulltext index (e.g., "content")
+    pub text_field: String,
+    /// Query embedding vector
+    pub vector: Vec<f64>,
+    /// Text query for fulltext search
+    pub query: String,
+    #[serde(default = "default_hybrid_limit")]
+    pub limit: usize,
+    #[serde(default = "default_vector_weight")]
+    pub vector_weight: f64,
+    #[serde(default = "default_fulltext_weight")]
+    pub fulltext_weight: f64,
+    /// MongoDB projection (optional)
+    pub projection: Option<Value>,
+
+    // ========== v2 parameters (preprocessing, reranking, deduplication) ==========
+
+    /// Language for query preprocessing (e.g., "hungarian")
+    /// If None or unrecognized, no preprocessing is applied
+    #[serde(default)]
+    pub language: Option<String>,
+
+    /// Enable reranking after RRF fusion (default: true)
+    /// Applies exact phrase match (1.3x), keyword density (1.0-1.1x), length penalty (0.8x)
+    #[serde(default = "default_rerank")]
+    pub rerank: bool,
+
+    /// Enable deduplication (default: true)
+    /// Removes results with duplicate content prefixes
+    #[serde(default = "default_deduplicate")]
+    pub deduplicate: bool,
+
+    /// Content prefix length for deduplication (default: 100)
+    #[serde(default = "default_dedup_threshold")]
+    pub dedup_threshold: usize,
+}
+
+fn default_hybrid_limit() -> usize {
+    10
+}
+fn default_vector_weight() -> f64 {
+    0.5
+}
+fn default_fulltext_weight() -> f64 {
+    0.5
+}
+fn default_rerank() -> bool {
+    true
+}
+fn default_deduplicate() -> bool {
+    true
+}
+fn default_dedup_threshold() -> usize {
+    100
+}
+
+// ============================================================================
 // Helper trait for param parsing
 // ============================================================================
 

@@ -18,9 +18,11 @@ pub mod crud;
 mod definitions;
 pub mod embedding;
 pub mod helpers;
+pub mod hybrid;
 pub mod index;
 pub mod listener;
 pub mod params;
+pub mod preprocessing;
 pub mod script;
 pub mod transaction;
 pub mod vector;
@@ -357,6 +359,9 @@ fn dispatch_tool_inner(
         | "index_drop_vector"
         | "vector_search"
         | "vector_search_filter" => vector::dispatch(name, params, adapter),
+
+        // Hybrid search (RRF fusion of vector + fulltext)
+        "hybrid_search" => hybrid::dispatch(name, params, adapter),
 
         // Embedding operations
         "embed_text" | "embed_batch" | "embed_list_models" => {
