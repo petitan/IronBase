@@ -565,10 +565,10 @@ pub struct HybridSearchParams {
     /// MongoDB projection (optional)
     pub projection: Option<Value>,
 
-    // ========== v2 parameters (preprocessing, reranking, deduplication) ==========
+    // ========== v2 parameters (reranking, deduplication) ==========
 
-    /// Language for query preprocessing (e.g., "hungarian")
-    /// If None or unrecognized, no preprocessing is applied
+    /// DEPRECATED: Language parameter is ignored for NLP consistency.
+    /// Vector search uses original query (client-embedded), fulltext uses Snowball stemmer.
     #[serde(default)]
     pub language: Option<String>,
 

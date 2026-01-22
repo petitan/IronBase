@@ -4,10 +4,12 @@
 //! RRF is collection-size independent, solving the score normalization problem between
 //! TF-IDF (unbounded) and vector similarity (0-1).
 //!
-//! ## v2 Features (2026-01)
-//! - Query preprocessing via pluggable language preprocessors
+//! ## Design (2026-01)
+//! - NO query preprocessing - consistent NLP for both paths:
+//!   - Vector: client embeds original query → matches original-embedded docs
+//!   - Fulltext: Snowball stems query → matches Snowball-stemmed index
 //! - Reranking: heading boost, phrase match, keyword density
-//! - Deduplication: content prefix and heading based
+//! - Deduplication: content prefix based
 
 use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
@@ -17,7 +19,6 @@ use std::sync::Arc;
 
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{HybridSearchParams, ParseParams};
-use super::preprocessing::{available_languages, get_preprocessor, PreprocessResult};
 
 /// RRF constant - empirically optimal value (Cormack et al., 2009)
 const RRF_K: f64 = 60.0;
@@ -53,35 +54,16 @@ struct FusedResult {
 }
 
 /// Handle hybrid_search - RRF fusion of vector and fulltext search
-/// With preprocessing, reranking, and deduplication
+/// With reranking and deduplication (NO query preprocessing for consistency)
 fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: HybridSearchParams = HybridSearchParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
     // ========================================================================
-    // 1. Query Preprocessing (via plugin registry)
+    // NO preprocessing - consistent NLP design:
+    // - Vector: client embeds original query → matches original-embedded docs
+    // - Fulltext: Snowball internally stems query → matches Snowball-stemmed index
     // ========================================================================
-    let preprocess_result = match p.language.as_deref() {
-        Some(lang) => {
-            if let Some(preprocessor) = get_preprocessor(lang) {
-                preprocessor.preprocess(&p.query)
-            } else {
-                return Err(McpError::invalid_params(format!(
-                    "Unknown language: '{}'. Available: {:?}",
-                    lang,
-                    available_languages()
-                )));
-            }
-        }
-        None => PreprocessResult::passthrough(&p.query),
-    };
-
-    // Fallback to original query if preprocessing removed all words
-    let processed_query = if preprocess_result.processed.is_empty() {
-        &p.query
-    } else {
-        &preprocess_result.processed
-    };
 
     // Internal limit multiplier for better fusion coverage
     // Need more results when reranking/deduplication will filter some out
@@ -112,7 +94,7 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
 
     // ========================================================================
-    // 3. Fulltext search → get ranks (using processed query)
+    // 3. Fulltext search → get ranks (original query - Snowball handles stemming)
     // ========================================================================
     let text_options = FulltextSearchOptions {
         limit: Some(internal_limit),
@@ -125,9 +107,9 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         highlight_max_snippets: None,
     };
 
-    // Use processed query for fulltext search (stop words/suffixes removed)
+    // Use original query - Snowball stemmer in fulltext handles NLP consistently
     let text_results =
-        adapter.fulltext_search(&p.collection, &p.text_field, processed_query, text_options)?;
+        adapter.fulltext_search(&p.collection, &p.text_field, &p.query, text_options)?;
 
     // Build fulltext rank map (1-indexed) with pre-allocated capacity (OOM protection)
     let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
@@ -199,8 +181,8 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     // 5. Reranking (optional)
     // ========================================================================
     if p.rerank {
-        // Pass both original query (for phrase match) and processed query (for keyword density)
-        rerank_results(&mut fused, &p.query, processed_query, &p.text_field);
+        // Use original query for both phrase match and keyword density
+        rerank_results(&mut fused, &p.query, &p.query, &p.text_field);
     }
 
     // ========================================================================
@@ -248,15 +230,6 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         })
         .collect();
 
-    // Build preprocessing info for response
-    let preprocessing_info = json!({
-        "original_query": preprocess_result.original,
-        "processed_query": preprocess_result.processed,
-        "language": p.language,
-        "removed_words": preprocess_result.removed_words,
-        "stemmed_words": preprocess_result.stemmed_words
-    });
-
     Ok(json!({
         "results": results,
         "count": results.len(),
@@ -266,9 +239,9 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
             "vector": p.vector_weight,
             "fulltext": p.fulltext_weight
         },
-        "preprocessing": preprocessing_info,
+        "query": p.query,
         "dedup_removed": dedup_removed,
-        "available_languages": available_languages()
+        "nlp_design": "consistent: vector=original, fulltext=snowball"
     }))
 }
 
