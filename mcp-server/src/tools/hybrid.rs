@@ -71,7 +71,13 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         }
         None => PreprocessResult::passthrough(&p.query),
     };
-    let processed_query = &preprocess_result.processed;
+
+    // Fallback to original query if preprocessing removed all words
+    let processed_query = if preprocess_result.processed.is_empty() {
+        &p.query
+    } else {
+        &preprocess_result.processed
+    };
 
     // Internal limit multiplier for better fusion coverage
     // Need more results when reranking/deduplication will filter some out
@@ -197,7 +203,8 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     // 5. Reranking (optional)
     // ========================================================================
     if p.rerank {
-        rerank_results(&mut fused, &p.query, &p.text_field);
+        // Pass both original query (for phrase match) and processed query (for keyword density)
+        rerank_results(&mut fused, &p.query, processed_query, &p.text_field);
     }
 
     // ========================================================================
@@ -289,16 +296,24 @@ fn strip_punctuation(s: &str) -> String {
 /// - Exact phrase boost: 1.3x if query found in content (punctuation ignored)
 /// - Keyword density: 1.0-1.1x based on query word occurrence ratio
 /// - Content length penalty: 0.8x for content < 100 chars
-fn rerank_results(results: &mut [FusedResult], original_query: &str, text_field: &str) {
-    // Build query word sets for matching
-    let query_words: HashSet<String> = original_query
+///
+/// Uses original_query for phrase matching (what user typed)
+/// and processed_query for keyword density (matches fulltext search behavior)
+fn rerank_results(
+    results: &mut [FusedResult],
+    original_query: &str,
+    processed_query: &str,
+    text_field: &str,
+) {
+    // Build query word sets from PROCESSED query (consistent with fulltext search)
+    let query_words: HashSet<String> = processed_query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.len() >= 3)
+        .filter(|w| w.chars().count() >= 3)
         .map(|s| s.to_string())
         .collect();
 
-    // Query for exact phrase matching (punctuation stripped)
+    // Query for exact phrase matching (punctuation stripped) - use ORIGINAL query
     let query_normalized = strip_punctuation(&original_query.to_lowercase());
 
     for item in results.iter_mut() {
@@ -314,7 +329,8 @@ fn rerank_results(results: &mut [FusedResult], original_query: &str, text_field:
         let content_normalized = strip_punctuation(&content_lower);
 
         // 1. Exact phrase boost (1.3x) - query found in content (punctuation ignored)
-        if query_normalized.len() > 10 && content_normalized.contains(&query_normalized) {
+        // Use chars().count() for UTF-8 correctness
+        if query_normalized.chars().count() > 10 && content_normalized.contains(&query_normalized) {
             boost *= 1.3;
         }
 
@@ -739,7 +755,7 @@ mod tests {
             ),
         ];
 
-        rerank_results(&mut results, "the exact phrase test query", "content");
+        rerank_results(&mut results, "the exact phrase test query", "the exact phrase test query", "content");
 
         // doc2 should be boosted (contains exact phrase)
         assert!(results[0].id == "doc2");
@@ -766,7 +782,8 @@ mod tests {
         ];
 
         // Query has "?" at end, content has ":" before and "-" after
-        rerank_results(&mut results, "milyen lépései vannak a kalibrálásnak?", "content");
+        // original_query and processed_query same for this test (no preprocessing)
+        rerank_results(&mut results, "milyen lépései vannak a kalibrálásnak?", "milyen lépései vannak a kalibrálásnak?", "content");
 
         // doc2 should be boosted (phrase matches ignoring punctuation)
         assert!(results[0].id == "doc2");
@@ -785,7 +802,7 @@ mod tests {
             ),
         ];
 
-        rerank_results(&mut results, "test", "content");
+        rerank_results(&mut results, "test", "test", "content");
 
         // doc1 should be penalized (content < 100 chars)
         let doc1 = results.iter().find(|r| r.id == "doc1").unwrap();

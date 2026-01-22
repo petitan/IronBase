@@ -44,12 +44,8 @@ impl HungarianPreprocessor {
         "tok", "tek", "tök", // birtokos többes 2. személy
         // ============ 3 karakteres ragok ============
         "ért",
-        "ból", "ből", "tól", "től",
-        "nak", "nek", "ban", "ben",
-        "hoz", "hez", "höz",
-        "val", "vel",
-        "nál", "nél",
-        "ról", "ről",
+        // Note: ból/ből/tól/től/nak/nek/ban/ben/hoz/hez/höz/val/vel/nál/nél/ról/ről
+        // are in 4-char section above (they're 4 bytes due to accents, but 3 chars)
         // ============ 2 karakteres ragok ============
         "ba", "be", "ra", "re", "ig",
         "at", "et", "ot", "öt", // tárgyeset egyes
@@ -88,9 +84,11 @@ impl HungarianPreprocessor {
 
     /// Strip the longest matching suffix from a word
     fn strip_suffix(word: &str) -> (String, Option<String>) {
+        let word_chars = word.chars().count();
         for suffix in Self::SUFFIXES {
-            // Only strip if word is longer than suffix + 2 chars (preserve stem)
-            if word.len() > suffix.len() + 2 && word.ends_with(suffix) {
+            let suffix_chars = suffix.chars().count();
+            // Only strip if word is longer than suffix + 2 chars (preserve stem of min 3 chars)
+            if word_chars > suffix_chars + 2 && word.ends_with(suffix) {
                 let stemmed = &word[..word.len() - suffix.len()];
 
                 // Don't strip -at/-et/-ot/-öt if stem ends in 't' (causative verbs: -tat/-tet)
@@ -130,8 +128,8 @@ impl QueryPreprocessor for HungarianPreprocessor {
             .collect();
 
         for word in cleaned.split_whitespace() {
-            // Skip short words (< 3 chars)
-            if word.len() < 3 {
+            // Skip short words (< 3 chars) - use chars().count() for UTF-8 correctness
+            if word.chars().count() < 3 {
                 removed_words.push(word.to_string());
                 continue;
             }
@@ -145,8 +143,8 @@ impl QueryPreprocessor for HungarianPreprocessor {
             // Strip suffix
             let (stemmed, original) = Self::strip_suffix(word);
 
-            // Skip if stemmed result is too short
-            if stemmed.len() < 3 {
+            // Skip if stemmed result is too short (< 3 chars)
+            if stemmed.chars().count() < 3 {
                 removed_words.push(word.to_string());
                 continue;
             }
@@ -292,6 +290,23 @@ mod tests {
         let result = preprocessor().preprocess("What are the characteristics?");
         // Should still produce some output
         assert!(!result.processed.is_empty());
+    }
+
+    #[test]
+    fn test_utf8_char_counting() {
+        // Verify UTF-8 character counting works correctly
+        // "áz" is 3 bytes but only 2 characters - should be filtered
+        let result = preprocessor().preprocess("áz éz őz");
+        // All words are 2 characters, should be removed
+        assert!(result.removed_words.contains(&"áz".to_string()));
+        assert!(result.removed_words.contains(&"éz".to_string()));
+        assert!(result.removed_words.contains(&"őz".to_string()));
+
+        // "ház" is 4 bytes but 3 characters - should be kept
+        let result = preprocessor().preprocess("ház tűz víz");
+        assert!(result.processed.contains("ház"));
+        assert!(result.processed.contains("tűz"));
+        assert!(result.processed.contains("víz"));
     }
 
     #[test]
