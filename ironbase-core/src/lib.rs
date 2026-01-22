@@ -42,6 +42,8 @@ pub mod limits;
 pub mod query;
 pub mod storage;
 pub mod transaction;
+pub mod update_options;
+pub mod upsert;
 
 // Vector index module (HNSW-based ANN search)
 pub mod vector;
@@ -91,6 +93,8 @@ pub use recovery::{
 };
 pub use storage::{CheckpointStats, CompactionStats, StorageEngine};
 pub use transaction::{Operation, Transaction, TransactionId, TransactionState};
+pub use update_options::{UpdateOptions, UpdateResult};
+pub use upsert::{create_upsert_document, filter_to_document};
 pub use wal::{
     CommittedTransaction, TransactionGrouper, WALEntry, WALEntryIterator, WALEntryType,
     WriteAheadLog,

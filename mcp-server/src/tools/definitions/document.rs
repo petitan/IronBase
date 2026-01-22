@@ -72,7 +72,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "update_one",
             "title": "Update Single Document",
-            "description": "Update the first document matching a filter.",
+            "description": "Update the first document matching a filter. Use upsert=true to insert if no match found.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -81,7 +81,12 @@ pub fn tools() -> Vec<Value> {
                         "description": "Collection containing the document"
                     },
                     "filter": fields::filter(),
-                    "update": fields::update()
+                    "update": fields::update(),
+                    "upsert": {
+                        "type": "boolean",
+                        "description": "If true, insert a new document when no match is found. The new document is created from filter fields + update operations. Default: false",
+                        "default": false
+                    }
                 },
                 "required": ["collection", "filter", "update"]
             }

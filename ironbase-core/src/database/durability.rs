@@ -651,6 +651,97 @@ impl DatabaseCore<StorageEngine> {
         }
     }
 
+    /// Update one document with upsert support (MongoDB-compatible)
+    ///
+    /// If `options.upsert` is true and no document matches the filter,
+    /// a new document is created from the filter criteria and update.
+    ///
+    /// # Arguments
+    /// * `collection_name` - Target collection
+    /// * `query` - Filter to find document
+    /// * `update` - Update operators to apply
+    /// * `options` - Update options (including upsert flag)
+    ///
+    /// # Returns
+    /// `UpdateResult` with matched/modified counts and optional upserted_id
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use ironbase_core::UpdateOptions;
+    ///
+    /// let options = UpdateOptions::new().with_upsert(true);
+    /// let result = db.update_one_with_options(
+    ///     "users",
+    ///     &json!({"email": "new@example.com"}),
+    ///     &json!({"$set": {"name": "New User"}}),
+    ///     options
+    /// )?;
+    ///
+    /// if let Some(id) = result.upserted_id {
+    ///     println!("Inserted new document: {:?}", id);
+    /// }
+    /// ```
+    pub fn update_one_with_options(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        update: &Value,
+        options: crate::update_options::UpdateOptions,
+    ) -> Result<crate::update_options::UpdateResult> {
+        use crate::update_options::UpdateResult;
+        use crate::upsert::create_upsert_document;
+
+        self.check_not_closed()?;
+
+        // First, try the normal update
+        // Handle CollectionNotFound specially for upsert
+        let update_result = self.update_one(collection_name, query, update);
+
+        match update_result {
+            Ok((matched, modified)) => {
+                // If we found a match, return the standard result
+                if matched > 0 {
+                    return Ok(UpdateResult::from_counts(matched, modified));
+                }
+
+                // No match - check if upsert is requested
+                if !options.upsert {
+                    return Ok(UpdateResult::from_counts(0, 0));
+                }
+
+                // Perform upsert: create new document from filter + update
+                let upsert_doc = create_upsert_document(query, update);
+
+                // Convert Value to HashMap for insert
+                let doc_map: std::collections::HashMap<String, Value> = match upsert_doc {
+                    Value::Object(map) => map.into_iter().collect(),
+                    _ => std::collections::HashMap::new(),
+                };
+
+                // Insert the new document (uses the existing insert_one with WAL durability)
+                let doc_id = self.insert_one(collection_name, doc_map)?;
+
+                Ok(UpdateResult::from_upsert(doc_id))
+            }
+            Err(IronBaseError::CollectionNotFound(_)) if options.upsert => {
+                // Collection doesn't exist but upsert is enabled - create it via insert
+                let upsert_doc = create_upsert_document(query, update);
+
+                // Convert Value to HashMap for insert
+                let doc_map: std::collections::HashMap<String, Value> = match upsert_doc {
+                    Value::Object(map) => map.into_iter().collect(),
+                    _ => std::collections::HashMap::new(),
+                };
+
+                // Insert creates the collection implicitly
+                let doc_id = self.insert_one(collection_name, doc_map)?;
+
+                Ok(UpdateResult::from_upsert(doc_id))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Delete one document with WAL durability
     ///
     /// This method wraps delete_one with proper WAL logging for crash recovery.
@@ -1140,6 +1231,71 @@ impl DatabaseCore<MemoryStorage> {
         // Use get_collection - no implicit creation for update operations
         let collection = self.get_collection(collection_name)?;
         collection.update_one_raw(query, update)
+    }
+
+    /// Update one document with upsert support (MemoryStorage version)
+    ///
+    /// If `options.upsert` is true and no document matches the filter,
+    /// a new document is created from the filter criteria and update.
+    pub fn update_one_with_options(
+        &self,
+        collection_name: &str,
+        query: &Value,
+        update: &Value,
+        options: crate::update_options::UpdateOptions,
+    ) -> Result<crate::update_options::UpdateResult> {
+        use crate::update_options::UpdateResult;
+        use crate::upsert::create_upsert_document;
+
+        self.check_not_closed()?;
+
+        // First, try the normal update
+        // Handle CollectionNotFound specially for upsert
+        let update_result = self.update_one(collection_name, query, update);
+
+        match update_result {
+            Ok((matched, modified)) => {
+                // If we found a match, return the standard result
+                if matched > 0 {
+                    return Ok(UpdateResult::from_counts(matched, modified));
+                }
+
+                // No match - check if upsert is requested
+                if !options.upsert {
+                    return Ok(UpdateResult::from_counts(0, 0));
+                }
+
+                // Perform upsert: create new document from filter + update
+                let upsert_doc = create_upsert_document(query, update);
+
+                // Convert Value to HashMap for insert
+                let doc_map: HashMap<String, Value> = match upsert_doc {
+                    Value::Object(map) => map.into_iter().collect(),
+                    _ => HashMap::new(),
+                };
+
+                // Insert the new document
+                let doc_id = self.insert_one(collection_name, doc_map)?;
+
+                Ok(UpdateResult::from_upsert(doc_id))
+            }
+            Err(IronBaseError::CollectionNotFound(_)) if options.upsert => {
+                // Collection doesn't exist but upsert is enabled - create it via insert
+                let upsert_doc = create_upsert_document(query, update);
+
+                // Convert Value to HashMap for insert
+                let doc_map: HashMap<String, Value> = match upsert_doc {
+                    Value::Object(map) => map.into_iter().collect(),
+                    _ => HashMap::new(),
+                };
+
+                // Insert creates the collection implicitly
+                let doc_id = self.insert_one(collection_name, doc_map)?;
+
+                Ok(UpdateResult::from_upsert(doc_id))
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Delete one document (MemoryStorage version - no WAL/durability)

@@ -119,11 +119,13 @@ pub struct FindResult {
     pub total: Option<usize>,
 }
 
-/// Update result
+/// Update result (MongoDB-compatible)
 #[derive(Debug)]
 pub struct UpdateResult {
     pub matched_count: u64,
     pub modified_count: u64,
+    /// ID of the upserted document (if upsert occurred)
+    pub upserted_id: Option<String>,
 }
 
 /// Full-text search options
@@ -1048,6 +1050,43 @@ impl IronBaseAdapter {
         Ok(UpdateResult {
             matched_count: matched,
             modified_count: modified,
+            upserted_id: None,
+        })
+    }
+
+    /// Update a single document with upsert support (MongoDB-compatible)
+    ///
+    /// If `upsert` is true and no document matches the filter,
+    /// a new document is created from the filter criteria and update.
+    ///
+    /// # Arguments
+    /// * `collection` - Target collection
+    /// * `filter` - Filter to find document
+    /// * `update` - Update operators to apply
+    /// * `upsert` - If true, insert when no match found
+    ///
+    /// # Returns
+    /// `UpdateResult` with matched/modified counts and optional upserted_id
+    pub fn update_one_with_options(
+        &self,
+        collection: &str,
+        filter: Value,
+        update: Value,
+        upsert: bool,
+    ) -> Result<UpdateResult> {
+        let db = self.db.read();
+        let options = ironbase_core::UpdateOptions::new().with_upsert(upsert);
+        let result = db.update_one_with_options(collection, &filter, &update, options)?;
+
+        // If upsert occurred, update in-memory count
+        if result.upserted_id.is_some() {
+            self.collection_stats.increment(collection, 1);
+        }
+
+        Ok(UpdateResult {
+            matched_count: result.matched_count,
+            modified_count: result.modified_count,
+            upserted_id: result.upserted_id.map(|id| Self::doc_id_to_string(&id)),
         })
     }
 
@@ -1063,6 +1102,7 @@ impl IronBaseAdapter {
         Ok(UpdateResult {
             matched_count: matched,
             modified_count: modified,
+            upserted_id: None,
         })
     }
 
@@ -1597,6 +1637,7 @@ impl IronBaseAdapter {
         Ok(UpdateResult {
             matched_count: matched,
             modified_count: modified,
+            upserted_id: None,
         })
     }
 

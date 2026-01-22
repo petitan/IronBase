@@ -138,11 +138,18 @@ fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     validate_filter(&p.filter)?;
     validate_update(&p.update)?;
 
-    let result = adapter.update_one(&p.collection, p.filter, p.update)?;
-    Ok(json!({
+    // Use update_one_with_options for upsert support
+    let result = adapter.update_one_with_options(&p.collection, p.filter, p.update, p.upsert)?;
+
+    // Build response - include upserted_id if present
+    let mut response = json!({
         "matched_count": result.matched_count,
         "modified_count": result.modified_count
-    }))
+    });
+    if let Some(ref upserted_id) = result.upserted_id {
+        response["upserted_id"] = json!(upserted_id);
+    }
+    Ok(response)
 }
 
 fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

@@ -300,8 +300,32 @@ namespace IronBase
         /// </summary>
         public UpdateResult UpdateOne(FilterDefinition<T> filter, UpdateDefinition<T> update)
         {
+            return UpdateOne(filter, update, null);
+        }
+
+        /// <summary>
+        /// Update one document with options (supports upsert).
+        /// </summary>
+        /// <param name="filter">Filter to find document</param>
+        /// <param name="update">Update operations to apply</param>
+        /// <param name="options">Update options (use IsUpsert = true to insert if no match)</param>
+        /// <returns>Update result with optional UpsertedId</returns>
+        /// <example>
+        /// var options = new UpdateOptions { IsUpsert = true };
+        /// var result = collection.UpdateOne(
+        ///     Builders&lt;User&gt;.Filter.Eq(u => u.Email, "new@example.com"),
+        ///     Builders&lt;User&gt;.Update.Set(u => u.Name, "New User"),
+        ///     options
+        /// );
+        /// if (result.UpsertedId != null)
+        ///     Console.WriteLine($"Inserted new document: {result.UpsertedId}");
+        /// </example>
+        public UpdateResult UpdateOne(FilterDefinition<T> filter, UpdateDefinition<T> update, UpdateOptions? options)
+        {
             if (filter == null) throw new ArgumentNullException(nameof(filter));
             if (update == null) throw new ArgumentNullException(nameof(update));
+
+            bool upsert = options?.IsUpsert ?? false;
 
             unsafe
             {
@@ -309,12 +333,16 @@ namespace IronBase
                 fixed (byte* updatePtr = NativeHelper.ToUtf8(update.ToJson()))
                 {
                     ulong matched, modified;
-                    int result = NativeMethods.ironbase_update_one(
+                    byte* upsertedIdPtr;
+
+                    int result = NativeMethods.ironbase_update_one_with_options(
                         (CollectionHandle*)_handle,
                         filterPtr,
                         updatePtr,
+                        upsert ? 1 : 0,
                         &matched,
-                        &modified
+                        &modified,
+                        &upsertedIdPtr
                     );
                     NativeHelper.ThrowIfError(result);
 
@@ -322,7 +350,8 @@ namespace IronBase
                     {
                         Acknowledged = true,
                         MatchedCount = (long)matched,
-                        ModifiedCount = (long)modified
+                        ModifiedCount = (long)modified,
+                        UpsertedId = upsertedIdPtr != null ? NativeHelper.PtrToStringUtf8AndFree(upsertedIdPtr) : null
                     };
                 }
             }

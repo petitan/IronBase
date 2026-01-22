@@ -504,6 +504,104 @@ pub extern "C" fn ironbase_update_one(
     }
 }
 
+/// Update one document with upsert support
+///
+/// # Parameters
+/// - `handle`: The collection handle
+/// - `query_json`: Query filter as JSON string
+/// - `update_json`: Update operations as JSON string
+/// - `upsert`: If true, insert a new document when no match is found
+/// - `out_matched`: Pointer to receive matched count
+/// - `out_modified`: Pointer to receive modified count
+/// - `out_upserted_id`: Pointer to receive upserted ID (null-terminated string, null if no upsert)
+///
+/// # Returns
+/// - `IronBaseErrorCode::Success` (0) on success
+/// - Error code on failure
+#[no_mangle]
+pub extern "C" fn ironbase_update_one_with_options(
+    handle: CollHandle,
+    query_json: *const c_char,
+    update_json: *const c_char,
+    upsert: i32,
+    out_matched: *mut u64,
+    out_modified: *mut u64,
+    out_upserted_id: *mut *mut c_char,
+) -> i32 {
+    clear_last_error();
+
+    let coll = match validate_coll_handle(handle) {
+        Some(h) => h,
+        None => {
+            set_last_error("Invalid collection handle");
+            return IronBaseErrorCode::InvalidHandle as i32;
+        }
+    };
+
+    let query_str = match c_str_to_string(query_json) {
+        Some(s) => s,
+        None => {
+            set_last_error("Query JSON is null or invalid UTF-8");
+            return IronBaseErrorCode::NullPointer as i32;
+        }
+    };
+
+    let update_str = match c_str_to_string(update_json) {
+        Some(s) => s,
+        None => {
+            set_last_error("Update JSON is null or invalid UTF-8");
+            return IronBaseErrorCode::NullPointer as i32;
+        }
+    };
+
+    let query: Value = match serde_json::from_str(&query_str) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(&format!("Invalid query JSON: {}", e));
+            return IronBaseErrorCode::InvalidQuery as i32;
+        }
+    };
+
+    let update: Value = match serde_json::from_str(&update_str) {
+        Ok(v) => v,
+        Err(e) => {
+            set_last_error(&format!("Invalid update JSON: {}", e));
+            return IronBaseErrorCode::InvalidQuery as i32;
+        }
+    };
+
+    let options = ironbase_core::UpdateOptions::new().with_upsert(upsert != 0);
+
+    match coll
+        .db
+        .update_one_with_options(&coll.name, &query, &update, options)
+    {
+        Ok(result) => {
+            if !out_matched.is_null() {
+                unsafe {
+                    *out_matched = result.matched_count;
+                }
+            }
+            if !out_modified.is_null() {
+                unsafe {
+                    *out_modified = result.modified_count;
+                }
+            }
+            if !out_upserted_id.is_null() {
+                unsafe {
+                    if let Some(ref id) = result.upserted_id {
+                        *out_upserted_id = string_to_c_str(&document_id_to_json(id));
+                    } else {
+                        *out_upserted_id = ptr::null_mut();
+                    }
+                }
+            }
+            IronBaseErrorCode::Success as i32
+        }
+        Err(e) => set_error(&e) as i32,
+    }
+}
+
 /// Update many documents
 ///
 /// # Parameters

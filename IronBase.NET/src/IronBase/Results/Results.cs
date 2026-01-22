@@ -59,6 +59,24 @@ namespace IronBase
         /// Number of documents modified.
         /// </summary>
         public long ModifiedCount { get; set; }
+
+        /// <summary>
+        /// The ID of the upserted document (if upsert occurred).
+        /// Null if no upsert happened or if upsert was not requested.
+        /// </summary>
+        public string? UpsertedId { get; set; }
+    }
+
+    /// <summary>
+    /// Options for update operations.
+    /// </summary>
+    public class UpdateOptions
+    {
+        /// <summary>
+        /// If true, insert a new document when no match is found.
+        /// The new document is created from filter fields + update operations.
+        /// </summary>
+        public bool IsUpsert { get; set; } = false;
     }
 
     /// <summary>

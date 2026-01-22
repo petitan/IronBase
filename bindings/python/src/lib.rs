@@ -215,6 +215,7 @@ impl DatabaseWrapper {
         db_dispatch!(self, insert_many, collection, docs)
     }
 
+    #[allow(dead_code)] // Kept for backward compatibility
     fn update_one(
         &self,
         collection: &str,
@@ -222,6 +223,23 @@ impl DatabaseWrapper {
         update: &Value,
     ) -> Result<(u64, u64), ironbase_core::IronBaseError> {
         db_dispatch!(self, update_one, collection, query, update)
+    }
+
+    fn update_one_with_options(
+        &self,
+        collection: &str,
+        query: &Value,
+        update: &Value,
+        options: ironbase_core::UpdateOptions,
+    ) -> Result<ironbase_core::UpdateResult, ironbase_core::IronBaseError> {
+        db_dispatch!(
+            self,
+            update_one_with_options,
+            collection,
+            query,
+            update,
+            options
+        )
     }
 
     fn update_many(
@@ -1268,25 +1286,47 @@ impl Collection {
         Ok(py_list)
     }
 
-    /// Update one document
+    /// Update one document with optional upsert support.
+    ///
+    /// If upsert=True and no document matches the filter, a new document
+    /// is created from the filter criteria and update operations.
+    ///
+    /// Example:
+    ///     >>> result = coll.update_one(
+    ///     ...     {"email": "new@example.com"},
+    ///     ...     {"$set": {"name": "New User"}},
+    ///     ...     upsert=True
+    ///     ... )
+    ///     >>> if result.get("upserted_id"):
+    ///     ...     print(f"Inserted new document: {result['upserted_id']}")
+    #[pyo3(signature = (query, update, upsert=false))]
     fn update_one<'py>(
         &self,
         py: Python<'py>,
         query: Bound<'_, PyDict>,
         update: Bound<'_, PyDict>,
+        upsert: bool,
     ) -> PyResult<Bound<'py, PyDict>> {
         let query_json = python_dict_to_json_value(py, &query)?;
         let update_json = python_dict_to_json_value(py, &update)?;
 
-        let (matched_count, modified_count) = self
+        let options = ironbase_core::UpdateOptions::new().with_upsert(upsert);
+        let update_result = self
             .db
-            .update_one(&self.name, &query_json, &update_json)
+            .update_one_with_options(&self.name, &query_json, &update_json, options)
             .map_err(ironbase_error_to_pyerr)?;
 
         let result = PyDict::new(py);
         result.set_item("acknowledged", true)?;
-        result.set_item("matched_count", matched_count)?;
-        result.set_item("modified_count", modified_count)?;
+        result.set_item("matched_count", update_result.matched_count)?;
+        result.set_item("modified_count", update_result.modified_count)?;
+
+        // Include upserted_id if present
+        if let Some(ref doc_id) = update_result.upserted_id {
+            let id_value = doc_id_to_py(py, doc_id)?;
+            result.set_item("upserted_id", id_value)?;
+        }
+
         Ok(result)
     }
 
