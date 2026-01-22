@@ -21,11 +21,13 @@ pub fn tools() -> Vec<Value> {
                 "collection": fields::collection(),
                 "vector_field": {
                     "type": "string",
-                    "description": "Field with vector index (e.g., 'embedding')"
+                    "description": "Field with vector index (default: 'embedding' - gaploader compatible)",
+                    "default": "embedding"
                 },
                 "text_field": {
                     "type": "string",
-                    "description": "Field with fulltext index (e.g., 'content')"
+                    "description": "Field with fulltext index (default: 'content' - gaploader compatible)",
+                    "default": "content"
                 },
                 "vector": {
                     "type": "array",
@@ -81,7 +83,7 @@ pub fn tools() -> Vec<Value> {
                     "maximum": 1000
                 }
             },
-            "required": ["collection", "vector_field", "text_field", "vector", "query"]
+            "required": ["collection", "vector", "query"]
         }
     })]
 }

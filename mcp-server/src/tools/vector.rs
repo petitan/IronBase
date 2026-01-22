@@ -61,10 +61,23 @@ pub struct VectorIndexDropParams {
     pub index_name: String,
 }
 
+// Gaploader-compatible default field name
+fn default_embedding_field() -> String {
+    "embedding".to_string()
+}
+
+fn default_limit() -> usize {
+    10
+}
+
 /// Parameters for `vector_search` tool
+///
+/// Field default matches gaploader schema: "embedding"
 #[derive(Debug, Deserialize)]
 pub struct VectorSearchParams {
     pub collection: String,
+    /// Field with vector index (default: "embedding" - gaploader compatible)
+    #[serde(default = "default_embedding_field")]
     pub field: String,
     pub vector: Vec<f64>,
     #[serde(default = "default_limit")]
@@ -72,14 +85,14 @@ pub struct VectorSearchParams {
     pub projection: Option<Value>,
 }
 
-fn default_limit() -> usize {
-    10
-}
-
 /// Parameters for `vector_search_filter` tool
+///
+/// Field default matches gaploader schema: "embedding"
 #[derive(Debug, Deserialize)]
 pub struct VectorSearchFilterParams {
     pub collection: String,
+    /// Field with vector index (default: "embedding" - gaploader compatible)
+    #[serde(default = "default_embedding_field")]
     pub field: String,
     pub vector: Vec<f64>,
     pub filter: Value,

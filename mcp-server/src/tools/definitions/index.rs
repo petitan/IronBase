@@ -85,7 +85,8 @@ pub fn tools() -> Vec<Value> {
                     },
                     "field": {
                         "type": "string",
-                        "description": "Indexed field to search"
+                        "description": "Indexed field to search (default: 'content' - gaploader compatible)",
+                        "default": "content"
                     },
                     "query": fields::search_query(),
                     "limit": fields::limit_results(10),
@@ -97,7 +98,7 @@ pub fn tools() -> Vec<Value> {
                     "highlight_context": fields::highlight_context(),
                     "highlight_max_snippets": fields::highlight_max_snippets()
                 },
-                "required": ["collection", "field", "query"]
+                "required": ["collection", "query"]
             }
         }),
         json!({

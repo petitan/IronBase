@@ -192,10 +192,19 @@ pub struct FuzzySearchParams {
     pub highlight: bool,
 }
 
+// Gaploader-compatible default content field
+fn default_content_field() -> String {
+    "content".to_string()
+}
+
 /// Parameters for `fulltext_search` tool
+///
+/// Field default matches gaploader schema: "content"
 #[derive(Debug, Deserialize)]
 pub struct FulltextSearchParams {
     pub collection: String,
+    /// Field with fulltext index (default: "content" - gaploader compatible)
+    #[serde(default = "default_content_field")]
     pub field: String,
     pub query: String,
     pub limit: Option<usize>,
@@ -521,13 +530,27 @@ pub struct ApiKeyListParams {
 // Hybrid Search Parameters
 // ============================================================================
 
+// Gaploader-compatible default field names (convention over configuration)
+fn default_vector_field() -> String {
+    "embedding".to_string()
+}
+fn default_text_field() -> String {
+    "content".to_string()
+}
+
 /// Parameters for `hybrid_search` tool (RRF-based fusion with preprocessing, reranking, dedup)
+///
+/// Field defaults match gaploader schema for seamless integration:
+/// - vector_field: "embedding" (gaploader stores embeddings here)
+/// - text_field: "content" (gaploader stores chunk text here)
 #[derive(Debug, Deserialize)]
 pub struct HybridSearchParams {
     pub collection: String,
-    /// Field with vector index (e.g., "embedding")
+    /// Field with vector index (default: "embedding" - gaploader compatible)
+    #[serde(default = "default_vector_field")]
     pub vector_field: String,
-    /// Field with fulltext index (e.g., "content")
+    /// Field with fulltext index (default: "content" - gaploader compatible)
+    #[serde(default = "default_text_field")]
     pub text_field: String,
     /// Query embedding vector
     pub vector: Vec<f64>,

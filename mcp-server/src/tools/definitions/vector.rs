@@ -103,7 +103,8 @@ pub fn tools() -> Vec<Value> {
                     },
                     "field": {
                         "type": "string",
-                        "description": "Field with vector index"
+                        "description": "Field with vector index (default: 'embedding' - gaploader compatible)",
+                        "default": "embedding"
                     },
                     "vector": {
                         "type": "array",
@@ -117,7 +118,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "projection": fields::projection_simple()
                 },
-                "required": ["collection", "field", "vector"]
+                "required": ["collection", "vector"]
             }
         }),
         json!({
@@ -133,7 +134,8 @@ pub fn tools() -> Vec<Value> {
                     },
                     "field": {
                         "type": "string",
-                        "description": "Field with vector index"
+                        "description": "Field with vector index (default: 'embedding' - gaploader compatible)",
+                        "default": "embedding"
                     },
                     "vector": {
                         "type": "array",
@@ -151,7 +153,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "projection": fields::projection_simple()
                 },
-                "required": ["collection", "field", "vector", "filter"]
+                "required": ["collection", "vector", "filter"]
             }
         }),
     ]
