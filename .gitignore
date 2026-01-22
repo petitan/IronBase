@@ -69,3 +69,4 @@ mcp-server/config.toml
 *.pdb
 *.exe
 *.ftidx
+*.hnsw
