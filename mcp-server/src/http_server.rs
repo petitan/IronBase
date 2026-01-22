@@ -229,11 +229,31 @@ fn load_rustls_config(
 }
 
 /// Load configuration from environment or config file
-/// Priority: CLI args (via env vars) > config file > defaults
+/// Priority: CLI args (via env vars) > config file next to executable > defaults
 pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
     let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
 
-    let mut config = if std::path::Path::new(&config_path).exists() {
+    // Try to find config file:
+    // 1. Specified path (absolute or relative to cwd)
+    // 2. Next to the executable
+    let config_path = if std::path::Path::new(&config_path).exists() {
+        std::path::PathBuf::from(&config_path)
+    } else if let Ok(exe_path) = std::env::current_exe() {
+        let exe_dir_config = exe_path.parent().map(|p| p.join("config.toml"));
+        if let Some(ref path) = exe_dir_config {
+            if path.exists() {
+                path.clone()
+            } else {
+                std::path::PathBuf::from(&config_path)
+            }
+        } else {
+            std::path::PathBuf::from(&config_path)
+        }
+    } else {
+        std::path::PathBuf::from(&config_path)
+    };
+
+    let mut config = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
         // Normalize Windows CRLF to LF for TOML parsing
         let content = content.replace("\r\n", "\n");
