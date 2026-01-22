@@ -17,6 +17,12 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 
+/// Maximum vocabulary size (OOM protection for corrupted files)
+const MAX_VOCAB_SIZE: usize = 10_000_000;
+
+/// Maximum vector dimension (OOM protection)
+const MAX_DIMENSION: usize = 4096;
+
 /// Memory-mapped FastText provider
 ///
 /// Only loads the word index into RAM (~50MB for 2M words).
@@ -59,14 +65,34 @@ impl FastTextProvider {
         let vocab_size = i32::from_le_bytes([mmap[0], mmap[1], mmap[2], mmap[3]]) as usize;
         let dim = i32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]) as usize;
 
+        // OOM protection: validate header values
+        if vocab_size > MAX_VOCAB_SIZE {
+            return Err(EmbeddingError::ModelLoadError(format!(
+                "vocab_size {} exceeds maximum {} (corrupted file?)",
+                vocab_size, MAX_VOCAB_SIZE
+            )));
+        }
+        if dim == 0 || dim > MAX_DIMENSION {
+            return Err(EmbeddingError::ModelLoadError(format!(
+                "invalid dimension {} (must be 1-{})",
+                dim, MAX_DIMENSION
+            )));
+        }
+
         log::info!(
             "Loading FastText model: vocab_size={}, dim={}",
             vocab_size,
             dim
         );
 
-        // Build word index
-        let mut word_index = HashMap::with_capacity(vocab_size);
+        // Build word index (OOM protection: try_reserve)
+        let mut word_index = HashMap::new();
+        word_index.try_reserve(vocab_size).map_err(|_| {
+            EmbeddingError::ModelLoadError(format!(
+                "failed to allocate word index for {} words",
+                vocab_size
+            ))
+        })?;
         let mut offset = 8usize; // Start after header
 
         for i in 0..vocab_size {
