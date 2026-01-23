@@ -1,4 +1,27 @@
 //! Transaction operations for CollectionCore
+//!
+//! # Known Limitations
+//!
+//! ## Index Tracking Not Atomic
+//!
+//! The current implementation tracks index changes separately from document operations.
+//! This means that in case of a crash during commit:
+//!
+//! 1. Document write may succeed while index update fails
+//! 2. This can lead to index-document inconsistency
+//! 3. After restart, `rebuild_indexes` may be needed to restore consistency
+//!
+//! **Future work:** Two-phase commit for atomic index updates (see INDEX_CONSISTENCY.md)
+//!
+//! ## Optimistic Concurrency
+//!
+//! Update and delete operations use optimistic concurrency:
+//! - `find_one()` locates the document (snapshot taken)
+//! - Changes are prepared based on that snapshot
+//! - Conflict detection happens at commit time
+//!
+//! If another transaction modifies the same document between find and commit,
+//! the behavior depends on the transaction manager's conflict resolution.
 
 use serde_json::Value;
 use std::collections::HashMap;

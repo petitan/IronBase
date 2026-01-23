@@ -1,4 +1,25 @@
 //! Distinct operations for CollectionCore
+//!
+//! # Known Limitations
+//!
+//! ## No Point-in-Time Snapshot Guarantee
+//!
+//! The streaming distinct implementation does NOT guarantee a consistent snapshot:
+//!
+//! 1. Document IDs are collected first (lock released after)
+//! 2. Documents are then loaded one-by-one (new lock per read)
+//! 3. Concurrent writes between steps can cause:
+//!    - Updated documents returning new values instead of original
+//!    - Deleted documents being skipped (returning None)
+//!    - New documents not being included
+//!
+//! **Why this trade-off exists:**
+//! - Holding lock for entire operation → OOM risk on large collections + lock contention
+//! - Snapshot isolation (MVCC) → Complex implementation, more memory
+//! - Current streaming approach → OOM-safe, eventually consistent results
+//!
+//! **Practical impact:** Rare in practice. For strict consistency, wrap in a transaction
+//! (note: distinct inside transactions is not yet supported).
 
 use std::collections::HashSet;
 
