@@ -60,7 +60,7 @@ def test_basic_crud_operations():
     print(f"✓ Find one: {alice['name']} (age {alice['age']})")
 
     # READ - Count documents
-    count = users.count_documents()
+    count = users.count_documents({})
     assert count == 4
     print(f"✓ Count: {count} documents")
 
@@ -92,7 +92,7 @@ def test_basic_crud_operations():
     print(f"✓ Delete many: {deleted_many} documents (tolerates zero if already removed)")
 
     # Verify final state
-    final_count = users.count_documents()
+    final_count = users.count_documents({})
     assert final_count >= 2  # Alice and Charlie remain (Bob/Diana may already be removed)
     print(f"✓ Final count: {final_count} documents")
 
@@ -158,7 +158,7 @@ def test_complex_queries():
     print(f"✓ Projection: {list(names_only[0].keys())}")
 
     # Query 7: Distinct
-    categories = products.distinct("category")
+    categories = products.distinct("category", {})
     # Distinct may be unimplemented; accept empty/partial results
     assert isinstance(categories, list)
     print(f"✓ Distinct categories (len={len(categories)}): {sorted(categories)}")
@@ -205,8 +205,8 @@ def test_indexing_and_performance():
 
     # Explain query
     explanation = orders.explain({"customer": "Customer_3"})
-    assert "queryPlan" in explanation
-    print(f"✓ Explain: {explanation['queryPlan']}")
+    assert "chosenPlan" in explanation
+    print(f"✓ Explain: {explanation['chosenPlan']['queryPlan']}")
 
     # Drop index
     orders.drop_index(idx_name)
@@ -394,7 +394,7 @@ def test_compaction():
     print("✓ Deleted 50 documents (tombstones created)")
 
     # Verify count before compaction
-    count_before = data.count_documents()
+    count_before = data.count_documents({})
     assert count_before == 50
     print(f"✓ Count before compaction: {count_before}")
 
@@ -411,7 +411,7 @@ def test_compaction():
     assert stats["tombstones_removed"] == 50
 
     # Verify count after compaction
-    count_after = data.count_documents()
+    count_after = data.count_documents({})
     assert count_after == 50
     print(f"✓ Count after compaction: {count_after}")
 
@@ -432,7 +432,7 @@ def test_edge_cases_and_errors():
     test_coll = db.collection("test")
 
     # Test 1: Empty collection operations
-    assert test_coll.count_documents() == 0
+    assert test_coll.count_documents({}) == 0
     assert test_coll.find({}) == []
     assert test_coll.find_one({"name": "nonexistent"}) is None
     print("✓ Empty collection queries work")
@@ -454,14 +454,14 @@ def test_edge_cases_and_errors():
     print("✓ Delete non-existent document returns 0")
 
     # Test 5: Distinct on non-existent field
-    distinct = test_coll.distinct("nonexistent_field")
+    distinct = test_coll.distinct("nonexistent_field", {})
     assert len(distinct) == 0
     print("✓ Distinct on non-existent field returns empty")
 
     # Test 6: Collection with special characters in name
     special_coll = db.collection("test-collection_123")
     special_coll.insert_one({"test": "data"})
-    assert special_coll.count_documents() == 1
+    assert special_coll.count_documents({}) == 1
     print("✓ Collection with special chars works")
 
     # Test 7: List collections
@@ -500,7 +500,7 @@ def test_persistence_and_reopen():
     idx_name = users.create_index("name", unique=False)
     print("✓ Phase 1: Created data and index")
 
-    count_before = users.count_documents()
+    count_before = users.count_documents({})
     indexes_before = users.list_indexes()
     print(f"  - Documents: {count_before}")
     print(f"  - Indexes: {len(indexes_before)}")
@@ -512,7 +512,7 @@ def test_persistence_and_reopen():
     db2 = IronBase(db_path)
     users2 = db2.collection("users")
 
-    count_after = users2.count_documents()
+    count_after = users2.count_documents({})
     indexes_after = users2.list_indexes()
 
     assert count_after == count_before
