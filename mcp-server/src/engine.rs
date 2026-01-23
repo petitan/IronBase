@@ -14,6 +14,7 @@ use crate::acl::{
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
 use crate::embedding::EmbeddingManager;
+use crate::jobs::JobManager;
 use crate::scripting::LimitsManager;
 use crate::tools::dispatch_tool;
 use crate::ServerInfo;
@@ -143,10 +144,12 @@ pub struct IronBaseService {
     require_api_key: bool,
     limits_manager: Arc<LimitsManager>,
     embedding_manager: Option<Arc<EmbeddingManager>>,
+    job_manager: Option<Arc<JobManager>>,
 }
 
 impl IronBaseService {
     /// Create a new IronBase service
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         adapter: Arc<IronBaseAdapter>,
         acl_manager: AclManager,
@@ -155,6 +158,7 @@ impl IronBaseService {
         require_api_key: bool,
         limits_manager: Arc<LimitsManager>,
         embedding_manager: Option<Arc<EmbeddingManager>>,
+        job_manager: Option<Arc<JobManager>>,
     ) -> Self {
         Self {
             adapter,
@@ -164,6 +168,7 @@ impl IronBaseService {
             require_api_key,
             limits_manager,
             embedding_manager,
+            job_manager,
         }
     }
 
@@ -241,6 +246,7 @@ impl IronBaseService {
             Some(&script_limits),
             ctx.cancel_flag.clone(),
             &self.embedding_manager,
+            &self.job_manager,
         ) {
             Ok(result) => ToolResult::Success(result),
             Err(e) => ToolResult::Error {

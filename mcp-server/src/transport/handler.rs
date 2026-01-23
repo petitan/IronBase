@@ -9,7 +9,7 @@ use crate::transport::{
 };
 use crate::{
     dispatch_tool, get_prompt_content, get_prompts_list, get_resources_list,
-    get_tools_list_filtered, read_resource, EmbeddingManager, IronBaseAdapter, VERSION,
+    get_tools_list_filtered, read_resource, EmbeddingManager, IronBaseAdapter, JobManager, VERSION,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -20,6 +20,8 @@ pub struct HandlerContext {
     pub adapter: Arc<IronBaseAdapter>,
     /// Embedding manager (optional - may not be configured)
     pub embedding_manager: Option<Arc<EmbeddingManager>>,
+    /// Job manager for async operations
+    pub job_manager: Option<Arc<JobManager>>,
     /// Whether the server has been initialized
     pub initialized: bool,
     /// Whether this is a localhost connection (affects tool visibility)
@@ -32,6 +34,7 @@ impl HandlerContext {
         Self {
             adapter,
             embedding_manager: None,
+            job_manager: None,
             initialized: false,
             is_localhost,
         }
@@ -46,6 +49,23 @@ impl HandlerContext {
         Self {
             adapter,
             embedding_manager,
+            job_manager: None,
+            initialized: false,
+            is_localhost,
+        }
+    }
+
+    /// Create a new handler context with all optional managers
+    pub fn with_managers(
+        adapter: Arc<IronBaseAdapter>,
+        embedding_manager: Option<Arc<EmbeddingManager>>,
+        job_manager: Option<Arc<JobManager>>,
+        is_localhost: bool,
+    ) -> Self {
+        Self {
+            adapter,
+            embedding_manager,
+            job_manager,
             initialized: false,
             is_localhost,
         }
@@ -192,6 +212,7 @@ impl HandlerContext {
             None,
             None,
             &self.embedding_manager,
+            &self.job_manager,
         ) {
             Ok(result) => {
                 if is_notification {

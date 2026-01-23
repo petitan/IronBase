@@ -16,6 +16,7 @@
 
 mod acl;
 mod admin;
+mod auto_embed;
 mod collection;
 pub mod common;
 mod database;
@@ -23,6 +24,7 @@ mod document;
 mod embedding;
 mod hybrid;
 mod index;
+mod jobs;
 mod listener;
 mod schema;
 mod script;
@@ -76,6 +78,12 @@ pub fn get_all_tools_json() -> Value {
 
     // Embedding Generation
     tools.extend(embedding::tools());
+
+    // Auto-Embedding Configuration
+    tools.extend(auto_embed::tools());
+
+    // Job Management
+    tools.extend(jobs::tools());
 
     json!({ "tools": tools })
 }

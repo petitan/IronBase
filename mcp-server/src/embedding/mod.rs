@@ -7,11 +7,16 @@
 //!   - OpenAI (cloud API)
 //!   - Cohere (cloud API)
 //!   - Mistral, Azure OpenAI, HuggingFace, etc.
+//!
+//! Features:
+//! - LRU cache for embedding results (10K entries, 1 hour TTL)
 
+pub mod cache;
 mod fasttext;
 mod http_provider;
 mod presets;
 
+pub use cache::{CacheConfig, CacheStats, CachedEmbedding, EmbeddingCache};
 pub use fasttext::FastTextProvider;
 pub use http_provider::{AuthMethod, HttpEmbeddingProvider, HttpProviderConfig, RequestFormat, ResponseFormat};
 
@@ -86,24 +91,46 @@ pub struct ModelInfo {
     pub available: bool,
 }
 
-/// Manager for embedding providers
+/// Manager for embedding providers with optional caching
 pub struct EmbeddingManager {
     providers: HashMap<String, Arc<dyn EmbeddingProvider>>,
     default_provider: String,
+    /// Optional embedding cache (shared across all providers)
+    cache: Option<Arc<EmbeddingCache>>,
 }
 
 impl EmbeddingManager {
-    /// Create a new EmbeddingManager with default configuration
+    /// Create a new EmbeddingManager with default configuration (no cache)
     pub fn new() -> Self {
         Self {
             providers: HashMap::new(),
             default_provider: String::new(),
+            cache: None,
         }
     }
 
-    /// Initialize with FastText as default provider
+    /// Create a new EmbeddingManager with caching enabled
+    pub fn with_cache(cache_config: CacheConfig) -> Self {
+        Self {
+            providers: HashMap::new(),
+            default_provider: String::new(),
+            cache: Some(Arc::new(EmbeddingCache::with_config(cache_config))),
+        }
+    }
+
+    /// Enable caching on an existing manager
+    pub fn enable_cache(&mut self, cache_config: CacheConfig) {
+        self.cache = Some(Arc::new(EmbeddingCache::with_config(cache_config)));
+    }
+
+    /// Get cache reference (for stats/clear operations)
+    pub fn cache(&self) -> Option<&Arc<EmbeddingCache>> {
+        self.cache.as_ref()
+    }
+
+    /// Initialize with FastText as default provider (with cache)
     pub fn with_fasttext(model_path: &Path) -> EmbeddingResult<Self> {
-        let mut manager = Self::new();
+        let mut manager = Self::with_cache(CacheConfig::default());
 
         match FastTextProvider::load(model_path) {
             Ok(provider) => {
@@ -128,8 +155,9 @@ impl EmbeddingManager {
     ///
     /// Checks environment variables for API keys and local services.
     /// FastText is used as default if IRONBASE_FASTTEXT_MODEL is set.
+    /// Cache is enabled by default with 10K entries and 1 hour TTL.
     pub fn auto_detect() -> Self {
-        let mut manager = Self::new();
+        let mut manager = Self::with_cache(CacheConfig::default());
 
         // 1. Try FastText first (highest priority as default)
         if let Ok(model_path) = std::env::var("IRONBASE_FASTTEXT_MODEL") {
@@ -238,7 +266,7 @@ impl EmbeddingManager {
         self.providers.get(name).cloned()
     }
 
-    /// Embed text using specified or default provider
+    /// Embed text using specified or default provider (with cache)
     pub fn embed(&self, text: &str, provider: Option<&str>) -> EmbeddingResult<Vec<f32>> {
         let provider_name = provider.unwrap_or(&self.default_provider);
         let provider = self
@@ -246,10 +274,30 @@ impl EmbeddingManager {
             .get(provider_name)
             .ok_or_else(|| EmbeddingError::ProviderNotFound(provider_name.to_string()))?;
 
-        provider.embed(text)
+        let model_name = provider.model_name();
+
+        // Check cache first
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(text, provider_name, model_name) {
+                return Ok(cached.vector);
+            }
+        }
+
+        // Generate embedding
+        let vector = provider.embed(text)?;
+
+        // Store in cache
+        if let Some(ref cache) = self.cache {
+            cache.put(text, provider_name, model_name, vector.clone());
+        }
+
+        Ok(vector)
     }
 
-    /// Embed batch of texts using specified or default provider
+    /// Embed batch of texts using specified or default provider (with cache)
+    ///
+    /// Cache lookup is done per-text, and only texts not in cache are embedded.
+    /// This provides deduplication within batches automatically.
     pub fn embed_batch(
         &self,
         texts: &[&str],
@@ -261,7 +309,43 @@ impl EmbeddingManager {
             .get(provider_name)
             .ok_or_else(|| EmbeddingError::ProviderNotFound(provider_name.to_string()))?;
 
-        provider.embed_batch(texts)
+        let model_name = provider.model_name();
+
+        // Try to get all from cache first
+        if let Some(ref cache) = self.cache {
+            let mut results: Vec<Vec<f32>> = Vec::with_capacity(texts.len());
+            let mut needs_embedding: Vec<(usize, &str)> = Vec::new();
+
+            for (i, text) in texts.iter().enumerate() {
+                if let Some(cached) = cache.get(text, provider_name, model_name) {
+                    results.push(cached.vector);
+                } else {
+                    // Placeholder - will be filled later
+                    results.push(Vec::new());
+                    needs_embedding.push((i, text));
+                }
+            }
+
+            // If all cached, return early
+            if needs_embedding.is_empty() {
+                return Ok(results);
+            }
+
+            // Embed only uncached texts
+            let uncached_texts: Vec<&str> = needs_embedding.iter().map(|(_, t)| *t).collect();
+            let new_embeddings = provider.embed_batch(&uncached_texts)?;
+
+            // Update results and cache
+            for ((i, text), embedding) in needs_embedding.iter().zip(new_embeddings.into_iter()) {
+                cache.put(text, provider_name, model_name, embedding.clone());
+                results[*i] = embedding;
+            }
+
+            Ok(results)
+        } else {
+            // No cache, just embed all
+            provider.embed_batch(texts)
+        }
     }
 
     /// List available models

@@ -1,8 +1,11 @@
 //! CRUD tool handlers: find, insert, update, delete, count, distinct, aggregate
 //!
 //! Uses typed parameter structs for compile-time validation.
+//! Supports auto-embedding: if enabled on a collection, embeddings are
+//! automatically generated from source fields on insert/update.
 
 use crate::adapter::{FindOptions, IronBaseAdapter};
+use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use crate::scripting::ScriptLimits;
 use serde_json::{json, Value};
@@ -25,10 +28,11 @@ pub fn dispatch(
     adapter: &Arc<IronBaseAdapter>,
     limits: Option<&ScriptLimits>,
     cancel_flag: Option<Arc<AtomicBool>>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
 ) -> Result<Value> {
     match name {
-        "insert_one" => handle_insert_one(params, adapter),
-        "insert_many" => handle_insert_many(params, adapter),
+        "insert_one" => handle_insert_one(params, adapter, embedding_manager),
+        "insert_many" => handle_insert_many(params, adapter, embedding_manager),
         "find" => handle_find(params, adapter, limits, cancel_flag),
         "find_one" => handle_find_one(params, adapter),
         "update_one" => handle_update_one(params, adapter),
@@ -45,25 +49,166 @@ pub fn dispatch(
     }
 }
 
-fn handle_insert_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+/// Apply auto-embedding to a document if configured for the collection
+fn apply_auto_embedding(
+    document: &mut Value,
+    config: &ironbase_core::storage::AutoEmbeddingConfig,
+    manager: &EmbeddingManager,
+) -> Result<bool> {
+    // Skip if target field already exists and skip_if_exists is true
+    if config.skip_if_exists && document.get(&config.target_field).is_some() {
+        return Ok(false);
+    }
+
+    // Get source text
+    let source_text = match document.get(&config.source_field) {
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(), // Convert non-strings to JSON string
+        None => return Ok(false), // No source field, skip
+    };
+
+    if source_text.is_empty() {
+        return Ok(false);
+    }
+
+    // Generate embedding
+    let provider = manager.get_provider(&config.provider).ok_or_else(|| {
+        McpError::internal(format!("Embedding provider '{}' not available", config.provider))
+    })?;
+
+    let embedding = provider.embed(&source_text).map_err(|e| {
+        McpError::internal(format!("Embedding generation failed: {}", e))
+    })?;
+
+    // Validate dimension if specified
+    if let Some(expected_dim) = config.dimension {
+        if embedding.len() != expected_dim {
+            return Err(McpError::internal(format!(
+                "Embedding dimension mismatch: expected {}, got {}",
+                expected_dim, embedding.len()
+            )));
+        }
+    }
+
+    // Set the embedding in the document
+    if let Some(obj) = document.as_object_mut() {
+        obj.insert(config.target_field.clone(), json!(embedding));
+    }
+
+    Ok(true)
+}
+
+fn handle_insert_one(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     check_cancelled()?;
 
     let p: InsertOneParams = InsertOneParams::parse(params)?;
     validate_collection_name(&p.collection)?;
     validate_document(&p.document)?;
 
-    let id = adapter.insert_one(&p.collection, p.document)?;
-    Ok(json!({"inserted_id": id}))
+    let mut document = p.document;
+
+    // Apply auto-embedding if configured
+    let mut embedding_applied = false;
+    if let Some(manager) = embedding_manager.as_ref() {
+        if let Ok(Some(config)) = adapter.get_auto_embedding_config(&p.collection) {
+            if config.enabled {
+                embedding_applied = apply_auto_embedding(&mut document, &config, manager)?;
+            }
+        }
+    }
+
+    let id = adapter.insert_one(&p.collection, document)?;
+
+    let mut response = json!({"inserted_id": id});
+    if embedding_applied {
+        response["auto_embedded"] = json!(true);
+    }
+    Ok(response)
 }
 
-fn handle_insert_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+fn handle_insert_many(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     check_cancelled()?;
 
     let p: InsertManyParams = InsertManyParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
-    let ids = adapter.insert_many(&p.collection, p.documents)?;
-    Ok(json!({"inserted_ids": ids, "inserted_count": ids.len()}))
+    let mut documents = p.documents;
+    let mut embeddings_applied = 0;
+
+    // Apply auto-embedding if configured
+    if let Some(manager) = embedding_manager.as_ref() {
+        if let Ok(Some(config)) = adapter.get_auto_embedding_config(&p.collection) {
+            if config.enabled {
+                // Batch embedding for efficiency
+                let provider = manager.get_provider(&config.provider);
+
+                if let Some(provider) = provider {
+                    // Collect texts that need embedding
+                    let texts_with_indices: Vec<(usize, String)> = documents
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, doc)| {
+                            // Skip if target exists and skip_if_exists is true
+                            if config.skip_if_exists && doc.get(&config.target_field).is_some() {
+                                return None;
+                            }
+                            // Get source text
+                            match doc.get(&config.source_field) {
+                                Some(Value::String(text)) if !text.is_empty() => {
+                                    Some((i, text.clone()))
+                                }
+                                Some(other) => {
+                                    let text = other.to_string();
+                                    if !text.is_empty() {
+                                        Some((i, text))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                None => None,
+                            }
+                        })
+                        .collect();
+
+                    if !texts_with_indices.is_empty() {
+                        let text_refs: Vec<&str> = texts_with_indices.iter().map(|(_, t)| t.as_str()).collect();
+
+                        // Generate embeddings in batch
+                        let embeddings = provider.embed_batch(&text_refs).map_err(|e| {
+                            McpError::internal(format!("Batch embedding failed: {}", e))
+                        })?;
+
+                        // Apply embeddings to documents
+                        for ((idx, _), embedding) in texts_with_indices.iter().zip(embeddings.iter()) {
+                            if let Some(obj) = documents[*idx].as_object_mut() {
+                                obj.insert(config.target_field.clone(), json!(embedding));
+                                embeddings_applied += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let ids = adapter.insert_many(&p.collection, documents)?;
+
+    let mut response = json!({
+        "inserted_ids": ids,
+        "inserted_count": ids.len()
+    });
+    if embeddings_applied > 0 {
+        response["auto_embedded_count"] = json!(embeddings_applied);
+    }
+    Ok(response)
 }
 
 fn handle_find(

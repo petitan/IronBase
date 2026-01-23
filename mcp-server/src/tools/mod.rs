@@ -13,6 +13,7 @@
 
 pub mod acl;
 pub mod admin;
+pub mod auto_embed;
 pub mod collection;
 pub mod crud;
 mod definitions;
@@ -20,6 +21,7 @@ pub mod embedding;
 pub mod helpers;
 pub mod hybrid;
 pub mod index;
+pub mod jobs;
 pub mod listener;
 pub mod params;
 pub mod preprocessing;
@@ -33,6 +35,7 @@ use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
+use crate::jobs::JobManager;
 use crate::scripting::ScriptLimits;
 use crate::ServerInfo;
 use serde_json::{json, Value};
@@ -91,6 +94,8 @@ const MAX_UNINDEXED_SORT_DOCS: usize = 100_000;
 /// * `server_info` - Optional server info for admin operations
 /// * `limits` - Optional script limits for unified resource limiting
 /// * `cancel_flag` - Optional cancellation flag for cooperative timeout
+/// * `embedding_manager` - Optional embedding manager for embedding operations
+/// * `job_manager` - Optional job manager for async operations
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_tool(
     name: &str,
@@ -101,6 +106,7 @@ pub fn dispatch_tool(
     limits: Option<&ScriptLimits>,
     cancel_flag: Option<Arc<AtomicBool>>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
+    job_manager: &Option<Arc<JobManager>>,
 ) -> Result<Value> {
     let tool_start = std::time::Instant::now();
 
@@ -131,6 +137,7 @@ pub fn dispatch_tool(
             limits,
             cancel_flag,
             embedding_manager,
+            job_manager,
         )
     }));
 
@@ -285,12 +292,13 @@ fn dispatch_tool_inner(
     limits: Option<&ScriptLimits>,
     cancel_flag: Option<Arc<AtomicBool>>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
+    job_manager: &Option<Arc<JobManager>>,
 ) -> Result<Value> {
     match name {
-        // CRUD operations
+        // CRUD operations (with auto-embedding support for insert)
         "insert_one" | "insert_many" | "find" | "find_one" | "update_one" | "update_many"
         | "delete_one" | "delete_many" | "count_documents" | "distinct" | "aggregate" => {
-            crud::dispatch(name, params, adapter, limits, cancel_flag)
+            crud::dispatch(name, params, adapter, limits, cancel_flag, embedding_manager)
         }
 
         // Index operations
@@ -364,8 +372,23 @@ fn dispatch_tool_inner(
         "hybrid_search" => hybrid::dispatch(name, params, adapter),
 
         // Embedding operations
-        "embed_text" | "embed_batch" | "embed_list_models" => {
-            embedding::dispatch(name, params, embedding_manager)
+        "embed_text"
+        | "embed_batch"
+        | "embed_list_models"
+        | "embed_document"
+        | "embed_cache_stats"
+        | "embed_cache_clear" => {
+            embedding::dispatch(name, params, embedding_manager, Some(adapter))
+        }
+
+        // Auto-embedding configuration
+        "auto_embed_enable" | "auto_embed_disable" | "auto_embed_status" | "auto_embed_backfill" => {
+            auto_embed::dispatch(name, params, adapter, embedding_manager)
+        }
+
+        // Job management
+        "embed_job_status" | "embed_job_list" | "embed_job_cancel" => {
+            jobs::dispatch(name, params, job_manager)
         }
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),

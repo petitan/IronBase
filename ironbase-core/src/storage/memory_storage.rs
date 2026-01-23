@@ -214,6 +214,7 @@ impl Storage for MemoryStorage {
             vector_indexes: Vec::new(),
             schema: None,
             flags: CollectionFlags::default(),
+            auto_embedding_config: None,
         };
 
         self.metadata.insert(name.to_string(), meta);

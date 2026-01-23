@@ -1534,6 +1534,35 @@ impl IronBaseAdapter {
     }
 
     // ============================================================
+    // Auto-Embedding Configuration
+    // ============================================================
+
+    /// Set auto-embedding configuration for a collection
+    ///
+    /// When enabled, documents inserted or updated will automatically have
+    /// embeddings generated from the source field and stored in the target field.
+    pub fn set_auto_embedding_config(
+        &self,
+        collection: &str,
+        config: Option<ironbase_core::storage::AutoEmbeddingConfig>,
+    ) -> Result<()> {
+        let db = self.db.read();
+        let coll = db.collection(collection)?;
+        coll.set_auto_embedding_config(config)?;
+        Ok(())
+    }
+
+    /// Get auto-embedding configuration for a collection
+    pub fn get_auto_embedding_config(
+        &self,
+        collection: &str,
+    ) -> Result<Option<ironbase_core::storage::AutoEmbeddingConfig>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.get_auto_embedding_config()?)
+    }
+
+    // ============================================================
     // Admin Operations
     // ============================================================
 

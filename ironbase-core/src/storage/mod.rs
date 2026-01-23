@@ -185,6 +185,74 @@ pub struct CollectionFlags {
     pub hidden: bool,
 }
 
+/// Configuration for automatic embedding generation on insert/update
+///
+/// When enabled, documents inserted into the collection will automatically
+/// have embeddings generated from the source field and stored in the target field.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct AutoEmbeddingConfig {
+    /// Whether auto-embedding is enabled
+    #[serde(default)]
+    pub enabled: bool,
+    /// Source field containing text to embed (e.g., "content", "text", "body")
+    #[serde(default)]
+    pub source_field: String,
+    /// Target field where embedding vector is stored (e.g., "embedding")
+    #[serde(default)]
+    pub target_field: String,
+    /// Embedding provider name (e.g., "fasttext", "openai", "ollama")
+    #[serde(default)]
+    pub provider: String,
+    /// Optional model override (provider-specific)
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Expected embedding dimension (for validation)
+    #[serde(default)]
+    pub dimension: Option<usize>,
+    /// Skip embedding if target field already exists (default: false)
+    #[serde(default)]
+    pub skip_if_exists: bool,
+    /// Chunking configuration (if source is long text)
+    #[serde(default)]
+    pub chunking: Option<ChunkingConfig>,
+}
+
+/// Configuration for text chunking before embedding
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ChunkingConfig {
+    /// Chunking mode: "auto" (detect markdown/text), "markdown", "text"
+    #[serde(default = "default_chunk_mode")]
+    pub mode: String,
+    /// Maximum chunk size in characters (default: 1000)
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: usize,
+    /// Overlap between chunks in characters (default: 100)
+    #[serde(default = "default_chunk_overlap")]
+    pub overlap: usize,
+}
+
+fn default_chunk_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_chunk_size() -> usize {
+    1000
+}
+
+fn default_chunk_overlap() -> usize {
+    100
+}
+
+impl Default for ChunkingConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_chunk_mode(),
+            chunk_size: default_chunk_size(),
+            overlap: default_chunk_overlap(),
+        }
+    }
+}
+
 /// Collection metadata
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CollectionMeta {
@@ -232,6 +300,11 @@ pub struct CollectionMeta {
     /// Collection flags (system, protected, hidden)
     #[serde(default)]
     pub flags: CollectionFlags,
+
+    /// Auto-embedding configuration for this collection
+    /// When enabled, inserts/updates automatically generate embeddings
+    #[serde(default)]
+    pub auto_embedding_config: Option<AutoEmbeddingConfig>,
 }
 
 /// Index record for persistence
@@ -651,6 +724,7 @@ impl StorageEngine {
             vector_indexes: Vec::new(),   // Initialize empty vector index list
             schema: None,
             flags: CollectionFlags::default(),
+            auto_embedding_config: None,
         };
 
         self.collections.insert(name.to_string(), meta);
@@ -952,6 +1026,7 @@ impl StorageEngine {
                             vector_indexes: Vec::new(),
                             schema: None,
                             flags: CollectionFlags::default(),
+                            auto_embedding_config: None,
                         });
 
                     if is_tombstone {
@@ -1678,6 +1753,7 @@ impl StorageEngine {
                                     vector_indexes: Vec::new(),
                                     schema: None,
                                     flags: CollectionFlags::default(),
+                                    auto_embedding_config: None,
                                 });
 
                             if is_tombstone {
@@ -2694,6 +2770,7 @@ mod tests {
             vector_indexes: Vec::new(),
             schema: None,
             flags: CollectionFlags::default(),
+            auto_embedding_config: None,
         };
         collections.insert("test_collection".to_string(), test_meta);
 

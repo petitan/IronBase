@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.256"
+version = "1.0.257"
 edition = "2021"
 authors = ["PeTitan Kft."]
 description = "MCP server for IronBase document database"
@@ -64,6 +64,14 @@ memmap2 = "0.9"                    # Memory-mapped files for FastText
 ureq = { version = "2.9", features = ["json"] }  # Blocking HTTP client for Ollama/OpenAI
 rayon = "1.10"                     # Parallel processing for batch embeddings
 log = "0.4"                        # Logging
+
+# Text chunking for embed_document
+text-splitter = { version = "0.18", features = ["markdown"] }
+
+# Embedding cache
+lru = "0.12"                       # LRU cache for embedding results
+sha2 = "0.10"                      # Hash for cache keys
+hex = "0.4"                        # Hex encoding for cache keys
 
 # Platform-specific service support
 [target.'cfg(windows)'.dependencies]

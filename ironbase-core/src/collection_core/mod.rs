@@ -890,6 +890,35 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .and_then(|meta| meta.schema.clone()))
     }
 
+    // ========== AUTO-EMBEDDING CONFIG ==========
+
+    /// Set or clear the auto-embedding configuration for this collection.
+    ///
+    /// When enabled, documents inserted or updated will automatically have
+    /// embeddings generated from the source field and stored in the target field.
+    pub fn set_auto_embedding_config(
+        &self,
+        config: Option<crate::storage::AutoEmbeddingConfig>,
+    ) -> Result<()> {
+        self.check_not_closed()?;
+        let mut storage = self.storage.write();
+        let meta = storage
+            .get_collection_meta_mut(&self.name)
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+        meta.auto_embedding_config = config;
+        storage.flush()?;
+        Ok(())
+    }
+
+    /// Get the auto-embedding configuration for this collection (if any)
+    pub fn get_auto_embedding_config(&self) -> Result<Option<crate::storage::AutoEmbeddingConfig>> {
+        self.check_not_closed()?;
+        let storage = self.storage.read();
+        Ok(storage
+            .get_collection_meta(&self.name)
+            .and_then(|meta| meta.auto_embedding_config.clone()))
+    }
+
     // ========== BATCH VALIDATION ==========
 
     /// Validate batch of documents for unique constraint violations within the batch

@@ -576,6 +576,10 @@ async fn run_http_server_internal(
             None
         };
 
+    // Initialize job manager for async operations (embedding backfill, etc.)
+    let job_manager: Option<Arc<crate::JobManager>> = Some(Arc::new(crate::JobManager::new()));
+    info!("Job manager initialized");
+
     // Initialize listener configuration in database
     {
         use crate::listener::ListenerManager;
@@ -612,6 +616,7 @@ async fn run_http_server_internal(
         config.require_api_key,
         limits_manager.clone(),
         embedding_manager,
+        job_manager,
     ));
 
     // Spawn periodic limits refresh task (every 5 minutes) with shutdown support

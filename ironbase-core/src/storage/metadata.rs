@@ -473,6 +473,7 @@ mod tests {
             vector_indexes: Vec::new(),
             schema: None,
             flags: CollectionFlags::default(),
+            auto_embedding_config: None,
         };
         meta.document_catalog.insert(DocumentId::Int(1), 1000);
         meta.document_catalog.insert(DocumentId::Int(2), 2000);
