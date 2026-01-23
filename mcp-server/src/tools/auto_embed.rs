@@ -5,6 +5,7 @@
 use crate::adapter::IronBaseAdapter;
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
+use crate::jobs::{JobManager, JobType};
 use ironbase_core::storage::{AutoEmbeddingConfig, ChunkingConfig};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -95,12 +96,13 @@ pub fn dispatch(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
+    job_manager: &Option<Arc<JobManager>>,
 ) -> Result<Value> {
     match name {
         "auto_embed_enable" => handle_auto_embed_enable(params, adapter, embedding_manager),
         "auto_embed_disable" => handle_auto_embed_disable(params, adapter),
         "auto_embed_status" => handle_auto_embed_status(params, adapter),
-        "auto_embed_backfill" => handle_auto_embed_backfill(params, adapter, embedding_manager),
+        "auto_embed_backfill" => handle_auto_embed_backfill(params, adapter, embedding_manager, job_manager),
         _ => Err(McpError::invalid_params(format!(
             "Unknown auto-embed tool: {}",
             name
@@ -231,6 +233,7 @@ fn handle_auto_embed_backfill(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
+    job_manager: &Option<Arc<JobManager>>,
 ) -> Result<Value> {
     let p: AutoEmbedBackfillParams = AutoEmbedBackfillParams::parse(params)?;
 
@@ -254,12 +257,12 @@ fn handle_auto_embed_backfill(
     })?;
 
     // Check if provider is available
-    let provider = manager.get_provider(&config.provider).ok_or_else(|| {
+    let _provider = manager.get_provider(&config.provider).ok_or_else(|| {
         McpError::internal(format!("Provider '{}' not available", config.provider))
     })?;
 
     // Build filter: documents without target field (or where target is null)
-    let mut query = p.filter.unwrap_or(json!({}));
+    let mut query = p.filter.clone().unwrap_or(json!({}));
     if let Some(obj) = query.as_object_mut() {
         // Only process documents that don't have the embedding field
         obj.insert(
@@ -268,17 +271,56 @@ fn handle_auto_embed_backfill(
         );
     }
 
-    // For async backfill, we'd return a job ID and process in background
-    // For now, we'll do synchronous processing with progress reporting
+    // For async backfill, use JobManager to run in background thread
     if p.r#async {
-        // TODO: Implement async job manager (Phase 4)
-        // For now, return a placeholder indicating async is not yet implemented
+        let job_mgr = job_manager.as_ref().ok_or_else(|| {
+            McpError::internal("Job manager not available for async operations")
+        })?;
+
+        // Create job
+        let job_type = JobType::EmbedBackfill {
+            collection: p.collection.clone(),
+            provider: config.provider.clone(),
+        };
+        let (job_id, _job) = job_mgr.create_job(job_type);
+
+        // Clone necessary data for background thread
+        let adapter_clone = adapter.clone();
+        let manager_clone = manager.clone();
+        let config_clone = config.clone();
+        let collection = p.collection.clone();
+        let batch_size = p.batch_size;
+        let filter = p.filter.clone();
+        let job_mgr_clone = job_mgr.clone();
+        let job_id_clone = job_id.clone();
+
+        // Spawn background thread for processing
+        std::thread::spawn(move || {
+            run_backfill_job(
+                &job_id_clone,
+                &job_mgr_clone,
+                &adapter_clone,
+                &manager_clone,
+                &config_clone,
+                &collection,
+                filter,
+                batch_size,
+            );
+        });
+
         return Ok(json!({
-            "success": false,
-            "message": "Async backfill not yet implemented. Use async=false for synchronous processing.",
-            "collection": p.collection
+            "success": true,
+            "async": true,
+            "job_id": job_id,
+            "collection": p.collection,
+            "message": "Backfill job started. Use embed_job_status to check progress."
         }));
     }
+
+    // Get provider again for synchronous processing (after potential async branch)
+    let provider = manager.get_provider(&config.provider).ok_or_else(|| {
+        McpError::internal(format!("Provider '{}' not available", config.provider))
+    })?;
 
     // Synchronous processing
     let filter = crate::adapter::FindOptions {
@@ -351,4 +393,144 @@ fn handle_auto_embed_backfill(
         "provider": config.provider,
         "dimension": provider.dimension()
     }))
+}
+
+/// Background job execution for async backfill
+#[allow(clippy::too_many_arguments)]
+fn run_backfill_job(
+    job_id: &str,
+    job_manager: &JobManager,
+    adapter: &IronBaseAdapter,
+    embedding_manager: &EmbeddingManager,
+    config: &AutoEmbeddingConfig,
+    collection: &str,
+    filter: Option<Value>,
+    batch_size: usize,
+) {
+    // Build filter: documents without target field
+    let mut query = filter.unwrap_or(json!({}));
+    if let Some(obj) = query.as_object_mut() {
+        obj.insert(
+            config.target_field.clone(),
+            json!({ "$exists": false })
+        );
+    }
+
+    // Count total documents to process
+    let total_count = match adapter.count_documents(collection, query.clone()) {
+        Ok(count) => count as usize,
+        Err(e) => {
+            job_manager.fail_job(job_id, format!("Failed to count documents: {}", e));
+            return;
+        }
+    };
+
+    if total_count == 0 {
+        job_manager.complete_job(job_id, json!({
+            "processed": 0,
+            "errors": 0,
+            "message": "No documents found that need embedding"
+        }));
+        return;
+    }
+
+    job_manager.update_progress(job_id, 0, Some(total_count), "Starting backfill...");
+
+    // Get provider
+    let provider = match embedding_manager.get_provider(&config.provider) {
+        Some(p) => p,
+        None => {
+            job_manager.fail_job(job_id, format!("Provider '{}' not available", config.provider));
+            return;
+        }
+    };
+
+    let mut processed = 0;
+    let mut errors = 0;
+    let mut skip = 0;
+
+    loop {
+        // Check if job was cancelled
+        if job_manager.is_cancelled(job_id) {
+            job_manager.update_progress(job_id, processed, Some(total_count), "Cancelled");
+            return;
+        }
+
+        // Fetch next batch
+        let find_options = crate::adapter::FindOptions {
+            limit: Some(batch_size),
+            skip: Some(skip),
+            ..Default::default()
+        };
+
+        let result = match adapter.find(collection, query.clone(), find_options) {
+            Ok(r) => r,
+            Err(e) => {
+                job_manager.fail_job(job_id, format!("Failed to fetch documents: {}", e));
+                return;
+            }
+        };
+
+        if result.documents.is_empty() {
+            break;
+        }
+
+        // Extract texts from source field
+        let texts: Vec<&str> = result.documents
+            .iter()
+            .filter_map(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()))
+            .collect();
+
+        if !texts.is_empty() {
+            // Generate embeddings
+            match provider.embed_batch(&texts) {
+                Ok(embeddings) => {
+                    // Update documents with embeddings
+                    let docs_with_source: Vec<_> = result.documents
+                        .iter()
+                        .filter(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()).is_some())
+                        .collect();
+
+                    for (doc, embedding) in docs_with_source.iter().zip(embeddings.iter()) {
+                        if let Some(id) = doc.get("_id") {
+                            let filter = json!({ "_id": id });
+                            let update = json!({
+                                "$set": { &config.target_field: embedding }
+                            });
+
+                            match adapter.update_one(collection, filter, update) {
+                                Ok(_) => processed += 1,
+                                Err(_) => errors += 1,
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Batch embedding failed: {}", e);
+                    errors += texts.len();
+                }
+            }
+        }
+
+        skip += result.documents.len();
+        job_manager.update_progress(
+            job_id,
+            processed,
+            Some(total_count),
+            &format!("Processed {}/{}", processed, total_count),
+        );
+
+        // If we got fewer documents than batch_size, we're done
+        if result.documents.len() < batch_size {
+            break;
+        }
+    }
+
+    // Complete the job
+    job_manager.complete_job(job_id, json!({
+        "processed": processed,
+        "errors": errors,
+        "total": total_count,
+        "provider": config.provider
+    }));
 }

@@ -327,6 +327,32 @@ fn run_stdio_server(cli: &Cli) {
         elapsed.as_secs_f64()
     );
 
+    // Initialize embedding manager if FastText model is configured
+    let embedding_manager: Option<Arc<mcp_ironbase::EmbeddingManager>> =
+        if let Ok(model_path) = std::env::var("IRONBASE_FASTTEXT_MODEL") {
+            match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+                Ok(manager) if manager.has_providers() => {
+                    eprintln!("Embedding manager initialized with FastText model: {}", model_path);
+                    Some(Arc::new(manager))
+                }
+                Ok(_) => {
+                    eprintln!("Warning: FastText model configured but failed to load");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to initialize embedding manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            eprintln!("No IRONBASE_FASTTEXT_MODEL configured, embeddings disabled");
+            None
+        };
+
+    // Initialize job manager for async operations
+    let job_manager: Option<Arc<mcp_ironbase::JobManager>> = Some(Arc::new(mcp_ironbase::JobManager::new()));
+    eprintln!("Job manager initialized");
+
     eprintln!("Ready for requests...");
 
     // Read from stdin line by line
@@ -368,7 +394,7 @@ fn run_stdio_server(cli: &Cli) {
         };
 
         // Handle request with lifecycle enforcement
-        if let Some(response) = handle_request(&request, &adapter, &mut initialized) {
+        if let Some(response) = handle_request(&request, &adapter, &embedding_manager, &job_manager, &mut initialized) {
             // BUG #14 fix: Handle JSON serialization errors gracefully
             let response_str = serde_json::to_string(&response).unwrap_or_else(|e| {
                 eprintln!("Response serialization error: {}", e);
@@ -387,6 +413,8 @@ fn run_stdio_server(cli: &Cli) {
 fn handle_request(
     request: &McpRequest,
     adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<mcp_ironbase::EmbeddingManager>>,
+    job_manager: &Option<Arc<mcp_ironbase::JobManager>>,
     initialized: &mut bool,
 ) -> Option<McpResponse> {
     let has_null_id = matches!(&request.id, Some(v) if v.is_null());
@@ -504,8 +532,7 @@ fn handle_request(
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
             // Note: stdio mode doesn't support cancellation (None cancel_flag)
-            // TODO: Add embedding_manager and job_manager initialization for stdio mode
-            match dispatch_tool(&params.name, arguments, adapter, None, None, None, None, &None, &None) {
+            match dispatch_tool(&params.name, arguments, adapter, None, None, None, None, embedding_manager, job_manager) {
                 Ok(result) => {
                     if is_notification {
                         return None;
