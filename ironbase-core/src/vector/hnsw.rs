@@ -58,6 +58,11 @@ struct SearchCandidate {
 
 impl PartialEq for SearchCandidate {
     fn eq(&self, other: &Self) -> bool {
+        // Handle NaN: treat NaN values as equal to maintain consistent ordering behavior
+        // This is important because NaN != NaN in IEEE 754, which would break BinaryHeap
+        if self.distance.is_nan() && other.distance.is_nan() {
+            return true;
+        }
         self.distance == other.distance
     }
 }
@@ -73,10 +78,16 @@ impl PartialOrd for SearchCandidate {
 impl Ord for SearchCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for max-heap (furthest first)
-        other
-            .distance
-            .partial_cmp(&self.distance)
-            .unwrap_or(Ordering::Equal)
+        // Handle NaN: treat NaN as maximum distance (largest Ord -> pops first from BinaryHeap)
+        match (self.distance.is_nan(), other.distance.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater, // NaN is "furthest" -> largest Ord -> pops first
+            (false, true) => Ordering::Less,    // normal < NaN
+            (false, false) => other
+                .distance
+                .partial_cmp(&self.distance)
+                .unwrap_or(Ordering::Equal),
+        }
     }
 }
 
@@ -89,6 +100,10 @@ struct NearestCandidate {
 
 impl PartialEq for NearestCandidate {
     fn eq(&self, other: &Self) -> bool {
+        // Handle NaN: treat NaN values as equal to maintain consistent ordering behavior
+        if self.distance.is_nan() && other.distance.is_nan() {
+            return true;
+        }
         self.distance == other.distance
     }
 }
@@ -104,9 +119,16 @@ impl PartialOrd for NearestCandidate {
 impl Ord for NearestCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
         // Normal ordering for min-heap (closest first)
-        self.distance
-            .partial_cmp(&other.distance)
-            .unwrap_or(Ordering::Equal)
+        // Handle NaN: treat NaN as maximum distance (push to back of min-heap)
+        match (self.distance.is_nan(), other.distance.is_nan()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater, // NaN is "furthest" -> comes last in min-heap
+            (false, true) => Ordering::Less,
+            (false, false) => self
+                .distance
+                .partial_cmp(&other.distance)
+                .unwrap_or(Ordering::Equal),
+        }
     }
 }
 
@@ -868,5 +890,111 @@ mod tests {
 
         hnsw.upsert("doc1", &[0.5, 0.5, 0.0]).unwrap();
         assert!(hnsw.is_dirty());
+    }
+
+    #[test]
+    fn test_search_candidate_nan_handling() {
+        use std::collections::BinaryHeap;
+
+        // Test NaN equality
+        let nan1 = SearchCandidate {
+            index: 0,
+            distance: f32::NAN,
+        };
+        let nan2 = SearchCandidate {
+            index: 1,
+            distance: f32::NAN,
+        };
+        let normal = SearchCandidate {
+            index: 2,
+            distance: 1.0,
+        };
+
+        // NaN == NaN should be true for consistent heap behavior
+        assert!(nan1 == nan2);
+        // NaN != normal
+        assert!(nan1 != normal);
+
+        // Test heap ordering: NaN should be treated as corrupted data to remove
+        // SearchCandidate uses reverse ordering, so BinaryHeap pops smallest distance first
+        // NaN gets largest Ord to pop first (remove bad data immediately)
+        let mut heap = BinaryHeap::new();
+        heap.push(SearchCandidate {
+            index: 0,
+            distance: 1.0,
+        });
+        heap.push(SearchCandidate {
+            index: 1,
+            distance: f32::NAN,
+        });
+        heap.push(SearchCandidate {
+            index: 2,
+            distance: 2.0,
+        });
+
+        // NaN should pop first (has largest Ord, treated as corrupted data to remove)
+        let first = heap.pop().unwrap();
+        assert!(
+            first.distance.is_nan(),
+            "NaN should be popped first to remove corrupted data"
+        );
+
+        // With reverse ordering: smaller distance = larger Ord = pops next
+        // So order is: 1.0, then 2.0
+        let second = heap.pop().unwrap();
+        assert_eq!(second.distance, 1.0);
+
+        let third = heap.pop().unwrap();
+        assert_eq!(third.distance, 2.0);
+    }
+
+    #[test]
+    fn test_nearest_candidate_nan_handling() {
+        // Test NaN equality
+        let nan1 = NearestCandidate {
+            index: 0,
+            distance: f32::NAN,
+        };
+        let nan2 = NearestCandidate {
+            index: 1,
+            distance: f32::NAN,
+        };
+        let normal = NearestCandidate {
+            index: 2,
+            distance: 1.0,
+        };
+
+        // NaN == NaN should be true for consistent heap behavior
+        assert!(nan1 == nan2);
+        // NaN != normal
+        assert!(nan1 != normal);
+
+        // Test ordering: NaN should be treated as maximum distance
+        // In min-heap (NearestCandidate), NaN comes last
+        let mut candidates = [
+            NearestCandidate {
+                index: 0,
+                distance: 1.0,
+            },
+            NearestCandidate {
+                index: 1,
+                distance: f32::NAN,
+            },
+            NearestCandidate {
+                index: 2,
+                distance: 0.5,
+            },
+        ];
+
+        // Sort ascending (closest first)
+        candidates.sort();
+
+        // 0.5 should be first, then 1.0, then NaN
+        assert_eq!(candidates[0].distance, 0.5);
+        assert_eq!(candidates[1].distance, 1.0);
+        assert!(
+            candidates[2].distance.is_nan(),
+            "NaN should be last in sorted order"
+        );
     }
 }

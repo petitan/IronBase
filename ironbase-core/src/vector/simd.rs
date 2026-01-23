@@ -23,7 +23,7 @@
 /// - Auto-vectorizes to AVX2/SSE on x86_64
 #[inline]
 pub fn squared_euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
+    assert_eq!(a.len(), b.len(), "Vector dimensions must match");
 
     let len = a.len();
     let mut sum = 0.0f32;
@@ -73,7 +73,7 @@ pub fn euclidean_distance(a: &[f32], b: &[f32]) -> f32 {
 /// Uses 8-wide loop unrolling for SIMD auto-vectorization.
 #[inline]
 pub fn dot_product(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
+    assert_eq!(a.len(), b.len(), "Vector dimensions must match");
 
     let len = a.len();
     let mut sum = 0.0f32;
@@ -128,7 +128,7 @@ pub fn squared_l2_norm(v: &[f32]) -> f32 {
 /// Computes dot product and norms in a single pass for better cache utilization.
 #[inline]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len(), "Vector dimensions must match");
+    assert_eq!(a.len(), b.len(), "Vector dimensions must match");
 
     let len = a.len();
     let mut dot = 0.0f32;
