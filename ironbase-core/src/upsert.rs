@@ -187,6 +187,20 @@ pub fn apply_update_to_base(base_doc: HashMap<String, Value>, update: &Value) ->
                         }
                     }
                 }
+                "$pop" => {
+                    if let Value::Object(pop_fields) = fields {
+                        for (field, direction) in pop_fields {
+                            apply_pop(&mut result, field, direction);
+                        }
+                    }
+                }
+                "$pull" => {
+                    if let Value::Object(pull_fields) = fields {
+                        for (field, value) in pull_fields {
+                            apply_pull(&mut result, field, value);
+                        }
+                    }
+                }
                 _ => {
                     // Unknown operator - ignore for upsert document creation
                 }
@@ -217,7 +231,7 @@ fn apply_set(doc: &mut Map<String, Value>, path: &str, value: Value) {
     }
 }
 
-/// Apply $inc operation
+/// Apply $inc operation with overflow protection
 fn apply_inc(doc: &mut Map<String, Value>, path: &str, amount: &Value) {
     let parts: Vec<&str> = path.split('.').collect();
 
@@ -226,7 +240,18 @@ fn apply_inc(doc: &mut Map<String, Value>, path: &str, amount: &Value) {
         let new_value = match (current, amount) {
             (Value::Number(c), Value::Number(a)) => {
                 if let (Some(ci), Some(ai)) = (c.as_i64(), a.as_i64()) {
-                    Value::Number((ci + ai).into())
+                    // FIX: Use checked_add to prevent overflow panic
+                    match ci.checked_add(ai) {
+                        Some(result) => Value::Number(result.into()),
+                        None => {
+                            // Overflow: saturate at i64::MAX or i64::MIN
+                            if ai > 0 {
+                                Value::Number(i64::MAX.into())
+                            } else {
+                                Value::Number(i64::MIN.into())
+                            }
+                        }
+                    }
                 } else if let (Some(cf), Some(af)) = (c.as_f64(), a.as_f64()) {
                     serde_json::Number::from_f64(cf + af)
                         .map(Value::Number)
@@ -316,6 +341,50 @@ fn apply_add_to_set(doc: &mut Map<String, Value>, path: &str, value: Value) {
 
         if let Value::Object(nested_map) = nested {
             apply_add_to_set(nested_map, &rest, value);
+        }
+    }
+}
+
+/// Apply $pop operation - removes first or last element from array
+/// direction: 1 = last element, -1 = first element
+fn apply_pop(doc: &mut Map<String, Value>, path: &str, direction: &Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+
+    if parts.len() == 1 {
+        if let Some(Value::Array(arr)) = doc.get_mut(path) {
+            if !arr.is_empty() {
+                let dir = direction.as_i64().unwrap_or(1);
+                if dir < 0 {
+                    arr.remove(0); // Remove first
+                } else {
+                    arr.pop(); // Remove last
+                }
+            }
+        }
+    } else {
+        let first = parts[0];
+        let rest = parts[1..].join(".");
+
+        if let Some(Value::Object(nested_map)) = doc.get_mut(first) {
+            apply_pop(nested_map, &rest, direction);
+        }
+    }
+}
+
+/// Apply $pull operation - removes all matching values from array
+fn apply_pull(doc: &mut Map<String, Value>, path: &str, value: &Value) {
+    let parts: Vec<&str> = path.split('.').collect();
+
+    if parts.len() == 1 {
+        if let Some(Value::Array(arr)) = doc.get_mut(path) {
+            arr.retain(|item| item != value);
+        }
+    } else {
+        let first = parts[0];
+        let rest = parts[1..].join(".");
+
+        if let Some(Value::Object(nested_map)) = doc.get_mut(first) {
+            apply_pull(nested_map, &rest, value);
         }
     }
 }
@@ -489,5 +558,95 @@ mod tests {
         assert!(doc.get("age").is_none()); // $gte ignored
         assert_eq!(doc.get("lastLogin"), Some(&json!("2024-01-01")));
         assert_eq!(doc.get("loginCount"), Some(&json!(1)));
+    }
+
+    #[test]
+    fn test_upsert_with_pop() {
+        // Test $pop on existing array from filter (no dependency on operator order)
+        let filter = json!({"name": "Alice", "tags": ["a", "b", "c"]});
+        let update = json!({
+            "$pop": {"tags": 1}  // Remove last
+        });
+
+        let doc = create_upsert_document(&filter, &update);
+
+        assert_eq!(doc.get("name"), Some(&json!("Alice")));
+        assert_eq!(doc.get("tags"), Some(&json!(["a", "b"])));
+    }
+
+    #[test]
+    fn test_upsert_with_pop_first() {
+        // Test $pop with -1 (remove first element)
+        let filter = json!({"name": "Alice", "tags": ["a", "b", "c"]});
+        let update = json!({
+            "$pop": {"tags": -1}  // Remove first
+        });
+
+        let doc = create_upsert_document(&filter, &update);
+
+        assert_eq!(doc.get("tags"), Some(&json!(["b", "c"])));
+    }
+
+    #[test]
+    fn test_upsert_with_pull() {
+        // Test $pull removes all matching values
+        let filter = json!({"name": "Alice", "tags": ["a", "b", "c", "b"]});
+        let update = json!({
+            "$pull": {"tags": "b"}  // Remove all "b"
+        });
+
+        let doc = create_upsert_document(&filter, &update);
+
+        assert_eq!(doc.get("tags"), Some(&json!(["a", "c"])));
+    }
+
+    #[test]
+    fn test_inc_overflow_saturates() {
+        // Test that $inc saturates at i64::MAX instead of panicking
+        let filter = json!({"id": 1, "counter": i64::MAX - 5});
+        let update = json!({
+            "$inc": {"counter": 10}  // Would overflow
+        });
+
+        let doc = create_upsert_document(&filter, &update);
+
+        // Should saturate at i64::MAX instead of panicking
+        assert_eq!(doc.get("counter"), Some(&json!(i64::MAX)));
+    }
+
+    #[test]
+    fn test_inc_underflow_saturates() {
+        // Test that $inc saturates at i64::MIN instead of panicking
+        let filter = json!({"id": 1, "counter": i64::MIN + 5});
+        let update = json!({
+            "$inc": {"counter": -10}  // Would underflow
+        });
+
+        let doc = create_upsert_document(&filter, &update);
+
+        // Should saturate at i64::MIN instead of panicking
+        assert_eq!(doc.get("counter"), Some(&json!(i64::MIN)));
+    }
+
+    #[test]
+    fn test_pop_on_empty_array() {
+        // Test $pop on empty array does nothing
+        let filter = json!({"tags": []});
+        let update = json!({"$pop": {"tags": 1}});
+
+        let doc = create_upsert_document(&filter, &update);
+
+        assert_eq!(doc.get("tags"), Some(&json!([])));
+    }
+
+    #[test]
+    fn test_pull_nonexistent_value() {
+        // Test $pull with value that doesn't exist
+        let filter = json!({"tags": ["a", "b", "c"]});
+        let update = json!({"$pull": {"tags": "x"}});
+
+        let doc = create_upsert_document(&filter, &update);
+
+        assert_eq!(doc.get("tags"), Some(&json!(["a", "b", "c"])));
     }
 }

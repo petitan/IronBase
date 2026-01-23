@@ -712,14 +712,32 @@ impl DatabaseCore<StorageEngine> {
                 // Perform upsert: create new document from filter + update
                 let upsert_doc = create_upsert_document(query, update);
 
-                // Convert Value to HashMap for insert
+                // FIX: Validate upsert document - don't silently insert empty documents
                 let doc_map: std::collections::HashMap<String, Value> = match upsert_doc {
                     Value::Object(map) => map.into_iter().collect(),
-                    _ => std::collections::HashMap::new(),
+                    other => {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Upsert document creation failed: expected Object, got {:?}",
+                            other
+                        )));
+                    }
                 };
+
+                // Log upsert operation for debugging
+                tracing::debug!(
+                    collection = collection_name,
+                    fields = doc_map.len(),
+                    "Performing upsert insert"
+                );
 
                 // Insert the new document (uses the existing insert_one with WAL durability)
                 let doc_id = self.insert_one(collection_name, doc_map)?;
+
+                tracing::debug!(
+                    collection = collection_name,
+                    doc_id = ?doc_id,
+                    "Upsert insert completed"
+                );
 
                 Ok(UpdateResult::from_upsert(doc_id))
             }
@@ -727,14 +745,32 @@ impl DatabaseCore<StorageEngine> {
                 // Collection doesn't exist but upsert is enabled - create it via insert
                 let upsert_doc = create_upsert_document(query, update);
 
-                // Convert Value to HashMap for insert
+                // FIX: Validate upsert document - don't silently insert empty documents
                 let doc_map: std::collections::HashMap<String, Value> = match upsert_doc {
                     Value::Object(map) => map.into_iter().collect(),
-                    _ => std::collections::HashMap::new(),
+                    other => {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Upsert document creation failed: expected Object, got {:?}",
+                            other
+                        )));
+                    }
                 };
+
+                // Log upsert operation with collection creation
+                tracing::debug!(
+                    collection = collection_name,
+                    fields = doc_map.len(),
+                    "Performing upsert insert (creating collection)"
+                );
 
                 // Insert creates the collection implicitly
                 let doc_id = self.insert_one(collection_name, doc_map)?;
+
+                tracing::debug!(
+                    collection = collection_name,
+                    doc_id = ?doc_id,
+                    "Upsert insert completed (collection created)"
+                );
 
                 Ok(UpdateResult::from_upsert(doc_id))
             }
