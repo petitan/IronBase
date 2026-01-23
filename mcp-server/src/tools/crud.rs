@@ -35,7 +35,7 @@ pub fn dispatch(
         "insert_many" => handle_insert_many(params, adapter, embedding_manager),
         "find" => handle_find(params, adapter, limits, cancel_flag),
         "find_one" => handle_find_one(params, adapter),
-        "update_one" => handle_update_one(params, adapter),
+        "update_one" => handle_update_one(params, adapter, embedding_manager),
         "update_many" => handle_update_many(params, adapter),
         "delete_one" => handle_delete_one(params, adapter),
         "delete_many" => handle_delete_many(params, adapter),
@@ -275,7 +275,11 @@ fn handle_find_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Valu
     Ok(json!({"document": document}))
 }
 
-fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+fn handle_update_one(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     check_cancelled()?;
 
     let p: UpdateParams = UpdateParams::parse(params)?;
@@ -291,9 +295,38 @@ fn handle_update_one(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
         "matched_count": result.matched_count,
         "modified_count": result.modified_count
     });
+
+    let mut embedding_applied = false;
+
     if let Some(ref upserted_id) = result.upserted_id {
         response["upserted_id"] = json!(upserted_id);
+
+        // FIX: Apply auto-embedding to newly upserted document
+        // When upsert creates a new document, it bypasses the insert_one handler
+        // which normally applies auto-embedding. We need to do it here.
+        if let Some(manager) = embedding_manager.as_ref() {
+            if let Ok(Some(config)) = adapter.get_auto_embedding_config(&p.collection) {
+                if config.enabled {
+                    // Fetch the newly inserted document
+                    let query = json!({"_id": upserted_id});
+                    if let Ok(Some(mut doc)) = adapter.find_one(&p.collection, query.clone()) {
+                        // Apply auto-embedding
+                        if apply_auto_embedding(&mut doc, &config, manager).unwrap_or(false) {
+                            // Update the document with the embedding
+                            let update = json!({"$set": {&config.target_field: doc.get(&config.target_field)}});
+                            let _ = adapter.update_one(&p.collection, query, update);
+                            embedding_applied = true;
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    if embedding_applied {
+        response["auto_embedded"] = json!(true);
+    }
+
     Ok(response)
 }
 
@@ -304,6 +337,15 @@ fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<V
     validate_collection_name(&p.collection)?;
     validate_filter(&p.filter)?;
     validate_update(&p.update)?;
+
+    // FIX: Reject upsert for update_many - not yet supported
+    // MongoDB supports upsert for updateMany (creates one document if no matches),
+    // but our core doesn't have update_many_with_options yet.
+    if p.upsert {
+        return Err(McpError::invalid_params(
+            "upsert is not supported for update_many. Use update_one with upsert=true instead.",
+        ));
+    }
 
     let result = adapter.update_many(&p.collection, p.filter, p.update)?;
     Ok(json!({
