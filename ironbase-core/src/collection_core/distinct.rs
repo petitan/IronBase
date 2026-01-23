@@ -27,8 +27,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Handle _id query optimization
         if let Some(doc_id) = Self::extract_id_query(query_json) {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
+                // PERF: Direct Value→Document conversion (no serialization)
+                let document = Document::from_value_owned(doc)?;
                 // Use Document::get_all for MongoDB-style array traversal
                 let values: Vec<Value> = document.get_all(field).into_iter().cloned().collect();
                 return Ok(values);
@@ -124,8 +124,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Handle _id query optimization
         if let Some(doc_id) = Self::extract_id_query(query_json) {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
+                // PERF: Direct Value→Document conversion (no serialization)
+                let document = Document::from_value_owned(doc)?;
                 let values: Vec<Value> = document.get_all(field).into_iter().cloned().collect();
                 return Ok(values);
             }
