@@ -82,6 +82,21 @@ impl ParsedQuery {
 /// let parsed = parse_query("\"exact phrase\" other words");
 /// // phrases: ["exact phrase"], terms: ["other", "words"]
 /// ```
+///
+/// # Edge Cases
+///
+/// - **Empty string**: Returns empty ParsedQuery
+/// - **Empty quotes** (`""`): Ignored, produces no phrase
+/// - **Whitespace-only quotes** (`"   "`): Ignored after trim, produces no phrase
+/// - **Unclosed quote** (`"hello`): Rest of query treated as regular terms
+/// - **Mixed**: `word "phrase" word2` correctly separates terms and phrases
+/// - **Multiple phrases**: `"one" "two"` produces two phrases
+///
+/// # Note
+///
+/// This function does NOT apply tokenization or stop-word filtering.
+/// The returned phrases/terms are raw strings. Use `ParsedQuery::all_search_terms()`
+/// with FtsOptions to get processed tokens for search.
 pub fn parse_query(query: &str) -> ParsedQuery {
     let mut result = ParsedQuery::default();
     let mut remaining = query.trim();
@@ -143,6 +158,74 @@ pub fn build_phrase_regex(phrase: &str) -> Result<regex::Regex> {
 
     regex::Regex::new(&format!(r"(?i)\b{}\b", pattern))
         .map_err(|e| IronBaseError::InvalidQuery(format!("Invalid phrase regex: {}", e)))
+}
+
+// ============================================================================
+// Phrase Regex Cache
+// ============================================================================
+
+use std::cell::RefCell;
+use std::collections::VecDeque;
+
+/// Maximum number of cached phrase regexes (LRU eviction)
+const PHRASE_REGEX_CACHE_SIZE: usize = 64;
+
+thread_local! {
+    /// Thread-local LRU cache for compiled phrase regexes
+    /// Avoids recompiling the same phrase patterns repeatedly
+    static PHRASE_REGEX_CACHE: RefCell<PhraseRegexCache> = RefCell::new(PhraseRegexCache::new());
+}
+
+struct PhraseRegexCache {
+    /// LRU order: most recently used at front
+    order: VecDeque<String>,
+    /// Cached compiled regexes
+    cache: HashMap<String, regex::Regex>,
+}
+
+impl PhraseRegexCache {
+    fn new() -> Self {
+        Self {
+            order: VecDeque::with_capacity(PHRASE_REGEX_CACHE_SIZE),
+            cache: HashMap::with_capacity(PHRASE_REGEX_CACHE_SIZE),
+        }
+    }
+
+    fn get_or_compile(&mut self, phrase: &str) -> Result<regex::Regex> {
+        // Check cache hit
+        if let Some(regex) = self.cache.get(phrase) {
+            // Move to front (most recently used)
+            if let Some(pos) = self.order.iter().position(|p| p == phrase) {
+                self.order.remove(pos);
+                self.order.push_front(phrase.to_string());
+            }
+            return Ok(regex.clone());
+        }
+
+        // Cache miss: compile regex
+        let regex = build_phrase_regex(phrase)?;
+
+        // Evict LRU if at capacity
+        if self.cache.len() >= PHRASE_REGEX_CACHE_SIZE {
+            if let Some(evicted) = self.order.pop_back() {
+                self.cache.remove(&evicted);
+            }
+        }
+
+        // Insert new entry
+        self.order.push_front(phrase.to_string());
+        self.cache.insert(phrase.to_string(), regex.clone());
+
+        Ok(regex)
+    }
+}
+
+/// Build a phrase regex with caching (recommended for repeated searches)
+///
+/// Uses a thread-local LRU cache to avoid recompiling the same phrase patterns.
+/// Cache size is limited to 64 entries with LRU eviction.
+pub fn build_phrase_regex_cached(phrase: &str) -> Result<regex::Regex> {
+    PHRASE_REGEX_CACHE.with(|cache| cache.borrow_mut().get_or_compile(phrase))
 }
 
 // ============================================================================
@@ -820,6 +903,27 @@ impl FulltextSearchOptions {
         self.deadline = Some(deadline);
         self
     }
+
+    /// Calculate candidate limit for fulltext search
+    ///
+    /// When filters or phrase matching is enabled, we request more candidates
+    /// from the TF-IDF search to account for post-filtering that may eliminate
+    /// some results.
+    ///
+    /// # Arguments
+    /// * `effective_limit` - The actual limit requested by the user
+    /// * `has_filter_or_phrase` - Whether post-filtering will be applied
+    ///
+    /// # Returns
+    /// The number of candidates to request from TF-IDF search
+    pub fn calculate_candidate_limit(effective_limit: usize, has_filter_or_phrase: bool) -> usize {
+        if has_filter_or_phrase {
+            // Request 10x more candidates to account for filtering, minimum 100
+            effective_limit.saturating_mul(10).max(100)
+        } else {
+            effective_limit
+        }
+    }
 }
 
 /// Extended fulltext search result - CORE LEVEL
@@ -1371,41 +1475,12 @@ impl FulltextIndex {
     }
 
     // =========================================================================
-    // Lazy Loading: Token-Level Disk I/O (V2 Format)
+    // Lazy Loading: Token-Level Disk I/O
     // =========================================================================
+    // Note: Token writing is done inline in flush() for efficiency.
+    // Only read functions are needed for lazy loading.
 
-    /// Write a single token's doc_ids to disk (for lazy loading)
-    ///
-    /// Format: [token_len:u32][token:bytes][doc_ids_len:u32][doc_ids:json]
-    #[allow(dead_code)]
-    fn write_token_entry(&mut self, token: &str, doc_ids: &HashSet<DocumentId>) -> Result<u64> {
-        let file = self.file_handle.as_mut().ok_or_else(|| {
-            IronBaseError::IndexError("No file handle for disk storage".to_string())
-        })?;
-
-        let offset = self.write_offset;
-        file.seek(SeekFrom::Start(offset))?;
-
-        // Serialize token
-        let token_bytes = token.as_bytes();
-        let token_len = token_bytes.len() as u32;
-
-        // Serialize doc_ids as JSON (preserves DocumentId type info)
-        let doc_ids_bytes = serde_json::to_vec(doc_ids)?;
-        let doc_ids_len = doc_ids_bytes.len() as u32;
-
-        // Write: token_len + token + doc_ids_len + doc_ids
-        file.write_all(&token_len.to_le_bytes())?;
-        file.write_all(token_bytes)?;
-        file.write_all(&doc_ids_len.to_le_bytes())?;
-        file.write_all(&doc_ids_bytes)?;
-
-        self.write_offset = offset + 4 + token_bytes.len() as u64 + 4 + doc_ids_bytes.len() as u64;
-
-        Ok(offset)
-    }
-
-    /// Read a single token's doc_ids from disk (for lazy loading)
+    /// Read a single token's doc_ids from disk (V2 format, for backward compatibility)
     fn read_token_entry(&self, offset: u64) -> Result<HashSet<DocumentId>> {
         let path = self
             .storage_path
@@ -1435,39 +1510,10 @@ impl FulltextIndex {
         Ok(doc_ids)
     }
 
-    /// Write a single token's entries to disk (V3 format with TF embedded)
+    /// Read a single token's entries from disk (V3 format with TF embedded)
     ///
     /// Format: [token_len:u32][token:bytes][entries_len:u32][entries:json]
     /// where entries is Vec<(DocumentId, u32)> - (doc_id, term_frequency)
-    #[allow(dead_code)]
-    fn write_token_entry_v3(&mut self, token: &str, entries: &[TokenEntry]) -> Result<u64> {
-        let file = self.file_handle.as_mut().ok_or_else(|| {
-            IronBaseError::IndexError("No file handle for disk storage".to_string())
-        })?;
-
-        let offset = self.write_offset;
-        file.seek(SeekFrom::Start(offset))?;
-
-        // Serialize token
-        let token_bytes = token.as_bytes();
-        let token_len = token_bytes.len() as u32;
-
-        // Serialize entries as JSON: Vec<(DocumentId, u32)>
-        let entries_bytes = serde_json::to_vec(entries)?;
-        let entries_len = entries_bytes.len() as u32;
-
-        // Write: token_len + token + entries_len + entries
-        file.write_all(&token_len.to_le_bytes())?;
-        file.write_all(token_bytes)?;
-        file.write_all(&entries_len.to_le_bytes())?;
-        file.write_all(&entries_bytes)?;
-
-        self.write_offset = offset + 4 + token_bytes.len() as u64 + 4 + entries_bytes.len() as u64;
-
-        Ok(offset)
-    }
-
-    /// Read a single token's entries from disk (V3 format with TF embedded)
     fn read_token_entry_v3(&self, offset: u64) -> Result<Vec<TokenEntry>> {
         let path = self
             .storage_path
@@ -1497,31 +1543,8 @@ impl FulltextIndex {
         Ok(entries)
     }
 
-    /// Get token entries from memory only (V3 format: doc_id + TF)
-    ///
-    /// This is the core lazy loading method:
-    /// 1. First checks in-memory inverted_index (new inserts since last flush)
-    /// 2. If not found and lazy_mode is active, loads from disk via token_offsets
-    /// 3. Returns None if token doesn't exist anywhere
-    #[allow(dead_code)]
-    fn get_token_entries(&self, token: &str) -> Option<Vec<TokenEntry>> {
-        // First check in-memory (for inserts since last flush, or non-lazy mode)
-        if let Some(entries) = self.inverted_index.get(token) {
-            return Some(entries.clone());
-        }
-
-        // If lazy mode, load from disk (V2 format: HashSet → Vec with TF=1)
-        if self.lazy_mode {
-            if let Some((offset, _count)) = self.token_offsets.get(token) {
-                if let Ok(doc_ids) = self.read_token_entry(*offset) {
-                    // Convert V2 HashSet to V3 Vec<TokenEntry> with TF=1 (placeholder)
-                    return Some(doc_ids.into_iter().map(|id| (id, 1)).collect());
-                }
-            }
-        }
-
-        None
-    }
+    // NOTE: get_token_entries() removed - superseded by get_token_entries_merged()
+    // which properly handles merging memory and disk data with deduplication.
 
     /// Get token entries, merging memory and disk data (V3 format: doc_id + TF)
     ///
@@ -1583,26 +1606,19 @@ impl FulltextIndex {
     }
 
     /// Check if a token exists in the index (memory or disk)
+    ///
+    /// This is a fast existence check that doesn't load the full entry.
+    /// Useful for query planning or diagnostics.
+    ///
+    /// Note: Currently private, but kept for potential future public API use.
     #[allow(dead_code)]
     fn has_token(&self, token: &str) -> bool {
         self.inverted_index.contains_key(token)
             || (self.lazy_mode && self.token_offsets.contains_key(token))
     }
 
-    /// Get total unique token count (memory + disk, may overlap)
-    #[allow(dead_code)]
-    fn total_token_count(&self) -> usize {
-        if self.lazy_mode {
-            // Union of memory and disk tokens
-            let mem_tokens: std::collections::HashSet<&str> =
-                self.inverted_index.keys().map(|s| s.as_str()).collect();
-            let disk_tokens: std::collections::HashSet<&str> =
-                self.token_offsets.keys().map(|s| s.as_str()).collect();
-            mem_tokens.union(&disk_tokens).count()
-        } else {
-            self.inverted_index.len()
-        }
-    }
+    // NOTE: total_token_count() removed - superseded by unique_token_count()
+    // which correctly computes the union without double-counting.
 
     /// Insert a document's field value into the index
     pub fn insert(&mut self, doc_id: &DocumentId, text: &str) -> Result<()> {
@@ -1638,6 +1654,10 @@ impl FulltextIndex {
         Ok(())
     }
 
+    /// Threshold for warning about unbounded deleted_doc_ids growth
+    /// When exceeded, a warning is logged suggesting a flush() call
+    const DELETED_DOC_IDS_WARNING_THRESHOLD: usize = 10_000;
+
     /// Remove a document from the index
     /// Note: This marks the document as removed but doesn't reclaim disk space.
     /// Disk space is reclaimed during compaction/rebuild.
@@ -1658,6 +1678,16 @@ impl FulltextIndex {
         // This ensures the doc won't appear in search results even if still on disk
         if self.lazy_mode {
             self.deleted_doc_ids.insert(doc_id.clone());
+
+            // Warn if deleted_doc_ids is growing too large (memory leak potential)
+            // User should call flush() periodically to clear this
+            if self.deleted_doc_ids.len() == Self::DELETED_DOC_IDS_WARNING_THRESHOLD {
+                tracing::warn!(
+                    index = %self.name,
+                    deleted_count = self.deleted_doc_ids.len(),
+                    "Fulltext index deleted_doc_ids set is large. Consider calling flush() to reclaim memory."
+                );
+            }
         }
 
         // Update inverted_index (V3: Vec.retain instead of HashSet.remove)
@@ -1762,10 +1792,8 @@ impl FulltextIndex {
         results.sort_by(|a, b| {
             // Primary: score descending
             // Secondary: doc_id ascending (for deterministic ordering when scores are equal)
-            match b.score.partial_cmp(&a.score) {
-                Some(std::cmp::Ordering::Equal) | None => a.doc_id.cmp(&b.doc_id),
-                Some(ord) => ord,
-            }
+            // NaN handling: NaN scores are sorted to the end (treated as lowest relevance)
+            Self::compare_search_results(a, b)
         });
 
         // Apply skip and limit
@@ -1840,12 +1868,32 @@ impl FulltextIndex {
             })
             .collect();
 
-        results.sort_by(|a, b| match b.score.partial_cmp(&a.score) {
-            Some(std::cmp::Ordering::Equal) | None => a.doc_id.cmp(&b.doc_id),
-            Some(ord) => ord,
-        });
+        results.sort_by(Self::compare_search_results);
 
         Ok(results.into_iter().skip(skip).take(limit).collect())
+    }
+
+    /// Compare two search results for sorting (score descending, doc_id ascending)
+    ///
+    /// Handles NaN scores by treating them as lowest relevance (sorted to end).
+    /// This ensures deterministic ordering even with corrupted/invalid scores.
+    fn compare_search_results(a: &FtsSearchResult, b: &FtsSearchResult) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        match (a.score.is_nan(), b.score.is_nan()) {
+            // Both NaN: fall back to doc_id ordering
+            (true, true) => a.doc_id.cmp(&b.doc_id),
+            // a is NaN: a goes to end (is "greater" in descending sort)
+            (true, false) => Ordering::Greater,
+            // b is NaN: b goes to end (a is "less" = comes first)
+            (false, true) => Ordering::Less,
+            // Normal comparison: score descending, doc_id ascending as tiebreaker
+            (false, false) => b
+                .score
+                .partial_cmp(&a.score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.doc_id.cmp(&b.doc_id)),
+        }
     }
 
     /// Check if a document is in the index
@@ -2197,24 +2245,37 @@ impl FulltextIndex {
     /// Get the number of unique tokens in the index
     ///
     /// This returns the total count from both in-memory and lazy-loaded sources.
+    /// In lazy mode, tokens may exist in both disk (token_offsets) and memory
+    /// (inverted_index), so we compute the union to avoid double-counting.
     pub fn unique_token_count(&self) -> usize {
         if self.lazy_mode {
-            self.token_offsets.len() + self.inverted_index.len()
+            // Compute union of disk and memory tokens to avoid double-counting
+            let mem_tokens: HashSet<&str> =
+                self.inverted_index.keys().map(|s| s.as_str()).collect();
+            let disk_tokens: HashSet<&str> =
+                self.token_offsets.keys().map(|s| s.as_str()).collect();
+            mem_tokens.union(&disk_tokens).count()
         } else {
             self.inverted_index.len()
         }
     }
 
+    /// Memory usage estimate constants (in bytes)
+    /// These are rough estimates based on typical HashMap overhead and value sizes
+    const EST_BYTES_PER_INVERTED_ENTRY: usize = 100; // String ~24 + Vec overhead ~40 + avg entries ~36
+    const EST_BYTES_PER_TOKEN_OFFSET: usize = 32; // String ~24 + (u64, u32) tuple ~12
+    const EST_BYTES_PER_DOC_OFFSET: usize = 24; // DocumentId ~16 + u64 ~8
+    const EST_BYTES_PER_DOC_TOKENS: usize = 200; // HashMap with ~10 tokens avg
+
     /// Get memory usage estimate in bytes (for monitoring)
+    ///
+    /// Note: These are rough estimates. Actual memory usage depends on
+    /// token lengths, document counts, and HashMap load factors.
     pub fn memory_usage_bytes(&self) -> usize {
-        // inverted_index: each entry is ~100 bytes on average (token + HashSet overhead)
-        let inverted_mem = self.inverted_index.len() * 100;
-        // token_offsets: each entry is ~32 bytes (String + (u64, u32))
-        let offsets_mem = self.token_offsets.len() * 32;
-        // doc_tokens_offsets: each entry is ~24 bytes
-        let doc_offsets_mem = self.doc_tokens_offsets.len() * 24;
-        // doc_tokens_memory: variable, estimate ~200 bytes per doc
-        let doc_tokens_mem = self.doc_tokens_memory.len() * 200;
+        let inverted_mem = self.inverted_index.len() * Self::EST_BYTES_PER_INVERTED_ENTRY;
+        let offsets_mem = self.token_offsets.len() * Self::EST_BYTES_PER_TOKEN_OFFSET;
+        let doc_offsets_mem = self.doc_tokens_offsets.len() * Self::EST_BYTES_PER_DOC_OFFSET;
+        let doc_tokens_mem = self.doc_tokens_memory.len() * Self::EST_BYTES_PER_DOC_TOKENS;
 
         inverted_mem + offsets_mem + doc_offsets_mem + doc_tokens_mem
     }

@@ -8,7 +8,7 @@ use crate::document::Document;
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
 use crate::fulltext::{
-    build_phrase_regex, generate_highlights, parse_query, tokenize, FulltextIndexMetadata,
+    build_phrase_regex_cached, generate_highlights, parse_query, tokenize, FulltextIndexMetadata,
     FulltextSearchOptions, FulltextSearchResultExt,
 };
 use crate::index::{FuzzyAlgorithm, FuzzySearchOptions, FuzzySearchResult};
@@ -668,8 +668,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Phrase search: get more candidates, then filter with regex
-        // Request limit * 10 candidates to account for regex filtering
-        let candidate_limit = effective_limit.saturating_mul(10).max(100);
+        let candidate_limit =
+            FulltextSearchOptions::calculate_candidate_limit(effective_limit, true);
 
         // Build search query from all terms (phrases tokenized + regular terms)
         let all_terms = parsed.all_search_terms(&fulltext_index.options);
@@ -689,7 +689,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let phrase_regexes: Vec<_> = parsed
             .phrases
             .iter()
-            .map(|p| build_phrase_regex(p))
+            .map(|p| build_phrase_regex_cached(p))
             .collect::<Result<Vec<_>>>()?;
 
         // Streaming doc loading with phrase filtering
@@ -822,11 +822,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let highlight_opts = options.highlight_options.clone().unwrap_or_default();
 
         // Determine candidate limit - if we have a filter, request more candidates
-        let candidate_limit = if parsed_filter.is_some() || parsed.has_phrases() {
-            effective_limit.saturating_mul(10).max(100)
-        } else {
-            effective_limit
-        };
+        let has_filter_or_phrase = parsed_filter.is_some() || parsed.has_phrases();
+        let candidate_limit =
+            FulltextSearchOptions::calculate_candidate_limit(effective_limit, has_filter_or_phrase);
 
         // Perform TF-IDF search
         let search_results = if !parsed.has_phrases() {
@@ -859,7 +857,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             parsed
                 .phrases
                 .iter()
-                .map(|p| build_phrase_regex(p))
+                .map(|p| build_phrase_regex_cached(p))
                 .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
