@@ -112,18 +112,21 @@ impl StorageEngine {
         use crate::error::IronBaseError;
         use std::os::unix::fs::FileExt;
 
-        let file_len = self.file.metadata()?.len();
+        // PERF FIX: Use cached header values instead of syscall per read!
+        // data_end_offset is updated after document writes (not metadata flush)
+        // This enables reading documents that were written but not yet flushed
+        let file_len = self.header.data_end_offset;
 
         if offset >= file_len {
             return Err(IronBaseError::Corruption(format!(
-                "Attempted to read at offset {} but file is only {} bytes",
+                "Attempted to read at offset {} but data region ends at {} bytes",
                 offset, file_len
             )));
         }
 
         if offset + 4 > file_len {
             return Err(IronBaseError::Corruption(format!(
-                "Insufficient space to read length header at offset {} (file: {} bytes)",
+                "Insufficient space to read length header at offset {} (data ends: {} bytes)",
                 offset, file_len
             )));
         }
@@ -168,18 +171,20 @@ impl StorageEngine {
         use crate::error::IronBaseError;
         use std::os::windows::fs::FileExt;
 
-        let file_len = self.file.metadata()?.len();
+        // PERF FIX: Use cached header values instead of syscall per read!
+        // data_end_offset is updated after document writes (not metadata flush)
+        let file_len = self.header.data_end_offset;
 
         if offset >= file_len {
             return Err(IronBaseError::Corruption(format!(
-                "Attempted to read at offset {} but file is only {} bytes",
+                "Attempted to read at offset {} but data region ends at {} bytes",
                 offset, file_len
             )));
         }
 
         if offset + 4 > file_len {
             return Err(IronBaseError::Corruption(format!(
-                "Insufficient space to read length header at offset {} (file: {} bytes)",
+                "Insufficient space to read length header at offset {} (data ends: {} bytes)",
                 offset, file_len
             )));
         }

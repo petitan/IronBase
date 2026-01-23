@@ -851,11 +851,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         options: crate::find_options::FindOptions,
     ) -> Result<Vec<Value>> {
         self.check_not_closed()?;
+        let t_start = std::time::Instant::now();
+
         // Phase 1: Build execution context (all setup logic centralized)
         let ctx = QueryExecutionContext::from_options(&options);
 
         // Phase 2: Collect document IDs (may use index for sorting)
         // Pass original skip/limit for index-based sort optimization (early termination)
+        let t_collect_start = std::time::Instant::now();
         let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
             query_json,
             None,
@@ -869,9 +872,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             ctx.cancel_flag.as_ref(), // For cooperative cancellation
             ctx.deadline,             // For cooperative timeout
         )?;
+        let t_collect_elapsed = t_collect_start.elapsed();
 
         // Phase 3: Document loading with OOM protection
         let doc_count = doc_ids.len();
+        log_warn!(
+            "find_with_options on '{}': collected {} doc_ids in {:?}",
+            self.name,
+            doc_count,
+            t_collect_elapsed
+        );
 
         // Warning for large queries
         if doc_count > LARGE_QUERY_WARNING_THRESHOLD {
@@ -905,12 +915,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         // Cancellation flag reference for cooperative timeout
         let cancel_flag = &ctx.cancel_flag;
 
+        // 🚀 PERF FIX: Acquire storage read lock ONCE for all documents
+        // Previously: N lock acquisitions + N HashMap lookups for N documents
+        // Now: 1 lock acquisition + 1 HashMap lookup for N documents
+        let storage = self.storage.read();
+        let meta = storage
+            .get_collection_meta(&self.name)
+            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
+
         let mut loaded = 0;
         for doc_id in doc_ids {
             // Check for cancellation/timeout every 100 documents
             if loaded % 100 == 0 {
                 if let Some(ref flag) = cancel_flag {
                     if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                        drop(storage); // Release lock before returning error
                         return Err(IronBaseError::Cancelled(format!(
                             "Query cancelled after loading {} documents. \
                             The operation was aborted due to client disconnection.",
@@ -920,6 +939,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
                 if let Some(dl) = ctx.deadline {
                     if std::time::Instant::now() >= dl {
+                        drop(storage); // Release lock before returning error
                         return Err(IronBaseError::Timeout(format!(
                             "Query timed out after loading {} documents. \
                             The operation exceeded the configured deadline.",
@@ -929,7 +949,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
 
-            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+            // Inline document loading (no per-doc lock/meta lookup!)
+            let doc_opt = if let Some(&offset) = meta.document_catalog.get(&doc_id) {
+                let doc_bytes = storage.read_data_at(offset)?;
+                let doc: Value = serde_json::from_slice(&doc_bytes)?;
+                // Check tombstone
+                if doc
+                    .get("_tombstone")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    None
+                } else {
+                    Some(doc)
+                }
+            } else {
+                None
+            };
+
+            if let Some(doc) = doc_opt {
                 // Apply early projection if safe (reduces memory, enables accurate size check)
                 let doc = if early_project {
                     ctx.apply_early_projection(doc)?
@@ -969,6 +1007,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
         }
+        let t_load_elapsed = t_start.elapsed() - t_collect_elapsed;
+        log_warn!(
+            "find_with_options on '{}': loaded {} docs in {:?} ({:.2}ms/doc)",
+            self.name,
+            loaded,
+            t_load_elapsed,
+            t_load_elapsed.as_secs_f64() * 1000.0 / (loaded.max(1) as f64)
+        );
 
         // Phase 4: Post-processing pipeline
         // 4a. Apply sort if needed (index didn't sort for us)
@@ -1940,25 +1986,59 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             // No tombstones - safe to use fast path
-            let effective_limit = limit.unwrap_or(usize::MAX);
+            // MongoDB compat: limit=0 means "no limit" (return all)
+            let effective_limit = match limit {
+                Some(0) | None => usize::MAX,
+                Some(n) => n,
+            };
 
             // NOTE: OOM protection already done above when collecting catalog_entries
 
-            // Sort keys for deterministic pagination across process restarts
-            // HashMap iteration order is non-deterministic due to ASLR hash seeds
-            let mut sorted_keys: Vec<DocumentId> =
-                catalog_entries.into_iter().map(|(id, _)| id).collect();
-            sorted_keys.sort();
+            // 🚀 PERF FIX: For small skip+limit, use heap-based partial sort O(n log k)
+            // instead of full sort O(n log n). Critical for pagination on large collections!
+            let need = skip.saturating_add(effective_limit);
+            let doc_ids: Vec<DocumentId> =
+                if effective_limit != usize::MAX && need < catalog_len && need < 10000 {
+                    // Use max-heap to find smallest `need` elements in O(n log k)
+                    use std::collections::BinaryHeap;
 
-            let doc_ids: Vec<DocumentId> = sorted_keys
-                .into_iter()
-                .skip(skip)
-                .take(if effective_limit == 0 {
-                    usize::MAX
+                    let mut heap: BinaryHeap<DocumentId> = BinaryHeap::with_capacity(need + 1);
+                    for (id, _) in catalog_entries {
+                        if heap.len() < need {
+                            heap.push(id);
+                        } else if let Some(max) = heap.peek() {
+                            if &id < max {
+                                heap.pop();
+                                heap.push(id);
+                            }
+                        }
+                    }
+
+                    // Extract and sort just the small result set O(k log k)
+                    let mut smallest: Vec<_> = heap.into_iter().collect();
+                    smallest.sort();
+
+                    smallest
+                        .into_iter()
+                        .skip(skip)
+                        .take(effective_limit)
+                        .collect()
                 } else {
-                    effective_limit
-                })
-                .collect();
+                    // Large skip or no limit - use full sort (deterministic pagination)
+                    let mut sorted_keys: Vec<DocumentId> =
+                        catalog_entries.into_iter().map(|(id, _)| id).collect();
+                    sorted_keys.sort();
+
+                    sorted_keys
+                        .into_iter()
+                        .skip(skip)
+                        .take(if effective_limit == 0 {
+                            usize::MAX
+                        } else {
+                            effective_limit
+                        })
+                        .collect()
+                };
             log_debug!(
                 "scan_documents_with_early_termination: FAST PATH (empty query, no tombstones) - skip={}, limit={:?}, returning {} docs",
                 skip,

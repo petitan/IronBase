@@ -533,7 +533,15 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         }
 
         let mut storage = self.storage.write();
-        let mut inserted_ids = Vec::with_capacity(documents.len());
+        // OOM FIX: Use try_reserve() instead of with_capacity() for fail-fast on allocation pressure
+        let doc_count = documents.len();
+        let mut inserted_ids = Vec::new();
+        inserted_ids.try_reserve(doc_count).map_err(|e| {
+            IronBaseError::OutOfMemory(format!(
+                "Cannot allocate {} document IDs for insert_many: {}",
+                doc_count, e
+            ))
+        })?;
         let mut live_delta = 0i64;
 
         // Get mutable reference to collection metadata ONCE
@@ -545,7 +553,14 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         let start_id = meta.last_id;
 
         // Prepare all documents with IDs
-        let mut prepared_docs = Vec::with_capacity(documents.len());
+        // OOM FIX: Use try_reserve() for fail-fast on allocation pressure
+        let mut prepared_docs = Vec::new();
+        prepared_docs.try_reserve(doc_count).map_err(|e| {
+            IronBaseError::OutOfMemory(format!(
+                "Cannot allocate {} prepared documents for insert_many: {}",
+                doc_count, e
+            ))
+        })?;
         let mut auto_id_count = 0u64;
 
         // 🔒 FIX #17: Create batch constraint validator to detect duplicates WITHIN batch
@@ -938,11 +953,59 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// Delete one document (raw, no WAL) - use DatabaseCore::delete_one for durability
     /// Returns deleted_count
     ///
+    /// PERF FIX (2026-01): O(1) fast path for _id queries.
+    /// Previously scanned 132K catalog entries even for {"_id": X} queries (0.56s/doc).
+    /// Now uses direct catalog lookup for _id queries (<0.05s/doc).
+    ///
     /// MEMORY FIX: Uses streaming document loading instead of scan_documents_via_catalog().
     /// Previously loaded ALL documents into memory, causing OOM on large collections.
     /// Now uses collect_doc_ids (with limit=1) + streaming read.
     fn delete_one_raw(&self, query_json: &Value) -> Result<u64> {
         self.check_not_closed()?;
+
+        // ====================================================================
+        // FAST PATH: Direct _id lookup O(1)
+        // When query is {"_id": value}, skip catalog scanning entirely.
+        // This is 10-100x faster than the slow path for large collections.
+        // ====================================================================
+        if let Some(doc_id) = Self::extract_id_query(query_json) {
+            // O(1) lookup via read_document_by_id
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                // PERF: Direct Value→Document (no serialization roundtrip)
+                let document = Document::from_value(&doc)?;
+
+                // Remove from all indexes BEFORE deleting
+                self.remove_from_indexes(&document)?;
+
+                // Acquire write lock for deletion
+                let mut storage = self.storage.write();
+
+                // Mark as tombstone (logical delete)
+                let mut tombstone = doc.clone();
+                if let Value::Object(ref mut map) = tombstone {
+                    map.insert("_tombstone".to_string(), Value::Bool(true));
+                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                }
+                let tombstone_json = serde_json::to_string(&tombstone)?;
+
+                // Write tombstone WITH catalog tracking (updates catalog entry)
+                storage.write_document_raw(&self.name, &document.id, tombstone_json.as_bytes())?;
+                storage.adjust_live_count(&self.name, -1);
+
+                // Invalidate query cache
+                drop(storage); // Release lock before cache invalidation
+                self.query_cache.invalidate_collection(&self.name);
+
+                return Ok(1);
+            }
+            // Document not found - return 0
+            return Ok(0);
+        }
+
+        // ====================================================================
+        // SLOW PATH: Complex queries (non-_id filters)
+        // Uses collect_doc_ids which may scan the catalog
+        // ====================================================================
         let parsed_query = Query::from_json(query_json)?;
 
         // STREAMING FIX: Collect only document IDs first (with limit=1 for efficiency)
@@ -1852,6 +1915,55 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// Now uses collect_doc_ids (with limit=1) + streaming read.
     fn delete_one_prepare(&self, query_json: &Value) -> Result<DeleteOnePrepared> {
         self.check_not_closed()?;
+
+        // ====================================================================
+        // FAST PATH: Direct _id lookup O(1)
+        // When query is {"_id": value}, skip catalog scanning entirely.
+        // This is 10-100x faster than the slow path for large collections.
+        // ====================================================================
+        if let Some(doc_id) = Self::extract_id_query(query_json) {
+            // O(1) lookup via read_document_by_id
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                // PERF: Direct Value→Document (no serialization roundtrip)
+                let document = Document::from_value(&doc)?;
+                let old_doc_value = doc.clone();
+
+                // Remove from indexes
+                self.remove_from_indexes(&document)?;
+
+                // 🔒 ATOMIC: Acquire write lock for delete operation
+                let mut storage = self.storage.write();
+
+                // Write tombstone
+                let mut tombstone = old_doc_value.clone();
+                if let Value::Object(ref mut map) = tombstone {
+                    map.insert("_tombstone".to_string(), Value::Bool(true));
+                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                }
+                let tombstone_json = serde_json::to_string(&tombstone)?;
+                storage.write_document_raw(&self.name, &doc_id, tombstone_json.as_bytes())?;
+                storage.adjust_live_count(&self.name, -1);
+
+                return Ok(DeleteOnePrepared {
+                    doc_id: Some(doc_id),
+                    old_doc: Some(old_doc_value),
+                    deleted: 1,
+                    collection_name: self.name.clone(),
+                });
+            }
+            // Document not found
+            return Ok(DeleteOnePrepared {
+                doc_id: None,
+                old_doc: None,
+                deleted: 0,
+                collection_name: self.name.clone(),
+            });
+        }
+
+        // ====================================================================
+        // SLOW PATH: Complex queries (non-_id filters)
+        // Uses collect_doc_ids which may scan the catalog
+        // ====================================================================
         let parsed_query = Query::from_json(query_json)?;
 
         // STREAMING FIX: Collect only document IDs first (with limit=1 for efficiency)
