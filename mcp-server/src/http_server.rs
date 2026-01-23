@@ -577,7 +577,9 @@ async fn run_http_server_internal(
         };
 
     // Initialize job manager for async operations (embedding backfill, etc.)
-    let job_manager: Option<Arc<crate::JobManager>> = Some(Arc::new(crate::JobManager::new()));
+    let job_manager = Arc::new(crate::JobManager::new());
+    let job_manager_for_shutdown = job_manager.clone();
+    let job_manager: Option<Arc<crate::JobManager>> = Some(job_manager);
     info!("Job manager initialized");
 
     // Initialize listener configuration in database
@@ -1005,8 +1007,16 @@ async fn run_http_server_internal(
         }
     }
 
-    // Graceful shutdown: close database (flush indexes + mark clean shutdown)
+    // Graceful shutdown: stop background jobs first
     info!("Shutting down gracefully...");
+
+    // 1. Stop all background jobs and wait for threads to complete
+    let completed = job_manager_for_shutdown.shutdown();
+    if completed > 0 {
+        info!("Stopped {} background job threads", completed);
+    }
+
+    // 2. Close database (flush indexes + mark clean shutdown)
     if let Err(e) = adapter.close() {
         tracing::error!("Error closing database: {}", e);
     } else {

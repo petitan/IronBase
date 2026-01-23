@@ -350,7 +350,9 @@ fn run_stdio_server(cli: &Cli) {
         };
 
     // Initialize job manager for async operations
-    let job_manager: Option<Arc<mcp_ironbase::JobManager>> = Some(Arc::new(mcp_ironbase::JobManager::new()));
+    let job_manager_instance = Arc::new(mcp_ironbase::JobManager::new());
+    let job_manager_for_shutdown = job_manager_instance.clone();
+    let job_manager: Option<Arc<mcp_ironbase::JobManager>> = Some(job_manager_instance);
     eprintln!("Job manager initialized");
 
     eprintln!("Ready for requests...");
@@ -408,6 +410,23 @@ fn run_stdio_server(cli: &Cli) {
         }
         // Notifications (no id) get no response - this is correct per JSON-RPC spec
     }
+
+    // Graceful shutdown when stdin is closed (EOF)
+    eprintln!("Shutting down gracefully...");
+
+    // 1. Stop all background jobs and wait for threads to complete
+    let completed = job_manager_for_shutdown.shutdown();
+    if completed > 0 {
+        eprintln!("Stopped {} background job threads", completed);
+    }
+
+    // 2. Close the adapter (flush indexes)
+    if let Err(e) = adapter.close() {
+        eprintln!("Error closing database: {}", e);
+    } else {
+        eprintln!("Database closed cleanly");
+    }
+    eprintln!("Server stopped");
 }
 
 fn handle_request(

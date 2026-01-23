@@ -344,6 +344,13 @@ fn handle_auto_embed_backfill(
             McpError::internal("Job manager not available for async operations")
         })?;
 
+        // Check if shutdown is in progress
+        if job_mgr.is_shutting_down() {
+            return Err(McpError::internal(
+                "Server is shutting down, cannot start new async jobs",
+            ));
+        }
+
         // Create job
         let job_type = JobType::EmbedBackfill {
             collection: p.collection.clone(),
@@ -360,9 +367,10 @@ fn handle_auto_embed_backfill(
         let filter = p.filter.clone();
         let job_mgr_clone = job_mgr.clone();
         let job_id_clone = job_id.clone();
+        let shutdown_flag = job_mgr.shutdown_flag();
 
         // Spawn background thread for processing
-        std::thread::spawn(move || {
+        let handle = std::thread::spawn(move || {
             run_backfill_job(
                 &job_id_clone,
                 &job_mgr_clone,
@@ -372,8 +380,12 @@ fn handle_auto_embed_backfill(
                 &collection,
                 filter,
                 batch_size,
+                &shutdown_flag,
             );
         });
+
+        // Register thread handle for graceful shutdown
+        job_mgr.register_thread(job_id.clone(), handle);
 
         return Ok(json!({
             "success": true,
@@ -473,6 +485,7 @@ fn run_backfill_job(
     collection: &str,
     filter: Option<Value>,
     batch_size: usize,
+    shutdown_flag: &std::sync::atomic::AtomicBool,
 ) {
     // Build filter: documents without target field
     let mut query = filter.unwrap_or(json!({}));
@@ -518,6 +531,13 @@ fn run_backfill_job(
     const MAX_EMPTY_BATCHES: usize = 3; // Safety limit to prevent infinite loop
 
     loop {
+        // Check if shutdown was requested
+        if shutdown_flag.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::info!("Backfill job {} stopping due to shutdown", job_id);
+            job_manager.update_progress(job_id, processed, Some(total_count), "Stopped (shutdown)");
+            return;
+        }
+
         // Check if job was cancelled
         if job_manager.is_cancelled(job_id) {
             job_manager.update_progress(job_id, processed, Some(total_count), "Cancelled");
