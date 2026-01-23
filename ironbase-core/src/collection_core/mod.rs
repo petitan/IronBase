@@ -851,14 +851,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         options: crate::find_options::FindOptions,
     ) -> Result<Vec<Value>> {
         self.check_not_closed()?;
-        let t_start = std::time::Instant::now();
 
         // Phase 1: Build execution context (all setup logic centralized)
         let ctx = QueryExecutionContext::from_options(&options);
 
         // Phase 2: Collect document IDs (may use index for sorting)
         // Pass original skip/limit for index-based sort optimization (early termination)
-        let t_collect_start = std::time::Instant::now();
         let (doc_ids, index_sorted) = self.collect_doc_ids_with_options(
             query_json,
             None,
@@ -872,16 +870,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             ctx.cancel_flag.as_ref(), // For cooperative cancellation
             ctx.deadline,             // For cooperative timeout
         )?;
-        let t_collect_elapsed = t_collect_start.elapsed();
 
         // Phase 3: Document loading with OOM protection
         let doc_count = doc_ids.len();
-        log_warn!(
-            "find_with_options on '{}': collected {} doc_ids in {:?}",
-            self.name,
-            doc_count,
-            t_collect_elapsed
-        );
 
         // Warning for large queries
         if doc_count > LARGE_QUERY_WARNING_THRESHOLD {
@@ -1007,14 +998,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
         }
-        let t_load_elapsed = t_start.elapsed() - t_collect_elapsed;
-        log_warn!(
-            "find_with_options on '{}': loaded {} docs in {:?} ({:.2}ms/doc)",
-            self.name,
-            loaded,
-            t_load_elapsed,
-            t_load_elapsed.as_secs_f64() * 1000.0 / (loaded.max(1) as f64)
-        );
 
         // Phase 4: Post-processing pipeline
         // 4a. Apply sort if needed (index didn't sort for us)
