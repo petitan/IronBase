@@ -132,11 +132,23 @@ impl EmbeddingCache {
     }
 
     /// Generate cache key from text, provider, and model
+    ///
+    /// Uses length-prefixed encoding to prevent collision attacks:
+    /// - "ab" + "cd" != "a" + "bcd" because lengths differ
     pub fn cache_key(text: &str, provider: &str, model: &str) -> String {
         let mut hasher = Sha256::new();
+
+        // Length-prefixed encoding: [len:8 bytes][data]
+        // This prevents collision between ("ab", "cd") and ("a", "bcd")
+        hasher.update((text.len() as u64).to_le_bytes());
         hasher.update(text.as_bytes());
+
+        hasher.update((provider.len() as u64).to_le_bytes());
         hasher.update(provider.as_bytes());
+
+        hasher.update((model.len() as u64).to_le_bytes());
         hasher.update(model.as_bytes());
+
         hex::encode(hasher.finalize())
     }
 
@@ -253,6 +265,23 @@ mod tests {
         assert_eq!(key1, key2);
         assert_ne!(key1, key3);
         assert_eq!(key1.len(), 64); // SHA256 hex = 64 chars
+    }
+
+    #[test]
+    fn test_cache_key_no_collision() {
+        // These would collide without length-prefixed encoding
+        let key1 = EmbeddingCache::cache_key("ab", "cd", "ef");
+        let key2 = EmbeddingCache::cache_key("a", "bcd", "ef");
+        let key3 = EmbeddingCache::cache_key("ab", "c", "def");
+        let key4 = EmbeddingCache::cache_key("abcdef", "", "");
+
+        // All should be different
+        assert_ne!(key1, key2);
+        assert_ne!(key1, key3);
+        assert_ne!(key1, key4);
+        assert_ne!(key2, key3);
+        assert_ne!(key2, key4);
+        assert_ne!(key3, key4);
     }
 
     #[test]

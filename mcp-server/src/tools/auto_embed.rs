@@ -31,6 +31,70 @@ pub struct AutoEmbedEnableParams {
     pub chunking: Option<ChunkingParams>,
 }
 
+impl AutoEmbedEnableParams {
+    /// Validate parameters
+    pub fn validate(&self) -> Result<()> {
+        // Collection name validation
+        if self.collection.is_empty() {
+            return Err(McpError::invalid_params("collection name cannot be empty"));
+        }
+        if self.collection.starts_with('_') && self.collection != "_system" {
+            return Err(McpError::invalid_params(
+                "collection names starting with '_' are reserved for system collections",
+            ));
+        }
+        if self.collection.contains('\0') || self.collection.contains('/') {
+            return Err(McpError::invalid_params(
+                "collection name contains invalid characters (null or /)",
+            ));
+        }
+
+        // Field name validation
+        if self.source_field.is_empty() {
+            return Err(McpError::invalid_params("source_field cannot be empty"));
+        }
+        if self.target_field.is_empty() {
+            return Err(McpError::invalid_params("target_field cannot be empty"));
+        }
+        if self.source_field == self.target_field {
+            return Err(McpError::invalid_params(
+                "source_field and target_field cannot be the same",
+            ));
+        }
+
+        // Provider validation
+        if self.provider.is_empty() {
+            return Err(McpError::invalid_params("provider cannot be empty"));
+        }
+
+        // Dimension validation
+        if let Some(dim) = self.dimension {
+            if dim == 0 {
+                return Err(McpError::invalid_params("dimension must be greater than 0"));
+            }
+            if dim > 4096 {
+                return Err(McpError::invalid_params(
+                    "dimension cannot exceed 4096 (practical limit for most models)",
+                ));
+            }
+        }
+
+        // Chunking validation
+        if let Some(ref chunking) = self.chunking {
+            if chunking.chunk_size == 0 {
+                return Err(McpError::invalid_params("chunk_size must be greater than 0"));
+            }
+            if chunking.overlap >= chunking.chunk_size {
+                return Err(McpError::invalid_params(
+                    "overlap must be less than chunk_size to prevent infinite loops",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Chunking parameters (subset of ChunkingConfig for MCP)
 #[derive(Debug, Deserialize)]
 pub struct ChunkingParams {
@@ -120,6 +184,9 @@ fn handle_auto_embed_enable(
     embedding_manager: &Option<Arc<EmbeddingManager>>,
 ) -> Result<Value> {
     let p: AutoEmbedEnableParams = AutoEmbedEnableParams::parse(params)?;
+
+    // Validate input parameters
+    p.validate()?;
 
     // Validate provider exists
     let manager = embedding_manager.as_ref().ok_or_else(|| {
@@ -447,7 +514,8 @@ fn run_backfill_job(
 
     let mut processed = 0;
     let mut errors = 0;
-    let mut skip = 0;
+    let mut consecutive_empty_batches = 0;
+    const MAX_EMPTY_BATCHES: usize = 3; // Safety limit to prevent infinite loop
 
     loop {
         // Check if job was cancelled
@@ -456,10 +524,12 @@ fn run_backfill_job(
             return;
         }
 
-        // Fetch next batch
+        // Fetch next batch - NO SKIP needed because the filter excludes already-processed docs
+        // The query filter includes: target_field: {$exists: false}
+        // So documents that have been processed (and now have target_field) are automatically excluded
         let find_options = crate::adapter::FindOptions {
             limit: Some(batch_size),
-            skip: Some(skip),
+            skip: None, // Don't use skip - filter handles exclusion
             ..Default::default()
         };
 
@@ -481,6 +551,8 @@ fn run_backfill_job(
             .filter_map(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()))
             .collect();
 
+        let batch_had_updates;
+
         if !texts.is_empty() {
             // Generate embeddings
             match provider.embed_batch(&texts) {
@@ -491,6 +563,7 @@ fn run_backfill_job(
                         .filter(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()).is_some())
                         .collect();
 
+                    let mut batch_processed = 0;
                     for (doc, embedding) in docs_with_source.iter().zip(embeddings.iter()) {
                         if let Some(id) = doc.get("_id") {
                             let filter = json!({ "_id": id });
@@ -499,20 +572,50 @@ fn run_backfill_job(
                             });
 
                             match adapter.update_one(collection, filter, update) {
-                                Ok(_) => processed += 1,
-                                Err(_) => errors += 1,
+                                Ok(_) => {
+                                    processed += 1;
+                                    batch_processed += 1;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to update document {:?}: {}", id, e);
+                                    errors += 1;
+                                }
                             }
                         }
                     }
+                    batch_had_updates = batch_processed > 0;
                 }
                 Err(e) => {
                     tracing::warn!("Batch embedding failed: {}", e);
                     errors += texts.len();
+                    batch_had_updates = false;
                 }
             }
+        } else {
+            // All documents in batch are missing source field - they won't be processed
+            // but they also won't be excluded by the filter, so we need to track this
+            tracing::warn!(
+                "Batch of {} documents has no valid source field '{}' - skipping",
+                result.documents.len(),
+                config.source_field
+            );
+            batch_had_updates = false;
         }
 
-        skip += result.documents.len();
+        // Safety: if we're not making progress, avoid infinite loop
+        if !batch_had_updates {
+            consecutive_empty_batches += 1;
+            if consecutive_empty_batches >= MAX_EMPTY_BATCHES {
+                tracing::warn!(
+                    "Stopping backfill after {} consecutive batches with no updates",
+                    MAX_EMPTY_BATCHES
+                );
+                break;
+            }
+        } else {
+            consecutive_empty_batches = 0;
+        }
+
         job_manager.update_progress(
             job_id,
             processed,

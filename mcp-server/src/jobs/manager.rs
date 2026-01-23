@@ -4,9 +4,16 @@ use super::types::{Job, JobId, JobInfo, JobType};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// Maximum number of completed jobs to keep in history
 const MAX_COMPLETED_JOBS: usize = 100;
+
+/// Time-to-live for completed jobs (1 hour)
+const COMPLETED_JOB_TTL: Duration = Duration::from_secs(3600);
+
+/// Minimum interval between cleanup runs
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Job manager for tracking and managing async operations
 pub struct JobManager {
@@ -14,6 +21,8 @@ pub struct JobManager {
     jobs: RwLock<HashMap<JobId, Arc<RwLock<Job>>>>,
     /// Counter for generating unique job IDs
     next_id: RwLock<u64>,
+    /// Last cleanup timestamp
+    last_cleanup: RwLock<Instant>,
 }
 
 impl JobManager {
@@ -22,6 +31,7 @@ impl JobManager {
         Self {
             jobs: RwLock::new(HashMap::new()),
             next_id: RwLock::new(1),
+            last_cleanup: RwLock::new(Instant::now()),
         }
     }
 
@@ -56,11 +66,17 @@ impl JobManager {
 
     /// Get job info by ID
     pub fn get_job_info(&self, id: &str) -> Option<JobInfo> {
+        // Trigger cleanup periodically
+        self.try_cleanup();
+
         self.jobs.read().get(id).map(|j| j.read().to_info())
     }
 
     /// List all jobs
     pub fn list_jobs(&self) -> Vec<JobInfo> {
+        // Trigger cleanup on list operations
+        self.try_cleanup();
+
         self.jobs
             .read()
             .values()
@@ -153,8 +169,27 @@ impl JobManager {
             .count()
     }
 
+    /// Try to run cleanup if enough time has passed
+    fn try_cleanup(&self) {
+        let should_cleanup = {
+            let last = self.last_cleanup.read();
+            last.elapsed() >= CLEANUP_INTERVAL
+        };
+
+        if should_cleanup {
+            let mut jobs = self.jobs.write();
+            self.cleanup_completed_jobs(&mut jobs);
+            *self.last_cleanup.write() = Instant::now();
+        }
+    }
+
     /// Cleanup old completed jobs to prevent memory leak
+    /// Removes jobs that are:
+    /// 1. Completed and older than TTL
+    /// 2. Completed and exceed MAX_COMPLETED_JOBS count
     fn cleanup_completed_jobs(&self, jobs: &mut HashMap<JobId, Arc<RwLock<Job>>>) {
+        let now = Instant::now();
+
         let completed: Vec<_> = jobs
             .iter()
             .filter_map(|(id, job)| {
@@ -167,14 +202,24 @@ impl JobManager {
             })
             .collect();
 
-        if completed.len() > MAX_COMPLETED_JOBS {
+        // First, remove jobs older than TTL
+        let mut remaining_completed = Vec::new();
+        for (id, updated_at) in completed {
+            if now.duration_since(updated_at) > COMPLETED_JOB_TTL {
+                jobs.remove(&id);
+            } else {
+                remaining_completed.push((id, updated_at));
+            }
+        }
+
+        // Then, if still too many, remove oldest
+        if remaining_completed.len() > MAX_COMPLETED_JOBS {
             // Sort by updated_at (oldest first)
-            let mut to_remove: Vec<_> = completed;
-            to_remove.sort_by_key(|(_, updated_at)| *updated_at);
+            remaining_completed.sort_by_key(|(_, updated_at)| *updated_at);
 
             // Remove oldest completed jobs
-            let remove_count = to_remove.len() - MAX_COMPLETED_JOBS;
-            for (id, _) in to_remove.into_iter().take(remove_count) {
+            let remove_count = remaining_completed.len() - MAX_COMPLETED_JOBS;
+            for (id, _) in remaining_completed.into_iter().take(remove_count) {
                 jobs.remove(&id);
             }
         }
@@ -252,5 +297,46 @@ mod tests {
 
         let jobs = manager.list_jobs();
         assert_eq!(jobs.len(), 2);
+    }
+
+    #[test]
+    fn test_cleanup_max_completed() {
+        let manager = JobManager::new();
+
+        // Create more than MAX_COMPLETED_JOBS completed jobs
+        for i in 0..150 {
+            let (id, _) = manager.create_job(JobType::Custom {
+                name: format!("test_{}", i),
+            });
+            manager.complete_job(&id, serde_json::json!({"i": i}));
+        }
+
+        // After cleanup, should have at most MAX_COMPLETED_JOBS
+        let jobs = manager.list_jobs();
+        assert!(jobs.len() <= super::MAX_COMPLETED_JOBS + 1); // +1 for potential race
+    }
+
+    #[test]
+    fn test_active_jobs_not_cleaned() {
+        let manager = JobManager::new();
+
+        // Create many completed jobs to trigger cleanup
+        for i in 0..150 {
+            let (id, _) = manager.create_job(JobType::Custom {
+                name: format!("completed_{}", i),
+            });
+            manager.complete_job(&id, serde_json::json!({}));
+        }
+
+        // Create an active job
+        let (active_id, _) = manager.create_job(JobType::Custom {
+            name: "active".to_string(),
+        });
+        manager.update_progress(&active_id, 50, Some(100), "Running...");
+
+        // Active job should still exist
+        let info = manager.get_job_info(&active_id);
+        assert!(info.is_some());
+        assert!(matches!(info.unwrap().status, JobStatus::Running { .. }));
     }
 }
