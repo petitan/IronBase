@@ -2,6 +2,8 @@
 
 use ironbase_core::{storage::MemoryStorage, DatabaseCore, UpdateOptions};
 use serde_json::json;
+use std::sync::Arc;
+use std::thread;
 
 #[test]
 fn test_upsert_insert_when_no_match() {
@@ -330,4 +332,273 @@ fn test_upsert_ignores_comparison_operators() {
     assert_eq!(doc.get("email"), Some(&json!("valid@example.com")));
     assert!(doc.get("age").is_none()); // Age should not be present
     assert_eq!(doc.get("name"), Some(&json!("Comparison Test")));
+}
+
+// ============================================================================
+// Edge Case Tests
+// ============================================================================
+
+#[test]
+fn test_upsert_concurrent_same_filter() {
+    // Test concurrent upserts with the same filter
+    // Only ONE document should be created (the first one wins, others update)
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+
+    let handles: Vec<_> = (0..10)
+        .map(|i| {
+            let db = Arc::clone(&db);
+            thread::spawn(move || {
+                let options = UpdateOptions::new().with_upsert(true);
+                db.update_one_with_options(
+                    "concurrent",
+                    &json!({"key": "shared"}),
+                    &json!({"$inc": {"counter": 1}, "$set": {"last_thread": i}}),
+                    options,
+                )
+            })
+        })
+        .collect();
+
+    // Wait for all threads
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+
+    // Should have exactly ONE document
+    let coll = db.collection("concurrent").unwrap();
+    let docs = coll
+        .find_with_options(&json!({}), Default::default())
+        .unwrap();
+    assert_eq!(
+        docs.len(),
+        1,
+        "Concurrent upserts should result in one document"
+    );
+
+    // Counter should be 10 (all increments should have applied)
+    let counter = docs[0].get("counter").unwrap().as_i64().unwrap();
+    assert_eq!(counter, 10, "All concurrent $inc should have been applied");
+}
+
+#[test]
+fn test_upsert_concurrent_different_filters() {
+    // Test concurrent upserts with different filters - should create multiple docs
+    let db = Arc::new(DatabaseCore::<MemoryStorage>::open_memory().unwrap());
+
+    let handles: Vec<_> = (0..5)
+        .map(|i| {
+            let db = Arc::clone(&db);
+            thread::spawn(move || {
+                let options = UpdateOptions::new().with_upsert(true);
+                db.update_one_with_options(
+                    "concurrent_multi",
+                    &json!({"key": format!("key_{}", i)}),
+                    &json!({"$set": {"value": i}}),
+                    options,
+                )
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().unwrap().unwrap();
+    }
+
+    // Should have 5 documents
+    let coll = db.collection("concurrent_multi").unwrap();
+    let docs = coll
+        .find_with_options(&json!({}), Default::default())
+        .unwrap();
+    assert_eq!(docs.len(), 5, "Each unique filter should create a document");
+}
+
+#[test]
+fn test_upsert_with_schema_validation() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // First create the collection with a schema
+    let coll = db.collection("validated").unwrap();
+
+    // Set a schema that requires "email" field
+    coll.set_schema(Some(json!({
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+            "email": {"type": "string"},
+            "name": {"type": "string"}
+        }
+    })))
+    .unwrap();
+
+    // Upsert that includes required field should work
+    let options = UpdateOptions::new().with_upsert(true);
+    let result = db.update_one_with_options(
+        "validated",
+        &json!({"email": "valid@example.com"}),
+        &json!({"$set": {"name": "Valid User"}}),
+        options.clone(),
+    );
+    assert!(result.is_ok(), "Upsert with required field should succeed");
+
+    // Upsert without required field in filter or update should fail
+    let result = db.update_one_with_options(
+        "validated",
+        &json!({"name": "Invalid"}),            // No email in filter
+        &json!({"$set": {"status": "active"}}), // No email in update
+        options,
+    );
+    assert!(result.is_err(), "Upsert missing required field should fail");
+}
+
+#[test]
+fn test_upsert_unicode_field_names() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    let options = UpdateOptions::new().with_upsert(true);
+    let result = db
+        .update_one_with_options(
+            "unicode",
+            &json!({"名前": "テスト", "이름": "테스트"}),
+            &json!({"$set": {"Ім'я": "Тест", "שם": "בדיקה"}}),
+            options,
+        )
+        .unwrap();
+
+    assert!(result.upserted_id.is_some());
+
+    let coll = db.collection("unicode").unwrap();
+    let docs = coll
+        .find_with_options(&json!({}), Default::default())
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+
+    let doc = &docs[0];
+    assert_eq!(doc.get("名前"), Some(&json!("テスト")));
+    assert_eq!(doc.get("이름"), Some(&json!("테스트")));
+    assert_eq!(doc.get("Ім'я"), Some(&json!("Тест")));
+    assert_eq!(doc.get("שם"), Some(&json!("בדיקה")));
+}
+
+#[test]
+fn test_upsert_deeply_nested_path() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    let options = UpdateOptions::new().with_upsert(true);
+    let result = db
+        .update_one_with_options(
+            "nested",
+            &json!({"a.b.c.d.e": "deep_value"}),
+            &json!({"$set": {"x.y.z": "another_deep"}}),
+            options,
+        )
+        .unwrap();
+
+    assert!(result.upserted_id.is_some());
+
+    let coll = db.collection("nested").unwrap();
+    let docs = coll
+        .find_with_options(&json!({}), Default::default())
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+
+    let doc = &docs[0];
+    // Verify nested structure was created
+    assert_eq!(
+        doc.get("a")
+            .and_then(|a| a.get("b"))
+            .and_then(|b| b.get("c"))
+            .and_then(|c| c.get("d"))
+            .and_then(|d| d.get("e")),
+        Some(&json!("deep_value"))
+    );
+    assert_eq!(
+        doc.get("x")
+            .and_then(|x| x.get("y"))
+            .and_then(|y| y.get("z")),
+        Some(&json!("another_deep"))
+    );
+}
+
+#[test]
+fn test_upsert_empty_update() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Upsert with only filter (no $set, $inc, etc.)
+    let options = UpdateOptions::new().with_upsert(true);
+    let result = db
+        .update_one_with_options(
+            "empty_update",
+            &json!({"email": "only-filter@example.com", "status": "active"}),
+            &json!({}), // Empty update
+            options,
+        )
+        .unwrap();
+
+    assert!(result.upserted_id.is_some());
+
+    // Document should have fields from filter
+    let coll = db.collection("empty_update").unwrap();
+    let docs = coll
+        .find_with_options(&json!({}), Default::default())
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+
+    let doc = &docs[0];
+    assert_eq!(doc.get("email"), Some(&json!("only-filter@example.com")));
+    assert_eq!(doc.get("status"), Some(&json!("active")));
+}
+
+#[test]
+fn test_upsert_special_characters_in_values() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    let options = UpdateOptions::new().with_upsert(true);
+    let result = db
+        .update_one_with_options(
+            "special",
+            &json!({"text": "Line1\nLine2\tTabbed"}),
+            &json!({"$set": {"quote": "He said \"hello\"", "backslash": "path\\to\\file"}}),
+            options,
+        )
+        .unwrap();
+
+    assert!(result.upserted_id.is_some());
+
+    let coll = db.collection("special").unwrap();
+    let docs = coll
+        .find_with_options(&json!({}), Default::default())
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+
+    let doc = &docs[0];
+    assert_eq!(doc.get("text"), Some(&json!("Line1\nLine2\tTabbed")));
+    assert_eq!(doc.get("quote"), Some(&json!("He said \"hello\"")));
+    assert_eq!(doc.get("backslash"), Some(&json!("path\\to\\file")));
+}
+
+#[test]
+fn test_upsert_null_values() {
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    let options = UpdateOptions::new().with_upsert(true);
+    let result = db
+        .update_one_with_options(
+            "nulls",
+            &json!({"id": 1}),
+            &json!({"$set": {"nullable_field": null, "another": "value"}}),
+            options,
+        )
+        .unwrap();
+
+    assert!(result.upserted_id.is_some());
+
+    let coll = db.collection("nulls").unwrap();
+    let docs = coll
+        .find_with_options(&json!({}), Default::default())
+        .unwrap();
+    assert_eq!(docs.len(), 1);
+
+    let doc = &docs[0];
+    assert_eq!(doc.get("nullable_field"), Some(&json!(null)));
+    assert_eq!(doc.get("another"), Some(&json!("value")));
 }

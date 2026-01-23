@@ -18,7 +18,7 @@ use super::helpers::{
 };
 use super::params::{
     AggregateParams, CountParams, DeleteParams, DistinctParams, FindOneParams, FindParams,
-    InsertManyParams, InsertOneParams, ParseParams, UpdateParams,
+    InsertManyParams, InsertOneParams, ParseParams, UpdateManyParams, UpdateOneParams,
 };
 
 /// Dispatch CRUD tool calls
@@ -64,7 +64,7 @@ fn apply_auto_embedding(
     let source_text = match document.get(&config.source_field) {
         Some(Value::String(text)) => text.clone(),
         Some(other) => other.to_string(), // Convert non-strings to JSON string
-        None => return Ok(false), // No source field, skip
+        None => return Ok(false),         // No source field, skip
     };
 
     if source_text.is_empty() {
@@ -73,19 +73,23 @@ fn apply_auto_embedding(
 
     // Generate embedding
     let provider = manager.get_provider(&config.provider).ok_or_else(|| {
-        McpError::internal(format!("Embedding provider '{}' not available", config.provider))
+        McpError::internal(format!(
+            "Embedding provider '{}' not available",
+            config.provider
+        ))
     })?;
 
-    let embedding = provider.embed(&source_text).map_err(|e| {
-        McpError::internal(format!("Embedding generation failed: {}", e))
-    })?;
+    let embedding = provider
+        .embed(&source_text)
+        .map_err(|e| McpError::internal(format!("Embedding generation failed: {}", e)))?;
 
     // Validate dimension if specified
     if let Some(expected_dim) = config.dimension {
         if embedding.len() != expected_dim {
             return Err(McpError::internal(format!(
                 "Embedding dimension mismatch: expected {}, got {}",
-                expected_dim, embedding.len()
+                expected_dim,
+                embedding.len()
             )));
         }
     }
@@ -179,7 +183,8 @@ fn handle_insert_many(
                         .collect();
 
                     if !texts_with_indices.is_empty() {
-                        let text_refs: Vec<&str> = texts_with_indices.iter().map(|(_, t)| t.as_str()).collect();
+                        let text_refs: Vec<&str> =
+                            texts_with_indices.iter().map(|(_, t)| t.as_str()).collect();
 
                         // Generate embeddings in batch
                         let embeddings = provider.embed_batch(&text_refs).map_err(|e| {
@@ -187,7 +192,9 @@ fn handle_insert_many(
                         })?;
 
                         // Apply embeddings to documents
-                        for ((idx, _), embedding) in texts_with_indices.iter().zip(embeddings.iter()) {
+                        for ((idx, _), embedding) in
+                            texts_with_indices.iter().zip(embeddings.iter())
+                        {
                             if let Some(obj) = documents[*idx].as_object_mut() {
                                 obj.insert(config.target_field.clone(), json!(embedding));
                                 embeddings_applied += 1;
@@ -282,7 +289,7 @@ fn handle_update_one(
 ) -> Result<Value> {
     check_cancelled()?;
 
-    let p: UpdateParams = UpdateParams::parse(params)?;
+    let p: UpdateOneParams = UpdateOneParams::parse(params)?;
     validate_collection_name(&p.collection)?;
     validate_filter(&p.filter)?;
     validate_update(&p.update)?;
@@ -333,19 +340,13 @@ fn handle_update_one(
 fn handle_update_many(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     check_cancelled()?;
 
-    let p: UpdateParams = UpdateParams::parse(params)?;
+    // Note: UpdateManyParams doesn't have upsert field - this is by design.
+    // MongoDB supports upsert for updateMany, but our API explicitly doesn't
+    // to prevent accidental bulk upserts. Use update_one with upsert=true instead.
+    let p: UpdateManyParams = UpdateManyParams::parse(params)?;
     validate_collection_name(&p.collection)?;
     validate_filter(&p.filter)?;
     validate_update(&p.update)?;
-
-    // FIX: Reject upsert for update_many - not yet supported
-    // MongoDB supports upsert for updateMany (creates one document if no matches),
-    // but our core doesn't have update_many_with_options yet.
-    if p.upsert {
-        return Err(McpError::invalid_params(
-            "upsert is not supported for update_many. Use update_one with upsert=true instead.",
-        ));
-    }
 
     let result = adapter.update_many(&p.collection, p.filter, p.update)?;
     Ok(json!({

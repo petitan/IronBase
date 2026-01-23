@@ -25,6 +25,35 @@
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 
+/// Deep equality comparison for JSON values, ignoring key order in objects
+///
+/// This is important for $addToSet where `{"a":1,"b":2}` should equal `{"b":2,"a":1}`.
+fn json_deep_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Object(map_a), Value::Object(map_b)) => {
+            if map_a.len() != map_b.len() {
+                return false;
+            }
+            map_a.iter().all(|(key, val_a)| {
+                map_b
+                    .get(key)
+                    .is_some_and(|val_b| json_deep_equal(val_a, val_b))
+            })
+        }
+        (Value::Array(arr_a), Value::Array(arr_b)) => {
+            if arr_a.len() != arr_b.len() {
+                return false;
+            }
+            arr_a
+                .iter()
+                .zip(arr_b.iter())
+                .all(|(a, b)| json_deep_equal(a, b))
+        }
+        // For primitives, use standard equality
+        _ => a == b,
+    }
+}
+
 /// Convert a MongoDB filter to a base document for upsert
 ///
 /// Extracts equality conditions from the filter to create the initial document.
@@ -327,7 +356,9 @@ fn apply_add_to_set(doc: &mut Map<String, Value>, path: &str, value: Value) {
             .entry(path.to_string())
             .or_insert_with(|| Value::Array(vec![]));
         if let Value::Array(arr) = arr {
-            if !arr.contains(&value) {
+            // Use json_deep_equal to compare objects ignoring key order
+            let already_exists = arr.iter().any(|existing| json_deep_equal(existing, &value));
+            if !already_exists {
                 arr.push(value);
             }
         }
@@ -648,5 +679,97 @@ mod tests {
         let doc = create_upsert_document(&filter, &update);
 
         assert_eq!(doc.get("tags"), Some(&json!(["a", "b", "c"])));
+    }
+
+    // ========== json_deep_equal tests ==========
+
+    #[test]
+    fn test_json_deep_equal_primitives() {
+        assert!(json_deep_equal(&json!(1), &json!(1)));
+        assert!(json_deep_equal(&json!("hello"), &json!("hello")));
+        assert!(json_deep_equal(&json!(true), &json!(true)));
+        assert!(json_deep_equal(&json!(null), &json!(null)));
+
+        assert!(!json_deep_equal(&json!(1), &json!(2)));
+        assert!(!json_deep_equal(&json!("a"), &json!("b")));
+    }
+
+    #[test]
+    fn test_json_deep_equal_objects_same_order() {
+        let a = json!({"name": "Alice", "age": 30});
+        let b = json!({"name": "Alice", "age": 30});
+        assert!(json_deep_equal(&a, &b));
+    }
+
+    #[test]
+    fn test_json_deep_equal_objects_different_order() {
+        // Key order should NOT matter
+        let a = json!({"name": "Alice", "age": 30});
+        let b = json!({"age": 30, "name": "Alice"});
+        assert!(json_deep_equal(&a, &b));
+    }
+
+    #[test]
+    fn test_json_deep_equal_nested_objects() {
+        let a = json!({"user": {"name": "Alice", "role": "admin"}});
+        let b = json!({"user": {"role": "admin", "name": "Alice"}});
+        assert!(json_deep_equal(&a, &b));
+    }
+
+    #[test]
+    fn test_json_deep_equal_arrays() {
+        // Arrays order DOES matter
+        assert!(json_deep_equal(&json!([1, 2, 3]), &json!([1, 2, 3])));
+        assert!(!json_deep_equal(&json!([1, 2, 3]), &json!([3, 2, 1])));
+    }
+
+    #[test]
+    fn test_json_deep_equal_mixed() {
+        let a = json!({"items": [{"a": 1, "b": 2}, {"c": 3}]});
+        let b = json!({"items": [{"b": 2, "a": 1}, {"c": 3}]});
+        assert!(json_deep_equal(&a, &b));
+    }
+
+    // ========== $addToSet key order independent tests ==========
+
+    #[test]
+    fn test_addtoset_object_key_order_independent() {
+        // If array already contains {"a":1,"b":2}, adding {"b":2,"a":1} should NOT add duplicate
+        let filter = json!({"items": [{"a": 1, "b": 2}]});
+        let update = json!({"$addToSet": {"items": {"b": 2, "a": 1}}});
+
+        let doc = create_upsert_document(&filter, &update);
+
+        // Should still have only one item (no duplicate added)
+        let items = doc.get("items").unwrap().as_array().unwrap();
+        assert_eq!(items.len(), 1);
+    }
+
+    #[test]
+    fn test_addtoset_object_different_values_added() {
+        // If array contains {"a":1,"b":2}, adding {"a":1,"b":3} SHOULD add (different value)
+        let filter = json!({"items": [{"a": 1, "b": 2}]});
+        let update = json!({"$addToSet": {"items": {"a": 1, "b": 3}}});
+
+        let doc = create_upsert_document(&filter, &update);
+
+        let items = doc.get("items").unwrap().as_array().unwrap();
+        assert_eq!(items.len(), 2);
+    }
+
+    #[test]
+    fn test_addtoset_nested_object_key_order() {
+        // Test with nested objects
+        let filter = json!({"items": [{"user": {"name": "Alice", "age": 30}}]});
+        let update = json!({"$addToSet": {"items": {"user": {"age": 30, "name": "Alice"}}}});
+
+        let doc = create_upsert_document(&filter, &update);
+
+        let items = doc.get("items").unwrap().as_array().unwrap();
+        assert_eq!(
+            items.len(),
+            1,
+            "Nested objects with same values but different key order should be treated as equal"
+        );
     }
 }

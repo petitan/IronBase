@@ -61,16 +61,28 @@ pub struct InsertManyParams {
     pub documents: Vec<Value>,
 }
 
-/// Parameters for `update_one` / `update_many` tools
+/// Parameters for `update_one` tool
 #[derive(Debug, Deserialize)]
-pub struct UpdateParams {
+pub struct UpdateOneParams {
     pub collection: String,
     /// Accepts both "filter" and "query" for API consistency
     #[serde(alias = "query")]
     pub filter: Value,
     pub update: Value,
+    /// Upsert: insert if no document matches (only for update_one)
     #[serde(default)]
     pub upsert: bool,
+}
+
+/// Parameters for `update_many` tool
+/// Note: upsert is NOT supported for update_many (MongoDB behavior)
+#[derive(Debug, Deserialize)]
+pub struct UpdateManyParams {
+    pub collection: String,
+    /// Accepts both "filter" and "query" for API consistency
+    #[serde(alias = "query")]
+    pub filter: Value,
+    pub update: Value,
 }
 
 /// Parameters for `delete_one` / `delete_many` tools
@@ -566,7 +578,6 @@ pub struct HybridSearchParams {
     pub projection: Option<Value>,
 
     // ========== v2 parameters (reranking, deduplication) ==========
-
     /// DEPRECATED: Language parameter is ignored for NLP consistency.
     /// Vector search uses original query (client-embedded), fulltext uses Snowball stemmer.
     #[serde(default)]
@@ -712,15 +723,41 @@ mod tests {
     }
 
     #[test]
-    fn test_update_params() {
+    fn test_update_one_params() {
         let params = json!({
             "collection": "users",
             "filter": {"name": "Alice"},
             "update": {"$set": {"age": 31}},
             "upsert": true
         });
-        let p: UpdateParams = UpdateParams::parse(params).unwrap();
+        let p: UpdateOneParams = UpdateOneParams::parse(params).unwrap();
         assert!(p.upsert);
+    }
+
+    #[test]
+    fn test_update_many_params() {
+        let params = json!({
+            "collection": "users",
+            "filter": {"status": "inactive"},
+            "update": {"$set": {"archived": true}}
+        });
+        let p: UpdateManyParams = UpdateManyParams::parse(params).unwrap();
+        assert_eq!(p.collection, "users");
+        assert_eq!(p.filter["status"], "inactive");
+    }
+
+    #[test]
+    fn test_update_many_no_upsert_field() {
+        // Verify UpdateManyParams doesn't have upsert field
+        let params = json!({
+            "collection": "users",
+            "filter": {},
+            "update": {"$set": {"x": 1}},
+            "upsert": true  // This field should be ignored
+        });
+        let p: UpdateManyParams = UpdateManyParams::parse(params).unwrap();
+        // If we could access upsert, the test would fail at compile time
+        assert_eq!(p.collection, "users");
     }
 
     #[test]
