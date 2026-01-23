@@ -5,11 +5,13 @@
 mod config;
 mod logging;
 mod size;
+mod state;
 mod tls;
 
 pub use config::{load_config, Config};
 pub(crate) use logging::SyncFileWriter;
 pub(crate) use size::format_size;
+pub(crate) use state::HttpAppState;
 pub(crate) use tls::load_rustls_config;
 
 use crate::acl::{AclManager, CallerContext};
@@ -664,18 +666,6 @@ async fn run_http_server_internal(
         info!("Database closed cleanly - fast restart enabled");
     }
     info!("Server stopped");
-}
-
-struct HttpAppState {
-    /// Central service layer for tool execution
-    service: Arc<crate::IronBaseService>,
-    /// MCP lifecycle state: track initialize per client
-    /// Per spec: "The initialization phase MUST be the first interaction"
-    initialized_clients: std::sync::Mutex<std::collections::HashSet<String>>,
-    /// Timeout for long-running tool operations (global default)
-    tool_timeout: std::time::Duration,
-    /// In-flight request tracker for MCP notifications/cancelled support
-    request_tracker: Arc<crate::cancellation::RequestTracker>,
 }
 
 // MCP Request/Response types imported from crate::transport
