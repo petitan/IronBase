@@ -192,6 +192,7 @@ Metadata flush után:  data_end_offset = metadata_offset + metadata_size
 ### Update Operators (7)
 - $set, $inc, $unset, $push, $pull, $addToSet, $pop
 - All support dot notation for nested fields
+- **Upsert support**: `update_one_with_options(..., UpdateOptions::new().with_upsert(true))`
 
 ### Aggregation
 - **Stages**: $match, $group, $project, $sort, $limit, $skip
@@ -706,6 +707,53 @@ collection.create_compound_index(
     false  // unique
 )?;
 ```
+
+### Upsert (MongoDB-compatible)
+```rust
+use ironbase_core::UpdateOptions;
+
+// Upsert: insert if no match found
+let options = UpdateOptions::new().with_upsert(true);
+let result = collection.update_one_with_options(
+    &json!({"email": "new@example.com"}),
+    &json!({"$set": {"name": "New User"}}),
+    options
+)?;
+
+if let Some(id) = result.upserted_id {
+    println!("Inserted new document: {:?}", id);
+} else {
+    println!("Updated {} documents", result.modified_count);
+}
+```
+
+**Python:**
+```python
+result = coll.update_one(
+    {"email": "new@example.com"},
+    {"$set": {"name": "New User"}},
+    upsert=True
+)
+print(result.get("upserted_id"))  # ID if inserted, None if updated
+```
+
+**MCP:**
+```json
+{"name": "document_update_one", "arguments": {
+  "collection": "users",
+  "filter": {"email": "new@example.com"},
+  "update": {"$set": {"name": "New User"}},
+  "upsert": true
+}}
+```
+
+**Filter → Document konverzió (upsert esetén):**
+- `{"email": "x"}` → `{"email": "x"}` (egyenlőség átmásolva)
+- `{"age": {"$gt": 18}}` → `{}` (comparison operátorok ignorálva)
+- `{"status": {"$eq": "active"}}` → `{"status": "active"}` ($eq támogatott)
+- `{"user.email": "x"}` → `{"user": {"email": "x"}}` (dot notation expandálva)
+- `{"$and": [...]}` → rekurzívan feldolgozva
+- `{"$or": [...]}` → ignorálva (ambiguus)
 
 ### $fuzzy Operator (Fuzzy Text Search)
 ```rust
