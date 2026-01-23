@@ -6,6 +6,7 @@ mod client;
 mod config;
 mod instructions;
 mod logging;
+mod response;
 mod size;
 mod state;
 mod tls;
@@ -14,6 +15,7 @@ pub use config::{load_config, Config};
 pub(crate) use client::{client_identity, is_client_initialized, mark_client_initialized};
 pub(crate) use instructions::get_server_instructions;
 pub(crate) use logging::SyncFileWriter;
+pub(crate) use response::{create_error_response, create_success_response};
 pub(crate) use size::format_size;
 pub(crate) use state::HttpAppState;
 pub(crate) use tls::load_rustls_config;
@@ -941,15 +943,4 @@ fn handle_request(
             request.id.clone(),
         )),
     }
-}
-
-fn create_success_response(
-    result: serde_json::Value,
-    id: Option<serde_json::Value>,
-) -> McpResponse {
-    McpResponse::success(result, id)
-}
-
-fn create_error_response(code: i32, message: &str, id: Option<serde_json::Value>) -> McpResponse {
-    McpResponse::error(code, message, id)
 }
