@@ -35,6 +35,26 @@ use super::CollectionCore;
 impl<S: Storage + RawStorage> CollectionCore<S> {
     // ========== TRANSACTION OPERATIONS ==========
 
+    /// Extract DocumentId from a Value (typically from _id field)
+    ///
+    /// Handles Int, u64 (with overflow check), and String types.
+    fn extract_doc_id_from_value(id_value: &Value) -> Result<DocumentId> {
+        match id_value {
+            Value::Number(n) if n.is_i64() => Ok(DocumentId::Int(n.as_i64().unwrap())),
+            Value::Number(n) if n.is_u64() => {
+                let u = n.as_u64().unwrap();
+                if u > i64::MAX as u64 {
+                    return Err(IronBaseError::Serialization(
+                        "_id value too large for i64".to_string(),
+                    ));
+                }
+                Ok(DocumentId::Int(u as i64))
+            }
+            Value::String(s) => Ok(DocumentId::String(s.clone())),
+            _ => Err(IronBaseError::Serialization("Invalid _id type".to_string())),
+        }
+    }
+
     /// Insert one document within a transaction
     ///
     /// Note: Index changes are tracked but not yet applied atomically.
@@ -120,21 +140,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
             let id_value = old_doc.get("_id").ok_or(IronBaseError::DocumentNotFound)?;
-
-            let doc_id = match id_value {
-                Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
-                Value::Number(n) if n.is_u64() => {
-                    let u = n.as_u64().unwrap();
-                    if u > i64::MAX as u64 {
-                        return Err(IronBaseError::Serialization(
-                            "_id value too large for i64".to_string(),
-                        ));
-                    }
-                    DocumentId::Int(u as i64)
-                }
-                Value::String(s) => DocumentId::String(s.clone()),
-                _ => return Err(IronBaseError::Serialization("Invalid _id type".to_string())),
-            };
+            let doc_id = Self::extract_doc_id_from_value(id_value)?;
 
             // Ensure new_doc has _id and _collection fields
             let new_doc_with_meta = if let Value::Object(mut map) = new_doc {
@@ -222,21 +228,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         if let Some(old_doc) = doc {
             // Extract document ID from _id field
             let id_value = old_doc.get("_id").ok_or(IronBaseError::DocumentNotFound)?;
-
-            let doc_id = match id_value {
-                Value::Number(n) if n.is_i64() => DocumentId::Int(n.as_i64().unwrap()),
-                Value::Number(n) if n.is_u64() => {
-                    let u = n.as_u64().unwrap();
-                    if u > i64::MAX as u64 {
-                        return Err(IronBaseError::Serialization(
-                            "_id value too large for i64".to_string(),
-                        ));
-                    }
-                    DocumentId::Int(u as i64)
-                }
-                Value::String(s) => DocumentId::String(s.clone()),
-                _ => return Err(IronBaseError::Serialization("Invalid _id type".to_string())),
-            };
+            let doc_id = Self::extract_doc_id_from_value(id_value)?;
 
             // Add operation to transaction
             tx.add_operation(Operation::Delete {

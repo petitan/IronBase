@@ -2,6 +2,12 @@
 
 use serde_json::Value;
 
+/// Build an IndexKey representing "string infinity" for range queries.
+/// Used as upper bound to capture all strings starting with a given prefix.
+fn max_string_key() -> IndexKey {
+    IndexKey::String("\u{10ffff}".repeat(100))
+}
+
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
@@ -145,7 +151,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         let default_start = IndexKey::Null;
-                        let default_end = IndexKey::String("\u{10ffff}".repeat(100));
+                        let default_end = max_string_key();
                         let start_key = start.as_ref().unwrap_or(&default_start);
                         let end_key = end.as_ref().unwrap_or(&default_end);
 
