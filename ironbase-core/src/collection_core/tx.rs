@@ -42,10 +42,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.validate_document(&doc_for_validation)?;
 
         // Add operation to transaction
+        // Convert to Value for nested field access in index tracking
+        let doc_value = serde_json::json!(doc_with_id);
+
         tx.add_operation(Operation::Insert {
             collection: self.name.clone(),
             doc_id: doc_id.clone(),
-            doc: serde_json::json!(doc_with_id),
+            doc: doc_value.clone(),
         })?;
 
         // Track index changes for two-phase commit
@@ -55,8 +58,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if let Some(btree_index) = indexes.get_btree_index(&index_name) {
                 let field_name = &btree_index.metadata.field;
 
-                // Get the field value from the document
-                if let Some(key_value) = doc_with_id.get(field_name) {
+                // FIX #19: Use get_nested_value to support dot notation (e.g., "profile.code")
+                if let Some(key_value) =
+                    crate::value_utils::get_nested_value(&doc_value, field_name)
+                {
                     let key = crate::transaction::IndexKey::from(key_value);
                     tx.add_index_change(
                         index_name.clone(),
