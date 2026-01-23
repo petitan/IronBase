@@ -42,8 +42,22 @@ pub struct WriteAheadLog {
 
 impl WriteAheadLog {
     /// Open or create a WAL file
+    ///
+    /// Also cleans up any orphaned .wal.tmp files from interrupted checkpoint operations.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+
+        // Clean up orphaned temp file from interrupted checkpoint (crash recovery)
+        let temp_path = path.with_extension("wal.tmp");
+        if temp_path.exists() {
+            tracing::warn!(
+                temp_path = %temp_path.display(),
+                "Removing orphaned WAL temp file from interrupted checkpoint"
+            );
+            if let Err(e) = std::fs::remove_file(&temp_path) {
+                tracing::error!(error = %e, "Failed to remove orphaned WAL temp file");
+            }
+        }
 
         let file = OpenOptions::new()
             .create(true)

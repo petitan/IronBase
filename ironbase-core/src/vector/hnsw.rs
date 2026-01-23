@@ -556,19 +556,59 @@ impl HnswIndex {
             .map(|&idx| self.nodes[idx].vector.as_slice())
     }
 
+    /// HNSW serialization format version
+    /// Version 1: Original bincode format (no header)
+    /// Version 2: Magic header + version + bincode data
+    const SERIALIZATION_VERSION: u32 = 2;
+    const MAGIC_HEADER: &'static [u8; 4] = b"HNSW";
+
     /// Serialize the index to bytes (for cache file)
+    ///
+    /// Format v2: [HNSW magic 4B][version u32 LE][bincode data...]
+    /// This allows future format changes without breaking existing cache files.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|e| {
+        let data = bincode::serialize(self).map_err(|e| {
             IronBaseError::Serialization(format!("Failed to serialize HNSW index: {}", e))
-        })
+        })?;
+
+        let mut buf = Vec::with_capacity(8 + data.len());
+        buf.extend_from_slice(Self::MAGIC_HEADER);
+        buf.extend_from_slice(&Self::SERIALIZATION_VERSION.to_le_bytes());
+        buf.extend_from_slice(&data);
+
+        Ok(buf)
     }
 
     /// Deserialize the index from bytes
+    ///
+    /// Supports both v1 (legacy, no header) and v2 (with header) formats.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        // Check for v2 format (has HNSW magic header)
+        if bytes.len() >= 8 && &bytes[0..4] == Self::MAGIC_HEADER {
+            let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+
+            if version > Self::SERIALIZATION_VERSION {
+                return Err(IronBaseError::Serialization(format!(
+                    "HNSW cache file version {} is newer than supported version {}",
+                    version,
+                    Self::SERIALIZATION_VERSION
+                )));
+            }
+
+            // v2: data starts after header
+            return bincode::deserialize(&bytes[8..]).map_err(|e| {
+                IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Failed to deserialize HNSW index v{}: {}", version, e),
+                )))
+            });
+        }
+
+        // v1 (legacy): no header, raw bincode
         bincode::deserialize(bytes).map_err(|e| {
             IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Failed to deserialize HNSW index: {}", e),
+                format!("Failed to deserialize HNSW index (legacy format): {}", e),
             )))
         })
     }
@@ -717,17 +757,28 @@ impl HnswIndex {
     }
 }
 
-/// Simple random float generator (0.0 to 1.0)
-/// Uses a basic LCG for reproducibility in tests
+/// Thread-safe random float generator (0.0 to 1.0)
+///
+/// Uses a basic LCG with atomic compare-exchange to ensure thread safety.
+/// The compare_exchange_weak loop guarantees that concurrent calls don't
+/// lose updates (which would result in duplicate random values).
 fn rand_float() -> f64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEED: AtomicU64 = AtomicU64::new(12345);
 
-    let mut seed = SEED.load(Ordering::Relaxed);
-    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-    SEED.store(seed, Ordering::Relaxed);
+    loop {
+        let old_seed = SEED.load(Ordering::Relaxed);
+        let new_seed = old_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
 
-    (seed >> 33) as f64 / (1u64 << 31) as f64
+        // Atomic read-modify-write: retry if another thread modified SEED
+        if SEED
+            .compare_exchange_weak(old_seed, new_seed, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            return (new_seed >> 33) as f64 / (1u64 << 31) as f64;
+        }
+        // Another thread won the race - retry with new seed value
+    }
 }
 
 #[cfg(test)]

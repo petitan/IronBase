@@ -43,7 +43,8 @@ fn build_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf
     index_name.hash(&mut hasher);
     let hash = hasher.finish();
 
-    let file_name = format!("{}_{}_{:08x}.idx", stem, safe_component, hash as u32);
+    // Use full 64-bit hash to minimize collision risk with many indexes
+    let file_name = format!("{}_{}_{:016x}.idx", stem, safe_component, hash);
     let parent = base_path
         .parent()
         .map(Path::to_path_buf)
@@ -104,7 +105,8 @@ pub fn build_fulltext_index_file_path(db_file_path: &str, index_name: &str) -> O
     index_name.hash(&mut hasher);
     let hash = hasher.finish();
 
-    let file_name = format!("{}_{}_{:08x}.ftidx", stem, safe_component, hash as u32);
+    // Use full 64-bit hash to minimize collision risk with many indexes
+    let file_name = format!("{}_{}_{:016x}.ftidx", stem, safe_component, hash);
     let parent = base_path
         .parent()
         .map(Path::to_path_buf)
@@ -127,9 +129,10 @@ pub fn try_load_fulltext_index_from_file(
     match FulltextIndex::load_from_file(ftidx_path.clone()) {
         Ok(index) => Some(index),
         Err(e) => {
-            eprintln!(
-                "[INFO] Fulltext index cache {:?} is stale or corrupted ({:?}), will rebuild from documents",
-                ftidx_path, e
+            tracing::info!(
+                path = %ftidx_path.display(),
+                error = ?e,
+                "Fulltext index cache stale or corrupted, will rebuild from documents"
             );
             None
         }
@@ -158,7 +161,8 @@ pub fn build_fuzzy_index_file_path(db_file_path: &str, index_name: &str) -> Opti
     index_name.hash(&mut hasher);
     let hash = hasher.finish();
 
-    let file_name = format!("{}_{}_{:08x}.fzidx", stem, safe_component, hash as u32);
+    // Use full 64-bit hash to minimize collision risk with many indexes
+    let file_name = format!("{}_{}_{:016x}.fzidx", stem, safe_component, hash);
     let parent = base_path
         .parent()
         .map(Path::to_path_buf)
@@ -181,9 +185,10 @@ pub fn try_load_fuzzy_index_from_file(
     match FuzzyIndex::load_from_file(&fzidx_path) {
         Ok(index) => Some(index),
         Err(e) => {
-            eprintln!(
-                "[INFO] Fuzzy index cache {:?} is stale or corrupted ({:?}), will rebuild from documents",
-                fzidx_path, e
+            tracing::info!(
+                path = %fzidx_path.display(),
+                error = ?e,
+                "Fuzzy index cache stale or corrupted, will rebuild from documents"
             );
             None
         }

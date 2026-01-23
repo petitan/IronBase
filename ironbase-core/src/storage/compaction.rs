@@ -2,22 +2,50 @@
 // Storage compaction functionality
 
 use super::{write_compaction_header, StorageEngine};
-use crate::error::Result;
+use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Compaction configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CompactionConfig {
     /// Number of documents to process in memory at once (default: 1000)
     pub chunk_size: usize,
+    /// Optional cancellation flag - set to true to abort compaction
+    pub cancel_flag: Option<Arc<AtomicBool>>,
 }
 
-impl Default for CompactionConfig {
-    fn default() -> Self {
-        CompactionConfig { chunk_size: 1000 }
+impl CompactionConfig {
+    /// Create a new compaction config with default values
+    pub fn new() -> Self {
+        Self {
+            chunk_size: 1000,
+            cancel_flag: None,
+        }
+    }
+
+    /// Set the chunk size
+    pub fn with_chunk_size(mut self, size: usize) -> Self {
+        self.chunk_size = size;
+        self
+    }
+
+    /// Set a cancellation flag for interruptible compaction
+    pub fn with_cancel_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
+        self
+    }
+
+    /// Check if cancellation was requested
+    fn is_cancelled(&self) -> bool {
+        self.cancel_flag
+            .as_ref()
+            .map(|f| f.load(Ordering::Relaxed))
+            .unwrap_or(false)
     }
 }
 
@@ -29,7 +57,9 @@ pub struct CompactionStats {
     pub documents_scanned: u64,
     pub documents_kept: u64,
     pub tombstones_removed: u64,
-    pub peak_memory_mb: u64, // Peak memory usage during compaction
+    pub peak_memory_mb: u64,
+    /// True if compaction was cancelled before completion
+    pub cancelled: bool,
 }
 
 impl CompactionStats {
@@ -188,14 +218,37 @@ impl StorageEngine {
             collection_docs.insert(coll_name.clone(), HashMap::new());
         }
 
-        // CATALOG-BASED ITERATION (instead of sequential file scan)
-        // The catalog is the source of truth for document locations
-        // This avoids sequential scan assumptions and handles gaps correctly
+        // ORDER-PRESERVING ITERATION: Use document_order instead of catalog HashMap
+        // This ensures documents are written in their original insertion order,
+        // which is important for consistent query results with implicit ordering.
         let mut chunk_count = 0;
 
         for (coll_name, coll_meta) in collections_snapshot.iter() {
-            // Iterate catalog instead of scanning file sequentially
-            for (doc_id, &offset) in &coll_meta.document_catalog {
+            // Check for cancellation at collection boundary
+            if config.is_cancelled() {
+                stats.cancelled = true;
+                return Err(IronBaseError::Cancelled(
+                    "Compaction cancelled by user".to_string(),
+                ));
+            }
+
+            // Iterate using document_order to preserve insertion order
+            for doc_id in &coll_meta.document_order {
+                // Get offset from catalog (document_order may have stale IDs, skip them)
+                let offset = match coll_meta.document_catalog.get(doc_id) {
+                    Some(&off) => off,
+                    None => continue, // Document was deleted, skip
+                };
+
+                // Check for cancellation periodically (every chunk)
+                if chunk_count > 0 && chunk_count % config.chunk_size == 0 && config.is_cancelled()
+                {
+                    stats.cancelled = true;
+                    return Err(IronBaseError::Cancelled(
+                        "Compaction cancelled by user".to_string(),
+                    ));
+                }
+
                 // Validate offset is before metadata (sanity check)
                 if offset >= file_len {
                     crate::log_warn!(
