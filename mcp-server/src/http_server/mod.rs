@@ -2,6 +2,7 @@
 //!
 //! Provides HTTP server functionality that can be started with custom shutdown signals.
 
+mod client;
 mod config;
 mod instructions;
 mod logging;
@@ -10,6 +11,7 @@ mod state;
 mod tls;
 
 pub use config::{load_config, Config};
+pub(crate) use client::{client_identity, is_client_initialized, mark_client_initialized};
 pub(crate) use instructions::get_server_instructions;
 pub(crate) use logging::SyncFileWriter;
 pub(crate) use size::format_size;
@@ -671,51 +673,6 @@ async fn run_http_server_internal(
 }
 
 // MCP Request/Response types imported from crate::transport
-
-fn client_identity(api_key: Option<&str>, remote_addr: Option<std::net::SocketAddr>) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    if let Some(key) = api_key {
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        return format!("api:{:x}", hasher.finish());
-    }
-
-    remote_addr
-        .map(|addr| format!("ip:{}", addr.ip()))
-        .unwrap_or_else(|| "unknown".to_string())
-}
-
-fn is_client_initialized(
-    initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
-    client_id: &str,
-) -> bool {
-    match initialized_clients.lock() {
-        Ok(set) => set.contains(client_id),
-        Err(poisoned) => {
-            // Recover from poisoned mutex - log warning and check the data
-            tracing::warn!("Client initialized set mutex was poisoned, recovering");
-            poisoned.into_inner().contains(client_id)
-        }
-    }
-}
-
-fn mark_client_initialized(
-    initialized_clients: &std::sync::Mutex<std::collections::HashSet<String>>,
-    client_id: &str,
-) {
-    match initialized_clients.lock() {
-        Ok(mut set) => {
-            set.insert(client_id.to_string());
-        }
-        Err(poisoned) => {
-            // Recover from poisoned mutex - log warning and insert anyway
-            tracing::warn!("Client initialized set mutex was poisoned, recovering");
-            poisoned.into_inner().insert(client_id.to_string());
-        }
-    }
-}
 
 /// Handle MCP request using the service layer
 ///
