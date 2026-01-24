@@ -15,7 +15,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.3.83"
+version = "0.3.84"
 edition = "2021"
 authors = ["Petitan"]
 repository = "https://github.com/petitan/IronBase"
