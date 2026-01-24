@@ -1829,6 +1829,8 @@ impl Drop for StorageEngine {
         let _ = self.flush();
         // Clear WAL on close to keep it clean for next open
         let _ = self.checkpoint();
+        // Mark clean shutdown for fast restart (indexes can be loaded from .idx files)
+        let _ = self.mark_clean_shutdown();
         // Explicitly unlock the lock file to ensure other processes can access the database
         // This is more reliable than relying on File::drop() to release the flock
         let _ = self.lock_file.unlock();
@@ -2402,36 +2404,35 @@ mod tests {
         // Create new database - should NOT be clean shutdown
         {
             let storage = StorageEngine::open(&db_path).unwrap();
-            assert!(!storage.was_clean_shutdown()); // New database
-                                                    // Drop without mark_clean_shutdown - simulates crash
+            assert!(!storage.was_clean_shutdown()); // New database - no previous shutdown
+                                                    // Drop runs and calls mark_clean_shutdown automatically
         }
 
-        // Reopen after dirty shutdown (no mark_clean_shutdown called)
+        // Reopen after proper Drop (which calls mark_clean_shutdown)
         {
             let storage = StorageEngine::open(&db_path).unwrap();
-            assert!(!storage.was_clean_shutdown()); // Dirty shutdown
+            assert!(storage.was_clean_shutdown()); // Clean - Drop called mark_clean_shutdown
+                                                   // Drop runs and calls mark_clean_shutdown again
         }
 
-        // Now do explicit mark_clean_shutdown
+        // Verify clean shutdown persists
+        {
+            let storage = StorageEngine::open(&db_path).unwrap();
+            assert!(storage.was_clean_shutdown()); // Still clean
+        }
+
+        // Test explicit mark_clean_shutdown (should work same as Drop)
         {
             let mut storage = StorageEngine::open(&db_path).unwrap();
-            assert!(!storage.was_clean_shutdown()); // Still dirty
+            assert!(storage.was_clean_shutdown()); // Clean from previous
             storage.mark_clean_shutdown().unwrap();
-            // Flag is now TRUE in file
+            // Both explicit and Drop will mark clean
         }
 
-        // Verify clean shutdown flag persists after proper shutdown
+        // Verify still clean
         {
             let storage = StorageEngine::open(&db_path).unwrap();
-            assert!(storage.was_clean_shutdown()); // Now clean!
-                                                   // Note: header.clean_shutdown is now false in memory
-                                                   // If we don't call mark_clean_shutdown, next open sees dirty
-        }
-
-        // Reopen again - should be DIRTY because previous scope didn't call mark_clean_shutdown
-        {
-            let storage = StorageEngine::open(&db_path).unwrap();
-            assert!(!storage.was_clean_shutdown()); // Dirty - no mark_clean in previous scope
+            assert!(storage.was_clean_shutdown()); // Clean
         }
     }
 

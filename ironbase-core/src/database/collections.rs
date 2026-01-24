@@ -181,11 +181,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     }
 
     /// Load persisted custom indexes from metadata/files
+    ///
+    /// IMPORTANT: Only loads from .idx files when `was_clean == true`.
+    /// On dirty shutdown, stale .idx files may contain entries for tombstoned documents,
+    /// so we create empty indexes that will be rebuilt from the catalog.
     fn load_persisted_indexes(
         index_manager: &mut IndexManager,
         persisted_indexes: &[crate::index::IndexMetadata],
         id_index_name: &str,
         db_path: &str,
+        was_clean: bool,
     ) -> Result<()> {
         use crate::log_debug;
 
@@ -195,29 +200,30 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 continue;
             }
 
-            // Try to load from .idx file first
-            if let Some(loaded_tree) =
-                crate::collection_core::try_load_index_from_file(db_path, index_meta)
-            {
-                log_debug!(
-                    "Loaded index '{}' from .idx file (will rebuild from documents)",
-                    index_meta.name
-                );
-                index_manager.add_loaded_index(loaded_tree);
-            } else {
-                // Fallback: create empty index
-                log_debug!(
-                    "Creating index '{}' on field '{}' (will rebuild from documents)",
-                    index_meta.name,
-                    index_meta.field
-                );
-                index_manager.create_btree_index(
-                    index_meta.name.clone(),
-                    index_meta.field.clone(),
-                    index_meta.unique,
-                    index_meta.sparse,
-                )?;
+            // Only try to load from .idx file if clean shutdown
+            // Dirty shutdown may have stale index entries for tombstoned documents
+            if was_clean {
+                if let Some(loaded_tree) =
+                    crate::collection_core::try_load_index_from_file(db_path, index_meta)
+                {
+                    log_debug!("Loaded index '{}' from .idx file", index_meta.name);
+                    index_manager.add_loaded_index(loaded_tree);
+                    continue;
+                }
             }
+
+            // Create empty index (will be rebuilt from documents if needed)
+            log_debug!(
+                "Creating empty index '{}' on field '{}' (will rebuild from documents)",
+                index_meta.name,
+                index_meta.field
+            );
+            index_manager.create_btree_index(
+                index_meta.name.clone(),
+                index_meta.field.clone(),
+                index_meta.unique,
+                index_meta.sparse,
+            )?;
         }
         Ok(())
     }
@@ -500,7 +506,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// This creates the _id index, loads persisted indexes, and rebuilds
     /// all indexes from the document catalog.
     fn initialize_index_manager(&self, name: &str) -> Result<IndexManager> {
-        use crate::log_debug;
+        use crate::{log_debug, log_warn};
 
         let mut index_manager = IndexManager::new();
         let id_index_name = format!("{}_id", name);
@@ -586,26 +592,33 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         }
 
         // Load persisted custom indexes (delegated to helper)
+        // Only load from .idx files if clean shutdown - stale files may have tombstone entries
         Self::load_persisted_indexes(
             &mut index_manager,
             &persisted_indexes,
             &id_index_name,
             &db_path,
+            was_clean,
         )?;
 
         // Load or create fuzzy indexes from persisted metadata
+        // Only load from files if clean shutdown (stale files may have tombstone entries)
         for fuzzy_meta in &persisted_fuzzy_indexes {
-            // Try to load from .fzidx file first
-            if let Some(loaded_index) =
-                crate::collection_core::try_load_fuzzy_index_from_file(&db_path, fuzzy_meta)
-            {
-                log_debug!(
-                    "Loaded fuzzy index '{}' from .fzidx file ({} entries)",
-                    fuzzy_meta.name,
-                    loaded_index.entry_count()
-                );
-                index_manager.add_loaded_fuzzy_index(loaded_index);
-            } else {
+            let mut loaded = false;
+            if was_clean {
+                if let Some(loaded_index) =
+                    crate::collection_core::try_load_fuzzy_index_from_file(&db_path, fuzzy_meta)
+                {
+                    log_debug!(
+                        "Loaded fuzzy index '{}' from .fzidx file ({} entries)",
+                        fuzzy_meta.name,
+                        loaded_index.entry_count()
+                    );
+                    index_manager.add_loaded_fuzzy_index(loaded_index);
+                    loaded = true;
+                }
+            }
+            if !loaded {
                 // Create new index with disk storage (will be rebuilt from documents)
                 let storage_path =
                     crate::collection_core::build_fuzzy_index_file_path(&db_path, &fuzzy_meta.name);
@@ -626,19 +639,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         }
 
         // Load or create fulltext indexes from persisted metadata
+        // Only load from files if clean shutdown (stale files may have tombstone entries)
         for fts_meta in &persisted_fulltext_indexes {
-            // Try to load from .ftidx file first
-            if let Some(loaded_index) =
-                crate::collection_core::try_load_fulltext_index_from_file(&db_path, fts_meta)
-            {
-                log_debug!(
-                    "Loaded fulltext index '{}' from .ftidx file ({} docs, {} tokens)",
-                    fts_meta.name,
-                    loaded_index.doc_count(),
-                    loaded_index.token_count()
-                );
-                index_manager.add_loaded_fulltext_index(loaded_index);
-            } else {
+            let mut loaded = false;
+            if was_clean {
+                if let Some(loaded_index) =
+                    crate::collection_core::try_load_fulltext_index_from_file(&db_path, fts_meta)
+                {
+                    log_debug!(
+                        "Loaded fulltext index '{}' from .ftidx file ({} docs, {} tokens)",
+                        fts_meta.name,
+                        loaded_index.doc_count(),
+                        loaded_index.token_count()
+                    );
+                    index_manager.add_loaded_fulltext_index(loaded_index);
+                    loaded = true;
+                }
+            }
+            if !loaded {
                 // Create new index with disk storage (will be rebuilt from documents)
                 let storage_path = crate::collection_core::build_fulltext_index_file_path(
                     &db_path,
@@ -662,22 +680,32 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         }
 
         // Load or create vector indexes from persisted metadata
+        // Only load from files if clean shutdown (stale files may have tombstone entries)
         for vec_meta in &persisted_vector_indexes {
-            // Try to load from .hnsw file first
-            if let Some(loaded_index) =
-                crate::index::IndexManager::try_load_vector_index(&db_path, &vec_meta.name)
-            {
-                log_debug!(
-                    "Loaded vector index '{}' from .hnsw file ({} vectors)",
-                    vec_meta.name,
-                    loaded_index.len()
-                );
-                index_manager.add_loaded_vector_index(vec_meta.name.clone(), loaded_index);
-            } else {
+            let mut loaded = false;
+            if was_clean {
+                if let Some(loaded_index) =
+                    crate::index::IndexManager::try_load_vector_index(&db_path, &vec_meta.name)
+                {
+                    log_debug!(
+                        "Loaded vector index '{}' from .hnsw file ({} vectors)",
+                        vec_meta.name,
+                        loaded_index.len()
+                    );
+                    index_manager.add_loaded_vector_index(vec_meta.name.clone(), loaded_index);
+                    loaded = true;
+                }
+            }
+            if !loaded {
                 // Create new index (will be rebuilt from documents)
                 log_debug!(
-                    "Vector index '{}' cache not found, creating empty (will rebuild)",
-                    vec_meta.name
+                    "Vector index '{}' {} - creating empty (will rebuild)",
+                    vec_meta.name,
+                    if was_clean {
+                        "cache not found"
+                    } else {
+                        "dirty shutdown"
+                    }
                 );
                 let storage_path =
                     crate::index::IndexManager::build_vector_cache_path(&db_path, &vec_meta.name);
@@ -698,6 +726,15 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Determine what needs rebuilding
         // (was_clean is already known from earlier)
+
+        // Check if any B+ tree indexes are empty (missing .idx file or failed to load)
+        let has_btree_without_file = persisted_indexes.iter().any(|meta| {
+            index_manager
+                .get_btree_index(&meta.name)
+                .map(|idx| idx.size() == 0)
+                .unwrap_or(true)
+        });
+
         let fuzzy_indexes = index_manager.list_fuzzy_indexes();
         let has_fuzzy_without_file = fuzzy_indexes.iter().any(|idx| idx.entry_count() == 0);
         let fulltext_indexes = index_manager.list_fulltext_indexes();
@@ -705,9 +742,10 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let vector_indexes = index_manager.list_vector_indexes();
         let has_vector_without_cache = vector_indexes.iter().any(|idx| idx.is_empty());
 
-        // FAST PATH: If clean shutdown AND no empty indexes, skip rebuild
+        // FAST PATH: If clean shutdown AND no empty indexes (ANY type), skip rebuild
         if was_clean
             && !catalog.is_empty()
+            && !has_btree_without_file
             && !has_fuzzy_without_file
             && !has_fulltext_without_file
             && !has_vector_without_cache
@@ -721,6 +759,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             // SLOW PATH: Rebuild indexes from document catalog
             let reason = if !was_clean {
                 "dirty shutdown/crash"
+            } else if has_btree_without_file {
+                "B+ tree indexes missing .idx file"
             } else if has_fuzzy_without_file {
                 "fuzzy indexes missing .fzidx file"
             } else if has_fulltext_without_file {
@@ -730,8 +770,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             } else {
                 "empty catalog"
             };
-            log_debug!(
-                "Rebuilding indexes due to {} - {} catalog entries",
+            // WARN level so users can see why startup is slow
+            log_warn!(
+                "Rebuilding indexes due to {} - {} catalog entries (this may take a while)",
                 reason,
                 catalog.len()
             );
