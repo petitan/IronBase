@@ -228,7 +228,7 @@ mod benchmarks {
         let db_path = temp_dir.path().join("bench.mlite");
         let db = DatabaseCore::open(&db_path).unwrap();
 
-        let iterations = 10000;
+        let iterations = 10_000;
         let start = Instant::now();
 
         for _ in 0..iterations {

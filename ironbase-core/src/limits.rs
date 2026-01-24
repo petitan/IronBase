@@ -109,6 +109,19 @@ pub const REGEX_CACHE_CAPACITY: usize = 100;
 /// 0.8 = ~80% hasonlóság szükséges.
 pub const DEFAULT_FUZZY_THRESHOLD: f64 = 0.8;
 
+/// Heap-based pagination küszöb
+///
+/// Ha `skip + limit < HEAP_PAGINATION_THRESHOLD`, akkor heap-alapú
+/// O(n log k) partial sort fut a teljes O(n log n) sort helyett.
+/// Ez 10x gyorsabb nagy collection-ökön kis limit esetén.
+pub const HEAP_PAGINATION_THRESHOLD: usize = 10_000;
+
+/// Nagy query figyelmeztetési küszöb
+///
+/// Ha egy query ennél több dokumentumot tölt be, warning log íródik.
+/// Segít azonosítani a teljesítményproblémákat.
+pub const LARGE_QUERY_WARNING_THRESHOLD: usize = 10_000;
+
 // ============================================================================
 // Cursor & Batch Limits
 // ============================================================================

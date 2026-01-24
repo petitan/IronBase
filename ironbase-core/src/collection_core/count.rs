@@ -2,10 +2,25 @@
 
 use serde_json::Value;
 
+/// Maximum repetitions of the max Unicode codepoint for "string infinity".
+///
+/// This value is used in range queries to create an upper bound that sorts
+/// after any realistic string value. 100 repetitions is arbitrary but
+/// exceeds any practical field length (MongoDB max is 1024 chars for index keys).
+const MAX_STRING_KEY_LENGTH: usize = 100;
+
 /// Build an IndexKey representing "string infinity" for range queries.
-/// Used as upper bound to capture all strings starting with a given prefix.
+///
+/// Uses the maximum Unicode codepoint (U+10FFFF) repeated to create a string
+/// that lexicographically sorts after any realistic string value.
+/// Used as the exclusive upper bound to capture all strings in a range.
+///
+/// # Why U+10FFFF?
+/// - It's the highest valid Unicode code point
+/// - Any real string will sort before it
+/// - Works correctly with UTF-8 collation
 fn max_string_key() -> IndexKey {
-    IndexKey::String("\u{10ffff}".repeat(100))
+    IndexKey::String("\u{10ffff}".repeat(MAX_STRING_KEY_LENGTH))
 }
 
 use crate::document::{Document, DocumentId};

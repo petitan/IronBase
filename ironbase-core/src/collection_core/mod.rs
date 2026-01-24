@@ -258,7 +258,7 @@ use crate::limits::QUERY_CACHE_CAPACITY;
 // OOM protection: try_reserve() fails fast on allocation pressure
 
 /// Threshold for logging a warning about large document loads
-const LARGE_QUERY_WARNING_THRESHOLD: usize = 10_000;
+use crate::limits::LARGE_QUERY_WARNING_THRESHOLD;
 
 /// Result of insert_many operation
 #[derive(Debug, Clone)]
@@ -1980,48 +1980,50 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             // 🚀 PERF FIX: For small skip+limit, use heap-based partial sort O(n log k)
             // instead of full sort O(n log n). Critical for pagination on large collections!
             let need = skip.saturating_add(effective_limit);
-            let doc_ids: Vec<DocumentId> =
-                if effective_limit != usize::MAX && need < catalog_len && need < 10000 {
-                    // Use max-heap to find smallest `need` elements in O(n log k)
-                    use std::collections::BinaryHeap;
+            let doc_ids: Vec<DocumentId> = if effective_limit != usize::MAX
+                && need < catalog_len
+                && need < crate::limits::HEAP_PAGINATION_THRESHOLD
+            {
+                // Use max-heap to find smallest `need` elements in O(n log k)
+                use std::collections::BinaryHeap;
 
-                    let mut heap: BinaryHeap<DocumentId> = BinaryHeap::with_capacity(need + 1);
-                    for (id, _) in catalog_entries {
-                        if heap.len() < need {
+                let mut heap: BinaryHeap<DocumentId> = BinaryHeap::with_capacity(need + 1);
+                for (id, _) in catalog_entries {
+                    if heap.len() < need {
+                        heap.push(id);
+                    } else if let Some(max) = heap.peek() {
+                        if &id < max {
+                            heap.pop();
                             heap.push(id);
-                        } else if let Some(max) = heap.peek() {
-                            if &id < max {
-                                heap.pop();
-                                heap.push(id);
-                            }
                         }
                     }
+                }
 
-                    // Extract and sort just the small result set O(k log k)
-                    let mut smallest: Vec<_> = heap.into_iter().collect();
-                    smallest.sort();
+                // Extract and sort just the small result set O(k log k)
+                let mut smallest: Vec<_> = heap.into_iter().collect();
+                smallest.sort();
 
-                    smallest
-                        .into_iter()
-                        .skip(skip)
-                        .take(effective_limit)
-                        .collect()
-                } else {
-                    // Large skip or no limit - use full sort (deterministic pagination)
-                    let mut sorted_keys: Vec<DocumentId> =
-                        catalog_entries.into_iter().map(|(id, _)| id).collect();
-                    sorted_keys.sort();
+                smallest
+                    .into_iter()
+                    .skip(skip)
+                    .take(effective_limit)
+                    .collect()
+            } else {
+                // Large skip or no limit - use full sort (deterministic pagination)
+                let mut sorted_keys: Vec<DocumentId> =
+                    catalog_entries.into_iter().map(|(id, _)| id).collect();
+                sorted_keys.sort();
 
-                    sorted_keys
-                        .into_iter()
-                        .skip(skip)
-                        .take(if effective_limit == 0 {
-                            usize::MAX
-                        } else {
-                            effective_limit
-                        })
-                        .collect()
-                };
+                sorted_keys
+                    .into_iter()
+                    .skip(skip)
+                    .take(if effective_limit == 0 {
+                        usize::MAX
+                    } else {
+                        effective_limit
+                    })
+                    .collect()
+            };
             log_debug!(
                 "scan_documents_with_early_termination: FAST PATH (empty query, no tombstones) - skip={}, limit={:?}, returning {} docs",
                 skip,
@@ -2803,6 +2805,40 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
         None
+    }
+
+    /// Extract DocumentId list from {"_id": {"$in": [id1, id2, ...]}} query
+    ///
+    /// Used by delete_many fast path to avoid collection scan when deleting
+    /// by a list of known _ids. Returns None if query format doesn't match.
+    fn extract_id_in_query(query_json: &Value) -> Option<Vec<DocumentId>> {
+        // Pattern: {"_id": {"$in": [id1, id2, ...]}}
+        let Value::Object(map) = query_json else {
+            return None;
+        };
+        if map.len() != 1 {
+            return None;
+        }
+        let Some(Value::Object(id_map)) = map.get("_id") else {
+            return None;
+        };
+        if id_map.len() != 1 {
+            return None;
+        }
+        let Some(Value::Array(arr)) = id_map.get("$in") else {
+            return None;
+        };
+
+        // Try to parse all values as DocumentId
+        let mut ids = Vec::with_capacity(arr.len());
+        for val in arr {
+            let Ok(doc_id) = serde_json::from_value::<DocumentId>(val.clone()) else {
+                // If any ID fails to parse, fall back to slow path
+                return None;
+            };
+            ids.push(doc_id);
+        }
+        Some(ids)
     }
 
     /// Try to use an index for sorted iteration (for sort-only queries without filter)

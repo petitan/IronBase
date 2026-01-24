@@ -284,44 +284,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             .map(|idx| (idx.name.clone(), idx.field.clone()))
             .collect();
 
-        // Pre-collect vector index info to avoid repeated lookups in the loop
+        // Pre-collect vector index info that need rebuilding
         // SKIP indexes that already have data (loaded from .hnsw file)
-        let vector_info: Vec<_> = index_manager
-            .list_vector_indexes()
-            .iter()
-            .filter(|idx| idx.is_empty()) // Only rebuild empty indexes
-            .map(|idx| {
-                let config = idx.config();
-                (
-                    // Extract index name from naming convention: {collection}_vec_{field}
-                    // We need to find the index by iterating over the HashMap
-                    String::new(), // Will be filled below
-                    config.dim,
-                )
-            })
-            .collect();
-
-        // Get actual vector index names that need rebuilding
         let vector_indexes_to_rebuild: Vec<(String, String, usize)> = {
-            let mut result = Vec::new();
-            // Get all vector index names and their info
-            for name in index_manager.list_indexes() {
-                if let Some(idx) = index_manager.get_vector_index(&name) {
-                    if idx.is_empty() {
-                        // Extract field from index name: {collection}_vec_{field}
-                        let prefix = format!("{}_vec_", collection_name);
-                        let field = if name.starts_with(&prefix) {
-                            name[prefix.len()..].to_string()
-                        } else {
-                            continue; // Skip if name doesn't match convention
-                        };
-                        result.push((name, field, idx.config().dim));
+            let prefix = format!("{}_vec_", collection_name);
+            index_manager
+                .list_indexes()
+                .into_iter()
+                .filter_map(|name| {
+                    let idx = index_manager.get_vector_index(&name)?;
+                    if !idx.is_empty() {
+                        return None; // Skip non-empty indexes
                     }
-                }
-            }
-            result
+                    // Extract field from index name: {collection}_vec_{field}
+                    let field = name.strip_prefix(&prefix)?.to_string();
+                    Some((name, field, idx.config().dim))
+                })
+                .collect()
         };
-        drop(vector_info); // Not needed anymore
 
         // Sort offsets for sequential disk reads (optimization)
         let mut sorted_entries: Vec<_> = catalog.iter().collect();

@@ -75,9 +75,15 @@ IronBase/
 - Durability modes: Safe (auto-commit), Batch, Unsafe
 - Shared IndexManager per collection (Arc<RwLock>) - prevents stale index state
 
-**collection_core/mod.rs** - All CRUD and query operations:
-- insert_one/many, find/find_one/find_with_options, update_one/many, delete_one/many
-- Aggregation pipeline: $match, $group, $project, $sort, $limit, $skip
+**collection_core/** - All CRUD and query operations (refactored 2026-01):
+- **mod.rs** - Core find/insert/update/delete, scan_documents_with_early_termination
+- **aggregate.rs** - aggregate, aggregate_with_limits, aggregate_auto
+- **count.rs** - count_documents, count_with_plan, adjust_count_for_tombstones
+- **distinct.rs** - distinct, distinct_with_ctx, try_index_based_distinct (2026-01-23: double serialization fix)
+- **tx.rs** - insert_one_tx, update_one_tx, delete_one_tx (transaction methods)
+- **context.rs** - QueryExecutionContext for deadline/cancel propagation
+- **topk.rs** - Top-K heap selection algorithm
+- **query_executor.rs** - topk_documents for sort+limit optimization
 - Index management: create_index, create_compound_index, drop_index, explain, hint
 - Cursor/streaming: find_streaming() for memory-efficient iteration
 
@@ -105,7 +111,7 @@ IronBase/
 - **file_storage.rs** - File-based persistence (.mlite files)
 - **memory_storage.rs** - In-memory backend for testing
 - **metadata.rs** - Metadata flush/load with dynamic offset (v2+ format)
-- **compaction.rs** - Garbage collection for tombstones
+- **compaction.rs** - Garbage collection for tombstones (2026-01-22: cancel support with `cancel_flag`)
 
 **index.rs** - B+ tree indexing (IndexManager + BPlusTree):
 - Single-field indexes: `create_index("field", unique)`
@@ -122,6 +128,7 @@ IronBase/
 - Crash recovery with automatic replay
 - begin_transaction/commit_transaction/rollback_transaction
 - Only one write transaction at a time (5 sec timeout, 10ms polling)
+- **Dot notation támogatás** (2026-01-23): `insert_one_tx` használ `get_nested_value()`-t nested field indexeléshez
 
 **query_cache.rs** - Query result caching:
 - LRU cache with configurable capacity (default: 1000)
@@ -329,6 +336,41 @@ With 50,000 unique groups:
 - `ironbase-core/src/aggregation/optimizer.rs` - Pattern detection
 - `ironbase-core/src/aggregation/stages/sort_stage.rs` - Top-K implementation
 
+**Heap-based helyeken (2026-01-24):**
+
+| Fájl | Funkció | Cél |
+|------|---------|-----|
+| `collection_core/topk.rs` | `topk_select()` | Generic Top-K szelekció |
+| `collection_core/mod.rs:1988` | `scan_documents_with_early_termination` | Pagination FAST PATH (skip+limit < 10000) |
+| `collection_core/query_executor.rs` | `topk_documents()` | Sort+limit dokumentum lekérés |
+| `aggregation/stages/sort_stage.rs` | `execute_topk()` | Aggregation $sort + $limit |
+| `vector/hnsw.rs` | `search_layer()` | HNSW nearest neighbor keresés |
+
+### delete_one O(1) Fast Path (2026-01-23)
+
+Az `_id` alapú delete_one műveletek O(1) időben futnak index lookup-pal.
+
+**Előtte:** 0.56s (collection scan 132K doc-on)
+**Utána:** <0.05s (index lookup)
+
+**Implementáció:**
+- `delete_one_raw()` és `delete_one_prepare()` használja `extract_id_query()` patternt
+- Konzisztens a `count.rs` és `distinct.rs` _id optimalizációval
+
+**Key files:**
+- `ironbase-core/src/collection_core/raw_operations.rs` - delete_one_raw, delete_one_prepare
+- `ironbase-core/src/collection_core/mod.rs` - extract_id_query pattern
+
+### read_data_at() Fix (2026-01-23)
+
+**Probléma:** Unflushed dokumentumok olvasása sikertelen volt.
+
+**Root cause:** `read_data_at()` a `metadata_offset + metadata_size`-t használta ellenőrzésre, ami stale volt flush előtt.
+
+**Fix:** `data_end_offset` használata helyette - ez mindig aktuális.
+
+**Key file:** `ironbase-core/src/storage/io.rs`
+
 ### Other Features
 - FindOptions: projection, sort, limit, skip, include_total, max_response_bytes (all with dot notation)
 - B+ tree indexes: single-field, compound, unique, fuzzy
@@ -359,6 +401,13 @@ With 50,000 unique groups:
 - Rust: `Result<T>` with `IronBaseError` (thiserror)
 - Python: Map to PyIOError, PyRuntimeError, PyValueError
 - C#: Map to appropriate .NET exceptions
+
+### FONTOS ELVE: Hibát javítunk, nem problémát kerülünk meg!
+
+Ha valami lassú vagy hibás:
+1. **TILOS** workaround-ot írni (pl. Python binding helyett MCP)
+2. **KÖTELEZŐ** megtalálni és javítani a root cause-t
+3. A probléma megkerülése NEM megoldás, csak elrejti a hibát
 
 ### When Fixing Bugs (KRITIKUS!)
 
@@ -511,6 +560,11 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 - `e445b44e` - range_query + Top-K egységesítés
 - `2026-01-11` - **WAL unbounded growth** → Safe módban WAL soha nem ürült, 29GB-ra nőtt
 - `a54f29a1` - **Sparse index empty array** → `[]` hibásan "hiányzó mező"-ként kezelve, 300s+ count → 0.059s
+- `9ff48302` - **Stale index loading** → Dirty shutdown után phantom duplikátumok aggregation-ben
+- `df5cee21` - **HNSW NaN handling** → NaN távolságok elrontották heap rendezést
+- `169e2e6b` - **Fulltext unique_token_count** → Lazy mode dupla számolás
+- `b71c5012` - **HNSW PRNG race** → compare_exchange_weak thread-safe random level
+- `b71c5012` - **Index file hash collision** → 64-bit hash 32-bit helyett
 
 ### WAL Unbounded Growth Bug (2026-01-11) - KRITIKUS FIX
 
@@ -536,6 +590,8 @@ if sync_file {
 **Tünet:** MCP szerver OOM startup-kor, `[STARTUP/DB] StorageEngine opened, recovering WAL...` után crash.
 
 **Workaround (ha előfordul):** Töröld a .wal fájlt (backup mlite előtte!).
+
+**WAL orphan cleanup (2026-01-22):** `.wal.tmp` fájlok automatikusan törlődnek startup-kor.
 
 ### Sparse Index Empty Array Bug (2026-01-15) - KRITIKUS FIX
 
@@ -592,6 +648,78 @@ QueryPlan::SparseIndexScan { ref index_name, .. } => {
 - `ironbase-core/src/collection_core/index_ops.rs` - index creation fix
 - `ironbase-core/src/collection_core/mod.rs` - count_with_plan SparseIndexScan
 
+### Stale Index Loading Bug (2026-01-24) - KRITIKUS FIX
+
+**Probléma:** Dirty shutdown után az aggregation phantom duplikátumokat mutatott.
+
+**Tünet:**
+- `find({"message_id": X})` → 1 dokumentum
+- `aggregate([{$group: {_id: "$message_id", count: {$sum: 1}}}])` → count=2 ugyanarra az X-re
+- 6 "duplikátum" ami valójában nem létezik
+
+**Root cause:**
+1. `.idx` fájlok tartalmazták a tombstoned dokumentumok index bejegyzéseit
+2. `load_persisted_indexes()` betöltötte ezeket `was_clean` ellenőrzés nélkül
+3. Index-based aggregation path megszámolta a stale bejegyzéseket
+4. `StorageEngine::Drop` nem hívta `mark_clean_shutdown()`-ot
+
+**Fix (9ff48302):**
+```rust
+// database/collections.rs - was_clean parameter hozzáadása
+fn load_persisted_indexes(..., was_clean: bool) {
+    if was_clean {
+        // Csak clean shutdown után töltsük be az .idx fájlokat
+        if let Some(loaded_tree) = try_load_index_from_file(...) {
+            index_manager.add_loaded_index(loaded_tree);
+            continue;
+        }
+    }
+    // Dirty shutdown → üres index, majd rebuild
+    index_manager.create_btree_index(...)?;
+}
+
+// FAST PATH fix - B+ tree index ellenőrzés
+let has_btree_without_file = persisted_indexes.iter().any(|meta| {
+    index_manager.get_btree_index(&meta.name)
+        .map(|idx| idx.size() == 0)
+        .unwrap_or(true)
+});
+
+// storage/mod.rs - mark_clean_shutdown() a Drop-ban
+impl Drop for StorageEngine {
+    fn drop(&mut self) {
+        let _ = self.flush();
+        let _ = self.checkpoint();
+        let _ = self.mark_clean_shutdown();  // ÚJ!
+        let _ = self.lock_file.unlock();
+    }
+}
+```
+
+**Érintett index típusok:** `.idx` (B+ tree), `.fzidx` (fuzzy), `.ftidx` (fulltext), `.hnsw` (vector)
+
+**Key files:**
+- `ironbase-core/src/database/collections.rs` - load_persisted_indexes, FAST PATH
+- `ironbase-core/src/storage/mod.rs` - Drop impl, mark_clean_shutdown
+
+### HNSW NaN Handling Bug (2026-01-22) - FIX
+
+**Probléma:** NaN távolságok elrontották a BinaryHeap rendezést.
+
+**Fix (df5cee21):**
+- `SearchCandidate`/`NearestCandidate` PartialEq: NaN == NaN
+- Ord implementáció: NaN → maximum distance (heap-ből először kirepül)
+- SIMD: `debug_assert!` → `assert!` (release mode-ban is ellenőriz)
+
+### Fulltext unique_token_count Bug (2026-01-22) - FIX
+
+**Probléma:** Lazy mode-ban dupla számolás volt.
+
+**Fix (169e2e6b):**
+- HashSet union használata
+- NaN-safe score összehasonlítás
+- Thread-local LRU regex cache (64 entry)
+
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
 
@@ -644,10 +772,14 @@ gc.collect()  # Forces GC to run Drop immediately
 
 Részletes dokumentáció: **`mcp-server/README.md`**
 
+**DEFAULT ADATBÁZIS:** `/home/petitan/MongoLite/mcp-server/ironbase_data.mlite`
+- MINDIG ezt használd szerver indításkor, hacsak a user másképp nem kéri!
+- Tartalmazza: emails, tales, mesek, docs_md, stb.
+
 ```bash
 # Build & Run
 cd mcp-server && cargo build --release
-./target/release/mcp-ironbase-server          # HTTP mode (port 8080)
+./target/release/mcp-ironbase-server --db /home/petitan/MongoLite/mcp-server/ironbase_data.mlite  # DEFAULT!
 ./target/release/mcp-ironbase-server --stdio  # stdio mode (Claude Desktop)
 ```
 
@@ -657,6 +789,41 @@ cd mcp-server && cargo build --release
 - `IRONBASE_PORT` - HTTP port (default: 8080)
 
 **Gyakori MCP cím:** 192.168.0.136:8080
+
+### MCP Server Struktúra (refactored 2026-01-22)
+
+```
+mcp-server/src/
+├── http_server/
+│   ├── mod.rs           # Main HTTP server
+│   ├── handler.rs       # handle_request()
+│   ├── response.rs      # create_success_response, create_error_response
+│   ├── client.rs        # client_identity, is/mark_client_initialized
+│   ├── instructions.rs  # get_server_instructions
+│   ├── state.rs         # HttpAppState
+│   ├── config.rs        # Config, load_config, TOML structs
+│   ├── tls.rs           # load_rustls_config
+│   ├── size.rs          # parse_size, format_size
+│   └── logging.rs       # SyncFileWriter
+├── jobs/
+│   ├── manager.rs       # JobManager with graceful shutdown
+│   └── types.rs         # Job, JobStatus, JobId
+├── chunking/
+│   ├── markdown.rs      # Markdown-aware chunking
+│   └── text.rs          # Plain text chunking
+└── tools/
+    └── auto_embed.rs    # Auto-embedding tools
+```
+
+### Windows Service (2026-01-22)
+
+**Fixes (698584a4):**
+- `LOCALAPPDATA` → `PROGRAMDATA` LocalSystem service context-hez
+- Tcpip service dependency proper startup ordering-hez
+- `wait_hint = 30s` SCM timeout kezeléshez
+- `collection_exists()` check - blokkolja implicit collection létrehozást
+
+**Telepítés:** Lásd `mcp-server/docs/windows-service.md`
 
 ## Testing Strategy
 
@@ -754,6 +921,15 @@ print(result.get("upserted_id"))  # ID if inserted, None if updated
 - `{"user.email": "x"}` → `{"user": {"email": "x"}}` (dot notation expandálva)
 - `{"$and": [...]}` → rekurzívan feldolgozva
 - `{"$or": [...]}` → ignorálva (ambiguus)
+
+**Upsert támogatott operátorok (2026-01-22):**
+- `$set`, `$inc`, `$unset`, `$push`, `$pull`, `$addToSet`, `$pop`
+- `$inc` overflow védelem: `checked_add()` saturating aritmetikával
+- `$addToSet` JSON deep equal: `{"a":1,"b":2}` == `{"b":2,"a":1}`
+
+**Upsert korlátozások:**
+- `update_many` NEM támogatja az upsert-et (explicit hiba)
+- Auto-embedding működik upsert insert-nél is (2026-01-22 fix)
 
 ### $fuzzy Operator (Fuzzy Text Search)
 ```rust
@@ -901,6 +1077,90 @@ RAG provides semantic document search using FastText word embeddings and HNSW ve
 - Embedding: ~50-100 docs/sec
 - Search: ~1-5ms for 10K chunks
 - Memory: ~50MB per 10K chunks (HNSW index)
+
+### Auto-Embedding (2026-01-22)
+
+Automatikus vektor embedding generálás insert műveletekkor.
+
+**MCP Tools:**
+```json
+// Enable auto-embedding for a collection
+{"name": "auto_embed_enable", "arguments": {
+  "collection": "articles",
+  "source_field": "content",
+  "target_field": "content_embedding",
+  "provider": "fasttext",
+  "model_path": "/path/to/cc.hu.300.bin",
+  "dimension": 300,
+  "chunking": {"enabled": true, "max_tokens": 500, "overlap": 50}
+}}
+
+// Check status
+{"name": "auto_embed_status", "arguments": {"collection": "articles"}}
+
+// Backfill existing documents
+{"name": "auto_embed_backfill", "arguments": {"collection": "articles"}}
+
+// Disable
+{"name": "auto_embed_disable", "arguments": {"collection": "articles"}}
+```
+
+**Működés:**
+1. Insert műveletkor automatikusan generálódik az embedding
+2. `source_field` szövegéből `target_field`-be kerül a vektor
+3. Chunking támogatás nagy szövegekhez
+4. Async backfill JobManager-en keresztül
+
+**Key files:**
+- `mcp-server/src/tools/auto_embed.rs` - MCP tool implementáció
+- `mcp-server/src/chunking/` - Markdown és plain text chunking
+
+### Embedding Cache (2026-01-22)
+
+LRU cache az embedding generáláshoz.
+
+```json
+// Cache statistics
+{"name": "embed_cache_stats"}
+
+// Clear cache
+{"name": "embed_cache_clear"}
+```
+
+**Jellemzők:**
+- SHA256-based kulcsok (text + provider + model)
+- Konfigurálható TTL és max entries
+- Thread-safe
+
+### Job Manager (2026-01-22)
+
+Async job kezelés hosszú futású műveletekhez (pl. backfill).
+
+```json
+// List jobs
+{"name": "embed_job_list"}
+
+// Job status
+{"name": "embed_job_status", "arguments": {"job_id": "..."}}
+
+// Cancel job
+{"name": "embed_job_cancel", "arguments": {"job_id": "..."}}
+```
+
+**Job lifecycle:** Pending → Running → Completed/Failed/Cancelled
+
+**Graceful Shutdown (2026-01-22):**
+- `shutdown_flag: Arc<AtomicBool>` - global flag
+- Background job-ok ellenőrzik a flag-et és kilépnek
+- `shutdown_with_timeout(30s)` - vár a thread-ekre
+
+**Job GC/TTL:**
+- Completed job-ok 1 óra után törlődnek
+- Periodikus cleanup get/list műveleteknél
+
+**Key files:**
+- `mcp-server/src/jobs/manager.rs` - JobManager
+- `mcp-server/src/jobs/types.rs` - Job, JobStatus
 
 ### $** Wildcard Operator (Recursive Descent)
 ```rust

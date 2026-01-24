@@ -768,7 +768,10 @@ fn rand_float() -> f64 {
 
     loop {
         let old_seed = SEED.load(Ordering::Relaxed);
-        let new_seed = old_seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        // LCG multiplier from Knuth's MMIX (PCG family)
+        let new_seed = old_seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
 
         // Atomic read-modify-write: retry if another thread modified SEED
         if SEED
