@@ -710,8 +710,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                             &document.id,
                             updated_json.as_bytes(),
                         )?;
-                        storage.adjust_live_count(&self.name, -1);
-                        storage.adjust_live_count(&self.name, 1);
+                        // NOTE: No live_count adjustment needed for update
+                        // (old doc tombstoned + new doc written = net zero change)
 
                         modified = 1;
                     }
@@ -734,12 +734,26 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
             // Read single document
             let doc_bytes = match storage.read_data(offset) {
                 Ok(bytes) => bytes,
-                Err(_) => continue,
+                Err(e) => {
+                    crate::log_warn!(
+                        "update_one_raw: failed to read doc at offset {}: {:?}",
+                        offset,
+                        e
+                    );
+                    continue;
+                }
             };
 
             let doc: Value = match serde_json::from_slice(&doc_bytes) {
                 Ok(d) => d,
-                Err(_) => continue,
+                Err(e) => {
+                    crate::log_warn!(
+                        "update_one_raw: failed to parse JSON at offset {}: {:?}",
+                        offset,
+                        e
+                    );
+                    continue;
+                }
             };
 
             // Skip tombstones
@@ -808,8 +822,8 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
                         &document.id,
                         updated_json.as_bytes(),
                     )?;
-                    storage.adjust_live_count(&self.name, -1);
-                    storage.adjust_live_count(&self.name, 1);
+                    // NOTE: No live_count adjustment needed for update
+                    // (old doc tombstoned + new doc written = net zero change)
 
                     modified = 1;
                 }
@@ -1300,6 +1314,60 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     /// Now uses collect_doc_ids + streaming read.
     fn delete_many_prepare(&self, query_json: &Value) -> Result<DeleteManyPrepared> {
         self.check_not_closed()?;
+
+        // ====================================================================
+        // FAST PATH: Direct _id $in lookup O(k) where k = number of IDs
+        // When query is {"_id": {"$in": [id1, id2, ...]}}, skip catalog scan.
+        // This is 100-1000x faster than collection scan for large collections.
+        // ====================================================================
+        if let Some(id_list) = Self::extract_id_in_query(query_json) {
+            let mut deleted = 0u64;
+            let mut wal_entries: Vec<(DocumentId, Value)> = Vec::new();
+            let mut index_removals: Vec<Document> = Vec::new();
+            let mut tombstone_writes: Vec<(DocumentId, String)> = Vec::new();
+
+            for doc_id in id_list {
+                // O(1) lookup via read_document_by_id
+                if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                    if is_tombstone(&doc) {
+                        continue;
+                    }
+
+                    // PERF: Direct Value→Document (no serialization roundtrip)
+                    let document = Document::from_value(&doc)?;
+
+                    // MEMORY OPT: Create minimal tombstone
+                    let tombstone = serde_json::json!({
+                        "_id": serde_json::to_value(&doc_id)?,
+                        "_tombstone": true,
+                        "_collection": &self.name
+                    });
+                    let tombstone_json = serde_json::to_string(&tombstone)?;
+                    tombstone_writes.push((doc_id.clone(), tombstone_json));
+
+                    // WAL entry with null old_doc
+                    wal_entries.push((doc_id, Value::Null));
+
+                    // Index removal needs Document for indexed field values
+                    index_removals.push(document);
+
+                    deleted += 1;
+                }
+                // Document not found - silently skip (already deleted or never existed)
+            }
+
+            return Ok(DeleteManyPrepared {
+                deleted,
+                wal_entries,
+                index_removals,
+                tombstone_writes,
+            });
+        }
+
+        // ====================================================================
+        // SLOW PATH: Complex queries (non-_id or non-$in filters)
+        // Uses collect_doc_ids which may scan the catalog
+        // ====================================================================
         let parsed_query = Query::from_json(query_json)?;
 
         // STREAMING FIX: Collect only document IDs first (small: ~8-32 bytes each)
