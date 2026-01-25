@@ -272,10 +272,11 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             .collect();
 
         // Pre-collect fuzzy index info to avoid repeated lookups in the loop
-        // Fuzzy indexes ALWAYS need rebuild (no file persistence yet)
+        // SKIP indexes that already have data (loaded from .fzidx file)
         let fuzzy_info: Vec<_> = index_manager
             .list_fuzzy_indexes()
             .iter()
+            .filter(|idx| idx.entry_count() == 0) // Only rebuild empty indexes
             .map(|idx| (idx.metadata.name.clone(), idx.metadata.field.clone()))
             .collect();
 
