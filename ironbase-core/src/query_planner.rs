@@ -252,6 +252,15 @@ pub enum QueryPlan {
         field: String,
         prefixes: Vec<String>,
     },
+
+    /// Multi-value scan for $in with plain values
+    /// e.g., { _id: { $in: ["a", "b", "c"] } }
+    /// Performs O(k) index lookups instead of O(n) collection scan
+    MultiValueScan {
+        index_name: String,
+        field: String,
+        keys: Vec<IndexKey>,
+    },
 }
 
 /// Query planner - analyzes queries and selects optimal execution plan
@@ -338,6 +347,7 @@ impl QueryPlanner {
             Self::collect_exists_candidates(query_json, index_fields, &mut candidates);
             Self::collect_regex_candidates(query_json, index_fields, &mut candidates);
             Self::collect_in_regex_candidates(query_json, index_fields, &mut candidates);
+            Self::collect_in_candidates(query_json, index_fields, &mut candidates);
             Self::collect_range_candidates(query_json, index_fields, &mut candidates);
             Self::collect_equality_candidates(query_json, index_fields, &mut candidates);
         }
@@ -457,6 +467,77 @@ impl QueryPlanner {
                         info.index_name, prefix_count
                     ),
                 ));
+            }
+        }
+    }
+
+    /// Collect candidates from $in with plain values (not regex)
+    /// e.g., { _id: { $in: ["a", "b", "c"] } }
+    ///
+    /// This enables O(k) index lookups instead of O(n) collection scan
+    /// where k = number of values in $in, n = collection size.
+    fn collect_in_candidates(
+        query_json: &Value,
+        index_fields: &[IndexPrefixInfo],
+        candidates: &mut Vec<CandidatePlan>,
+    ) {
+        if let Value::Object(ref map) = query_json {
+            for (field, value) in map {
+                // Skip operator fields at root level
+                if field.starts_with('$') {
+                    continue;
+                }
+
+                // Look for { field: { $in: [...] } } pattern
+                if let Value::Object(ref cond_map) = value {
+                    if let Some(Value::Array(in_values)) = cond_map.get("$in") {
+                        // Skip if $in contains operators (handled by collect_in_regex_candidates)
+                        let has_operators = in_values.iter().any(|v| {
+                            v.as_object()
+                                .map(|o| o.keys().any(|k| k.starts_with('$')))
+                                .unwrap_or(false)
+                        });
+                        if has_operators {
+                            continue;
+                        }
+
+                        // Skip empty $in
+                        if in_values.is_empty() {
+                            continue;
+                        }
+
+                        // Find matching index for this field
+                        if let Some(info) = index_fields
+                            .iter()
+                            .find(|i| i.prefix_field == *field && !i.is_compound)
+                        {
+                            // Convert values to IndexKeys
+                            let keys: Vec<IndexKey> =
+                                in_values.iter().map(IndexKey::from).collect();
+
+                            let plan = QueryPlan::MultiValueScan {
+                                index_name: info.index_name.clone(),
+                                field: field.clone(),
+                                keys: keys.clone(),
+                            };
+
+                            // Cost: k index lookups, each O(log n)
+                            // Better than collection scan O(n) when k << n
+                            let cost = keys.len() as f64 * (info.num_keys as f64).log2().max(1.0);
+
+                            candidates.push(CandidatePlan::new(
+                                plan,
+                                field.clone(),
+                                cost,
+                                format!(
+                                    "Multi-value scan on {} ({} keys)",
+                                    info.index_name,
+                                    keys.len()
+                                ),
+                            ));
+                        }
+                    }
+                }
             }
         }
     }
@@ -1069,6 +1150,23 @@ impl QueryPlanner {
                     "prefixes": prefixes,
                     "prefixCount": prefixes.len(),
                     "estimatedCost": "O(k * (log n + m))",
+                })
+            }
+            QueryPlan::MultiValueScan {
+                ref index_name,
+                ref keys,
+                field: ref plan_field,
+            } => {
+                let _ = field; // silence unused warning for function param
+                json!({
+                    "queryPlan": "MultiValueScan",
+                    "indexUsed": index_name,
+                    "field": plan_field,
+                    "stage": "FETCH_WITH_INDEX",
+                    "indexType": "multi_value_in",
+                    "keyCount": keys.len(),
+                    "description": "$in query optimized with index lookups",
+                    "estimatedCost": "O(k * log n)",
                 })
             }
         }

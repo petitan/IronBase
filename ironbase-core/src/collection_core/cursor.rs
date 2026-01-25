@@ -276,6 +276,8 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
                 true,
             )?)),
             QueryPlan::MultiRegexPrefixScan { .. } => Ok(None),
+            // MultiValueScan is handled by collect_doc_ids_from_plan, not cursor
+            QueryPlan::MultiValueScan { .. } => Ok(None),
         }
     }
 

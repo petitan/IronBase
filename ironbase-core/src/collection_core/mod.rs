@@ -2451,6 +2451,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         vec![]
                     }
                 }
+                QueryPlan::MultiValueScan {
+                    ref index_name,
+                    ref keys,
+                    ..
+                } => {
+                    // Multi-value scan: O(k) index lookups for $in queries
+                    // Much faster than collection scan O(n) when k << n
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let mut all_doc_ids = Vec::new();
+                        for key in keys {
+                            let mode = RangeQueryMode::Scan {
+                                skip: 0,
+                                limit: None,
+                                order: ScanOrder::Asc,
+                            };
+                            // Point lookup for each key
+                            let ids = index.range_query(key, key, true, true, mode).unwrap_docs();
+                            all_doc_ids.extend(ids);
+                        }
+                        // Sort and dedup (in case of duplicates from multikey index)
+                        all_doc_ids.sort_unstable();
+                        all_doc_ids.dedup();
+                        all_doc_ids
+                    } else {
+                        vec![]
+                    }
+                }
             }
         };
 

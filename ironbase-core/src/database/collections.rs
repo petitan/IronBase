@@ -244,7 +244,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         persisted_indexes: &[crate::index::IndexMetadata],
         id_index_name: &str,
     ) -> Result<u64> {
-        use crate::{log_debug, log_warn};
+        use crate::{log_debug, log_info, log_warn};
 
         // Batch size for memory-efficient rebuilding
         // Uses smaller batch for safety during warm-up
@@ -318,11 +318,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Process documents in batches to prevent OOM
         for (batch_num, batch) in sorted_entries.chunks(REBUILD_BATCH_SIZE).enumerate() {
             // Progress logging every 10% (or at least every batch for small collections)
+            // Uses INFO level so progress is visible during normal operation
             if batch_num % log_interval == 0 || batch_num == total_batches - 1 {
                 let progress = (batch_num + 1) * 100 / total_batches;
                 let docs_processed =
                     std::cmp::min((batch_num + 1) * REBUILD_BATCH_SIZE, total_docs);
-                log_debug!(
+                log_info!(
                     "Index rebuild progress: {}/{} batches ({}%), {}/{} docs",
                     batch_num + 1,
                     total_batches,

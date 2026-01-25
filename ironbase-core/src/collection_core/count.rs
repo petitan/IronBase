@@ -237,6 +237,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         return self.adjust_count_for_tombstones(total_count);
                     }
                 }
+                QueryPlan::MultiValueScan {
+                    ref index_name,
+                    ref keys,
+                    ..
+                } => {
+                    // Count for $in with plain values: O(k) index lookups
+                    // Each key is a point lookup, sum the counts
+                    if let Some(index) = indexes.get_btree_index(index_name) {
+                        let mut total_count = 0usize;
+                        for key in keys {
+                            let result =
+                                index.range_query(key, key, true, true, RangeQueryMode::Count);
+                            if let RangeQueryResult::Count(c) = result {
+                                total_count += c;
+                            }
+                        }
+                        drop(indexes);
+                        return self.adjust_count_for_tombstones(total_count);
+                    }
+                }
                 QueryPlan::SparseIndexScan { ref index_name, .. } => {
                     // Sparse index: all entries represent docs where field exists
                     // Simply count all entries in the index - O(1) operation
