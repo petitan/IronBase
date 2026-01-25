@@ -44,7 +44,7 @@ fn delete_remaining_6() {
 
         // Get IDs, sort, keep first, delete rest
         let mut ids: Vec<Value> = docs.iter().filter_map(|d| d.get("_id").cloned()).collect();
-        ids.sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+        ids.sort_by_key(|a| a.to_string());
 
         println!("  _ids: {:?}", ids);
 
@@ -73,7 +73,7 @@ fn delete_remaining_6() {
     let remaining = coll.aggregate(&pipeline).unwrap();
     println!("\nRemaining duplicates: {}", remaining.len());
 
-    if remaining.len() == 0 {
+    if remaining.is_empty() {
         println!("\n=== SUCCESS! All duplicates deleted ===");
     } else {
         for dup in &remaining {

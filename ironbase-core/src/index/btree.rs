@@ -830,9 +830,7 @@ impl BPlusTree {
                         let offset = internal.children_offsets[child_index];
                         match File::open(path) {
                             Ok(mut file) => match Self::load_node(&mut file, offset) {
-                                Ok(child_node) => {
-                                    return self.search_in_node(&child_node, key);
-                                }
+                                Ok(child_node) => self.search_in_node(&child_node, key),
                                 Err(e) => {
                                     eprintln!(
                                         "[LAZY_LOAD_ERROR] Failed to load node at offset {}: {:?}",
@@ -2387,6 +2385,7 @@ impl BPlusTree {
     ///
     /// For lazy-loaded trees, this loads children from disk using their offsets.
     /// For in-memory trees, this is a no-op.
+    #[allow(dead_code)]
     fn ensure_children_loaded(&self, node: &mut InternalNode) -> Result<()> {
         // If children are already loaded, nothing to do
         if !node.children.is_empty() {

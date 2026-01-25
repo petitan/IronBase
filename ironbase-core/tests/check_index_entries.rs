@@ -1,6 +1,5 @@
 //! Check index entries directly
 
-use ironbase_core::index::{IndexKey, RangeQueryMode};
 use ironbase_core::storage::StorageEngine;
 use ironbase_core::DatabaseCore;
 use serde_json::json;

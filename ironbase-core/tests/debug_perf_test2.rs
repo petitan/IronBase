@@ -21,7 +21,7 @@ fn debug_test_large_index_reopen2() {
     eprintln!("=== PHASE 1: Create large dataset with index ===");
     {
         let db = DatabaseCore::open(&db_path).unwrap();
-        
+
         for i in 1..=1000 {
             db.insert_one("large", user_doc(i, &format!("User{}", i), i % 100, "City"))
                 .unwrap();
@@ -31,7 +31,7 @@ fn debug_test_large_index_reopen2() {
         let coll = db.collection("large").unwrap();
         coll.create_index("age".to_string(), false, false).unwrap();
         eprintln!("Phase 1: Index created");
-        
+
         // Test query before close
         let age_50 = coll.find(&json!({"age": 50})).unwrap();
         eprintln!("Phase 1: age=50 BEFORE close = {} results", age_50.len());
@@ -56,23 +56,26 @@ fn debug_test_large_index_reopen2() {
         eprintln!("Phase 2: document count = {}", count);
 
         let coll = db.collection("large").unwrap();
-        
+
         // List indexes
         let indexes = coll.list_indexes().unwrap();
         eprintln!("Phase 2: indexes = {:?}", indexes);
-        
+
         // Try explain to see query plan
         let plan = coll.explain(&json!({"age": 50})).unwrap();
         eprintln!("Phase 2: explain = {:?}", plan);
-        
+
         // The actual query
         let age_50 = coll.find(&json!({"age": 50})).unwrap();
         eprintln!("Phase 2: age=50 query returns {} results", age_50.len());
-        
+
         // Try a collection scan query (no index)
         let results_scan = coll.find(&json!({"name": "User50"})).unwrap();
-        eprintln!("Phase 2: name=User50 (scan) = {} results", results_scan.len());
-        
+        eprintln!(
+            "Phase 2: name=User50 (scan) = {} results",
+            results_scan.len()
+        );
+
         // Check if documents with age=50 exist
         let all_docs = coll.find(&json!({})).unwrap();
         let with_age_50 = all_docs.iter().filter(|d| d["age"] == 50).count();
@@ -80,6 +83,6 @@ fn debug_test_large_index_reopen2() {
 
         db.close().unwrap();
     }
-    
+
     eprintln!("\n=== TEST COMPLETE ===");
 }

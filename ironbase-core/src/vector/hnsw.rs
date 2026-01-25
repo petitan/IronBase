@@ -784,6 +784,78 @@ fn rand_float() -> f64 {
     }
 }
 
+// ============================================================================
+// LazyLoadable Trait Implementation
+// ============================================================================
+//
+// Note: HNSW's graph structure makes true lazy loading complex - the search
+// algorithm needs to traverse multiple layers and neighbors. Unlike B+ tree
+// (linear path) or fulltext (independent token entries), HNSW would require
+// loading connected nodes which defeats the purpose of lazy loading.
+//
+// For now, HNSW always loads fully into memory. Future optimization could use
+// memory-mapped files for the vector data while keeping the graph in memory.
+
+use crate::index::traits::{IndexTrait, LazyLoadable};
+
+impl IndexTrait for HnswIndex {
+    fn name(&self) -> &str {
+        // HNSW indexes don't have a name field - return a placeholder
+        "hnsw_index"
+    }
+
+    fn fields(&self) -> Vec<&str> {
+        // HNSW indexes a vector field, but don't track the field name
+        vec![]
+    }
+
+    fn entry_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    fn memory_usage_bytes(&self) -> usize {
+        // Estimate: each node has a vector (dim * 4 bytes) + neighbors + metadata
+        let dim = self.config.dim;
+        let vector_bytes = dim * 4; // f32 = 4 bytes
+        let neighbors_bytes = self.config.m * 2 * 8; // ~2*M neighbors per node, usize each
+        let metadata_bytes = 64; // id string, layer info, etc.
+
+        let per_node = vector_bytes + neighbors_bytes + metadata_bytes;
+        let base_struct = std::mem::size_of::<Self>();
+
+        base_struct + self.nodes.len() * per_node
+    }
+
+    fn is_disk_backed(&self) -> bool {
+        false // HNSW is currently memory-only (serialized via serde when saved)
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        // HNSW doesn't have incremental flush - uses serde for full serialization
+        Ok(())
+    }
+}
+
+impl LazyLoadable for HnswIndex {
+    fn is_lazy_mode(&self) -> bool {
+        false // HNSW doesn't support lazy loading yet
+    }
+
+    fn ensure_fully_loaded(&mut self) -> Result<()> {
+        // HNSW is always fully loaded
+        Ok(())
+    }
+
+    fn persisted_size_bytes(&self) -> Option<u64> {
+        // HNSW doesn't track persisted size
+        None
+    }
+
+    fn hot_ratio(&self) -> f32 {
+        1.0 // Always fully loaded
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1050,77 +1122,5 @@ mod tests {
             candidates[2].distance.is_nan(),
             "NaN should be last in sorted order"
         );
-    }
-}
-
-// ============================================================================
-// LazyLoadable Trait Implementation
-// ============================================================================
-//
-// Note: HNSW's graph structure makes true lazy loading complex - the search
-// algorithm needs to traverse multiple layers and neighbors. Unlike B+ tree
-// (linear path) or fulltext (independent token entries), HNSW would require
-// loading connected nodes which defeats the purpose of lazy loading.
-//
-// For now, HNSW always loads fully into memory. Future optimization could use
-// memory-mapped files for the vector data while keeping the graph in memory.
-
-use crate::index::traits::{IndexTrait, LazyLoadable};
-
-impl IndexTrait for HnswIndex {
-    fn name(&self) -> &str {
-        // HNSW indexes don't have a name field - return a placeholder
-        "hnsw_index"
-    }
-
-    fn fields(&self) -> Vec<&str> {
-        // HNSW indexes a vector field, but don't track the field name
-        vec![]
-    }
-
-    fn entry_count(&self) -> usize {
-        self.nodes.len()
-    }
-
-    fn memory_usage_bytes(&self) -> usize {
-        // Estimate: each node has a vector (dim * 4 bytes) + neighbors + metadata
-        let dim = self.config.dim;
-        let vector_bytes = dim * 4; // f32 = 4 bytes
-        let neighbors_bytes = self.config.m * 2 * 8; // ~2*M neighbors per node, usize each
-        let metadata_bytes = 64; // id string, layer info, etc.
-
-        let per_node = vector_bytes + neighbors_bytes + metadata_bytes;
-        let base_struct = std::mem::size_of::<Self>();
-
-        base_struct + self.nodes.len() * per_node
-    }
-
-    fn is_disk_backed(&self) -> bool {
-        false // HNSW is currently memory-only (serialized via serde when saved)
-    }
-
-    fn flush(&mut self) -> Result<()> {
-        // HNSW doesn't have incremental flush - uses serde for full serialization
-        Ok(())
-    }
-}
-
-impl LazyLoadable for HnswIndex {
-    fn is_lazy_mode(&self) -> bool {
-        false // HNSW doesn't support lazy loading yet
-    }
-
-    fn ensure_fully_loaded(&mut self) -> Result<()> {
-        // HNSW is always fully loaded
-        Ok(())
-    }
-
-    fn persisted_size_bytes(&self) -> Option<u64> {
-        // HNSW doesn't track persisted size
-        None
-    }
-
-    fn hot_ratio(&self) -> f32 {
-        1.0 // Always fully loaded
     }
 }

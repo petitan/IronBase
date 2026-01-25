@@ -2329,9 +2329,9 @@ impl LazyLoadable for FulltextIndex {
     }
 
     fn persisted_size_bytes(&self) -> Option<u64> {
-        self.storage_path.as_ref().and_then(|path| {
-            std::fs::metadata(path).ok().map(|m| m.len())
-        })
+        self.storage_path
+            .as_ref()
+            .and_then(|path| std::fs::metadata(path).ok().map(|m| m.len()))
     }
 
     fn hot_ratio(&self) -> f32 {

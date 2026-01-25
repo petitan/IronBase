@@ -22,7 +22,7 @@ fn debug_test_large_index_reopen() {
     {
         let db = DatabaseCore::open(&db_path).unwrap();
         eprintln!("Phase 1: DB opened");
-        
+
         for i in 1..=1000 {
             db.insert_one("large", user_doc(i, &format!("User{}", i), i % 100, "City"))
                 .unwrap();
@@ -32,7 +32,7 @@ fn debug_test_large_index_reopen() {
         let coll = db.collection("large").unwrap();
         coll.create_index("age".to_string(), false, false).unwrap();
         eprintln!("Phase 1: Index created");
-        
+
         let count = db.count_documents("large", &json!({})).unwrap();
         eprintln!("Phase 1: count = {}", count);
 
@@ -44,7 +44,10 @@ fn debug_test_large_index_reopen() {
     // Check file exists
     eprintln!("\n=== Checking files ===");
     eprintln!("DB file exists: {}", db_path.exists());
-    eprintln!("DB file size: {} bytes", std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0));
+    eprintln!(
+        "DB file size: {} bytes",
+        std::fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0)
+    );
 
     eprintln!("\n=== PHASE 2: Reopen and query ===");
     {
@@ -58,11 +61,11 @@ fn debug_test_large_index_reopen() {
         let coll = db.collection("large").unwrap();
         let age_50 = coll.find(&json!({"age": 50})).unwrap();
         eprintln!("Phase 2: age=50 query returns {} results", age_50.len());
-        
+
         assert!(!age_50.is_empty(), "age=50 query should return results");
 
         db.close().unwrap();
     }
-    
+
     eprintln!("\n=== TEST COMPLETE ===");
 }

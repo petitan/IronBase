@@ -183,7 +183,10 @@ mod tests {
 
         // Should be between 50MB and 500MB
         assert!(threshold >= 50 * 1024 * 1024, "Threshold should be >= 50MB");
-        assert!(threshold <= 500 * 1024 * 1024, "Threshold should be <= 500MB");
+        assert!(
+            threshold <= 500 * 1024 * 1024,
+            "Threshold should be <= 500MB"
+        );
     }
 
     #[test]

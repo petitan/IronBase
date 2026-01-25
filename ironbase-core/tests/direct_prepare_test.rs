@@ -19,7 +19,7 @@ fn test_direct_prepare() {
     // Get collection directly
     println!("\n=== Getting collection... ===");
     let start = Instant::now();
-    let coll = db
+    let _coll = db
         .get_collection("emails")
         .expect("Failed to get collection");
     println!("Got collection in {:?}", start.elapsed());
@@ -30,7 +30,7 @@ fn test_direct_prepare() {
 
     // Test the underlying method
     println!("\n=== Calling internal prepare... ===");
-    let start = Instant::now();
+    let _start = Instant::now();
 
     // We can't call delete_many_prepare directly (it's a trait method)
     // Let's just call delete_many and see timing

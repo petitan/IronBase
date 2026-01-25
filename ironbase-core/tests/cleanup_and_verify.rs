@@ -68,7 +68,7 @@ fn cleanup_and_verify() {
     let dups = coll2.aggregate(&pipeline).expect("Aggregation failed");
     println!("   Remaining duplicates: {}", dups.len());
 
-    if dups.len() == 0 {
+    if dups.is_empty() {
         println!("\n=== SUCCESS! No duplicates remain ===");
     } else {
         println!("\n=== WARNING: Still {} duplicates ===", dups.len());
