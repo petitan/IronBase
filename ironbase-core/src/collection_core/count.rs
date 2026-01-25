@@ -48,12 +48,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Fast path: _id query = O(1) lookup
+        // FIX #7: Uses normalize_document_id to handle string/int conversion
         if let Some(doc_id) = Self::extract_id_query(query_json) {
-            return Ok(if self.read_document_by_id(&doc_id)?.is_some() {
-                1
-            } else {
-                0
-            });
+            // Try original ID first
+            if self.read_document_by_id(&doc_id)?.is_some() {
+                return Ok(1);
+            }
+            // Try normalized version (string "123" → int 123)
+            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                if self.read_document_by_id(&normalized)?.is_some() {
+                    return Ok(1);
+                }
+            }
+            return Ok(0);
         }
 
         // Fast path: _id $in query = O(k) lookups (k = number of IDs)
@@ -96,12 +103,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Fast path: _id query = O(1) lookup
+        // FIX #7: Uses normalize_document_id to handle string/int conversion
         if let Some(doc_id) = Self::extract_id_query(query_json) {
-            return Ok(if self.read_document_by_id(&doc_id)?.is_some() {
-                1
-            } else {
-                0
-            });
+            // Try original ID first
+            if self.read_document_by_id(&doc_id)?.is_some() {
+                return Ok(1);
+            }
+            // Try normalized version (string "123" → int 123)
+            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                if self.read_document_by_id(&normalized)?.is_some() {
+                    return Ok(1);
+                }
+            }
+            return Ok(0);
         }
 
         // Fast path: _id $in query = O(k) lookups (k = number of IDs)

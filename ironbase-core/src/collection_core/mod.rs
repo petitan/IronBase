@@ -901,6 +901,55 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<Vec<Value>> {
         self.check_not_closed()?;
 
+        // ====================================================================
+        // FAST PATH: Direct _id lookup O(1)
+        // FIX #5-6: When query is {"_id": value}, skip catalog scanning entirely.
+        // Uses normalize_document_id to handle string/int conversion.
+        // Note: _id queries always return max 1 doc, so skip/limit don't matter.
+        // ====================================================================
+        // Single _id query - always fast path (returns 0 or 1 doc)
+        if options.sort.is_none() {
+            if let Some(doc_id) = Self::extract_id_query(query_json) {
+                // Try original ID first
+                if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                    return Ok(vec![doc]);
+                }
+                // Try normalized version (string "123" → int 123)
+                if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                    if let Some(doc) = self.read_document_by_id(&normalized)? {
+                        return Ok(vec![doc]);
+                    }
+                }
+                return Ok(Vec::new());
+            }
+
+            // Fast path for _id $in query
+            if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
+                let mut results = Vec::new();
+                results.try_reserve(doc_ids.len()).map_err(|e| {
+                    IronBaseError::InvalidQuery(format!(
+                        "Out of memory: cannot allocate space for {} documents ({})",
+                        doc_ids.len(),
+                        e
+                    ))
+                })?;
+                for doc_id in doc_ids {
+                    if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                        results.push(doc);
+                    } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                        if let Some(doc) = self.read_document_by_id(&normalized)? {
+                            results.push(doc);
+                        }
+                    }
+                }
+                return Ok(results);
+            }
+        }
+
+        // ====================================================================
+        // SLOW PATH: Complex queries with sort/skip/limit
+        // ====================================================================
+
         // Phase 1: Build execution context (all setup logic centralized)
         let ctx = QueryExecutionContext::from_options(&options);
 
