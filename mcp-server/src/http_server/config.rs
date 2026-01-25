@@ -34,6 +34,8 @@ pub struct Config {
     pub tool_timeout_secs: u64,
     /// If true, use synchronous (fsync) logging for crash debugging
     pub sync_logging: bool,
+    /// Log level for ironbase-core internal logging (error, warn, info, debug, trace)
+    pub core_log_level: Option<String>,
 }
 
 /// Load configuration from environment or config file
@@ -87,6 +89,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_key_file: toml_config.tls.key_file,
             tool_timeout_secs: toml_config.server.tool_timeout_secs,
             sync_logging: toml_config.logging.sync,
+            core_log_level: toml_config.logging.core_level,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -104,6 +107,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tls_key_file: None,
             tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
             sync_logging: false,
+            core_log_level: None,
         }
     };
 
@@ -193,4 +197,8 @@ struct LoggingConfig {
     /// WARNING: This significantly impacts performance but guarantees log writes before crash
     #[serde(default)]
     sync: bool,
+    /// Log level for ironbase-core internal logging (error, warn, info, debug, trace)
+    /// Default: warn (production), override with IRONBASE_LOG_LEVEL env var
+    #[serde(default)]
+    core_level: Option<String>,
 }

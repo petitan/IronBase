@@ -62,6 +62,23 @@ async fn run_http_server_internal(
         }
     };
 
+    // Initialize ironbase-core log level from config (before any core operations)
+    // Priority: IRONBASE_LOG_LEVEL env var > config.toml [logging] core_level > default (warn)
+    if let Some(ref level_str) = config.core_log_level {
+        if let Some(level) = ironbase_core::LogLevel::from_str(level_str) {
+            ironbase_core::set_log_level(level);
+            eprintln!(
+                "ℹ️ [CONFIG] ironbase-core log level set to {} from config.toml",
+                level.as_str()
+            );
+        } else {
+            eprintln!(
+                "⚠️ [CONFIG] Invalid core_level '{}' in config.toml (valid: error, warn, info, debug, trace)",
+                level_str
+            );
+        }
+    }
+
     // Initialize tracing with dual output (stderr + file)
     // File logs go to ./logs/mcp-server.YYYY-MM-DD.log with daily rotation
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -135,8 +152,21 @@ async fn run_http_server_internal(
         );
     } else {
         // Normal async logging (fast but may lose last logs on crash)
-        let file_appender = tracing_appender::rolling::daily(&log_dir_path, "mcp-server.log");
-        let (non_blocking_file, _guard) = tracing_appender::non_blocking(file_appender);
+        // Use same filename format as sync mode: mcp-server.YYYY-MM-DD.log
+        let today = chrono::Local::now().format("%Y-%m-%d");
+        let log_path = format!("{}/mcp-server.{}.log", log_dir_path, today);
+        let file = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("Failed to create log file: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let (non_blocking_file, _guard) = tracing_appender::non_blocking(file);
 
         let _ = tracing_subscriber::registry()
             .with(env_filter)
