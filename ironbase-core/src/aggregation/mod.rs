@@ -1028,19 +1028,21 @@ mod tests {
         // 1GB = 1024MB → scale_factor = 1.0 → base limits
         let gb1 = AggregationLimits::with_memory_budget(1024);
         assert_eq!(gb1.max_docs_without_match, 10_000);
-        assert_eq!(gb1.max_group_count, 5_000);
+        // FIX (2026-01-25): Increased base from 5K to 100K for streaming $group
+        // Streaming $group only stores ~64 bytes per group (hash + accumulator state)
+        assert_eq!(gb1.max_group_count, 100_000);
         assert_eq!(gb1.max_memory_mb, 1024);
 
         // 4GB = 4096MB → scale_factor = 4.0 → 4x base limits
         let gb4 = AggregationLimits::with_memory_budget(4096);
         assert_eq!(gb4.max_docs_without_match, 40_000);
-        assert_eq!(gb4.max_group_count, 20_000);
+        assert_eq!(gb4.max_group_count, 400_000);
         assert_eq!(gb4.max_memory_mb, 4096);
 
         // 16GB = 16384MB → scale_factor = 16.0 → 16x base limits
         let gb16 = AggregationLimits::with_memory_budget(16384);
         assert_eq!(gb16.max_docs_without_match, 160_000);
-        assert_eq!(gb16.max_group_count, 80_000);
+        assert_eq!(gb16.max_group_count, 1_600_000);
         assert_eq!(gb16.max_memory_mb, 16384);
     }
 

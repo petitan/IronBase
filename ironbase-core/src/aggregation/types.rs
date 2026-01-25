@@ -136,8 +136,12 @@ impl AggregationLimits {
             // $match doesn't disable limits - it just allows higher ones
             max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(2_000),
 
-            // Group/accumulator limits (also reduced proportionally)
-            max_group_count: ((5_000.0 * scale_factor) as usize).max(500),
+            // Group/accumulator limits
+            // FIX (2026-01-25): Increased base from 5K to 100K for streaming $group
+            // Streaming $group only stores ~64 bytes per group (hash + accumulator state)
+            // 100K groups × 64 bytes = 6.4 MB - minimal memory usage
+            // Old: 5K * 2.5 = 12.5K limit was too restrictive for high-cardinality group keys
+            max_group_count: ((100_000.0 * scale_factor) as usize).max(10_000),
             max_push_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
             max_addtoset_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
             max_unwind_output: ((100_000.0 * scale_factor) as usize).max(10_000),
@@ -188,7 +192,8 @@ impl AggregationLimits {
             max_docs_without_match: ((10_000.0 * scale_factor) as usize).max(1_000),
             // OOM FIX (2026-01): Reduced minimum from 10K to 2K
             max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(2_000),
-            max_group_count: ((5_000.0 * scale_factor) as usize).max(500),
+            // FIX (2026-01-25): Increased base for streaming $group (64 bytes/group)
+            max_group_count: ((100_000.0 * scale_factor) as usize).max(10_000),
             max_push_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
             max_addtoset_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
             max_unwind_output: ((100_000.0 * scale_factor) as usize).max(10_000),
