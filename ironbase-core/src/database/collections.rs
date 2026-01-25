@@ -312,9 +312,26 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         sorted_entries.sort_by_key(|(_, offset)| *offset);
 
         let total_docs = sorted_entries.len();
+        let total_batches = total_docs.div_ceil(REBUILD_BATCH_SIZE);
+        let log_interval = std::cmp::max(1, total_batches / 10); // Log every 10%
 
         // Process documents in batches to prevent OOM
         for (batch_num, batch) in sorted_entries.chunks(REBUILD_BATCH_SIZE).enumerate() {
+            // Progress logging every 10% (or at least every batch for small collections)
+            if batch_num % log_interval == 0 || batch_num == total_batches - 1 {
+                let progress = (batch_num + 1) * 100 / total_batches;
+                let docs_processed =
+                    std::cmp::min((batch_num + 1) * REBUILD_BATCH_SIZE, total_docs);
+                log_debug!(
+                    "Index rebuild progress: {}/{} batches ({}%), {}/{} docs",
+                    batch_num + 1,
+                    total_batches,
+                    progress,
+                    docs_processed,
+                    total_docs
+                );
+            }
+
             // Read and parse documents for this batch
             let mut batch_docs: Vec<(DocumentId, Value)> = Vec::with_capacity(batch.len());
 
