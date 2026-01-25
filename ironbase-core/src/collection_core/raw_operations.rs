@@ -205,6 +205,8 @@ fn is_tombstone(doc: &Value) -> bool {
 
 /// Helper: Direct _id lookup optimization (O(1) instead of full scan)
 /// Returns Some(map) if query is `{_id: <value>}`, None otherwise (fallback to scan)
+/// FIX #7: Uses normalize_document_id to handle string/int conversion
+/// e.g., {"_id": "123"} should match DocumentId::Int(123)
 fn try_direct_id_lookup<S: Storage + RawStorage>(
     storage: &mut S,
     catalog: &HashMap<DocumentId, u64>,
@@ -216,17 +218,39 @@ fn try_direct_id_lookup<S: Storage + RawStorage>(
     }
     let id_val = query_obj.get("_id")?;
     let doc_id: DocumentId = serde_json::from_value(id_val.clone()).ok()?;
-    let &offset = catalog.get(&doc_id)?;
-    let doc_bytes = storage.read_data(offset).ok()?;
-    let doc: Value = serde_json::from_slice(&doc_bytes).ok()?;
 
-    if is_tombstone(&doc) {
-        return Some(HashMap::new());
+    // Helper to load document from catalog offset
+    let mut load_doc = |actual_id: &DocumentId| -> Option<(DocumentId, Value)> {
+        let &offset = catalog.get(actual_id)?;
+        let doc_bytes = storage.read_data(offset).ok()?;
+        let doc: Value = serde_json::from_slice(&doc_bytes).ok()?;
+        if is_tombstone(&doc) {
+            return None;
+        }
+        Some((actual_id.clone(), doc))
+    };
+
+    // Try original ID first
+    if let Some((actual_id, doc)) = load_doc(&doc_id) {
+        let mut map = HashMap::new();
+        map.insert(actual_id, doc);
+        return Some(map);
     }
 
-    let mut map = HashMap::new();
-    map.insert(doc_id, doc);
-    Some(map)
+    // Try normalized version (string "123" → int 123)
+    if let DocumentId::String(s) = &doc_id {
+        if let Ok(num) = s.parse::<i64>() {
+            let normalized = DocumentId::Int(num);
+            if let Some((actual_id, doc)) = load_doc(&normalized) {
+                let mut map = HashMap::new();
+                map.insert(actual_id, doc);
+                return Some(map);
+            }
+        }
+    }
+
+    // Not found - return empty map (signal to caller this was an _id query but no match)
+    Some(HashMap::new())
 }
 
 /// Private module that seals the trait
@@ -1988,36 +2012,52 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         // FAST PATH: Direct _id lookup O(1)
         // When query is {"_id": value}, skip catalog scanning entirely.
         // This is 10-100x faster than the slow path for large collections.
+        // FIX #7: Uses normalize_document_id to handle string/int conversion
+        // e.g., {"_id": "123"} should match DocumentId::Int(123)
         // ====================================================================
         if let Some(doc_id) = Self::extract_id_query(query_json) {
-            // O(1) lookup via read_document_by_id
-            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+            // Helper closure to perform the actual delete operation
+            let do_delete = |coll: &Self,
+                             actual_doc_id: &DocumentId,
+                             doc: Value|
+             -> Result<DeleteOnePrepared> {
                 // PERF: Direct Value→Document (no serialization roundtrip)
                 let document = Document::from_value(&doc)?;
                 let old_doc_value = doc.clone();
 
                 // Remove from indexes
-                self.remove_from_indexes(&document)?;
+                coll.remove_from_indexes(&document)?;
 
                 // 🔒 ATOMIC: Acquire write lock for delete operation
-                let mut storage = self.storage.write();
+                let mut storage = coll.storage.write();
 
                 // Write tombstone
                 let mut tombstone = old_doc_value.clone();
                 if let Value::Object(ref mut map) = tombstone {
                     map.insert("_tombstone".to_string(), Value::Bool(true));
-                    map.insert("_collection".to_string(), Value::String(self.name.clone()));
+                    map.insert("_collection".to_string(), Value::String(coll.name.clone()));
                 }
                 let tombstone_json = serde_json::to_string(&tombstone)?;
-                storage.write_document_raw(&self.name, &doc_id, tombstone_json.as_bytes())?;
-                storage.adjust_live_count(&self.name, -1);
+                storage.write_document_raw(&coll.name, actual_doc_id, tombstone_json.as_bytes())?;
+                storage.adjust_live_count(&coll.name, -1);
 
-                return Ok(DeleteOnePrepared {
-                    doc_id: Some(doc_id),
+                Ok(DeleteOnePrepared {
+                    doc_id: Some(actual_doc_id.clone()),
                     old_doc: Some(old_doc_value),
                     deleted: 1,
-                    collection_name: self.name.clone(),
-                });
+                    collection_name: coll.name.clone(),
+                })
+            };
+
+            // Try original ID first
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                return do_delete(self, &doc_id, doc);
+            }
+            // Try normalized version (string "123" → int 123)
+            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                if let Some(doc) = self.read_document_by_id(&normalized)? {
+                    return do_delete(self, &normalized, doc);
+                }
             }
             // Document not found
             return Ok(DeleteOnePrepared {

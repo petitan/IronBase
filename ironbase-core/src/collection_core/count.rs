@@ -56,6 +56,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             });
         }
 
+        // Fast path: _id $in query = O(k) lookups (k = number of IDs)
+        // Note: Uses normalize_document_id to handle string/int conversion
+        if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
+            let mut count = 0u64;
+            for doc_id in doc_ids {
+                // Try both the original ID and normalized version
+                // This handles {"$in": ["123"]} matching DocumentId::Int(123)
+                if self.read_document_by_id(&doc_id)?.is_some() {
+                    count += 1;
+                } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                    if self.read_document_by_id(&normalized)?.is_some() {
+                        count += 1;
+                    }
+                }
+            }
+            return Ok(count);
+        }
+
         // Index-aware count with Vec-less fallback
         self.count_with_plan(query_json, None)
     }
@@ -84,6 +102,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             } else {
                 0
             });
+        }
+
+        // Fast path: _id $in query = O(k) lookups (k = number of IDs)
+        // Note: Uses normalize_document_id to handle string/int conversion
+        if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
+            let mut count = 0u64;
+            for doc_id in doc_ids {
+                // Try both the original ID and normalized version
+                // This handles {"$in": ["123"]} matching DocumentId::Int(123)
+                if self.read_document_by_id(&doc_id)?.is_some() {
+                    count += 1;
+                } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                    if self.read_document_by_id(&normalized)?.is_some() {
+                        count += 1;
+                    }
+                }
+            }
+            return Ok(count);
         }
 
         // Index-aware count with Vec-less fallback

@@ -821,6 +821,55 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.check_not_closed()?;
         log_debug!("find() called with query: {:?}", query_json);
 
+        // ====================================================================
+        // FAST PATH: Direct _id lookup O(1)
+        // FIX #5-6: When query is {"_id": value}, skip catalog scanning entirely.
+        // Uses normalize_document_id to handle string/int conversion.
+        // ====================================================================
+        if let Some(doc_id) = Self::extract_id_query(query_json) {
+            // Try original ID first
+            if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                return Ok(vec![doc]);
+            }
+            // Try normalized version (string "123" → int 123)
+            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                if let Some(doc) = self.read_document_by_id(&normalized)? {
+                    return Ok(vec![doc]);
+                }
+            }
+            return Ok(Vec::new());
+        }
+
+        // ====================================================================
+        // FAST PATH: _id $in query = O(k) lookups (k = number of IDs)
+        // FIX #5: Uses normalize_document_id to handle string/int conversion.
+        // ====================================================================
+        if let Some(doc_ids) = Self::extract_id_in_query(query_json) {
+            let mut results = Vec::new();
+            results.try_reserve(doc_ids.len()).map_err(|e| {
+                IronBaseError::InvalidQuery(format!(
+                    "Out of memory: cannot allocate space for {} documents ({})",
+                    doc_ids.len(),
+                    e
+                ))
+            })?;
+            for doc_id in doc_ids {
+                // Try original ID first
+                if let Some(doc) = self.read_document_by_id(&doc_id)? {
+                    results.push(doc);
+                } else if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                    // Try normalized version (string "123" → int 123)
+                    if let Some(doc) = self.read_document_by_id(&normalized)? {
+                        results.push(doc);
+                    }
+                }
+            }
+            return Ok(results);
+        }
+
+        // ====================================================================
+        // SLOW PATH: Complex queries (non-_id filters)
+        // ====================================================================
         // STREAMING: Collect IDs first (small), then load docs one by one
         // This avoids bulk-loading all documents into memory at once
         let doc_ids = self.collect_doc_ids(query_json)?;
@@ -1143,11 +1192,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.check_not_closed()?;
         // OPTIMIZATION: Check if this is an _id equality query (O(1) lookup)
         // This is faster than going through QueryPlanner for the most common case
+        // FIX #7: Uses normalize_document_id to handle string/int conversion
+        // e.g., {"_id": "123"} should match DocumentId::Int(123)
         if let Some(query_obj) = query_json.as_object() {
             if query_obj.len() == 1 && query_obj.contains_key("_id") {
                 if let Some(id_val) = query_obj.get("_id") {
                     // Direct O(1) lookup using document_catalog
                     if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                        // Try original ID first
                         if let Some(doc) = self.read_document_by_id(&doc_id)? {
                             // Verify query still matches (for consistency)
                             let parsed_query = Query::from_json(query_json)?;
@@ -1156,6 +1208,17 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                             if parsed_query.matches(&document)? {
                                 return Ok(Some(doc));
+                            }
+                        }
+                        // Try normalized version (string "123" → int 123)
+                        if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                            if let Some(doc) = self.read_document_by_id(&normalized)? {
+                                let parsed_query = Query::from_json(query_json)?;
+                                let document = Document::from_value(&doc)?;
+
+                                if parsed_query.matches(&document)? {
+                                    return Ok(Some(doc));
+                                }
                             }
                         }
                     }
@@ -2832,6 +2895,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
         None
+    }
+
+    /// Normalize a DocumentId by converting string representations to int if possible.
+    ///
+    /// This handles the common case where insert_many returns IDs as strings like "178755"
+    /// but the catalog stores them as DocumentId::Int(178755).
+    /// Without this, {"_id": {"$in": ["178755"]}} would fail to match DocumentId::Int(178755).
+    fn normalize_document_id(doc_id: &DocumentId) -> Option<DocumentId> {
+        match doc_id {
+            DocumentId::String(s) => {
+                // Try to parse as integer
+                s.parse::<i64>().ok().map(DocumentId::Int)
+            }
+            _ => None, // Int and ObjectId don't need normalization
+        }
     }
 
     /// Extract DocumentId list from {"_id": {"$in": [id1, id2, ...]}} query

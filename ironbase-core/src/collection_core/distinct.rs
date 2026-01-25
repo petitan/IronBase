@@ -66,12 +66,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.check_not_closed()?;
 
         // Handle _id query optimization
+        // FIX #7: Uses normalize_document_id to handle string/int conversion
+        // e.g., {"_id": "123"} should match DocumentId::Int(123)
         if let Some(doc_id) = Self::extract_id_query(query_json) {
+            // Try original ID first
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
                 // PERF: Direct Value→Document conversion (no serialization)
                 let document = Document::from_value_owned(doc)?;
                 let values: Vec<Value> = document.get_all(field).into_iter().cloned().collect();
                 return Ok(values);
+            }
+            // Try normalized version (string "123" → int 123)
+            if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                if let Some(doc) = self.read_document_by_id(&normalized)? {
+                    let document = Document::from_value_owned(doc)?;
+                    let values: Vec<Value> = document.get_all(field).into_iter().cloned().collect();
+                    return Ok(values);
+                }
             }
             return Ok(Vec::new());
         }
