@@ -1,387 +1,147 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+**IronBase** - MongoDB-kompatibilis embedded NoSQL (Rust + Python/C# bindings)
 
-## Project Overview
+| Jellemző | Érték |
+|----------|-------|
+| Tesztek | 939+ (unit + integration + doctest) |
+| API-k | Rust, Python (PyO3), C# (.NET 8) |
+| Operátorok | 21 query, 7 update |
+| Indexek | B+ tree, compound, fuzzy, fulltext, HNSW |
+| Keresés | Fuzzy (Jaro-Winkler/Levenshtein), TF-IDF, RAG |
 
-**IronBase** is a high-performance embedded NoSQL document database written in Rust with Python and C# bindings. It provides a MongoDB-compatible API with SQLite's simplicity - a single-file, serverless, zero-configuration database.
+---
 
-**Key Stats:**
-- 760+ tests passing (unit + integration + doctest)
-- Python (PyO3), C# (.NET 8), Rust APIs
-- 21 query operators (including $fuzzy), 7 update operators
-- Full aggregation pipeline with dot notation
-- B+ tree indexing with compound index and fuzzy index support
-- LRU query cache with collection-level invalidation
-- MCP server for AI assistant integration (HTTP + stdio modes)
-- Fuzzy text search with Jaro-Winkler, Levenshtein, Damerau-Levenshtein algorithms
-- Full-text search with TF-IDF scoring, stemming, and multi-language support (Hungarian, English, German)
+## Build
 
-## Build and Development Commands
+| Művelet | Parancs |
+|---------|---------|
+| Python dev build | `maturin develop` |
+| Rust tesztek | `cargo test -p ironbase-core` |
+| Egyetlen teszt | `cargo test -p ironbase-core -- test_name` |
+| Full CI | `just run-dev-checks` |
+| .NET tesztek | `cd IronBase.NET && dotnet test` |
+| MCP Server | `cd mcp-server && cargo build --release` |
+
+<details>
+<summary>Fuzz Testing (nightly)</summary>
 
 ```bash
-# Initial setup
-pip install maturin
-maturin develop              # Development build with Python bindings
-
-# Testing
-cargo test -p ironbase-core                    # All Rust tests (744+)
-cargo test -p ironbase-core -- test_name       # Single test by name
-cargo test -p ironbase-core -- --nocapture     # Tests with stdout
-just run-dev-checks                            # Full CI: fmt + clippy + tests
-
-# .NET
-cd IronBase.NET && dotnet test                 # C# tests
-
-# MCP Server (separate workspace)
-cd mcp-server && cargo build --release
-cd mcp-server && cargo test
-
-# Fuzz Testing (requires nightly)
-cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_query_parser -- -max_total_time=60
-cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_wal_bytes -- -max_total_time=60
-cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_document_parse -- -max_total_time=60
-cd ironbase-core/fuzz && cargo +nightly fuzz run fuzz_json_ops -- -max_total_time=60
+cd ironbase-core/fuzz
+cargo +nightly fuzz run fuzz_query_parser -- -max_total_time=60
+cargo +nightly fuzz run fuzz_wal_bytes -- -max_total_time=60
 ```
+</details>
 
 ## Architecture
 
-### Workspace Structure
-
 ```
-IronBase/
-├── ironbase-core/           # Pure Rust core library
-│   └── src/
-│       ├── database.rs      # DatabaseCore, durability modes
-│       ├── collection_core/ # CRUD, aggregation, indexes
-│       ├── query/           # Query operators (strategy pattern)
-│       ├── aggregation.rs   # Pipeline stages + accumulators
-│       ├── find_options.rs  # Projection, sort, limit, skip
-│       ├── index.rs         # B+ tree indexes
-│       ├── storage/         # Append-only storage engine
-│       ├── transaction.rs   # ACID transactions
-│       └── wal.rs           # Write-Ahead Log
-├── bindings/python/         # PyO3 Python bindings
-├── IronBase.NET/            # C# .NET 8 bindings
-└── mcp-server/              # MCP protocol server (DOCJL editing)
+ironbase-core/src/     bindings/python/    IronBase.NET/    mcp-server/
+├── database.rs        └── PyO3            └── .NET 8       └── HTTP/stdio
+├── collection_core/
+├── query/operators.rs
+├── aggregation.rs
+├── storage/
+├── index.rs
+├── transaction.rs
+└── wal.rs
 ```
 
-### Core Module Responsibilities
+### Core Modules
 
-**database.rs** - Database lifecycle and durability:
-- `DatabaseCore<S: Storage + RawStorage>` - generic over storage backend
-- `DatabaseCore::open(path)` - File-based storage (production)
-- `DatabaseCore::<MemoryStorage>::open_memory()` - In-memory (testing, 10-100x faster)
-- Durability modes: Safe (auto-commit), Batch, Unsafe
-- Shared IndexManager per collection (Arc<RwLock>) - prevents stale index state
+| Modul | Felelősség | Kulcs API |
+|-------|------------|-----------|
+| `database.rs` | Lifecycle, durability | `open()`, `open_memory()` |
+| `collection_core/` | CRUD, aggregation | `find`, `insert`, `update`, `delete`, `aggregate` |
+| `query/operators.rs` | Query engine | $eq, $gt, $in, $regex, $and, $or... |
+| `aggregation.rs` | Pipeline | $match, $group, $sort, $limit + accumulators |
+| `storage/` | Append-only engine | `.mlite` files, compaction |
+| `index.rs` | B+ tree indexing | `create_index`, `explain`, `hint` |
+| `transaction.rs` | ACID | WAL, Read Committed isolation |
 
-**collection_core/** - All CRUD and query operations (refactored 2026-01):
-- **mod.rs** - Core find/insert/update/delete, scan_documents_with_early_termination
-- **aggregate.rs** - aggregate, aggregate_with_limits, aggregate_auto
-- **count.rs** - count_documents, count_with_plan, adjust_count_for_tombstones
-- **distinct.rs** - distinct, distinct_with_ctx, try_index_based_distinct (2026-01-23: double serialization fix)
-- **tx.rs** - insert_one_tx, update_one_tx, delete_one_tx (transaction methods)
-- **context.rs** - QueryExecutionContext for deadline/cancel propagation
-- **topk.rs** - Top-K heap selection algorithm
-- **query_executor.rs** - topk_documents for sort+limit optimization
-- Index management: create_index, create_compound_index, drop_index, explain, hint
-- Cursor/streaming: find_streaming() for memory-efficient iteration
+<details>
+<summary>collection_core/ részletek</summary>
 
-**query/operators.rs** - Query engine (strategy pattern):
-- Comparison: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
-- Logical: $and, $or, $not, $nor
-- Element: $exists, $type
-- Array: $all, $elemMatch, $size
-- String: $regex
+| Fájl | Funkció |
+|------|---------|
+| `mod.rs` | find/insert/update/delete, scan_with_early_termination |
+| `aggregate.rs` | aggregate_auto, aggregate_with_limits |
+| `count.rs` | count_documents, adjust_count_for_tombstones |
+| `distinct.rs` | try_index_based_distinct |
+| `tx.rs` | insert_one_tx, update_one_tx |
+| `topk.rs` | Top-K heap selection |
+</details>
 
-**aggregation.rs** - Pipeline stages and accumulators:
-- Stages: MatchStage, GroupStage, ProjectStage, SortStage, LimitStage, SkipStage
-- Accumulators: $sum, $avg, $min, $max, $first, $last
-- Full dot notation support for nested fields
-- **Memory limits** to prevent OOM (see AggregationLimits below)
+<details>
+<summary>Storage File Format (.mlite v2+)</summary>
 
-**find_options.rs** - Query options:
-- Projection (include/exclude mode)
-- Sort (single and multi-field, dot notation)
-- Limit, Skip (pagination)
-- **max_response_bytes** - OOM protection for large responses (2026-01)
-- All support dot notation for nested fields
-
-**storage/** - Append-only storage engine:
-- **file_storage.rs** - File-based persistence (.mlite files)
-- **memory_storage.rs** - In-memory backend for testing
-- **metadata.rs** - Metadata flush/load with dynamic offset (v2+ format)
-- **compaction.rs** - Garbage collection for tombstones (2026-01-22: cancel support with `cancel_flag`)
-
-**index.rs** - B+ tree indexing (IndexManager + BPlusTree):
-- Single-field indexes: `create_index("field", unique)`
-- Compound indexes: `create_compound_index(["field1", "field2"], unique)`
-- Automatic query optimization with index selection
-- explain() and find_with_hint() for query planning
-- Unique indexes enforce constraint on null/missing values (MongoDB behavior)
-
-**transaction.rs + wal.rs** - ACID transactions:
-- **A**tomicity: WAL + rollback support
-- **C**onsistency: Schema validation
-- **I**solation: Read Committed (exclusive write lock, SQLite-style)
-- **D**urability: fsync + WAL with CRC32 checksums
-- Crash recovery with automatic replay
-- begin_transaction/commit_transaction/rollback_transaction
-- Only one write transaction at a time (5 sec timeout, 10ms polling)
-- **Dot notation támogatás** (2026-01-23): `insert_one_tx` használ `get_nested_value()`-t nested field indexeléshez
-
-**query_cache.rs** - Query result caching:
-- LRU cache with configurable capacity (default: 1000)
-- Collection-level invalidation via reverse index
-- Thread-safe with parking_lot::RwLock
-
-### Storage File Format (.mlite)
-
-**Version 2+ (dynamic metadata at end of file):**
 ```
-┌─────────────────────────────────────┐
-│  Header (256 bytes)                 │
-│  - magic: "MONGOLTE", version=2     │
-│  - metadata_offset, metadata_size   │
-├─────────────────────────────────────┤
-│  Document Data (append-only)        │
-│  [u32 len][JSON bytes]...           │
-├─────────────────────────────────────┤
-│  Collection Metadata (JSON)         │  ← Dynamic offset (end of file)
-│  - document_catalog, indexes        │
-└─────────────────────────────────────┘
+Header (256 bytes)     → magic: "MONGOLTE", metadata_offset
+Document Data          → [u32 len][JSON bytes]... (append-only)
+Collection Metadata    → document_catalog, indexes (end of file)
 ```
+Metadata at END → no race conditions, no truncation.
+</details>
 
-**Design notes:**
-- Metadata at END of file prevents race conditions during concurrent reads
-- No file truncation - append-only design for safety
-- `flush_metadata()` uses idempotent offset calculation
+### HeaderWriter - KRITIKUS
 
-### HeaderWriter - KRITIKUS INVARIÁNS
+**TILOS `data_end_offset`-ot közvetlenül módosítani!**
 
-A `data_end_offset` mező mutatja, hogy a következő adat HOVA íródjon.
-**TILOS közvetlenül módosítani!** Mindig a `HeaderWriter` metódusokat használd:
-
-| Helyzet | Metódus |
+| Művelet | Metódus |
 |---------|---------|
-| Document write után | `HeaderWriter::new(&mut header, &mut file).advance_after_write()` |
-| Metadata flush után | `HeaderWriter::new(&mut header, &mut file).set_after_metadata(offset, size)` |
-| Compaction | `write_compaction_header(&mut file, &header, offset, size)` |
+| Doc write | `HeaderWriter::new(...).advance_after_write()` |
+| Metadata flush | `HeaderWriter::new(...).set_after_metadata(offset, size)` |
+| Compaction | `write_compaction_header(...)` |
 
-**Miért fontos?**
-- 7+ kritikus bug volt korábban mert valaki elfelejtette frissíteni
-- A HeaderWriter **AUTOMATIKUSAN** számolja a helyes értéket
-- Ha `data_end_offset` rossz → sparse hole vagy metadata felülírás
+7+ bug volt mert valaki elfelejtette → HeaderWriter AUTOMATIKUSAN számolja.
 
-**Invariáns:**
-```
-Document write után:  data_end_offset = file.stream_position()
-Metadata flush után:  data_end_offset = metadata_offset + metadata_size
-```
+---
 
-**Fájlok:**
-- `storage/mod.rs` - HeaderWriter struct, write_compaction_header()
-- `storage/io.rs` - advance_after_write() használat
-- `storage/metadata.rs` - set_after_metadata() használat
-- `storage/compaction.rs` - write_compaction_header() használat
+## Operátorok
 
-## Implemented Features
+| Típus | Operátorok |
+|-------|-----------|
+| **Query (21)** | $eq $ne $gt $gte $lt $lte $in $nin · $and $or $not $nor · $exists $type · $all $elemMatch $size · $regex · $fuzzy · $** |
+| **Update (7)** | $set $inc $unset $push $pull $addToSet $pop (+ dot notation + upsert) |
+| **Aggregation** | $match $group $project $sort $limit $skip · Accumulators: $sum $avg $min $max $first $last |
 
-### Query Operators (21)
-- **Comparison**: $eq, $ne, $gt, $gte, $lt, $lte, $in, $nin
-- **Logical**: $and, $or, $not, $nor
-- **Element**: $exists, $type
-- **Array**: $all, $elemMatch, $size
-- **String**: $regex
-- **Fuzzy**: $fuzzy (Jaro-Winkler, Levenshtein, Damerau-Levenshtein algorithms)
-- **Wildcard**: $** (recursive descent - finds field at any depth)
+---
 
-### Update Operators (7)
-- $set, $inc, $unset, $push, $pull, $addToSet, $pop
-- All support dot notation for nested fields
-- **Upsert support**: `update_one_with_options(..., UpdateOptions::new().with_upsert(true))`
+## OOM Protection
 
-### Aggregation
-- **Stages**: $match, $group, $project, $sort, $limit, $skip
-- **Accumulators**: $sum, $avg, $min, $max, $first, $last
-- **Dot notation**: Full support everywhere
-- **Memory limits**: OOM protection (see below)
+**Használat:** `aggregate_auto()` / `FindOptions::with_safe_defaults()`
 
-### Aggregation Memory Limits (OOM Protection)
+| RAM | Aggregation max | Find max |
+|-----|-----------------|----------|
+| < 512 MB | 64 MB, 10K docs | 10 MB |
+| 512MB-2GB | 128 MB, 50K docs | 50 MB |
+| 2-8 GB | 256 MB, 100K docs | 100 MB |
+| 8-32 GB | 512 MB, 250K docs | 200 MB |
+| > 32 GB | 1024 MB, 500K docs | 500 MB |
 
-Az aggregation pipeline-ok memória védelemmel rendelkeznek OOM megelőzésre.
+**Védelmek:** ✅ `$match` nem kapcsolja ki limitet · ✅ `$push/$addToSet` per-group limit · ✅ `$unwind` kumulatív · ✅ `try_reserve()`
 
-**Ajánlott használat - Dinamikus limitek (2026-01):**
+<details>
+<summary>Top-K Optimization</summary>
 
-```rust
-// AJÁNLOTT: Automatikus rendszer RAM alapú skálázás
-let results = collection.aggregate_auto(&pipeline)?;
+`$sort` + `$limit` → BinaryHeap O(k) memória O(n) helyett.
 
-// Vagy explicit:
-let limits = AggregationLimits::from_system_memory();
-let results = collection.aggregate_with_limits(&pipeline, limits)?;
+| Hely | Funkció |
+|------|---------|
+| `topk.rs` | Generic Top-K |
+| `sort_stage.rs` | Aggregation $sort+$limit |
+| `hnsw.rs` | Nearest neighbor |
+</details>
 
-// Fix memória budget:
-let limits = AggregationLimits::with_memory_budget(256); // 256 MB
-```
+<details>
+<summary>Kisebb Fixek</summary>
 
-**Skálázási táblázat (`from_system_memory()`):**
-
-| Elérhető RAM | max_memory_mb | max_docs | max_groups |
-|--------------|---------------|----------|------------|
-| < 512 MB     | 64            | 10K      | 5K         |
-| 512MB - 2GB  | 128           | 50K      | 25K        |
-| 2GB - 8GB    | 256           | 100K     | 50K        |
-| 8GB - 32GB   | 512           | 250K     | 100K       |
-| > 32GB       | 1024          | 500K     | 250K       |
-
-**Static limitek (backward compatible):**
-
-| Limit | Default | Leírás |
-|-------|---------|--------|
-| `max_docs_without_match` | 100,000 | Max doc `$match` nélkül |
-| `max_docs_with_match` | 1,000,000 | Max doc `$match`-el is! |
-| `max_group_count` | 50,000 | Max egyedi csoportok |
-| `max_push_elements` | 100,000 | Max elemek `$push`-ban per csoport |
-| `max_addtoset_elements` | 100,000 | Max elemek `$addToSet`-ben per csoport |
-| `max_unwind_output` | 1,000,000 | Max `$unwind` output dokumentumok |
-| `max_memory_mb` | 512 | Becsült max memória |
-
-**OOM védelem implementálva (2026-01):**
-- ✅ `$match` NEM kapcsolja ki a limitet (max 1M doc)
-- ✅ `$push`/`$addToSet` limitálva per csoport
-- ✅ `$unwind` output limitálva **KUMULATÍVAN** (több $unwind együtt max 1M)
-- ✅ `try_reserve()` használat allokációk előtt
-
-**Kumulatív $unwind limit (2026-01-10):**
-Több egymást követő `$unwind` stage KÖZÖS számlálón osztozik:
-```json
-// ELŐTTE: 2 × 1M limit → akár 2M doc
-// UTÁNA: Összesen max 1M doc minden $unwind-ból együtt
-[
-  {"$unwind": "$orders"},      // 100K output → OK (100K < 1M)
-  {"$unwind": "$orders.items"} // +500K output → OK (600K < 1M)
-                               // +600K output → HIBA (1.1M > 1M)
-]
-```
-
-**Key files:**
-- `ironbase-core/src/aggregation/memory_info.rs` - RAM detektálás
-- `ironbase-core/src/aggregation/types.rs` - AggregationLimits
-
-### Find OOM Protection (2026-01)
-
-A `find` művelet is rendelkezik response size limit védelmmel az OOM megelőzésre.
-
-**Használat:**
-
-```rust
-// Automatic RAM-based limits (MCP uses this by default)
-let options = FindOptions::with_safe_defaults()
-    .with_limit(100)
-    .with_projection(proj);
-let results = collection.find_with_options(&query, options)?;
-
-// Manual limit
-let options = FindOptions::new()
-    .with_max_response_bytes(50 * 1024 * 1024); // 50 MB max
-```
-
-**Skálázási táblázat (`with_safe_defaults()`):**
-
-| Elérhető RAM | max_response_bytes |
-|--------------|--------------------|
-| < 512 MB     | 10 MB              |
-| 512MB - 2GB  | 50 MB              |
-| 2GB - 8GB    | 100 MB             |
-| 8GB - 32GB   | 200 MB             |
-| > 32GB       | 500 MB             |
-
-**MCP Integration:**
-- `ScriptLimits.max_result_size` automatikusan átadódik `FindOptions.max_response_bytes`-nak
-- Ha a response meghaladná a limitet, informatív hibaüzenet jelenik meg:
-  `"Response size limit exceeded: loaded X documents (Y bytes)..."`
-
-**Key files:**
-- `ironbase-core/src/find_options.rs` - FindOptions, estimate_json_size()
-- `ironbase-core/src/collection_core/mod.rs` - find_with_options response tracking
-
-### Top-K Optimization (Sort + Limit)
-
-When an aggregation pipeline has `$sort` followed by `$limit`, IronBase automatically uses a bounded heap algorithm instead of full sorting:
-
-**Before (naive):** Sort all N documents → O(n log n) time, O(n) memory
-**After (optimized):** Maintain heap of K elements → O(n log k) time, O(k) memory
-
-**Example - Query that triggered OOM before optimization:**
-```json
-[
-  {"$group": {"_id": "$from.email", "count": {"$sum": 1}}},
-  {"$sort": {"count": -1}},
-  {"$limit": 5}
-]
-```
-
-With 50,000 unique groups:
-- **Before:** Sort all 50K groups → ~50MB memory
-- **After:** Heap of 5 elements → ~500 bytes memory
-
-**How it works:**
-1. Pipeline optimizer detects `$sort` → `$limit` pattern
-2. `SortStage` receives limit hint
-3. Uses `BinaryHeap` to track only top K elements
-4. Final sort of K elements for correct ordering
-
-**Key files:**
-- `ironbase-core/src/aggregation/optimizer.rs` - Pattern detection
-- `ironbase-core/src/aggregation/stages/sort_stage.rs` - Top-K implementation
-
-**Heap-based helyeken (2026-01-24):**
-
-| Fájl | Funkció | Cél |
-|------|---------|-----|
-| `collection_core/topk.rs` | `topk_select()` | Generic Top-K szelekció |
-| `collection_core/mod.rs:1988` | `scan_documents_with_early_termination` | Pagination FAST PATH (skip+limit < 10000) |
-| `collection_core/query_executor.rs` | `topk_documents()` | Sort+limit dokumentum lekérés |
-| `aggregation/stages/sort_stage.rs` | `execute_topk()` | Aggregation $sort + $limit |
-| `vector/hnsw.rs` | `search_layer()` | HNSW nearest neighbor keresés |
-
-### delete_one O(1) Fast Path (2026-01-23)
-
-Az `_id` alapú delete_one műveletek O(1) időben futnak index lookup-pal.
-
-**Előtte:** 0.56s (collection scan 132K doc-on)
-**Utána:** <0.05s (index lookup)
-
-**Implementáció:**
-- `delete_one_raw()` és `delete_one_prepare()` használja `extract_id_query()` patternt
-- Konzisztens a `count.rs` és `distinct.rs` _id optimalizációval
-
-**Key files:**
-- `ironbase-core/src/collection_core/raw_operations.rs` - delete_one_raw, delete_one_prepare
-- `ironbase-core/src/collection_core/mod.rs` - extract_id_query pattern
-
-### read_data_at() Fix (2026-01-23)
-
-**Probléma:** Unflushed dokumentumok olvasása sikertelen volt.
-
-**Root cause:** `read_data_at()` a `metadata_offset + metadata_size`-t használta ellenőrzésre, ami stale volt flush előtt.
-
-**Fix:** `data_end_offset` használata helyette - ez mindig aktuális.
-
-**Key file:** `ironbase-core/src/storage/io.rs`
-
-### Other Features
-- FindOptions: projection, sort, limit, skip, include_total, max_response_bytes (all with dot notation)
-- B+ tree indexes: single-field, compound, unique, fuzzy
-- Query planning: explain(), find_with_hint()
-- ACID transactions with WAL (Read Committed isolation)
-- Durability modes: Safe/Batch/Unsafe (see Durability section below)
-- In-memory mode for testing
-- Cursor/streaming for large results
-- JSON schema validation
-- Storage compaction
-- Fuzzy text search with configurable algorithms and thresholds
+| Fix | Probléma | Megoldás |
+|-----|----------|----------|
+| read_data_at() | Unflushed doc hiba | `data_end_offset` |
+| live_document_count | find 200s+ régi DB | Migration |
+| delete_one O(1) | 0.56s → <0.05s | `_id` index lookup |
+</details>
 
 ## Development Guidelines
 
@@ -397,106 +157,198 @@ Az `_id` alapú delete_one műveletek O(1) időben futnak index lookup-pal.
 - Write lock: insert, update, delete
 - Read lock: find, count, list_collections
 
-### Error Handling
+### Error Handling (API)
 - Rust: `Result<T>` with `IronBaseError` (thiserror)
 - Python: Map to PyIOError, PyRuntimeError, PyValueError
 - C#: Map to appropriate .NET exceptions
 
-### FONTOS ELVE: Hibát javítunk, nem problémát kerülünk meg!
+### Kód Konzisztencia Protokoll
 
-Ha valami lassú vagy hibás:
-1. **TILOS** workaround-ot írni (pl. Python binding helyett MCP)
-2. **KÖTELEZŐ** megtalálni és javítani a root cause-t
-3. A probléma megkerülése NEM megoldás, csak elrejti a hibát
+> **Előbb OLVASD a meglévő kódot, utána ÍRJ újat.**
 
-### When Fixing Bugs (KRITIKUS!)
+**Új kód előtt:**
+1. Keress hasonló fájlt/funkciót
+2. Azonosítsd: naming, error handling, logging, kommentek
+3. Kövesd amit találtál — ne találj ki újat
 
-**KÖTELEZŐ: Fix alkalmazása előtt keress MINDEN code path-ot ahol ugyanaz a logika létezik!**
+| Kérdés | Hol nézd |
+|--------|----------|
+| Változó nevek? | Hasonló fájlok |
+| Error kezelés? | Meglévő handlers |
+| Függvény signatúra? | Hasonló funkciók |
+| Hova kerül? | Könyvtárstruktúra |
+| Van helper? | `utils/`, `common/` |
 
-Példa eset (2025-01-02):
-- Bug: `create_fulltext_index()` OOM nagy collection-öknél
-- Fix: Batching hozzáadva `collection_core/mod.rs`-ben ✅
-- PROBLÉMA: `rebuild_indexes_from_catalog()` ugyanazt csinálja `database/collections.rs`-ben, de NEM lett fixelve!
-- Eredmény: 1 héttel később újra OOM backup/restore-nál
+**TILOS:**
+- Új pattern ha van meglévő
+- Más naming konvenció
+- "Szerintem jobb" refaktor konzultáció nélkül
 
-**Ellenőrzőlista fix előtt:**
-1. `git grep "hasonló_pattern"` - keresd meg az összes előfordulást
-2. Minden fájlt ellenőrizz ahol ugyanaz a logika van
-3. Ha duplikált kód van, refaktoráld közös utility-be
-4. Írj tesztet MINDEN érintett code path-ra
+**Kimenet új kódnál:**
+```
+Mintának használt: [fájl] — [mit vettem át]
+Konvenciók: [naming, error, stb.]
+```
+
+> **Ha nem találsz mintát → kérdezz, ne találj ki.**
+
+---
+
+## Hibakezelési Protokoll
+
+### 1. STOP Szabály
+
+**2× szabály:** 2 sikertelen kísérlet után ÁLLJ MEG és elemezz.
+
+**TILOS:**
+- Ugyanazt újrapróbálni más paraméterekkel
+- Workaround keresése root cause előtt
+- "Majd most sikerül" megközelítés
+- Problémát megkerülni (pl. Python binding helyett MCP)
+
+**Red Flags** (ha ezeket látod magadon, ÁLLJ MEG):
+- "Próbáljuk még egyszer"
+- "Növeljük a timeout-ot"
+- 3+ próbálkozás ugyanarra
+- 10+ perce ugyanazon a problémán
+
+### 2. Debug Folyamat
+```
+STOP      → Ne próbáld újra azonnal
+OLVASD    → Mi a pontos hibaüzenet? Melyik sor dobta?
+HIPOTÉZIS → 2-3 lehetséges ok
+VALIDÁLD  → Ellenőrizd melyik igaz (NE JAVÍTS MÉG)
+JAVÍTS    → Csak ha tudod mi a root cause
+```
+
+### 3. Fix Ellenőrzőlista
+
+**KÖTELEZŐ: Fix előtt keress MINDEN code path-ot ahol ugyanaz a logika!**
+
+```bash
+git grep "hasonló_pattern"  # Összes előfordulás
+```
+
+| Ellenőrzés | Kész? |
+|------------|-------|
+| Minden fájl ahol ugyanaz a logika | ☐ |
+| Duplikált kód → közös utility | ☐ |
+| Teszt MINDEN érintett path-ra | ☐ |
 
 **Code Duplication Red Flags:**
-- Ugyanaz a logic `collection_core/` és `database/` könyvtárban
-- `create_*` és `rebuild_*` függvények hasonló tartalommal
-- Startup/warmup vs runtime kód ugyanazzal a művelettel
+- `collection_core/` és `database/` ugyanazzal a logikával
+- `create_*` és `rebuild_*` hasonló tartalommal
+- Startup/warmup vs runtime ugyanazzal a művelettel
 
-### OOM Prevention (KRITIKUS!)
+### 4. OOM Minták (Rust)
 
-**TILOS minták - Soha ne csináld nagy kollekciókra:**
+| Minta | Kockázat | Keresendő |
+|-------|----------|-----------|
+| Korlátlan collect | Magas | `.collect::<Vec>()` limit nélkül |
+| Tömeges betöltés | Magas | `load_all`, `get_all`, `fetch_all` |
+| Hiányzó try_reserve | Közepes | `Vec::new()` + loop push |
+| Parallel chunk nélkül | Közepes | `par_iter()` nagy kollekcióra |
+| Hardcoded limit | Közepes | `100_000`, `50_000` konstansok |
 
-| Pattern | Probléma | Megoldás |
-|---------|----------|----------|
-| `docs.iter().map(\|d\| load(d)).collect::<Vec<_>>()` | Összes doc memóriában | Streaming: egyesével |
-| `Vec<Vec<u8>>` összes doc-ból | GB-ok memóriában | Iterator/for loop |
-| `.collect()` catalog-on filter nélkül | 78K+ doc memóriában | Limit vagy streaming |
+**Javítási minták:**
 
-**KÖTELEZŐ minták:**
-
-1. **Streaming Document Loading** - Egy doc egyszerre:
 ```rust
+// 1. Streaming - egy doc egyszerre
 for doc_id in doc_ids {
-    let doc = load_one(doc_id)?;  // ← EGY doc memóriában
+    let doc = load_one(doc_id)?;
     process(doc);
-    // doc felszabadul itt
 }
-```
 
-2. **try_reserve() használata MINDEN nagy Vec allokáció előtt:**
-```rust
+// 2. try_reserve - allokáció előtt
 let mut results = Vec::new();
 results.try_reserve(count).map_err(|e| IronBaseError::OutOfMemory(...))?;
-```
 
-3. **Chunked Parallel Processing** - Ha párhuzamosítás kell:
-```rust
-const CHUNK_SIZE: usize = 1000;  // Max ~500MB memória
-for chunk in catalog_entries.chunks(CHUNK_SIZE) {
-    let batch = load_batch(chunk);  // Max 1000 doc
-    process_parallel(batch);        // rayon par_iter
-    // batch felszabadul itt
+// 3. Chunked parallel
+for chunk in entries.chunks(1000) {
+    let batch = load_batch(chunk);
+    process_parallel(batch);
 }
+
+// 4. Dinamikus limitek (NE hardcoded!)
+let limits = AggregationLimits::from_system_memory();
 ```
 
-### Hardcoded Limitek - ANTIPATTERN! ❌
+### 5. Kimenet Formátum
+```markdown
+## [fájl/hiba]
 
-**A hardcoded limitek (100K doc, 50K group, stb.) önmagukban NEM elegendőek OOM védelemhez.**
+### Probléma
+[mi a hiba, melyik sor]
 
-Miért NEM működnek önmagukban:
-1. **Rendszerfüggő:** 512MB limit értelmetlen 64GB RAM-mal, és túl sok 2GB-os gépen
-2. **Workload-függő:** 100K 100 byte-os doc ≠ 100K 10KB-os doc
-3. **Hamis biztonságérzet:** "Van limit" → de nincs VALÓS memória ellenőrzés
+### Root Cause
+[miért történt]
 
-**✅ MEGOLDÁS IMPLEMENTÁLVA (2026-01):**
+### Javítás
+[csak ha a root cause ismert]
+
+### Memória (ha OOM)
+- Előtte: O(?)
+- Utána: O(?)
+```
+
+> **A cél MEGÉRTENI miért nem működik. Az adat SZEMÉT. A tudás ÉRTÉK.**
+
+---
+
+### Egységes Lazy Loading (2026-01-25)
+
+**Minden index típus támogatja a `LazyLoadable` trait-et a gyors startup és OOM védelem érdekében.**
+
+**Működés (Opció A - Read-only):**
+- **Startup**: Csak metadata betöltése ha fájl > threshold
+- **Keresés**: `ensure_fully_loaded()` majd memóriában keres
+- **Módosítás**: `ensure_fully_loaded()` majd memóriában módosít
+- **Persistence**: Változatlan (checkpoint = teljes újraírás)
+
+**RAM-alapú threshold (`calculate_lazy_threshold()`):**
+
+| Elérhető RAM | Lazy Threshold |
+|--------------|----------------|
+| < 2 GB       | 50 MB          |
+| 4 GB         | 100 MB         |
+| 8 GB         | 200 MB         |
+| 16 GB        | 400 MB         |
+| 32 GB+       | 500 MB         |
+
+**Index támogatás:**
+
+| Index | Lazy Loading | Megjegyzés |
+|-------|--------------|------------|
+| B+ Tree | ✅ Igen | `load_from_path()` threshold check |
+| Fulltext | ✅ Igen | V2/V3 format mindig lazy |
+| Fuzzy | ✅ Igen | Dinamikus threshold |
+| HNSW | ❌ Nem | Gráf struktúra miatt komplex |
+
+**Használat:**
 
 ```rust
-// Dinamikus limitek - rendszer RAM alapján skálázódik!
-let results = collection.aggregate_auto(&pipeline)?;
+use ironbase_core::index::traits::{LazyLoadable, calculate_lazy_threshold};
 
-// Vagy explicit API:
-let limits = AggregationLimits::from_system_memory();
-let limits = AggregationLimits::with_memory_budget(256); // 256 MB
+// Threshold lekérdezés
+let threshold = calculate_lazy_threshold(); // RAM-alapú
+
+// Index lazy állapot ellenőrzés
+if index.is_lazy_mode() {
+    index.ensure_fully_loaded()?;
+}
+
+// IndexManager monitoring
+let mem_mb = index_manager.total_memory_usage() / (1024 * 1024);
+let lazy_count = index_manager.lazy_index_count();
+index_manager.log_lazy_status(); // tracing::info!
 ```
 
-**Ami implementálva lett:**
-1. ✅ **Rendszer RAM detektálás:** `memory_info.rs` (`/proc/meminfo`, `libc::sysconf`)
-2. ✅ **Rendszer RAM %:** Max 25% available RAM az aggregation-re
-3. ✅ **try_reserve():** `$push`, `$addToSet`, `$unwind` allokációk előtt
-4. ✅ **Minden stage limitálva:** `$match` sem kapcsolja ki a védelmet
-
-**SOHA ne írj olyan kódot ami:**
-- Csak hardcoded számra támaszkodik memória védelemhez
-- "Működik a gépemen" alapon van tesztelve
-- Dokumentál egy limitet amit nem implementál
+**Key files:**
+- `ironbase-core/src/index/traits.rs` - LazyLoadable trait, calculate_lazy_threshold()
+- `ironbase-core/src/index/btree.rs` - B+ tree lazy loading
+- `ironbase-core/src/index/fuzzy.rs` - Fuzzy lazy loading
+- `ironbase-core/src/fulltext.rs` - Fulltext lazy loading
+- `ironbase-core/src/index/manager.rs` - Memory tracking methods
 
 ### Egységes Range Query API (KÖTELEZŐ!)
 
@@ -551,174 +403,36 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 - `count_live_docs_from_ids()` - törölve
 - `parallel.rs` modul - törölve
 
-**Korábbi OOM hibák (tanulság):**
-- `4904ccc9` - scan_documents_via_catalog() összes doc betöltése
-- `567e0d11` - aggregation pipeline összes doc memóriában
-- `e0001bbe` - count_with_scan párhuzamos verzió → chunked parallel fix
-- `49f27a77` - update_one bulk load → streaming fix
-- `88f0a79c` - update_many bulk load → streaming fix
-- `e445b44e` - range_query + Top-K egységesítés
-- `2026-01-11` - **WAL unbounded growth** → Safe módban WAL soha nem ürült, 29GB-ra nőtt
-- `a54f29a1` - **Sparse index empty array** → `[]` hibásan "hiányzó mező"-ként kezelve, 300s+ count → 0.059s
-- `9ff48302` - **Stale index loading** → Dirty shutdown után phantom duplikátumok aggregation-ben
-- `df5cee21` - **HNSW NaN handling** → NaN távolságok elrontották heap rendezést
-- `169e2e6b` - **Fulltext unique_token_count** → Lazy mode dupla számolás
-- `b71c5012` - **HNSW PRNG race** → compare_exchange_weak thread-safe random level
-- `b71c5012` - **Index file hash collision** → 64-bit hash 32-bit helyett
+### Dokumentált Bugok (Referencia)
 
-### WAL Unbounded Growth Bug (2026-01-11) - KRITIKUS FIX
+**Korábbi OOM hibák (commit):**
+`4904ccc9`, `567e0d11`, `e0001bbe`, `49f27a77`, `88f0a79c`, `e445b44e`
 
-**Probléma:** Safe módban a WAL soha nem ürült ki hosszú futás alatt.
+**Kritikus bugok:**
 
-**Root cause:**
-- `commit_transaction_internal()` ír WAL-ba és hívja `wal.flush()`-t (fsync)
-- DE `wal.clear()` csak `StorageEngine::flush()`-ban volt, ami csak close/drop-kor hívódott
-- Eredmény: 29GB WAL fájl, OOM startup-kor (`wal.recover()` mindent memóriába tölt)
+| Bug | Commit | Tünet | Root Cause | Fix |
+|-----|--------|-------|------------|-----|
+| **WAL Unbounded Growth** | 2026-01-11 | OOM startup, 29GB .wal | `wal.clear()` csak close-kor | Periodikus clear 100 commit után |
+| **Sparse Index []** | a54f29a1 | count 300s+ timeout | `[]` = "hiányzó mező" | `get_nested_value().is_some()` |
+| **Stale Index Loading** | 9ff48302 | Phantom duplikátumok | `.idx` tombstone-okkal | `was_clean` check + Drop fix |
+| **HNSW NaN** | df5cee21 | Rossz heap rendezés | NaN összehasonlítás | NaN → max distance |
+| **Fulltext count** | 169e2e6b | Dupla számolás | Lazy mode bug | HashSet union |
+| **HNSW PRNG race** | b71c5012 | Thread-safety | Random level race | `compare_exchange_weak` |
+| **Index hash collision** | b71c5012 | Fájl ütközés | 32-bit hash | 64-bit hash |
 
-**Fix:** `commit_transaction_internal()` végén (Step 10) periodikus `wal.clear()` minden 100 commit után:
-```rust
-// storage/mod.rs:1299-1312
-if sync_file {
-    self.wal_ops_since_clear += 1;
-    if self.wal_ops_since_clear >= 100 {
-        self.wal.clear()?;
-        self.wal_ops_since_clear = 0;
-    }
-}
-```
+<details>
+<summary>Workaround-ok (kattints)</summary>
 
-**Tünet:** MCP szerver OOM startup-kor, `[STARTUP/DB] StorageEngine opened, recovering WAL...` után crash.
+**WAL Unbounded Growth:**
+- Tünet: `[STARTUP/DB] StorageEngine opened, recovering WAL...` után crash
+- Workaround: Töröld a `.wal` fájlt (backup mlite előtte!)
+- `.wal.tmp` auto-törlés startup-kor (2026-01-22)
 
-**Workaround (ha előfordul):** Töröld a .wal fájlt (backup mlite előtte!).
-
-**WAL orphan cleanup (2026-01-22):** `.wal.tmp` fájlok automatikusan törlődnek startup-kor.
-
-### Sparse Index Empty Array Bug (2026-01-15) - KRITIKUS FIX
-
-**Probléma:** Sparse index nem indexelte a dokumentumokat ahol a mező üres tömb `[]` volt.
-
-**Tünet:**
-- `create_index("attachments", sparse=true)` → `indexed=0` (94K doc helyett)
-- `count_documents({"attachments": {"$exists": true}})` → 300s+ timeout (collection scan)
-- `explain()` nem mutat `SparseIndexScan`-t
-
-**Root cause:**
-1. `get_all_nested_values(&doc, "attachments")` üres Vec-et ad vissza `attachments: []`-ra
-2. Üres Vec hibásan "hiányzó mező"-ként volt kezelve
-3. Sparse index kihagyta ezeket a dokumentumokat
-
-**Fix (három rész):**
-
-1. **index_ops.rs** - Üres tömb vs hiányzó mező megkülönböztetése:
-```rust
-let values = get_all_nested_values(&doc, &field_clone);
-if values.is_empty() {
-    // get_nested_value() → Some(&[]) üres tömbre, None hiányzó mezőre
-    let field_exists = get_nested_value(&doc, &field_clone).is_some();
-    if sparse && !field_exists {
-        continue;  // Csak VALÓBAN hiányzó mezőnél ugorjuk át
-    }
-    // Üres tömböt indexeljük Null kulccsal
-    let should_index = (sparse && field_exists)
-        || !IndexManager::is_key_all_null(&index_key)
-        || (unique && !sparse);
-    // ...
-}
-```
-
-2. **collection_core/mod.rs** - `SparseIndexScan` kezelése `count_with_plan()`-ben:
-```rust
-QueryPlan::SparseIndexScan { ref index_name, .. } => {
-    if let Some(index) = indexes.get_btree_index(index_name) {
-        let raw_count = index.metadata.num_keys as usize;
-        drop(indexes);
-        return self.adjust_count_for_tombstones(raw_count);
-    }
-}
-```
-
-**Eredmény:**
-- `indexed=94942` (összes doc ahol attachments létezik)
-- `count_documents({"attachments": {"$exists": true}})` → **0.059s** (300s+ helyett)
-- **~5000x gyorsulás**
-
-**Commit:** `a54f29a1`
-
-**Key files:**
-- `ironbase-core/src/collection_core/index_ops.rs` - index creation fix
-- `ironbase-core/src/collection_core/mod.rs` - count_with_plan SparseIndexScan
-
-### Stale Index Loading Bug (2026-01-24) - KRITIKUS FIX
-
-**Probléma:** Dirty shutdown után az aggregation phantom duplikátumokat mutatott.
-
-**Tünet:**
-- `find({"message_id": X})` → 1 dokumentum
-- `aggregate([{$group: {_id: "$message_id", count: {$sum: 1}}}])` → count=2 ugyanarra az X-re
-- 6 "duplikátum" ami valójában nem létezik
-
-**Root cause:**
-1. `.idx` fájlok tartalmazták a tombstoned dokumentumok index bejegyzéseit
-2. `load_persisted_indexes()` betöltötte ezeket `was_clean` ellenőrzés nélkül
-3. Index-based aggregation path megszámolta a stale bejegyzéseket
-4. `StorageEngine::Drop` nem hívta `mark_clean_shutdown()`-ot
-
-**Fix (9ff48302):**
-```rust
-// database/collections.rs - was_clean parameter hozzáadása
-fn load_persisted_indexes(..., was_clean: bool) {
-    if was_clean {
-        // Csak clean shutdown után töltsük be az .idx fájlokat
-        if let Some(loaded_tree) = try_load_index_from_file(...) {
-            index_manager.add_loaded_index(loaded_tree);
-            continue;
-        }
-    }
-    // Dirty shutdown → üres index, majd rebuild
-    index_manager.create_btree_index(...)?;
-}
-
-// FAST PATH fix - B+ tree index ellenőrzés
-let has_btree_without_file = persisted_indexes.iter().any(|meta| {
-    index_manager.get_btree_index(&meta.name)
-        .map(|idx| idx.size() == 0)
-        .unwrap_or(true)
-});
-
-// storage/mod.rs - mark_clean_shutdown() a Drop-ban
-impl Drop for StorageEngine {
-    fn drop(&mut self) {
-        let _ = self.flush();
-        let _ = self.checkpoint();
-        let _ = self.mark_clean_shutdown();  // ÚJ!
-        let _ = self.lock_file.unlock();
-    }
-}
-```
-
-**Érintett index típusok:** `.idx` (B+ tree), `.fzidx` (fuzzy), `.ftidx` (fulltext), `.hnsw` (vector)
-
-**Key files:**
-- `ironbase-core/src/database/collections.rs` - load_persisted_indexes, FAST PATH
-- `ironbase-core/src/storage/mod.rs` - Drop impl, mark_clean_shutdown
-
-### HNSW NaN Handling Bug (2026-01-22) - FIX
-
-**Probléma:** NaN távolságok elrontották a BinaryHeap rendezést.
-
-**Fix (df5cee21):**
-- `SearchCandidate`/`NearestCandidate` PartialEq: NaN == NaN
-- Ord implementáció: NaN → maximum distance (heap-ből először kirepül)
-- SIMD: `debug_assert!` → `assert!` (release mode-ban is ellenőriz)
-
-### Fulltext unique_token_count Bug (2026-01-22) - FIX
-
-**Probléma:** Lazy mode-ban dupla számolás volt.
-
-**Fix (169e2e6b):**
-- HashSet union használata
-- NaN-safe score összehasonlítás
-- Thread-local LRU regex cache (64 entry)
+**Stale Index Loading:**
+- `database/collections.rs` - `load_persisted_indexes(..., was_clean: bool)`
+- `storage/mod.rs` - `mark_clean_shutdown()` a Drop-ban
+- Érintett: `.idx`, `.fzidx`, `.ftidx`, `.hnsw`
+</details>
 
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
@@ -770,504 +484,181 @@ gc.collect()  # Forces GC to run Drop immediately
 
 ## MCP Server
 
-Részletes dokumentáció: **`mcp-server/README.md`**
-
-**DEFAULT ADATBÁZIS:** `/home/petitan/MongoLite/mcp-server/ironbase_data.mlite`
-- MINDIG ezt használd szerver indításkor, hacsak a user másképp nem kéri!
-- Tartalmazza: emails, tales, mesek, docs_md, stb.
+**DEFAULT DB:** `/home/petitan/MongoLite/mcp-server/ironbase_data.mlite`
 
 ```bash
-# Build & Run
 cd mcp-server && cargo build --release
-./target/release/mcp-ironbase-server --db /home/petitan/MongoLite/mcp-server/ironbase_data.mlite  # DEFAULT!
-./target/release/mcp-ironbase-server --stdio  # stdio mode (Claude Desktop)
+./target/release/mcp-ironbase-server --db /path/to/db.mlite
+./target/release/mcp-ironbase-server --stdio  # Claude Desktop
 ```
 
-**Környezeti változók:**
-- `IRONBASE_PATH` - Adatbázis fájl útvonala
-- `IRONBASE_ADMIN_KEY` - Admin kulcs rendszer műveletekhez
-- `IRONBASE_PORT` - HTTP port (default: 8080)
+| Env | Leírás |
+|-----|--------|
+| `IRONBASE_PATH` | DB fájl |
+| `IRONBASE_ADMIN_KEY` | Admin kulcs |
+| `IRONBASE_PORT` | Port (8080) |
 
-**Gyakori MCP cím:** 192.168.0.136:8080
-
-### MCP Server Struktúra (refactored 2026-01-22)
+<details>
+<summary>Struktúra</summary>
 
 ```
 mcp-server/src/
-├── http_server/
-│   ├── mod.rs           # Main HTTP server
-│   ├── handler.rs       # handle_request()
-│   ├── response.rs      # create_success_response, create_error_response
-│   ├── client.rs        # client_identity, is/mark_client_initialized
-│   ├── instructions.rs  # get_server_instructions
-│   ├── state.rs         # HttpAppState
-│   ├── config.rs        # Config, load_config, TOML structs
-│   ├── tls.rs           # load_rustls_config
-│   ├── size.rs          # parse_size, format_size
-│   └── logging.rs       # SyncFileWriter
-├── jobs/
-│   ├── manager.rs       # JobManager with graceful shutdown
-│   └── types.rs         # Job, JobStatus, JobId
-├── chunking/
-│   ├── markdown.rs      # Markdown-aware chunking
-│   └── text.rs          # Plain text chunking
-└── tools/
-    └── auto_embed.rs    # Auto-embedding tools
+├── http_server/  # mod.rs, handler.rs, response.rs, state.rs, config.rs
+├── jobs/         # manager.rs, types.rs
+├── chunking/     # markdown.rs, text.rs
+└── tools/        # auto_embed.rs
 ```
+</details>
 
-### Windows Service (2026-01-22)
+<details>
+<summary>Windows Service</summary>
 
-**Fixes (698584a4):**
-- `LOCALAPPDATA` → `PROGRAMDATA` LocalSystem service context-hez
-- Tcpip service dependency proper startup ordering-hez
-- `wait_hint = 30s` SCM timeout kezeléshez
-- `collection_exists()` check - blokkolja implicit collection létrehozást
+Fixes: `PROGRAMDATA` · Tcpip dependency · `wait_hint=30s` · `collection_exists()` check
 
-**Telepítés:** Lásd `mcp-server/docs/windows-service.md`
+Telepítés: `mcp-server/docs/windows-service.md`
+</details>
 
-## Testing Strategy
+## Server Kezelés
 
-- **Test first** approach always
-- Rust unit tests: `cargo test -p ironbase-core` (744+ tests)
-- Property tests: proptest in `ironbase-core/tests/property_tests.rs`
-- Integration tests: `ironbase-core/tests/`
-- Python tests: `test_*.py`, `run_all_tests.py`
-- C# tests: `IronBase.NET/src/IronBase.Tests/`
-- MCP tests: `cd mcp-server && cargo test`
+| Művelet | Parancs |
+|---------|---------|
+| Graceful stop | `kill -SIGTERM <pid>` (vár 60s) |
+| Force kill | `kill -SIGKILL <pid>` (KERÜLENDŐ!) |
+| Restart | `pkill -TERM mcp-ironbase && sleep 60 && ./server --db ...` |
+
+**SIGKILL → Dirty shutdown → indexek újraépítése (LASSÚ!)**
+
+Systemd: `TimeoutStopSec=60`, `KillSignal=SIGTERM`
+- `mark_clean_shutdown()` - Drop-ban hívódik
+
+## Testing
+
+| Típus | Parancs/Hely |
+|-------|--------------|
+| Rust unit | `cargo test -p ironbase-core` |
+| Property | `ironbase-core/tests/property_tests.rs` |
+| Python | `test_*.py`, `run_all_tests.py` |
+| C# | `IronBase.NET/src/IronBase.Tests/` |
+| MCP | `cd mcp-server && cargo test` |
+
+**MemoryStorage teszt:** `DatabaseCore::<MemoryStorage>::open_memory()` (10-100x gyorsabb)
+
+---
 
 ## Quick Reference
 
-### Creating Tests with MemoryStorage (fast, no files)
-```rust
-use ironbase_core::{DatabaseCore, storage::MemoryStorage};
+### Alapvető műveletek
 
-let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
-let coll = db.collection("test").unwrap();
-// ... test code - no cleanup needed
-```
-
-### Dot Notation for Nested Fields
 ```rust
-// Query
+// Dot notation - mindenhol működik
 coll.find(&json!({"address.city": "NYC"}))?;
+coll.update_one(&json!({"name": "X"}), &json!({"$set": {"a.b": "Y"}}))?;
 
-// Update
-coll.update_one(
-    &json!({"name": "Alice"}),
-    &json!({"$set": {"address.city": "Boston"}})
-)?;
+// Compound index
+coll.create_compound_index(vec!["country".into(), "city".into()], false)?;
 
-// Aggregation
-coll.aggregate(&json!([
-    {"$group": {"_id": "$address.city", "count": {"$sum": 1}}}
-]))?;
-
-// Sort
-let options = FindOptions::new().with_sort(vec![("address.zip".to_string(), 1)]);
-coll.find_with_options(&json!({}), options)?;
+// Upsert
+let opts = UpdateOptions::new().with_upsert(true);
+coll.update_one_with_options(&filter, &update, opts)?;
 ```
 
-### Creating Compound Indexes
+<details>
+<summary>Upsert részletek</summary>
+
+**Filter → Doc konverzió:** `{"email": "x"}` → doc-ba, `{"$gt": ...}` → ignorálva
+
+**Korlátozások:** `update_many` NEM támogatja · Auto-embed OK upsert-nél
+</details>
+
+### Keresés
+
+| Típus | API | Megjegyzés |
+|-------|-----|------------|
+| **Fuzzy** | `{"$fuzzy": "john"}` | jaro_winkler/levenshtein, threshold: 0.8 |
+| **Fulltext** | `fulltext_search(field, query, limit)` | TF-IDF, stemming, HU/EN/DE |
+| **RAG** | `rag_search(collection, query)` | FastText + HNSW |
+
+<details>
+<summary>Fulltext példa</summary>
+
 ```rust
-collection.create_compound_index(
-    vec!["country".to_string(), "city".to_string()],
-    false  // unique
-)?;
+coll.create_fulltext_index("content".into(), "hungarian", None, None)?;
+let results = coll.fulltext_search("content", "király", Some(10), None, None, None)?;
 ```
+</details>
 
-### Upsert (MongoDB-compatible)
-```rust
-use ironbase_core::UpdateOptions;
+<details>
+<summary>RAG MCP Tools</summary>
 
-// Upsert: insert if no match found
-let options = UpdateOptions::new().with_upsert(true);
-let result = collection.update_one_with_options(
-    &json!({"email": "new@example.com"}),
-    &json!({"$set": {"name": "New User"}}),
-    options
-)?;
+| Tool | Leírás |
+|------|--------|
+| `rag_collection_create` | Collection + FastText model |
+| `rag_document_import` | Auto-chunked import |
+| `rag_search` | Semantic search |
+| `rag_collection_stats` | Statisztikák |
 
-if let Some(id) = result.upserted_id {
-    println!("Inserted new document: {:?}", id);
-} else {
-    println!("Updated {} documents", result.modified_count);
-}
-```
+Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
+</details>
 
-**Python:**
-```python
-result = coll.update_one(
-    {"email": "new@example.com"},
-    {"$set": {"name": "New User"}},
-    upsert=True
-)
-print(result.get("upserted_id"))  # ID if inserted, None if updated
-```
+### Auto-Embedding & Cache
 
-**MCP:**
 ```json
-{"name": "document_update_one", "arguments": {
-  "collection": "users",
-  "filter": {"email": "new@example.com"},
-  "update": {"$set": {"name": "New User"}},
-  "upsert": true
-}}
-```
-
-**Filter → Document konverzió (upsert esetén):**
-- `{"email": "x"}` → `{"email": "x"}` (egyenlőség átmásolva)
-- `{"age": {"$gt": 18}}` → `{}` (comparison operátorok ignorálva)
-- `{"status": {"$eq": "active"}}` → `{"status": "active"}` ($eq támogatott)
-- `{"user.email": "x"}` → `{"user": {"email": "x"}}` (dot notation expandálva)
-- `{"$and": [...]}` → rekurzívan feldolgozva
-- `{"$or": [...]}` → ignorálva (ambiguus)
-
-**Upsert támogatott operátorok (2026-01-22):**
-- `$set`, `$inc`, `$unset`, `$push`, `$pull`, `$addToSet`, `$pop`
-- `$inc` overflow védelem: `checked_add()` saturating aritmetikával
-- `$addToSet` JSON deep equal: `{"a":1,"b":2}` == `{"b":2,"a":1}`
-
-**Upsert korlátozások:**
-- `update_many` NEM támogatja az upsert-et (explicit hiba)
-- Auto-embedding működik upsert insert-nél is (2026-01-22 fix)
-
-### $fuzzy Operator (Fuzzy Text Search)
-```rust
-// Simple fuzzy search (default: jaro_winkler, threshold: 0.8)
-coll.find(&json!({"name": {"$fuzzy": "john"}}))?;
-
-// With options
-coll.find(&json!({"name": {"$fuzzy": {
-    "value": "john",
-    "algorithm": "levenshtein",  // jaro_winkler | levenshtein | damerau_levenshtein
-    "threshold": 0.7
-}}}))?;
-
-// Create fuzzy index for faster queries
-coll.create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.8)?;
-```
-
-### Full-Text Search (TF-IDF)
-```rust
-// Create fulltext index with language support
-// Languages: "hungarian", "english", "german", "none"
-coll.create_fulltext_index(
-    "content".to_string(),
-    "hungarian",      // language for stemming and stop words
-    None,             // min_word_length (default: 2)
-    None              // accent_folding (default: true)
-)?;
-
-// Basic fulltext search
-let results = coll.fulltext_search(
-    "content",        // field
-    "király",         // query
-    Some(10),         // limit
-    None,             // skip
-    None,             // min_score
-    None              // projection
-)?;
-// Returns: Vec<(Document, score, matched_tokens)>
-
-// Search with projection (reduces response size for large documents)
-let mut projection = HashMap::new();
-projection.insert("title".to_string(), 1);
-projection.insert("_id".to_string(), 1);
-let results = coll.fulltext_search(
-    "content", "király", Some(10), None, None,
-    Some(projection)  // Only return title and _id
-)?;
-
-// Exclude large fields
-let mut proj = HashMap::new();
-proj.insert("full_text".to_string(), 0);  // Exclude full_text field
-let results = coll.fulltext_search("content", "query", Some(10), None, None, Some(proj))?;
-```
-
-**Features:**
-- TF-IDF scoring (term frequency × inverse document frequency)
-- Hungarian, English, German stop words
-- Snowball stemming (15+ languages via rust-stemmers)
-- Unicode accent folding (áéíóú → aeiou)
-- Pagination (limit/skip) and min_score filtering
-- Projection support for reduced response size
-
-**MCP Usage:**
-```json
-// Create index
-{"name": "index_create_fulltext", "arguments": {
-  "collection": "articles",
-  "field": "content",
-  "language": "hungarian"
-}}
-
-// Search with projection
-{"name": "fulltext_search", "arguments": {
-  "collection": "articles",
-  "field": "content",
-  "query": "király",
-  "limit": 10,
-  "projection": {"title": 1, "_id": 1}
-}}
-```
-
-### RAG (Retrieval Augmented Generation) - Semantic Search
-
-RAG provides semantic document search using FastText word embeddings and HNSW vector indexing.
-
-**Key Components:**
-- **FastText**: Memory-mapped word embeddings (~2GB model, ~150ms load time)
-- **HNSW Index**: Hierarchical Navigable Small World graph for fast nearest neighbor search
-- **Smart Chunker**: Markdown-aware document chunking with heading preservation
-
-**MCP Tools:**
-```json
-// Create RAG collection with FastText model
-{"name": "rag_collection_create", "arguments": {
-  "name": "docs",
-  "model_path": "/path/to/cc.hu.300.bin",
-  "chunk_max_tokens": 1000,
-  "chunk_overlap": 100,
-  "admin_key": "..."
-}}
-
-// Import document (auto-chunked)
-{"name": "rag_document_import", "arguments": {
-  "collection": "docs",
-  "doc_id": "readme",
-  "title": "README",
-  "content": "# Markdown content..."
-}}
-
-// Semantic search
-{"name": "rag_search", "arguments": {
-  "collection": "docs",
-  "query": "how to install",
-  "limit": 5,
-  "min_score": 0.6
-}}
-
-// List/delete operations
-{"name": "rag_collection_list"}
-{"name": "rag_collection_stats", "arguments": {"collection": "docs"}}
-{"name": "rag_document_list", "arguments": {"collection": "docs"}}
-{"name": "rag_document_delete", "arguments": {"collection": "docs", "doc_id": "readme"}}
-{"name": "rag_collection_delete", "arguments": {"name": "docs", "admin_key": "..."}}
-```
-
-**Search Result Structure:**
-```json
-{
-  "doc_id": "readme",
-  "doc_title": "README",
-  "chunk_id": 3,
-  "section": "Installation",
-  "text": "To install the package...",
-  "score": 0.847,
-  "block_type": "paragraph"
-}
-```
-
-**Storage:**
-- RAG data stored in `_rag/` directory relative to database file
-- Each collection has: `{name}.meta.json`, `{name}.state.json`, HNSW index files
-- FastText models are loaded once per request (memory-mapped, ~150ms)
-
-**Performance:**
-- Embedding: ~50-100 docs/sec
-- Search: ~1-5ms for 10K chunks
-- Memory: ~50MB per 10K chunks (HNSW index)
-
-### Auto-Embedding (2026-01-22)
-
-Automatikus vektor embedding generálás insert műveletekkor.
-
-**MCP Tools:**
-```json
-// Enable auto-embedding for a collection
 {"name": "auto_embed_enable", "arguments": {
-  "collection": "articles",
-  "source_field": "content",
-  "target_field": "content_embedding",
-  "provider": "fasttext",
-  "model_path": "/path/to/cc.hu.300.bin",
-  "dimension": 300,
-  "chunking": {"enabled": true, "max_tokens": 500, "overlap": 50}
+  "collection": "articles", "source_field": "content",
+  "target_field": "content_embedding", "provider": "fasttext"
 }}
-
-// Check status
-{"name": "auto_embed_status", "arguments": {"collection": "articles"}}
-
-// Backfill existing documents
-{"name": "auto_embed_backfill", "arguments": {"collection": "articles"}}
-
-// Disable
-{"name": "auto_embed_disable", "arguments": {"collection": "articles"}}
-```
-
-**Működés:**
-1. Insert műveletkor automatikusan generálódik az embedding
-2. `source_field` szövegéből `target_field`-be kerül a vektor
-3. Chunking támogatás nagy szövegekhez
-4. Async backfill JobManager-en keresztül
-
-**Key files:**
-- `mcp-server/src/tools/auto_embed.rs` - MCP tool implementáció
-- `mcp-server/src/chunking/` - Markdown és plain text chunking
-
-### Embedding Cache (2026-01-22)
-
-LRU cache az embedding generáláshoz.
-
-```json
-// Cache statistics
 {"name": "embed_cache_stats"}
 
 // Clear cache
 {"name": "embed_cache_clear"}
 ```
 
-**Jellemzők:**
-- SHA256-based kulcsok (text + provider + model)
-- Konfigurálható TTL és max entries
-- Thread-safe
+Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pending→Running→Done
 
-### Job Manager (2026-01-22)
+### $** Wildcard
 
-Async job kezelés hosszú futású műveletekhez (pl. backfill).
+`{"$**.name": "Alice"}` - mező keresése BÁRMILYEN mélységben (collection scan, MAX_DEPTH=100)
 
-```json
-// List jobs
-{"name": "embed_job_list"}
+---
 
-// Job status
-{"name": "embed_job_status", "arguments": {"job_id": "..."}}
+## Release & Dependencies
 
-// Cancel job
-{"name": "embed_job_cancel", "arguments": {"job_id": "..."}}
-```
+**Verzió frissítés (KÖTELEZŐ):**
+- `mcp-server/Cargo.toml` → `1.0.XX`
+- `Cargo.toml` (workspace) → `0.3.X`
 
-**Job lifecycle:** Pending → Running → Completed/Failed/Cancelled
+**CI/CD:** Push → auto-tag.yml → release.yml → Win/Linux/macOS build
 
-**Graceful Shutdown (2026-01-22):**
-- `shutdown_flag: Arc<AtomicBool>` - global flag
-- Background job-ok ellenőrzik a flag-et és kilépnek
-- `shutdown_with_timeout(30s)` - vár a thread-ekre
+**Ellenőrzés:** `gh run list --limit 5` · `gh release list --limit 3`
 
-**Job GC/TTL:**
-- Completed job-ok 1 óra után törlődnek
-- Periodikus cleanup get/list műveleteknél
+**Dependencies:** serde, parking_lot, pyo3, maturin, ahash/dashmap, thiserror
 
-**Key files:**
-- `mcp-server/src/jobs/manager.rs` - JobManager
-- `mcp-server/src/jobs/types.rs` - Job, JobStatus
+**MCP cím:** 192.168.0.136:8080
 
-### $** Wildcard Operator (Recursive Descent)
-```rust
-// Find "name" field at ANY depth in the document
-coll.find(&json!({"$**.name": "Alice"}))?;
-
-// With regex - find all documents where any "content" field matches
-coll.find(&json!({"$**.content": {"$regex": "sqrt"}}))?;
-
-// With comparison operators
-coll.find(&json!({"$**.score": {"$gte": 85}}))?;
-
-// Multiple matches - returns docs where ANY occurrence matches
-coll.find(&json!({"$**.status": "active"}}))?;
-```
-
-**Notes:**
-- Syntax: `$**.fieldName` (only simple field names, no nested paths)
-- `$**.a.b` is INVALID - use separate queries or dot notation
-- Cannot use indexes - always performs collection scan
-- MAX_DEPTH=100 to prevent stack overflow
-- Works with arrays: searches inside array elements too
-
-## Key Dependencies
-
-- **serde/serde_json**: Serialization
-- **parking_lot**: Fast RwLock
-- **pyo3**: Python bindings
-- **maturin**: Build Python wheels
-- **ahash/dashmap**: Fast hashing
-- **thiserror**: Error handling
-- 192.168.0.136 az mcp cime általában
-
-## Release folyamat (FONTOS!)
-
-### Verzió frissítés KÖTELEZŐ lépései
-
-Minden feature/bugfix commit után **KÖTELEZŐ** a verzió frissítése:
-
-1. **mcp-server verzió** (fő verzió): `mcp-server/Cargo.toml` → `version = "1.0.XX"`
-2. **core verzió**: `Cargo.toml` (workspace) → `version = "0.3.X"`
-
-### CI/CD folyamat (AUTOMATIKUS)
-
-```
-[Push to master]
-    ↓
-[auto-tag.yml]
-    ├── job: auto-tag → tag létrehozás (v1.0.XX)
-    ↓
-    └── job: call-release → workflow_call
-            ↓
-        [release.yml] → build (Win/Linux/macOS) + GitHub Release
-```
-
-**Megoldott probléma:** A `workflow_call` megkerüli a GitHub biztonsági korlátozást - az auto-tag.yml közvetlenül meghívja a release.yml-t.
-
-### Ellenőrzés
+<details>
+<summary>Hot Backup</summary>
 
 ```bash
-# Workflow futások
-gh run list --limit 5
-
-# Release létrejött-e?
-gh release list --limit 3
-```
-
-## Hot Backup
-
-Részletes dokumentáció: **`ironbase-backup/README.md`**
-
-```bash
-# Full backup futó adatbázisról
-ironbase-backup backup --db /path/to/data.mlite --output ./backups --full
-
-# Split backup (>10 GB adatbázisokhoz)
-ironbase-backup backup --db /path/to/data.mlite --output ./backups --split 2G
-
-# Restore
+ironbase-backup backup --db /path/to.mlite --output ./backups --full
 ironbase-backup restore --dir ./backups --output /path/to/restored.mlite
 ```
+Lock-free: append-only → `data_end_offset`-ig immutable
+</details>
 
-**Lock-free működés:** Az append-only storage garantálja, hogy `data_end_offset`-ig minden adat immutable → backup olvashat LOCK NÉLKÜL.
+---
 
-## Durability
+## Durability & Performance
 
-| Mode | fsync | Sebesség | Adatvesztés crash-nél |
-|------|-------|----------|----------------------|
-| **Safe** (default) | ✅ | ~1,000-5,000 op/sec | 0 |
-| **Batch** | ✅ | ~20,000-50,000 op/sec | Max N művelet |
-| **Unsafe** | ❌ | ~50,000-100,000 op/sec | Minden uncommitted |
+| Mode | fsync | ops/sec | Crash loss |
+|------|-------|---------|------------|
+| **Safe** | ✅ | 1-5K | 0 |
+| **Batch** | ✅ | 20-50K | Max N |
+| **Unsafe** | ❌ | 50-100K | All |
 
-**Crash safety:** WAL + metadata snapshot → automatikus recovery `open()` hívásnál.
-
-## Performance (MemoryStorage)
-
-| Művelet | Sebesség |
-|---------|----------|
-| INSERT (batch) | ~200K ops/sec |
-| INSERT (single) | ~50K ops/sec |
-| FIND (indexed) | ~500K ops/sec |
-| FIND (scan) | ~50K ops/sec |
-| UPDATE | ~30K ops/sec |
+| Művelet | MemoryStorage |
+|---------|---------------|
+| INSERT batch | ~200K/sec |
+| FIND indexed | ~500K/sec |
 | AGGREGATION | ~100K docs/sec |
 
-**Fulltext index overhead:** +2x lassulás írási műveleteknél (~30µs/doc)
-
-```bash
-cargo test -p ironbase-core --release speed_benchmark_full_suite -- --nocapture --ignored
-```
+Benchmark: `cargo test -p ironbase-core --release speed_benchmark_full_suite -- --nocapture --ignored`
