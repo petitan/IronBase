@@ -10,10 +10,23 @@ use std::collections::HashMap;
 /// These limits protect against memory exhaustion when running aggregation
 /// pipelines without $match (full collection scans) or with high-cardinality $group.
 ///
-/// # Default limits
-/// - `max_docs_without_match`: 100,000 - Max documents to process without $match
-/// - `max_group_count`: 50,000 - Max unique groups in $group stage
-/// - `max_memory_mb`: 512 - Max estimated memory usage (MB)
+/// # Default limits (consistent with scale_to_memory(4GB))
+///
+/// | Limit | Default | Memory Impact |
+/// |-------|---------|---------------|
+/// | `max_docs_without_match` | 10,000 | ~10 MB (1KB/doc) |
+/// | `max_docs_with_match` | 100,000 | ~100 MB |
+/// | `max_group_count` | 100,000 | ~6.4 MB (64B/group) |
+/// | `max_push_elements` | 10,000/group | ~1 MB/group |
+/// | `max_addtoset_elements` | 10,000/group | ~1.5 MB/group |
+/// | `max_total_push_elements` | 1,000,000 | ~100 MB global |
+/// | `max_total_addtoset_elements` | 500,000 | ~75 MB global |
+/// | `max_unwind_output` | 100,000 | ~100 MB |
+///
+/// # Scaling
+///
+/// All constructors use 4GB as the reference point (scale_factor = 1.0).
+/// Limits scale linearly with available memory up to 2.5× at 10GB+.
 ///
 /// # Example
 /// ```rust,ignore
@@ -21,61 +34,86 @@ use std::collections::HashMap;
 ///
 /// // Use stricter limits for memory-constrained environment
 /// let limits = AggregationLimits {
-///     max_docs_without_match: 10_000,
-///     max_group_count: 5_000,
-///     max_memory_mb: 256,
+///     max_docs_without_match: 5_000,
+///     max_group_count: 50_000,
+///     ..AggregationLimits::low_memory()
 /// };
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub struct AggregationLimits {
     /// Maximum documents to scan when there's no $match stage
-    /// Default: 100,000
+    /// Default: 10,000 (≈10 MB at 1KB/doc average)
     pub max_docs_without_match: usize,
 
     /// Maximum documents to scan even WITH $match stage
     /// Prevents OOM when $match returns too many documents
-    /// Default: 1,000,000 (was: usize::MAX - UNSAFE!)
+    /// Default: 100,000 (≈100 MB)
     pub max_docs_with_match: usize,
 
     /// Maximum number of unique groups in $group stage
-    /// Prevents memory explosion with high-cardinality group keys
-    /// Default: 50,000
+    /// Streaming $group only uses ~64 bytes per group (hash + accumulator state)
+    /// Default: 100,000 (≈6.4 MB)
     pub max_group_count: usize,
 
-    /// Maximum elements in a single $push accumulator per group
-    /// Prevents OOM when collecting many values
-    /// Default: 100,000
+    /// Maximum elements in a single $push accumulator PER GROUP
+    /// Default: 10,000 per group (≈1 MB/group at 100 bytes/element)
     pub max_push_elements: usize,
 
-    /// Maximum elements in a single $addToSet accumulator per group
-    /// Prevents OOM with high-cardinality fields
-    /// Default: 100,000
+    /// Maximum elements in a single $addToSet accumulator PER GROUP
+    /// Default: 10,000 per group (≈1.5 MB/group with HashSet overhead)
     pub max_addtoset_elements: usize,
+
+    /// Maximum TOTAL elements across ALL $push accumulators (all groups combined)
+    /// Prevents OOM when many groups each have moderate $push usage
+    /// Default: 1,000,000 (≈100 MB global)
+    pub max_total_push_elements: usize,
+
+    /// Maximum TOTAL elements across ALL $addToSet accumulators (all groups combined)
+    /// Prevents OOM when many groups each have moderate $addToSet usage
+    /// Default: 500,000 (≈75 MB global)
+    pub max_total_addtoset_elements: usize,
 
     /// Maximum output documents from $unwind stage
     /// Prevents explosion when unwinding large arrays
-    /// Default: 1,000,000
+    /// Default: 100,000 (≈100 MB)
     pub max_unwind_output: usize,
 
-    /// Maximum estimated memory usage in MB
-    /// NOTE: Currently used for try_reserve() failures, not runtime tracking
-    /// Default: 512 MB
+    /// Maximum estimated memory budget in MB
+    /// Used for documentation and error messages
+    /// Default: 256 MB (25% of 1GB reference)
     pub max_memory_mb: usize,
 }
 
+/// Reference memory for scale_factor = 1.0 (4GB)
+const BASE_MEMORY_MB: f64 = 4096.0;
+
 impl Default for AggregationLimits {
+    /// Default limits consistent with scale_to_memory(4GB)
+    ///
+    /// FIX (2026-01-25): Harmonized with scale_to_memory() to avoid inconsistencies.
+    /// All values now match what scale_to_memory(4GB) would produce.
     fn default() -> Self {
         Self {
-            // OOM FIX (2026-01): Reduced from 100K to 10K
-            // 10K docs × 100KB avg = ~1GB max memory - safe for most systems
-            // Use aggregate_auto() or explicit $match for larger collections
-            max_docs_without_match: 10_000,
-            max_docs_with_match: 1_000_000,
-            max_group_count: 50_000,
-            max_push_elements: 100_000,
-            max_addtoset_elements: 100_000,
-            max_unwind_output: 1_000_000,
-            max_memory_mb: 512,
+            // Document limits
+            max_docs_without_match: 10_000, // 10K × 1KB = 10 MB
+            max_docs_with_match: 100_000,   // 100K × 1KB = 100 MB
+
+            // Group limits - streaming $group uses ~64 bytes/group
+            max_group_count: 100_000, // 100K × 64B = 6.4 MB
+
+            // Per-group accumulator limits
+            max_push_elements: 10_000,     // 10K × 100B = 1 MB/group
+            max_addtoset_elements: 10_000, // 10K × 150B = 1.5 MB/group
+
+            // Global accumulator limits (across all groups)
+            max_total_push_elements: 1_000_000, // 1M × 100B = 100 MB total
+            max_total_addtoset_elements: 500_000, // 500K × 150B = 75 MB total
+
+            // Output limits
+            max_unwind_output: 100_000, // 100K × 1KB = 100 MB
+
+            // Memory budget (for documentation/error messages)
+            max_memory_mb: 256, // 25% of 1GB reference
         }
     }
 }
@@ -84,18 +122,19 @@ impl AggregationLimits {
     /// Create limits dynamically based on system RAM
     ///
     /// Automatically scales limits to match available system memory:
-    /// - Uses max 25% of available RAM for aggregation
-    /// - Scales doc/group limits proportionally
+    /// - Uses max 25% of available RAM for aggregation budget
+    /// - Scales all limits proportionally (base = 4GB)
     /// - Falls back to `low_memory()` if detection fails
     ///
-    /// # Scaling table (OOM FIX 2026-01: reduced base from 100K to 10K)
-    /// | Available RAM | max_memory_mb | max_docs_without_match | max_groups |
-    /// |---------------|---------------|------------------------|------------|
-    /// | < 512 MB      | 64            | 1K                     | 500        |
-    /// | 512MB - 2GB   | 128           | 5K                     | 2.5K       |
-    /// | 2GB - 8GB     | 256           | 10K                    | 5K         |
-    /// | 8GB - 32GB    | 512           | 25K                    | 10K        |
-    /// | > 32GB        | 1024          | 50K                    | 25K        |
+    /// # Scaling table (base: 4GB = scale_factor 1.0)
+    ///
+    /// | Available RAM | scale_factor | max_docs | max_groups | max_memory_mb |
+    /// |---------------|--------------|----------|------------|---------------|
+    /// | 1 GB          | 0.25         | 2.5K     | 25K        | 64            |
+    /// | 2 GB          | 0.5          | 5K       | 50K        | 128           |
+    /// | 4 GB          | 1.0          | 10K      | 100K       | 256           |
+    /// | 8 GB          | 2.0          | 20K      | 200K       | 512           |
+    /// | 10+ GB        | 2.5 (max)    | 25K      | 250K       | 640+          |
     ///
     /// # Example
     /// ```rust,ignore
@@ -117,38 +156,19 @@ impl AggregationLimits {
     }
 
     /// Scale limits based on available memory bytes
+    ///
+    /// FIX (2026-01-25): Unified scaling formula with with_memory_budget()
+    /// Both now use BASE_MEMORY_MB (4GB) as reference point.
     fn scale_to_memory(available_bytes: u64) -> Self {
         let available_mb = available_bytes / (1024 * 1024);
 
         // Use max 25% of available RAM, bounded between 64MB and 4GB
         let max_memory_mb = (available_mb as usize / 4).clamp(64, 4096);
 
-        // Scale factor: 1.0 at 4GB available, proportionally less below
-        // This means at 4GB+ available, you get the "standard" limits
-        let scale_factor = (available_mb as f64 / 4096.0).clamp(0.1, 2.5);
+        // Scale factor: 1.0 at 4GB available, proportionally less below, max 2.5 above
+        let scale_factor = (available_mb as f64 / BASE_MEMORY_MB).clamp(0.1, 2.5);
 
-        Self {
-            // Document limits scale with memory
-            // OOM FIX (2026-01): Reduced base from 100K to 10K
-            // Even with 8GB RAM, 100K docs × 100KB = 10GB > RAM!
-            max_docs_without_match: ((10_000.0 * scale_factor) as usize).max(1_000),
-            // OOM FIX (2026-01): Reduced minimum from 10K to 2K
-            // $match doesn't disable limits - it just allows higher ones
-            max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(2_000),
-
-            // Group/accumulator limits
-            // FIX (2026-01-25): Increased base from 5K to 100K for streaming $group
-            // Streaming $group only stores ~64 bytes per group (hash + accumulator state)
-            // 100K groups × 64 bytes = 6.4 MB - minimal memory usage
-            // Old: 5K * 2.5 = 12.5K limit was too restrictive for high-cardinality group keys
-            max_group_count: ((100_000.0 * scale_factor) as usize).max(10_000),
-            max_push_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
-            max_addtoset_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
-            max_unwind_output: ((100_000.0 * scale_factor) as usize).max(10_000),
-
-            // Memory limit
-            max_memory_mb,
-        }
+        Self::from_scale_factor(scale_factor, max_memory_mb)
     }
 
     /// Create limits for a specific memory budget
@@ -156,14 +176,17 @@ impl AggregationLimits {
     /// Scales all limits proportionally to the given memory budget.
     /// Use this when you want precise control over memory usage.
     ///
-    /// # Scaling table
-    /// | Budget     | max_docs_without_match | max_groups |
-    /// |------------|------------------------|------------|
-    /// | 64 MB      | 1K (minimum)           | 500        |
-    /// | 256 MB     | 2.5K                   | 1.25K      |
-    /// | 1 GB       | 10K                    | 5K         |
-    /// | 4 GB       | 40K                    | 20K        |
-    /// | 16 GB      | 160K                   | 80K        |
+    /// FIX (2026-01-25): Now uses same 4GB base as scale_to_memory() for consistency.
+    ///
+    /// # Scaling table (base: 4GB = scale_factor 1.0)
+    ///
+    /// | Budget     | scale_factor | max_docs | max_groups |
+    /// |------------|--------------|----------|------------|
+    /// | 256 MB     | 0.0625       | 1K       | 10K        |
+    /// | 1 GB       | 0.25         | 2.5K     | 25K        |
+    /// | 4 GB       | 1.0          | 10K      | 100K       |
+    /// | 8 GB       | 2.0          | 20K      | 200K       |
+    /// | 16 GB      | 4.0          | 40K      | 400K       |
     ///
     /// # Arguments
     /// * `memory_mb` - Maximum memory to use in megabytes (min: 64, no upper limit)
@@ -183,46 +206,77 @@ impl AggregationLimits {
         // Minimum 64MB, no upper limit (allow large memory systems to scale)
         let effective_budget = memory_mb.max(64);
 
-        // Scale factor: 1.0 at 1GB budget, proportionally more/less for other values
-        // This means at 1GB budget, you get the "base" limits (10K docs, 5K groups)
-        // At 4GB → 4x limits, at 16GB → 16x limits
-        let scale_factor = (effective_budget as f64 / 1024.0).max(0.1);
+        // FIX (2026-01-25): Use same 4GB base as scale_to_memory()
+        // Old: 1GB base caused 4x inconsistency with scale_to_memory()
+        let scale_factor = (effective_budget as f64 / BASE_MEMORY_MB).max(0.01);
 
+        Self::from_scale_factor(scale_factor, effective_budget)
+    }
+
+    /// Internal: create limits from scale factor
+    ///
+    /// Centralizes all limit calculations to ensure consistency.
+    fn from_scale_factor(scale_factor: f64, max_memory_mb: usize) -> Self {
         Self {
+            // Document limits
             max_docs_without_match: ((10_000.0 * scale_factor) as usize).max(1_000),
-            // OOM FIX (2026-01): Reduced minimum from 10K to 2K
             max_docs_with_match: ((100_000.0 * scale_factor) as usize).max(2_000),
-            // FIX (2026-01-25): Increased base for streaming $group (64 bytes/group)
+
+            // Group limits - streaming $group uses ~64 bytes/group
             max_group_count: ((100_000.0 * scale_factor) as usize).max(10_000),
+
+            // Per-group accumulator limits
             max_push_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
             max_addtoset_elements: ((10_000.0 * scale_factor) as usize).max(1_000),
+
+            // Global accumulator limits
+            max_total_push_elements: ((1_000_000.0 * scale_factor) as usize).max(100_000),
+            max_total_addtoset_elements: ((500_000.0 * scale_factor) as usize).max(50_000),
+
+            // Output limits
             max_unwind_output: ((100_000.0 * scale_factor) as usize).max(10_000),
-            max_memory_mb: effective_budget,
+
+            // Memory budget
+            max_memory_mb,
         }
     }
 
-    /// Create limits suitable for low-memory environments
+    /// Create limits suitable for low-memory environments (< 1GB RAM)
     ///
-    /// OOM FIX (2026-01): Made truly conservative
-    /// - 1K docs without match (was: 10K - same as default!)
-    /// - 5K docs with match (was: 100K)
-    /// - 64 MB memory budget
+    /// FIX (2026-01-25): Increased max_group_count from 500 to 10,000
+    /// Streaming $group only uses ~64 bytes/group, so 10K groups = 640KB
+    /// The old 500 group limit was unnecessarily restrictive.
     ///
     /// Use this when memory detection fails or in restricted environments.
     pub fn low_memory() -> Self {
         Self {
-            max_docs_without_match: 1_000, // Conservative - 1K × 100KB = 100MB max
-            max_docs_with_match: 5_000,    // Even with $match, limit aggressively
-            max_group_count: 500,          // Low group count
+            // Document limits - very conservative
+            max_docs_without_match: 1_000, // 1K × 1KB = 1 MB
+            max_docs_with_match: 5_000,    // 5K × 1KB = 5 MB
+
+            // Group limits - 10K groups still only 640KB with streaming
+            max_group_count: 10_000, // 10K × 64B = 640 KB
+
+            // Per-group limits
             max_push_elements: 1_000,
             max_addtoset_elements: 1_000,
+
+            // Global limits - reduced for low memory
+            max_total_push_elements: 50_000,
+            max_total_addtoset_elements: 25_000,
+
+            // Output limits
             max_unwind_output: 10_000,
-            max_memory_mb: 128,
+
+            // Memory budget
+            max_memory_mb: 64,
         }
     }
 
     /// Create limits with no restrictions (use with caution!)
+    ///
     /// WARNING: This can cause OOM on large collections!
+    /// Only use for testing or when you have verified the data size is safe.
     pub fn unlimited() -> Self {
         Self {
             max_docs_without_match: usize::MAX,
@@ -230,6 +284,8 @@ impl AggregationLimits {
             max_group_count: usize::MAX,
             max_push_elements: usize::MAX,
             max_addtoset_elements: usize::MAX,
+            max_total_push_elements: usize::MAX,
+            max_total_addtoset_elements: usize::MAX,
             max_unwind_output: usize::MAX,
             max_memory_mb: usize::MAX,
         }

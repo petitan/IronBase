@@ -57,50 +57,63 @@ impl MemoryTier {
     }
 
     /// Get the scaling entry for this tier
+    ///
+    /// FIX (2026-01-25): Added global accumulator limits
+    /// Global limits are ~100x per-group limits to allow many groups
     fn scaling_entry(&self) -> ScalingEntry {
         match self {
             Self::Tiny => ScalingEntry {
                 max_docs_without_match: 10_000,
                 max_docs_with_match: 50_000,
-                max_group_count: 5_000,
+                max_group_count: 10_000, // FIX: was 5K, streaming only uses 640KB
                 max_push_elements: 10_000,
                 max_addtoset_elements: 10_000,
+                max_total_push_elements: 100_000,
+                max_total_addtoset_elements: 50_000,
                 max_unwind_output: 100_000,
                 max_memory_mb: 64,
             },
             Self::Small => ScalingEntry {
                 max_docs_without_match: 50_000,
                 max_docs_with_match: 250_000,
-                max_group_count: 25_000,
+                max_group_count: 50_000, // FIX: was 25K
                 max_push_elements: 50_000,
                 max_addtoset_elements: 50_000,
+                max_total_push_elements: 500_000,
+                max_total_addtoset_elements: 250_000,
                 max_unwind_output: 500_000,
                 max_memory_mb: 128,
             },
             Self::Medium => ScalingEntry {
                 max_docs_without_match: 100_000,
                 max_docs_with_match: 500_000,
-                max_group_count: 50_000,
+                max_group_count: 100_000, // FIX: was 50K
                 max_push_elements: 100_000,
                 max_addtoset_elements: 100_000,
+                max_total_push_elements: 1_000_000,
+                max_total_addtoset_elements: 500_000,
                 max_unwind_output: 1_000_000,
                 max_memory_mb: 256,
             },
             Self::Large => ScalingEntry {
                 max_docs_without_match: 250_000,
                 max_docs_with_match: 1_000_000,
-                max_group_count: 100_000,
+                max_group_count: 200_000, // FIX: was 100K
                 max_push_elements: 250_000,
                 max_addtoset_elements: 250_000,
+                max_total_push_elements: 2_500_000,
+                max_total_addtoset_elements: 1_250_000,
                 max_unwind_output: 2_500_000,
                 max_memory_mb: 512,
             },
             Self::XLarge => ScalingEntry {
                 max_docs_without_match: 500_000,
                 max_docs_with_match: 2_000_000,
-                max_group_count: 250_000,
+                max_group_count: 500_000, // FIX: was 250K
                 max_push_elements: 500_000,
                 max_addtoset_elements: 500_000,
+                max_total_push_elements: 5_000_000,
+                max_total_addtoset_elements: 2_500_000,
                 max_unwind_output: 5_000_000,
                 max_memory_mb: 1024,
             },
@@ -109,6 +122,8 @@ impl MemoryTier {
 }
 
 /// Internal scaling entry for a memory tier
+///
+/// FIX (2026-01-25): Added global accumulator limits
 #[derive(Debug, Clone, Copy)]
 struct ScalingEntry {
     max_docs_without_match: usize,
@@ -116,6 +131,8 @@ struct ScalingEntry {
     max_group_count: usize,
     max_push_elements: usize,
     max_addtoset_elements: usize,
+    max_total_push_elements: usize,
+    max_total_addtoset_elements: usize,
     max_unwind_output: usize,
     max_memory_mb: usize,
 }
@@ -128,6 +145,8 @@ impl From<ScalingEntry> for AggregationLimits {
             max_group_count: entry.max_group_count,
             max_push_elements: entry.max_push_elements,
             max_addtoset_elements: entry.max_addtoset_elements,
+            max_total_push_elements: entry.max_total_push_elements,
+            max_total_addtoset_elements: entry.max_total_addtoset_elements,
             max_unwind_output: entry.max_unwind_output,
             max_memory_mb: entry.max_memory_mb,
         }
@@ -221,9 +240,13 @@ mod tests {
 
         assert_eq!(tiny.max_docs_without_match, 10_000);
         assert_eq!(tiny.max_docs_with_match, 50_000);
-        assert_eq!(tiny.max_group_count, 5_000);
+        // FIX (2026-01-25): was 5K, now 10K - streaming $group uses only 640KB
+        assert_eq!(tiny.max_group_count, 10_000);
         assert_eq!(tiny.max_push_elements, 10_000);
         assert_eq!(tiny.max_addtoset_elements, 10_000);
+        // FIX (2026-01-25): new global limits
+        assert_eq!(tiny.max_total_push_elements, 100_000);
+        assert_eq!(tiny.max_total_addtoset_elements, 50_000);
         assert_eq!(tiny.max_unwind_output, 100_000);
         assert_eq!(tiny.max_memory_mb, 64);
     }
@@ -234,9 +257,13 @@ mod tests {
 
         assert_eq!(xlarge.max_docs_without_match, 500_000);
         assert_eq!(xlarge.max_docs_with_match, 2_000_000);
-        assert_eq!(xlarge.max_group_count, 250_000);
+        // FIX (2026-01-25): was 250K, now 500K
+        assert_eq!(xlarge.max_group_count, 500_000);
         assert_eq!(xlarge.max_push_elements, 500_000);
         assert_eq!(xlarge.max_addtoset_elements, 500_000);
+        // FIX (2026-01-25): new global limits
+        assert_eq!(xlarge.max_total_push_elements, 5_000_000);
+        assert_eq!(xlarge.max_total_addtoset_elements, 2_500_000);
         assert_eq!(xlarge.max_unwind_output, 5_000_000);
         assert_eq!(xlarge.max_memory_mb, 1024);
     }

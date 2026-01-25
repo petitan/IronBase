@@ -55,6 +55,8 @@ fn test_context_with_custom_limits() {
         max_group_count: 50,
         max_push_elements: 20,
         max_addtoset_elements: 20,
+        max_total_push_elements: 100_000,
+        max_total_addtoset_elements: 50_000,
         max_unwind_output: 500,
         max_memory_mb: 64,
     };

@@ -90,23 +90,26 @@ impl GroupStage {
 
     /// Execute $group stage with streaming accumulators (memory optimized)
     ///
-    /// OLD APPROACH (BAD - OOM prone):
-    /// ```ignore
-    /// groups: HashMap<String, Vec<Value>>  // Stored ALL documents per group
-    /// ```
+    /// # DEPRECATED (2026-01-25)
     ///
-    /// NEW APPROACH (GOOD - constant memory per group):
-    /// ```ignore
-    /// groups: HashMap<u64, GroupEntry>  // Hash-based lookup, stores original key
-    /// ```
+    /// **WARNING:** This method has NO LIMIT CHECKING!
+    /// Use `execute_streaming_with_context()` or `execute_streaming_with_limits()` instead.
     ///
-    /// PERF OPTIMIZATION (2024-12):
-    /// Changed from String keys (serde_json::to_string) to u64 hash keys (value_hash).
-    /// This eliminates JSON serialization overhead: ~30µs/doc → ~0.3µs/doc
+    /// This legacy method is kept only for backward compatibility and may be removed
+    /// in a future version.
     ///
-    /// Memory comparison for 650K emails grouped by sender (~10K unique senders):
-    /// - OLD: 650K × ~800 bytes = ~500MB
-    /// - NEW: 10K × ~64 bytes = ~640KB (780× reduction!)
+    /// ## Why this is dangerous:
+    /// - No `max_group_count` limit → OOM with high-cardinality group keys
+    /// - No `max_push_elements` limit → OOM with large $push accumulators
+    /// - No deadline checking → can run indefinitely
+    ///
+    /// ## Memory comparison for 650K emails grouped by sender (~10K unique senders):
+    /// - OLD (storing docs): 650K × ~800 bytes = ~500MB
+    /// - NEW (streaming): 10K × ~64 bytes = ~640KB (780× reduction!)
+    #[deprecated(
+        since = "0.3.90",
+        note = "Use execute_streaming_with_context() or execute_streaming_with_limits() for OOM protection"
+    )]
     pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
         // HashMap<hash, GroupEntry> - hash-based lookup avoids JSON serialization
         let mut groups: HashMap<u64, GroupEntry> = HashMap::new();
@@ -688,6 +691,7 @@ impl GroupStage {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // Tests use deprecated execute() for backward compatibility testing
 mod tests {
     use super::*;
     use crate::aggregation::context::AggregationLimitContext;

@@ -58,6 +58,14 @@ struct ContextInner {
     // Per-group counters: HashMap<group_hash, (push_count, addtoset_count)>
     group_counters: HashMap<u64, (usize, usize)>,
 
+    // Global $push element counter (across all groups)
+    // FIX (2026-01-25): Added to prevent OOM when many groups each have moderate $push
+    total_push_elements: usize,
+
+    // Global $addToSet element counter (across all groups)
+    // FIX (2026-01-25): Added to prevent OOM when many groups each have moderate $addToSet
+    total_addtoset_elements: usize,
+
     // Flag: pipeline has leading $match (allows higher doc limit)
     has_leading_match: bool,
 
@@ -83,6 +91,8 @@ impl AggregationLimitContext {
                 groups_created: 0,
                 unwind_outputs: 0,
                 group_counters: HashMap::new(),
+                total_push_elements: 0,
+                total_addtoset_elements: 0,
                 has_leading_match: false,
                 early_limit: None,
                 streaming_to_group: false,
@@ -274,22 +284,38 @@ impl AggregationLimitContext {
     }
 
     /// Increment $push counter for a group
+    ///
+    /// FIX (2026-01-25): Now also tracks global total across all groups
     pub fn increment_push(&self, group_hash: u64) -> Result<()> {
         self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
-        let limit = inner.limits.max_push_elements;
+        let per_group_limit = inner.limits.max_push_elements;
+        let global_limit = inner.limits.max_total_push_elements;
 
         if let Some((push_count, _)) = inner.group_counters.get_mut(&group_hash) {
             *push_count += 1;
-            if *push_count > limit {
+
+            // Check per-group limit
+            if *push_count > per_group_limit {
                 let count = *push_count;
                 return Err(IronBaseError::AggregationError(format!(
-                    "$push accumulator exceeded element limit for group: {} elements (limit: {}). \
+                    "$push accumulator exceeded per-group limit: {} elements (limit: {}). \
                      Consider using $slice after $push or limiting input documents.",
-                    count, limit
+                    count, per_group_limit
                 )));
             }
         }
+
+        // Increment and check global limit
+        inner.total_push_elements += 1;
+        if inner.total_push_elements > global_limit {
+            return Err(IronBaseError::AggregationError(format!(
+                "$push accumulators exceeded global limit: {} total elements across all groups (limit: {}). \
+                 Too many groups with $push. Consider reducing input documents or using a different approach.",
+                inner.total_push_elements, global_limit
+            )));
+        }
+
         Ok(())
     }
 
@@ -322,22 +348,38 @@ impl AggregationLimitContext {
     }
 
     /// Increment $addToSet counter for a group
+    ///
+    /// FIX (2026-01-25): Now also tracks global total across all groups
     pub fn increment_addtoset(&self, group_hash: u64) -> Result<()> {
         self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
-        let limit = inner.limits.max_addtoset_elements;
+        let per_group_limit = inner.limits.max_addtoset_elements;
+        let global_limit = inner.limits.max_total_addtoset_elements;
 
         if let Some((_, addtoset_count)) = inner.group_counters.get_mut(&group_hash) {
             *addtoset_count += 1;
-            if *addtoset_count > limit {
+
+            // Check per-group limit
+            if *addtoset_count > per_group_limit {
                 let count = *addtoset_count;
                 return Err(IronBaseError::AggregationError(format!(
-                    "$addToSet accumulator exceeded element limit for group: {} elements (limit: {}). \
-                     Consider limiting input documents or using a different approach.",
-                    count, limit
+                    "$addToSet accumulator exceeded per-group limit: {} unique elements (limit: {}). \
+                     High-cardinality field detected. Consider using $match to filter first.",
+                    count, per_group_limit
                 )));
             }
         }
+
+        // Increment and check global limit
+        inner.total_addtoset_elements += 1;
+        if inner.total_addtoset_elements > global_limit {
+            return Err(IronBaseError::AggregationError(format!(
+                "$addToSet accumulators exceeded global limit: {} total unique elements across all groups (limit: {}). \
+                 Too many groups with $addToSet. Consider reducing input documents or using a different approach.",
+                inner.total_addtoset_elements, global_limit
+            )));
+        }
+
         Ok(())
     }
 
@@ -487,7 +529,21 @@ impl AggregationLimitContext {
         inner.groups_created = 0;
         inner.unwind_outputs = 0;
         inner.group_counters.clear();
+        inner.total_push_elements = 0;
+        inner.total_addtoset_elements = 0;
         inner.early_limit = None;
+    }
+
+    /// Get current global $push element count
+    #[allow(dead_code)]
+    pub fn total_push_elements(&self) -> usize {
+        self.inner.borrow().total_push_elements
+    }
+
+    /// Get current global $addToSet element count
+    #[allow(dead_code)]
+    pub fn total_addtoset_elements(&self) -> usize {
+        self.inner.borrow().total_addtoset_elements
     }
 }
 

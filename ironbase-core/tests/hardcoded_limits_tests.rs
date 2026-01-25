@@ -316,6 +316,8 @@ fn test_aggregation_doc_limit_with_match_relaxes_limit() {
         max_group_count: 100,
         max_push_elements: 100,
         max_addtoset_elements: 100,
+        max_total_push_elements: 100_000,
+        max_total_addtoset_elements: 50_000,
         max_unwind_output: 1000,
         max_memory_mb: 64,
     };
@@ -355,6 +357,8 @@ fn test_aggregation_group_limit() {
         max_group_count: 10, // Only allow 10 groups
         max_push_elements: 100,
         max_addtoset_elements: 100,
+        max_total_push_elements: 100_000,
+        max_total_addtoset_elements: 50_000,
         max_unwind_output: 1000,
         max_memory_mb: 64,
     };
@@ -387,6 +391,8 @@ fn test_aggregation_unwind_limit() {
         max_group_count: 1000,
         max_push_elements: 100,
         max_addtoset_elements: 100,
+        max_total_push_elements: 100_000,
+        max_total_addtoset_elements: 50_000,
         max_unwind_output: 50, // Only allow 50 output docs
         max_memory_mb: 64,
     };
@@ -421,6 +427,8 @@ fn test_aggregation_push_limit() {
         max_group_count: 1000,
         max_push_elements: 10, // Only allow 10 elements per push
         max_addtoset_elements: 100,
+        max_total_push_elements: 100_000,
+        max_total_addtoset_elements: 50_000,
         max_unwind_output: 1000,
         max_memory_mb: 64,
     };
@@ -714,6 +722,8 @@ fn test_cumulative_unwind_limit() {
         max_group_count: 1000,
         max_push_elements: 1000,
         max_addtoset_elements: 1000,
+        max_total_push_elements: 100_000,
+        max_total_addtoset_elements: 50_000,
         max_unwind_output: 20, // Very low cumulative limit
         max_memory_mb: 64,
     };

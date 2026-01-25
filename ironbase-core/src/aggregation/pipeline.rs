@@ -704,6 +704,12 @@ impl Stage {
     }
 
     /// Execute this stage
+    ///
+    /// # DEPRECATED for $group
+    ///
+    /// For $group stages, this calls the deprecated `GroupStage::execute()` which
+    /// has NO LIMIT CHECKING. Use `execute_with_context()` for OOM protection.
+    #[allow(deprecated)] // GroupStage::execute() is deprecated but we need backward compat
     pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
         match self {
             Stage::Match(stage) => stage.execute(docs),

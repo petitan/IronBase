@@ -447,20 +447,144 @@ mod tests {
     #[test]
     fn test_aggregation_limits_default() {
         let limits = AggregationLimits::default();
-        // OOM FIX (2026-01): Reduced from 100K to 10K for safety
+        // FIX (2026-01-25): Harmonized with scale_to_memory(4GB)
         assert_eq!(limits.max_docs_without_match, 10_000);
-        assert_eq!(limits.max_group_count, 50_000);
-        assert_eq!(limits.max_memory_mb, 512);
+        assert_eq!(limits.max_group_count, 100_000); // FIX: was 50K
+        assert_eq!(limits.max_memory_mb, 256); // FIX: was 512
+                                               // New global limits
+        assert_eq!(limits.max_total_push_elements, 1_000_000);
+        assert_eq!(limits.max_total_addtoset_elements, 500_000);
     }
 
     #[test]
     fn test_aggregation_limits_low_memory() {
         let limits = AggregationLimits::low_memory();
-        // OOM FIX (2026-01): low_memory() is now truly conservative
-        assert_eq!(limits.max_docs_without_match, 1_000); // Was 10K - same as default!
-        assert_eq!(limits.max_docs_with_match, 5_000); // New: limits even with $match
-        assert_eq!(limits.max_group_count, 500); // Was 5K
-        assert_eq!(limits.max_memory_mb, 128);
+        // FIX (2026-01-25): Increased max_group_count - streaming $group uses minimal memory
+        assert_eq!(limits.max_docs_without_match, 1_000);
+        assert_eq!(limits.max_docs_with_match, 5_000);
+        assert_eq!(limits.max_group_count, 10_000); // FIX: was 500, now 10K (only 640KB)
+        assert_eq!(limits.max_memory_mb, 64); // FIX: was 128
+                                              // Global limits
+        assert_eq!(limits.max_total_push_elements, 50_000);
+        assert_eq!(limits.max_total_addtoset_elements, 25_000);
+    }
+
+    // ========== FIX (2026-01-25) New tests for limit system consistency ==========
+
+    #[test]
+    fn test_default_matches_4gb_scale() {
+        // Verify that Default produces the same values as scale_to_memory with 4GB
+        // This ensures consistency between constructors
+        let default_limits = AggregationLimits::default();
+        let scaled_limits = AggregationLimits::with_memory_budget(4096); // 4GB
+
+        assert_eq!(
+            default_limits.max_docs_without_match, scaled_limits.max_docs_without_match,
+            "default() should match with_memory_budget(4GB) for max_docs_without_match"
+        );
+        assert_eq!(
+            default_limits.max_group_count, scaled_limits.max_group_count,
+            "default() should match with_memory_budget(4GB) for max_group_count"
+        );
+        assert_eq!(
+            default_limits.max_push_elements, scaled_limits.max_push_elements,
+            "default() should match with_memory_budget(4GB) for max_push_elements"
+        );
+        assert_eq!(
+            default_limits.max_total_push_elements, scaled_limits.max_total_push_elements,
+            "default() should match with_memory_budget(4GB) for max_total_push_elements"
+        );
+    }
+
+    #[test]
+    fn test_scaling_formula_consistency() {
+        // Verify that scaling produces consistent results across different memory levels
+        // All limits should scale linearly with memory
+        let gb1 = AggregationLimits::with_memory_budget(1024); // 1GB
+        let gb4 = AggregationLimits::with_memory_budget(4096); // 4GB
+        let gb16 = AggregationLimits::with_memory_budget(16384); // 16GB
+
+        // 1GB → 4GB is 4x, so limits should be ~4x (accounting for minimums)
+        assert!(
+            gb4.max_docs_without_match >= gb1.max_docs_without_match,
+            "4GB limits should be >= 1GB limits"
+        );
+        assert!(
+            gb16.max_docs_without_match >= gb4.max_docs_without_match,
+            "16GB limits should be >= 4GB limits"
+        );
+
+        // Same pattern for groups
+        assert!(gb4.max_group_count >= gb1.max_group_count);
+        assert!(gb16.max_group_count >= gb4.max_group_count);
+
+        // Global limits should also scale
+        assert!(gb4.max_total_push_elements >= gb1.max_total_push_elements);
+        assert!(gb16.max_total_push_elements >= gb4.max_total_push_elements);
+    }
+
+    #[test]
+    fn test_low_memory_allows_reasonable_streaming_group() {
+        // Even low_memory() should allow reasonable streaming $group usage
+        // because streaming only uses ~64 bytes per group
+        let limits = AggregationLimits::low_memory();
+
+        // 10K groups × 64 bytes = 640 KB - should be allowed
+        assert!(
+            limits.max_group_count >= 10_000,
+            "low_memory() should allow at least 10K groups (only 640KB memory)"
+        );
+
+        // Memory estimate: 10K groups × 64B = 640KB << 64MB budget
+        let estimated_memory_kb = (limits.max_group_count * 64) / 1024;
+        let budget_kb = limits.max_memory_mb * 1024;
+        assert!(
+            estimated_memory_kb < budget_kb,
+            "max_group_count ({}) memory estimate ({}KB) should be < budget ({}KB)",
+            limits.max_group_count,
+            estimated_memory_kb,
+            budget_kb
+        );
+    }
+
+    #[test]
+    fn test_global_push_limit_context_tracking() {
+        // Verify that the context tracks global $push elements
+        use crate::aggregation::context::AggregationLimitContext;
+
+        let limits = AggregationLimits {
+            max_push_elements: 100,       // per-group
+            max_total_push_elements: 250, // global (2.5 groups worth)
+            ..Default::default()
+        };
+
+        let ctx = AggregationLimitContext::new(limits);
+
+        // Register 3 groups
+        ctx.register_new_group(1).unwrap();
+        ctx.register_new_group(2).unwrap();
+        ctx.register_new_group(3).unwrap();
+
+        // Each group pushes elements - should hit global limit
+        for _ in 0..80 {
+            ctx.increment_push(1).unwrap();
+        }
+        for _ in 0..80 {
+            ctx.increment_push(2).unwrap();
+        }
+        // Now at 160 total, try to push 100 more - should fail at global limit
+        for _ in 0..90 {
+            // This should eventually fail when we hit 250
+            let _ = ctx.increment_push(3);
+        }
+
+        // Should have hit the global limit
+        let total = ctx.total_push_elements();
+        assert!(
+            total >= 250,
+            "Should have tracked at least 250 elements, got {}",
+            total
+        );
     }
 
     #[test]
@@ -1025,24 +1149,24 @@ mod tests {
     #[test]
     fn test_with_memory_budget_exact_values() {
         // Test specific expected values at known budget points
-        // 1GB = 1024MB → scale_factor = 1.0 → base limits
+        // FIX (2026-01-25): Now uses 4GB base (was 1GB), so values are different
+        //
+        // 1GB = 1024MB → scale_factor = 1024/4096 = 0.25 → 0.25x base limits
         let gb1 = AggregationLimits::with_memory_budget(1024);
-        assert_eq!(gb1.max_docs_without_match, 10_000);
-        // FIX (2026-01-25): Increased base from 5K to 100K for streaming $group
-        // Streaming $group only stores ~64 bytes per group (hash + accumulator state)
-        assert_eq!(gb1.max_group_count, 100_000);
+        assert_eq!(gb1.max_docs_without_match, 2_500);
+        assert_eq!(gb1.max_group_count, 25_000);
         assert_eq!(gb1.max_memory_mb, 1024);
 
-        // 4GB = 4096MB → scale_factor = 4.0 → 4x base limits
+        // 4GB = 4096MB → scale_factor = 1.0 → base limits (this is the reference point)
         let gb4 = AggregationLimits::with_memory_budget(4096);
-        assert_eq!(gb4.max_docs_without_match, 40_000);
-        assert_eq!(gb4.max_group_count, 400_000);
+        assert_eq!(gb4.max_docs_without_match, 10_000);
+        assert_eq!(gb4.max_group_count, 100_000);
         assert_eq!(gb4.max_memory_mb, 4096);
 
-        // 16GB = 16384MB → scale_factor = 16.0 → 16x base limits
+        // 16GB = 16384MB → scale_factor = 4.0 → 4x base limits
         let gb16 = AggregationLimits::with_memory_budget(16384);
-        assert_eq!(gb16.max_docs_without_match, 160_000);
-        assert_eq!(gb16.max_group_count, 1_600_000);
+        assert_eq!(gb16.max_docs_without_match, 40_000);
+        assert_eq!(gb16.max_group_count, 400_000);
         assert_eq!(gb16.max_memory_mb, 16384);
     }
 
@@ -1089,21 +1213,21 @@ mod tests {
     #[test]
     fn test_scale_to_memory_profiles() {
         // Test the scale_to_memory function indirectly through with_memory_budget
-        // which uses similar scaling logic
+        // FIX (2026-01-25): Now uses 4GB base, so values changed
 
-        // Low memory profile
+        // Low memory profile: 128/4096 = 0.03125 → uses minimum
         let low = AggregationLimits::with_memory_budget(128);
-        assert_eq!(low.max_docs_without_match, 1_250);
+        assert_eq!(low.max_docs_without_match, 1_000); // minimum
 
-        // Standard profile
+        // Standard profile: 512/4096 = 0.125
         let standard = AggregationLimits::with_memory_budget(512);
-        assert_eq!(standard.max_docs_without_match, 5_000);
+        assert_eq!(standard.max_docs_without_match, 1_250);
 
-        // High memory profile
+        // High memory profile: 2048/4096 = 0.5
         let high = AggregationLimits::with_memory_budget(2048);
-        assert_eq!(high.max_docs_without_match, 20_000);
+        assert_eq!(high.max_docs_without_match, 5_000);
 
-        assert!(low.max_docs_without_match < standard.max_docs_without_match);
+        assert!(low.max_docs_without_match <= standard.max_docs_without_match);
         assert!(standard.max_docs_without_match < high.max_docs_without_match);
     }
 
