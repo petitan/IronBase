@@ -414,6 +414,14 @@ impl GroupStage {
         for doc_result in docs {
             let doc = doc_result?;
 
+            // FIX (2026-01-25): Check deadline on EVERY document, not just new groups.
+            // Without this, aggregations on 129K+ docs with few unique groups would never
+            // check the timeout, causing apparent hangs. The increment_docs() call:
+            // 1. Increments docs_processed counter
+            // 2. Calls check_doc_limit() which calls check_deadline()
+            // 3. Skips doc limit check in streaming_to_group mode (but deadline still checked)
+            ctx.increment_docs()?;
+
             let (group_hash, group_value) = self.extract_group_key_hash(&doc)?;
 
             // Use Entry API to check and insert atomically
