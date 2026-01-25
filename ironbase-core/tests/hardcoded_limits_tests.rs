@@ -629,29 +629,37 @@ fn test_index_build_batch_processing() {
 // ============================================================================
 
 /// Test AggregationLimits default values
+/// Updated 2026-01-25: Defaults now match scale_to_memory(4GB)
 #[test]
 fn test_aggregation_limits_defaults() {
     let default = AggregationLimits::default();
     assert_eq!(default.max_docs_without_match, 10_000);
-    assert_eq!(default.max_docs_with_match, 1_000_000);
-    assert_eq!(default.max_group_count, 50_000);
-    assert_eq!(default.max_push_elements, 100_000);
-    assert_eq!(default.max_addtoset_elements, 100_000);
-    assert_eq!(default.max_unwind_output, 1_000_000);
-    assert_eq!(default.max_memory_mb, 512);
+    assert_eq!(default.max_docs_with_match, 100_000);
+    assert_eq!(default.max_group_count, 100_000);
+    assert_eq!(default.max_push_elements, 10_000);
+    assert_eq!(default.max_addtoset_elements, 10_000);
+    assert_eq!(default.max_unwind_output, 100_000);
+    assert_eq!(default.max_memory_mb, 256);
+    // New global limits
+    assert_eq!(default.max_total_push_elements, 1_000_000);
+    assert_eq!(default.max_total_addtoset_elements, 500_000);
 }
 
 /// Test AggregationLimits low_memory profile
+/// Updated 2026-01-25: max_group_count increased for streaming $group efficiency
 #[test]
 fn test_aggregation_limits_low_memory() {
     let low = AggregationLimits::low_memory();
     assert_eq!(low.max_docs_without_match, 1_000);
     assert_eq!(low.max_docs_with_match, 5_000);
-    assert_eq!(low.max_group_count, 500);
+    assert_eq!(low.max_group_count, 10_000); // Increased - streaming $group uses only 64B/group
     assert_eq!(low.max_push_elements, 1_000);
     assert_eq!(low.max_addtoset_elements, 1_000);
     assert_eq!(low.max_unwind_output, 10_000);
-    assert_eq!(low.max_memory_mb, 128);
+    assert_eq!(low.max_memory_mb, 64);
+    // New global limits
+    assert_eq!(low.max_total_push_elements, 50_000);
+    assert_eq!(low.max_total_addtoset_elements, 25_000);
 
     // Verify low < default
     let default = AggregationLimits::default();

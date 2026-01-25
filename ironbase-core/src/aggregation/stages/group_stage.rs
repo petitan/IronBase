@@ -290,6 +290,11 @@ impl GroupStage {
         let mut doc_count: usize = 0;
         let mut last_group_check: usize = 0;
 
+        // FIX (2026-01-25): Track global $push/$addToSet counts
+        // These were added but not enforced in this method!
+        let mut total_push_elements: usize = 0;
+        let mut total_addtoset_elements: usize = 0;
+
         // OOM FIX (2026-01): Adaptive check interval based on limit
         // For small limits (e.g., 100), check every ~10 new groups
         // For large limits (e.g., 50K), check every ~1000 docs
@@ -316,12 +321,33 @@ impl GroupStage {
             // Update accumulators with OOM-safe limits for $push/$addToSet
             for (field, accumulator) in &self.accumulators {
                 if let Some(state) = entry.states.get_mut(field) {
-                    state.update_with_limits(
+                    // Track global counts BEFORE update to catch the limit
+                    let (push_added, addtoset_added) = state.update_with_limits_tracking(
                         &doc,
                         accumulator,
                         limits.max_push_elements,
                         limits.max_addtoset_elements,
                     )?;
+
+                    // Update global counters
+                    total_push_elements += push_added;
+                    total_addtoset_elements += addtoset_added;
+
+                    // FIX (2026-01-25): Check GLOBAL limits
+                    if total_push_elements > limits.max_total_push_elements {
+                        return Err(IronBaseError::AggregationError(format!(
+                            "$push accumulators exceeded global limit: {} total elements across all groups (limit: {}). \
+                             Too many groups with $push. Consider reducing input documents or using a different approach.",
+                            total_push_elements, limits.max_total_push_elements
+                        )));
+                    }
+                    if total_addtoset_elements > limits.max_total_addtoset_elements {
+                        return Err(IronBaseError::AggregationError(format!(
+                            "$addToSet accumulators exceeded global limit: {} total unique elements across all groups (limit: {}). \
+                             Too many groups with $addToSet. Consider reducing input documents or using a different approach.",
+                            total_addtoset_elements, limits.max_total_addtoset_elements
+                        )));
+                    }
                 }
             }
 

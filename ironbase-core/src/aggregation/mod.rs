@@ -941,7 +941,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("$push exceeded limit"),
+            err_msg.contains("$push exceeded") && err_msg.contains("limit"),
             "Expected $push limit error, got: {}",
             err_msg
         );
@@ -967,7 +967,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("$addToSet exceeded limit"),
+            err_msg.contains("$addToSet exceeded") && err_msg.contains("limit"),
             "Expected $addToSet limit error, got: {}",
             err_msg
         );

@@ -509,7 +509,7 @@ fn test_memory_tier_tiny() {
 
     let limits = limits_from_tier(MemoryTier::Tiny);
     assert_eq!(limits.max_docs_without_match, 10_000);
-    assert_eq!(limits.max_group_count, 5_000);
+    assert_eq!(limits.max_group_count, 10_000); // FIX: streaming $group uses only 64B/group
     assert_eq!(limits.max_memory_mb, 64);
 }
 
@@ -519,7 +519,7 @@ fn test_memory_tier_xlarge() {
 
     let limits = limits_from_tier(MemoryTier::XLarge);
     assert_eq!(limits.max_docs_without_match, 500_000);
-    assert_eq!(limits.max_group_count, 250_000);
+    assert_eq!(limits.max_group_count, 500_000); // FIX: streaming $group uses only 64B/group
     assert_eq!(limits.max_memory_mb, 1024);
 }
 

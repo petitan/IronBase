@@ -422,6 +422,174 @@ impl AccumulatorState {
         Ok(())
     }
 
+    /// Update state with explicit limits and return how many elements were added
+    ///
+    /// FIX (2026-01-25): This variant returns (push_added, addtoset_added) counts
+    /// so the caller can track GLOBAL limits across all groups.
+    ///
+    /// # Returns
+    /// * `Ok((push_added, addtoset_added))` - Number of elements added to each accumulator type
+    /// * `Err` - If per-group limit is exceeded
+    pub(crate) fn update_with_limits_tracking(
+        &mut self,
+        doc: &Value,
+        accumulator: &Accumulator,
+        max_push_elements: usize,
+        max_addtoset_elements: usize,
+    ) -> Result<(usize, usize)> {
+        let mut push_added: usize = 0;
+        let mut addtoset_added: usize = 0;
+
+        match (self, accumulator) {
+            // Non-array accumulators - delegate to update_with_limits, return (0, 0)
+            (
+                AccumulatorState::Sum {
+                    int_sum,
+                    float_sum,
+                    has_float,
+                    is_count,
+                },
+                Accumulator::Sum(expr),
+            ) => match expr {
+                SumExpression::Constant(n) => {
+                    *int_sum = int_sum.saturating_add(*n);
+                    *is_count = true;
+                }
+                SumExpression::Field(field) => {
+                    if let Some(value) = get_nested_value(doc, field) {
+                        if let Some(n) = value.as_i64() {
+                            *int_sum = int_sum.saturating_add(n);
+                        } else if let Some(f) = value.as_f64() {
+                            *float_sum += f;
+                            *has_float = true;
+                        }
+                    }
+                }
+            },
+
+            (AccumulatorState::Avg { sum, count }, Accumulator::Avg(field)) => {
+                if let Some(value) = get_nested_value(doc, field) {
+                    if let Some(n) = value.as_f64() {
+                        *sum += n;
+                        *count = count.saturating_add(1);
+                    } else if let Some(n) = value.as_i64() {
+                        *sum += n as f64;
+                        *count = count.saturating_add(1);
+                    }
+                }
+            }
+
+            (AccumulatorState::Min { value: min_val }, Accumulator::Min(expr)) => {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    match min_val {
+                        None => *min_val = Some(doc_val.clone()),
+                        Some(current) => {
+                            if compare_values(&doc_val, current) == Some(std::cmp::Ordering::Less) {
+                                *min_val = Some(doc_val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            (AccumulatorState::Max { value: max_val }, Accumulator::Max(expr)) => {
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    match max_val {
+                        None => *max_val = Some(doc_val.clone()),
+                        Some(current) => {
+                            if compare_values(&doc_val, current)
+                                == Some(std::cmp::Ordering::Greater)
+                            {
+                                *max_val = Some(doc_val.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            (
+                AccumulatorState::First {
+                    value: first_val,
+                    captured,
+                },
+                Accumulator::First(expr),
+            ) => {
+                if !*captured {
+                    *captured = true;
+                    *first_val = evaluate_value_expr(doc, expr);
+                }
+            }
+
+            (
+                AccumulatorState::Last {
+                    value: last_val,
+                    doc_count,
+                },
+                Accumulator::Last(expr),
+            ) => {
+                *doc_count += 1;
+                *last_val = evaluate_value_expr(doc, expr);
+            }
+
+            // $push - track how many elements were added
+            (AccumulatorState::Push { values }, Accumulator::Push(expr)) => {
+                if values.len() >= max_push_elements {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "$push exceeded per-group limit: {} elements (max: {}). \
+                         Consider using $slice in $project or filtering with $match first.",
+                        values.len(),
+                        max_push_elements
+                    )));
+                }
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    let expr_name = expr_debug_name(expr);
+                    values.try_reserve(1).map_err(|_| {
+                        IronBaseError::OutOfMemory(format!(
+                            "$push failed to allocate memory for element {} in field '{}'.",
+                            values.len(),
+                            expr_name
+                        ))
+                    })?;
+                    values.push(doc_val.clone());
+                    push_added = 1; // Track that we added 1 element
+                }
+            }
+
+            // $addToSet - track how many unique elements were added
+            (AccumulatorState::AddToSet { seen, values }, Accumulator::AddToSet(expr)) => {
+                if values.len() >= max_addtoset_elements {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "$addToSet exceeded per-group limit: {} unique elements (max: {}). \
+                         High-cardinality field detected. Consider using $match to filter first.",
+                        values.len(),
+                        max_addtoset_elements
+                    )));
+                }
+                if let Some(doc_val) = evaluate_value_expr(doc, expr) {
+                    let expr_name = expr_debug_name(expr);
+                    let key = canonical_json_string(&doc_val);
+                    if seen.insert(key) {
+                        values.try_reserve(1).map_err(|_| {
+                            IronBaseError::OutOfMemory(format!(
+                                "$addToSet failed to allocate memory for element {} in field '{}'.",
+                                values.len(),
+                                expr_name
+                            ))
+                        })?;
+                        values.push(doc_val.clone());
+                        addtoset_added = 1; // Track that we added 1 unique element
+                    }
+                }
+            }
+
+            _ => {
+                debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
+            }
+        }
+
+        Ok((push_added, addtoset_added))
+    }
+
     /// Update state using centralized AggregationLimitContext
     ///
     /// This method uses the context for per-group tracking of $push/$addToSet.
