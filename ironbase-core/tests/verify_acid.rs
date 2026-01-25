@@ -6,6 +6,7 @@ use serde_json::json;
 use std::time::Instant;
 
 #[test]
+#[ignore] // Manual verification test - opens production database which may be locked
 fn verify_acid_after_deletion() {
     let db_path = "/home/petitan/MongoLite/mcp-server/ironbase_data.mlite";
 
