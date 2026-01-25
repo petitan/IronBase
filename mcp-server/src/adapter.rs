@@ -54,7 +54,10 @@ impl CollectionStats {
             tracing::warn!(
                 "Collection '{}' stats count went negative: {} + {} = {} (clamping to 0). \
                  Stats may be out of sync with actual document count.",
-                collection, current, delta, new_count_raw
+                collection,
+                current,
+                delta,
+                new_count_raw
             );
         }
         let new_count = new_count_raw.max(0) as u64;
@@ -528,43 +531,66 @@ impl IronBaseAdapter {
 
         // Warm up user collections and count documents
         for (i, name) in user_collections.iter().enumerate() {
+            // Log BEFORE starting - critical for diagnosing hangs/crashes
+            tracing::debug!(
+                "Warming up [{}/{}] '{}'...",
+                i + 1,
+                total,
+                name
+            );
+
             let coll_start = std::time::Instant::now();
             let db = self.db.read();
             match db.collection(name) {
                 Ok(coll) => {
-                    // Initialize document count in memory (one-time cost at startup)
+                    // Phase 1: Count documents (can be slow on large collections)
+                    tracing::debug!("  [{}/{}] '{}': counting documents...", i + 1, total, name);
+                    let count_start = std::time::Instant::now();
                     let count = coll.count_documents(&serde_json::json!({})).unwrap_or(0);
+                    let count_elapsed = count_start.elapsed();
+                    if count_elapsed.as_millis() > 500 {
+                        tracing::info!(
+                            "  [{}/{}] '{}': counted {} docs in {:.2}s",
+                            i + 1, total, name, count, count_elapsed.as_secs_f64()
+                        );
+                    }
                     self.collection_stats.set(name, count);
 
-                    // Refresh index statistics for query planner optimization
-                    // This computes distinct_count/null_count for all B+ tree indexes
+                    // Phase 2: Refresh index statistics (can be slow with many indexes)
+                    tracing::debug!("  [{}/{}] '{}': refreshing index stats...", i + 1, total, name);
+                    let index_start = std::time::Instant::now();
                     if let Err(e) = coll.refresh_index_stats() {
                         tracing::warn!("Failed to refresh index stats for '{}': {}", name, e);
                     }
+                    let index_elapsed = index_start.elapsed();
+                    if index_elapsed.as_millis() > 500 {
+                        tracing::info!(
+                            "  [{}/{}] '{}': index stats refreshed in {:.2}s",
+                            i + 1, total, name, index_elapsed.as_secs_f64()
+                        );
+                    }
 
-                    // Load vector indexes into IndexManager for auto-indexing on insert/update
-                    // Without this, vector indexes are lazily loaded only during search
+                    // Phase 3: Load vector indexes (can be slow for large HNSW indexes)
+                    tracing::debug!("  [{}/{}] '{}': loading vector indexes...", i + 1, total, name);
+                    let vector_start = std::time::Instant::now();
                     match coll.ensure_vector_indexes_loaded() {
                         Ok(loaded) if loaded > 0 => {
+                            let vector_elapsed = vector_start.elapsed();
                             tracing::info!(
-                                "Loaded {} vector index(es) for collection '{}'",
-                                loaded,
-                                name
+                                "  [{}/{}] '{}': loaded {} vector index(es) in {:.2}s",
+                                i + 1, total, name, loaded, vector_elapsed.as_secs_f64()
                             );
                         }
                         Err(e) => {
-                            tracing::warn!(
-                                "Failed to load vector indexes for '{}': {}",
-                                name,
-                                e
-                            );
+                            tracing::warn!("Failed to load vector indexes for '{}': {}", name, e);
                         }
                         _ => {}
                     }
 
+                    // Summary for this collection
                     let elapsed = coll_start.elapsed();
                     if elapsed.as_millis() > 100 {
-                        // Only log slow collections
+                        // Only log slow collections at info level
                         tracing::info!(
                             "Warmed up [{}/{}] '{}' ({} docs) in {:.2}s",
                             i + 1,
@@ -871,9 +897,10 @@ impl IronBaseAdapter {
         }))
     }
 
-    /// Force checkpoint (flush to disk)
+    /// Force checkpoint (flush indexes + metadata + clear WAL)
     ///
-    /// Returns checkpoint statistics including WAL size before/after.
+    /// This is the MongoDB-style checkpoint that persists indexes to disk.
+    /// Returns checkpoint statistics including indexes flushed and WAL size.
     pub fn checkpoint(&self) -> Result<Value> {
         let start = std::time::Instant::now();
         let db = self.db.write();
@@ -882,6 +909,7 @@ impl IronBaseAdapter {
 
         Ok(serde_json::json!({
             "success": true,
+            "indexes_flushed": result.indexes_flushed,
             "wal_size_before": format_bytes(result.wal_size_before),
             "wal_size_after": format_bytes(result.wal_size_after),
             "wal_size_before_bytes": result.wal_size_before,
@@ -1831,5 +1859,4 @@ impl IronBaseAdapter {
         let results = coll.vector_search_with_filter(field, query_vector, filter, limit)?;
         Ok(results)
     }
-
 }

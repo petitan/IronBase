@@ -74,8 +74,12 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     // 2. Vector search → get ranks
     // ========================================================================
     let query_vector: Vec<f32> = p.vector.iter().map(|&v| v as f32).collect();
-    let vector_results =
-        adapter.vector_search(&p.collection, &p.vector_field, &query_vector, internal_limit)?;
+    let vector_results = adapter.vector_search(
+        &p.collection,
+        &p.vector_field,
+        &query_vector,
+        internal_limit,
+    )?;
 
     // Build vector rank map (1-indexed) with pre-allocated capacity (OOM protection)
     let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
@@ -86,7 +90,8 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
 
     // Store vector docs for later retrieval with pre-allocated capacity
-    let mut vector_docs: HashMap<String, (Value, f32)> = HashMap::with_capacity(vector_results.len());
+    let mut vector_docs: HashMap<String, (Value, f32)> =
+        HashMap::with_capacity(vector_results.len());
     for (doc, score) in vector_results.into_iter() {
         if let Some(id) = doc.get("_id").and_then(id_to_string) {
             vector_docs.insert(id, (doc, score));
@@ -175,7 +180,11 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
 
     // Sort by RRF score initially
-    fused.sort_by(|a, b| b.rrf_score.partial_cmp(&a.rrf_score).unwrap_or(std::cmp::Ordering::Equal));
+    fused.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // ========================================================================
     // 5. Reranking (optional)
@@ -632,7 +641,7 @@ mod tests {
         assert_eq!(p.limit, 10); // default
         assert_eq!(p.vector_weight, 0.5); // default
         assert_eq!(p.fulltext_weight, 0.5); // default
-        // v2 defaults
+                                            // v2 defaults
         assert!(p.rerank); // default: true
         assert!(p.deduplicate); // default: true
         assert_eq!(p.dedup_threshold, 100); // default
@@ -724,7 +733,12 @@ mod tests {
             ),
         ];
 
-        rerank_results(&mut results, "the exact phrase test query", "the exact phrase test query", "content");
+        rerank_results(
+            &mut results,
+            "the exact phrase test query",
+            "the exact phrase test query",
+            "content",
+        );
 
         // doc2 should be boosted (contains exact phrase)
         assert!(results[0].id == "doc2");
@@ -752,7 +766,12 @@ mod tests {
 
         // Query has "?" at end, content has ":" before and "-" after
         // original_query and processed_query same for this test (no preprocessing)
-        rerank_results(&mut results, "milyen lépései vannak a kalibrálásnak?", "milyen lépései vannak a kalibrálásnak?", "content");
+        rerank_results(
+            &mut results,
+            "milyen lépései vannak a kalibrálásnak?",
+            "milyen lépései vannak a kalibrálásnak?",
+            "content",
+        );
 
         // doc2 should be boosted (phrase matches ignoring punctuation)
         assert!(results[0].id == "doc2");
@@ -787,7 +806,12 @@ mod tests {
     fn test_dedup_by_content_prefix() {
         let mut results = vec![
             make_fused_result("doc1", "Same content prefix here and more", "Title 1", 0.02),
-            make_fused_result("doc2", "Same content prefix here but different", "Title 2", 0.01),
+            make_fused_result(
+                "doc2",
+                "Same content prefix here but different",
+                "Title 2",
+                0.01,
+            ),
             make_fused_result("doc3", "Different content entirely", "Title 3", 0.005),
         ];
 

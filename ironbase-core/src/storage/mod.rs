@@ -864,6 +864,7 @@ impl StorageEngine {
             wal_size_before,
             wal_size_after,
             wal_ops_cleared: wal_ops_cleared as u64,
+            indexes_flushed: 0, // Storage layer doesn't know about indexes; set by DatabaseCore
         })
     }
 

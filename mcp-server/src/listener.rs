@@ -214,27 +214,25 @@ impl ListenerManager {
         }
     }
 
-    /// Add or update a listener configuration
-    pub fn set(&self, config: &ListenerConfig) -> Result<()> {
+    /// Add or update a listener configuration (atomic upsert)
+    ///
+    /// Returns `true` if an existing listener was updated, `false` if a new one was created.
+    pub fn set(&self, config: &ListenerConfig) -> Result<bool> {
         // Validate configuration
         config.validate()?;
 
         let doc = serde_json::to_value(config)?;
 
-        // Check if listener exists (handle case where collection doesn't exist yet)
-        if self.get(&config.id).unwrap_or(None).is_some() {
-            // Update existing
-            self.adapter.update_one(
-                SYSTEM_LISTENERS_COLLECTION,
-                json!({ "_id": config.id }),
-                json!({ "$set": doc }),
-            )?;
-        } else {
-            // Insert new (this will create the collection if it doesn't exist)
-            self.adapter.insert_one(SYSTEM_LISTENERS_COLLECTION, doc)?;
-        }
+        // Atomic upsert - no TOCTOU race condition
+        let result = self.adapter.update_one_with_options(
+            SYSTEM_LISTENERS_COLLECTION,
+            json!({ "_id": config.id }),
+            json!({ "$set": doc }),
+            true, // upsert = true
+        )?;
 
-        Ok(())
+        // matched_count > 0 means we updated an existing document
+        Ok(result.matched_count > 0)
     }
 
     /// Delete a listener configuration
@@ -304,7 +302,7 @@ impl ListenerManager {
             description: Some("Default listener (created from startup config)".to_string()),
         };
 
-        self.set(&default)?;
+        let _ = self.set(&default)?;
         tracing::info!("Initialized default listener: {}", default.bind);
 
         Ok(())

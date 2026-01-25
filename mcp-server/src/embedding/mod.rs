@@ -18,7 +18,9 @@ mod presets;
 
 pub use cache::{CacheConfig, CacheStats, CachedEmbedding, EmbeddingCache};
 pub use fasttext::FastTextProvider;
-pub use http_provider::{AuthMethod, HttpEmbeddingProvider, HttpProviderConfig, RequestFormat, ResponseFormat};
+pub use http_provider::{
+    AuthMethod, HttpEmbeddingProvider, HttpProviderConfig, RequestFormat, ResponseFormat,
+};
 
 use std::collections::HashMap;
 use std::path::Path;

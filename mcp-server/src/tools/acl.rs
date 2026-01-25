@@ -103,18 +103,14 @@ fn handle_acl_set(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value
         "rules": parsed_rules
     });
 
-    // Upsert into _system.acl
+    // Atomic upsert into _system.acl (TOCTOU fix: no find_one + update/insert race)
     let filter = json!({"collection": &p.collection});
-    match adapter.find_one(SYSTEM_ACL_COLLECTION, filter.clone()) {
-        Ok(Some(_)) => {
-            // Update existing
-            adapter.update_one(SYSTEM_ACL_COLLECTION, filter, json!({"$set": acl_doc}))?;
-        }
-        _ => {
-            // Insert new
-            adapter.insert_one(SYSTEM_ACL_COLLECTION, acl_doc)?;
-        }
-    }
+    adapter.update_one_with_options(
+        SYSTEM_ACL_COLLECTION,
+        filter,
+        json!({"$set": acl_doc}),
+        true, // upsert = true
+    )?;
 
     Ok(json!({
         "success": true,

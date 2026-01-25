@@ -55,8 +55,8 @@ fn generate_plist() -> ServiceResult<String> {
         <false/>
     </dict>
 
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
+    <!-- FIX #7: ThrottleInterval removed - deprecated since macOS 10.10 -->
+    <!-- Modern launchd automatically throttles restarts via KeepAlive -->
 
     <key>SoftResourceLimits</key>
     <dict>

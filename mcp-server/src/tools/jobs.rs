@@ -36,14 +36,10 @@ pub struct JobCancelParams {
 // ============================================================================
 
 /// Dispatch job tool calls
-pub fn dispatch(
-    name: &str,
-    params: Value,
-    job_manager: &Option<Arc<JobManager>>,
-) -> Result<Value> {
-    let manager = job_manager.as_ref().ok_or_else(|| {
-        McpError::internal("Job manager not available")
-    })?;
+pub fn dispatch(name: &str, params: Value, job_manager: &Option<Arc<JobManager>>) -> Result<Value> {
+    let manager = job_manager
+        .as_ref()
+        .ok_or_else(|| McpError::internal("Job manager not available"))?;
 
     match name {
         "embed_job_status" => handle_job_status(params, manager),

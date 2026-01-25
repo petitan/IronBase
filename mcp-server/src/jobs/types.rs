@@ -67,14 +67,9 @@ pub enum JobType {
         provider: String,
     },
     /// Import and embed a document with chunking
-    EmbedDocument {
-        collection: String,
-        doc_id: String,
-    },
+    EmbedDocument { collection: String, doc_id: String },
     /// Custom job type
-    Custom {
-        name: String,
-    },
+    Custom { name: String },
 }
 
 /// Job information

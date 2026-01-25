@@ -113,6 +113,16 @@ impl StorageEngine {
             header.data_end_offset = super::HEADER_SIZE;
         }
 
+        // MIGRATION: Fix live_document_count for databases before this field existed
+        // When live_document_count is 0 but catalog has documents, set it from catalog.len()
+        // This is critical for the fast path in scan_documents_with_early_termination
+        let mut collections = collections;
+        for meta in collections.values_mut() {
+            if meta.live_document_count == 0 && !meta.document_catalog.is_empty() {
+                meta.live_document_count = meta.document_catalog.len() as u64;
+            }
+        }
+
         Ok((header, collections))
     }
 

@@ -69,6 +69,8 @@ where
 
 /// Try to load an index from .idx file (graceful degradation)
 /// Returns None if file doesn't exist or is corrupted (fallback to rebuild)
+///
+/// Uses lazy loading: only root node is loaded, children are loaded on-demand.
 pub fn try_load_index_from_file(
     db_file_path: &str,
     index_meta: &IndexMetadata,
@@ -79,8 +81,8 @@ pub fn try_load_index_from_file(
         return None;
     }
 
-    let mut file = File::open(&idx_path).ok()?;
-    BPlusTree::load_from_file(&mut file, index_meta.clone()).ok()
+    // Use lazy loading - only loads root node, children loaded on-demand
+    BPlusTree::load_from_path(idx_path, index_meta.clone()).ok()
 }
 
 // ============================================================================

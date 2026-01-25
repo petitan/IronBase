@@ -189,11 +189,7 @@ impl HttpEmbeddingProvider {
     /// Build the full URL for the API call
     fn build_url(&self) -> String {
         if let Some(ref endpoint) = self.config.endpoint {
-            format!(
-                "{}{}",
-                self.config.base_url.trim_end_matches('/'),
-                endpoint
-            )
+            format!("{}{}", self.config.base_url.trim_end_matches('/'), endpoint)
         } else {
             self.config.base_url.clone()
         }
@@ -224,10 +220,7 @@ impl HttpEmbeddingProvider {
                 let body = template
                     .replace("{model}", &self.model)
                     .replace("{text}", text)
-                    .replace(
-                        "{texts}",
-                        &format!(r#"["{}"]"#, text.replace('"', r#"\""#)),
-                    );
+                    .replace("{texts}", &format!(r#"["{}"]"#, text.replace('"', r#"\""#)));
                 serde_json::from_str(&body).unwrap_or_else(|_| serde_json::json!({}))
             }
         };
@@ -609,7 +602,10 @@ mod tests {
     #[test]
     fn test_extra_body_fields_merged() {
         let mut extra = HashMap::new();
-        extra.insert("input_type".to_string(), serde_json::json!("search_document"));
+        extra.insert(
+            "input_type".to_string(),
+            serde_json::json!("search_document"),
+        );
 
         let config = HttpProviderConfig {
             name: "test".to_string(),
@@ -635,7 +631,10 @@ mod tests {
         let provider = HttpEmbeddingProvider::new(config);
         let body = provider.build_single_body("test text");
 
-        assert_eq!(body.get("input_type"), Some(&serde_json::json!("search_document")));
+        assert_eq!(
+            body.get("input_type"),
+            Some(&serde_json::json!("search_document"))
+        );
         assert_eq!(body.get("model"), Some(&serde_json::json!("test-model")));
     }
 }

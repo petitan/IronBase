@@ -529,9 +529,18 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
 
     /// Collect all remaining documents into a Vec
     ///
-    /// Warning: This loads all remaining documents into memory
+    /// Warning: This loads all remaining documents into memory.
+    /// Uses try_reserve() to fail gracefully on OOM instead of panic.
     pub fn collect_all(&mut self) -> Result<Vec<Value>> {
-        let mut results = Vec::with_capacity(self.remaining());
+        let count = self.remaining();
+        let mut results = Vec::new();
+        // OOM FIX: Use try_reserve() for graceful error on allocation failure
+        results.try_reserve(count).map_err(|e| {
+            crate::error::IronBaseError::OutOfMemory(format!(
+                "Cannot allocate {} documents for cursor.collect_all(): {}",
+                count, e
+            ))
+        })?;
         while let Some(doc) = self.next()? {
             results.push(doc);
         }
@@ -539,8 +548,17 @@ impl<'a, S: Storage + RawStorage> FindCursor<'a, S> {
     }
 
     /// Take the next N documents
+    ///
+    /// Uses try_reserve() to fail gracefully on OOM instead of panic.
     pub fn take(&mut self, n: usize) -> Result<Vec<Value>> {
-        let mut results = Vec::with_capacity(n);
+        let mut results = Vec::new();
+        // OOM FIX: Use try_reserve() for graceful error on allocation failure
+        results.try_reserve(n).map_err(|e| {
+            crate::error::IronBaseError::OutOfMemory(format!(
+                "Cannot allocate {} documents for cursor.take(): {}",
+                n, e
+            ))
+        })?;
         for _ in 0..n {
             match self.next()? {
                 Some(doc) => results.push(doc),

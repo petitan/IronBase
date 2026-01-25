@@ -15,7 +15,8 @@ const FUZZY_INDEX_MAGIC: &[u8; 8] = b"IRONFZX\0";
 const FUZZY_INDEX_VERSION: u32 = 1;
 /// Header size in bytes
 const HEADER_SIZE: u64 = 64;
-const FUZZY_LAZY_LOAD_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
+// Deprecated: using calculate_lazy_threshold() instead for RAM-based scaling
+// const FUZZY_LAZY_LOAD_THRESHOLD_BYTES: u64 = 100 * 1024 * 1024;
 
 /// Fuzzy matching algorithm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -490,7 +491,7 @@ impl FuzzyIndex {
         // Calculate sizes
         let entries_size = metadata_offset - entries_offset;
 
-        let lazy_mode = entries_size > FUZZY_LAZY_LOAD_THRESHOLD_BYTES;
+        let lazy_mode = entries_size > super::traits::calculate_lazy_threshold();
         let mut entries: Vec<(String, String, DocumentId)> = Vec::new();
 
         if !lazy_mode {
@@ -732,4 +733,69 @@ pub struct FuzzySearchResult {
     pub matched_value: String,
     /// Optional highlight showing the matched value with <mark> tags
     pub highlight: Option<String>,
+}
+
+// ============================================================================
+// LazyLoadable Trait Implementation
+// ============================================================================
+
+use super::traits::{IndexTrait, LazyLoadable};
+
+impl IndexTrait for FuzzyIndex {
+    fn name(&self) -> &str {
+        &self.metadata.name
+    }
+
+    fn fields(&self) -> Vec<&str> {
+        vec![&self.metadata.field]
+    }
+
+    fn entry_count(&self) -> usize {
+        self.metadata.num_entries
+    }
+
+    fn memory_usage_bytes(&self) -> usize {
+        if self.entries.is_empty() && self.lazy_mode {
+            // Lazy mode: only metadata in memory
+            std::mem::size_of::<Self>()
+        } else {
+            // Estimate: each entry ~100 bytes average (strings + doc_id)
+            std::mem::size_of::<Self>() + self.entries.len() * 100
+        }
+    }
+
+    fn is_disk_backed(&self) -> bool {
+        self.storage_path.is_some()
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        // Fuzzy indexes are written via save_to_file(), not incremental flush
+        Ok(())
+    }
+}
+
+impl LazyLoadable for FuzzyIndex {
+    fn is_lazy_mode(&self) -> bool {
+        self.lazy_mode && self.entries.is_empty()
+    }
+
+    fn ensure_fully_loaded(&mut self) -> Result<()> {
+        self.ensure_entries_loaded()
+    }
+
+    fn persisted_size_bytes(&self) -> Option<u64> {
+        if self.entries_size > 0 {
+            Some(self.entries_size)
+        } else {
+            None
+        }
+    }
+
+    fn hot_ratio(&self) -> f32 {
+        if self.lazy_mode && self.entries.is_empty() {
+            0.0
+        } else {
+            1.0
+        }
+    }
 }

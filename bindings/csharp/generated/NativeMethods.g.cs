@@ -373,6 +373,25 @@ namespace IronBase.Interop
         internal static extern int ironbase_update_one(CollectionHandle* handle, byte* query_json, byte* update_json, ulong* out_matched, ulong* out_modified);
 
         /// <summary>
+        ///  Update one document with upsert support
+        ///
+        ///  # Parameters
+        ///  - `handle`: The collection handle
+        ///  - `query_json`: Query filter as JSON string
+        ///  - `update_json`: Update operations as JSON string
+        ///  - `upsert`: If true, insert a new document when no match is found
+        ///  - `out_matched`: Pointer to receive matched count
+        ///  - `out_modified`: Pointer to receive modified count
+        ///  - `out_upserted_id`: Pointer to receive upserted ID (null-terminated string, null if no upsert)
+        ///
+        ///  # Returns
+        ///  - `IronBaseErrorCode::Success` (0) on success
+        ///  - Error code on failure
+        /// </summary>
+        [DllImport(__DllName, EntryPoint = "ironbase_update_one_with_options", CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
+        internal static extern int ironbase_update_one_with_options(CollectionHandle* handle, byte* query_json, byte* update_json, int upsert, ulong* out_matched, ulong* out_modified, byte** out_upserted_id);
+
+        /// <summary>
         ///  Update many documents
         ///
         ///  # Parameters

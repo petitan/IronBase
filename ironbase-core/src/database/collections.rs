@@ -185,14 +185,17 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// IMPORTANT: Only loads from .idx files when `was_clean == true`.
     /// On dirty shutdown, stale .idx files may contain entries for tombstoned documents,
     /// so we create empty indexes that will be rebuilt from the catalog.
+    /// Load persisted indexes from .idx files or create empty ones.
+    /// Returns the set of index names that were successfully loaded from files.
     fn load_persisted_indexes(
         index_manager: &mut IndexManager,
         persisted_indexes: &[crate::index::IndexMetadata],
         id_index_name: &str,
         db_path: &str,
         was_clean: bool,
-    ) -> Result<()> {
+    ) -> Result<std::collections::HashSet<String>> {
         use crate::log_debug;
+        let mut loaded_from_file = std::collections::HashSet::new();
 
         for index_meta in persisted_indexes {
             // Skip _id index (already created)
@@ -207,6 +210,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                     crate::collection_core::try_load_index_from_file(db_path, index_meta)
                 {
                     log_debug!("Loaded index '{}' from .idx file", index_meta.name);
+                    loaded_from_file.insert(index_meta.name.clone());
                     index_manager.add_loaded_index(loaded_tree);
                     continue;
                 }
@@ -225,7 +229,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 index_meta.sparse,
             )?;
         }
-        Ok(())
+        Ok(loaded_from_file)
     }
 
     /// Rebuild all indexes from document catalog
@@ -573,7 +577,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         // Load persisted custom indexes (delegated to helper)
         // Only load from .idx files if clean shutdown - stale files may have tombstone entries
-        Self::load_persisted_indexes(
+        let btree_indexes_loaded_from_file = Self::load_persisted_indexes(
             &mut index_manager,
             &persisted_indexes,
             &id_index_name,
@@ -707,8 +711,18 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // Determine what needs rebuilding
         // (was_clean is already known from earlier)
 
-        // Check if any B+ tree indexes are empty (missing .idx file or failed to load)
+        // Check if any B+ tree indexes need rebuilding
+        // Skip indexes that were successfully loaded from .idx files (even if empty/sparse)
         let has_btree_without_file = persisted_indexes.iter().any(|meta| {
+            // Skip indexes loaded from .idx files
+            if btree_indexes_loaded_from_file.contains(&meta.name) {
+                return false;
+            }
+            // Skip _id index if it was loaded
+            if meta.name == id_index_name && id_index_loaded {
+                return false;
+            }
+            // Check if index is empty (needs rebuild)
             index_manager
                 .get_btree_index(&meta.name)
                 .map(|idx| idx.size() == 0)

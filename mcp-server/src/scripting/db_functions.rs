@@ -516,8 +516,12 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
     let adapter_lidx = adapter.clone();
     engine.register_fn("db_list_indexes", move |collection: &str| -> Dynamic {
         let btree = adapter_lidx.list_indexes(collection).unwrap_or_default();
-        let fulltext = adapter_lidx.list_fulltext_indexes(collection).unwrap_or_default();
-        let vector = adapter_lidx.list_vector_indexes(collection).unwrap_or_default();
+        let fulltext = adapter_lidx
+            .list_fulltext_indexes(collection)
+            .unwrap_or_default();
+        let vector = adapter_lidx
+            .list_vector_indexes(collection)
+            .unwrap_or_default();
 
         let btree_dyn: Vec<Dynamic> = btree.iter().map(|s| Dynamic::from(s.clone())).collect();
         let fulltext_dyn: Vec<Dynamic> = fulltext.iter().map(json_to_dynamic).collect();
@@ -525,9 +529,15 @@ fn register_index_functions(engine: &mut Engine, adapter: Arc<IronBaseAdapter>) 
 
         let mut summary = Map::new();
         summary.insert("btree_count".into(), Dynamic::from(btree.len() as i64));
-        summary.insert("fulltext_count".into(), Dynamic::from(fulltext.len() as i64));
+        summary.insert(
+            "fulltext_count".into(),
+            Dynamic::from(fulltext.len() as i64),
+        );
         summary.insert("vector_count".into(), Dynamic::from(vector.len() as i64));
-        summary.insert("total".into(), Dynamic::from((btree.len() + fulltext.len() + vector.len()) as i64));
+        summary.insert(
+            "total".into(),
+            Dynamic::from((btree.len() + fulltext.len() + vector.len()) as i64),
+        );
 
         let mut result = Map::new();
         result.insert("btree_indexes".into(), Dynamic::from(btree_dyn));

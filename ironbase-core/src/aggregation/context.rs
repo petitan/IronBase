@@ -215,6 +215,11 @@ impl AggregationLimitContext {
     ///
     /// Returns Ok if group was already registered or limit not exceeded.
     /// Returns Err if new group would exceed limit.
+    ///
+    /// Registers a new group and checks the group limit.
+    ///
+    /// The group limit is always `max_group_count` regardless of streaming mode.
+    /// (The `streaming_to_group` flag only affects doc limits, not group limits.)
     pub fn register_new_group(&self, group_hash: u64) -> Result<()> {
         self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
@@ -224,8 +229,10 @@ impl AggregationLimitContext {
             return Ok(());
         }
 
+        let limit = inner.limits.max_group_count;
+
         // Check limit BEFORE adding new group
-        if inner.groups_created >= inner.limits.max_group_count {
+        if inner.groups_created >= limit {
             return Err(IronBaseError::AggregationError(format!(
                 "Aggregation exceeded group limit: {} unique groups (limit: {}). \
                  High-cardinality $group key detected. Consider:\n\
@@ -233,7 +240,7 @@ impl AggregationLimitContext {
                  2. Use a lower-cardinality group key\n\
                  3. Increase max_group_count limit",
                 inner.groups_created + 1,
-                inner.limits.max_group_count
+                limit
             )));
         }
 
@@ -395,33 +402,22 @@ impl AggregationLimitContext {
 
     // ========== Index entry counting (for index-based paths) ==========
 
-    /// Increment index entry counter and check limit
+    /// Increment index entry counter (no limit check for index-based paths)
     ///
-    /// Used by index-based $group optimization. The limit is the same
-    /// as document limit since each index entry corresponds to a document.
+    /// Used by index-based $group optimization. Unlike document loading,
+    /// index entries are tiny (~16 bytes each), so we don't limit by entry count.
+    /// Memory is bounded by `max_group_count` instead (O(unique_keys) not O(entries)).
+    ///
+    /// # Memory comparison:
+    /// - Document-based: 132K docs × 1KB avg = 132 MB
+    /// - Index-based: 130K unique keys × 16 bytes = 2 MB
+    ///
+    /// The group count limit (`register_new_group`) is the appropriate memory guard.
     pub fn increment_index_entries(&self, count: usize) -> Result<()> {
         self.check_deadline()?;
         let mut inner = self.inner.borrow_mut();
         inner.index_entries_scanned += count;
-
-        if inner.streaming_to_group {
-            return Ok(());
-        }
-
-        // Use same logic as doc limit
-        let limit = if inner.has_leading_match {
-            inner.limits.max_docs_with_match
-        } else {
-            inner.limits.max_docs_without_match
-        };
-
-        if inner.index_entries_scanned > limit {
-            return Err(IronBaseError::AggregationError(format!(
-                "Index-based aggregation exceeded entry limit: {} entries (limit: {}). \
-                 Add a more selective $match or reduce index size.",
-                inner.index_entries_scanned, limit
-            )));
-        }
+        // No entry limit - index entries are tiny, memory bounded by group count
         Ok(())
     }
 

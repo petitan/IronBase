@@ -8,6 +8,9 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::defaults::{
+    default_chunk_mode, default_chunk_overlap, default_chunk_size, default_embedding_provider,
+};
 use super::params::ParseParams;
 
 // ============================================================================
@@ -44,28 +47,12 @@ pub struct EmbedDocumentParams {
     pub mode: String,
     #[serde(default = "default_chunk_size")]
     pub chunk_size: usize,
-    #[serde(default = "default_overlap")]
+    #[serde(default = "default_chunk_overlap")]
     pub overlap: usize,
-    #[serde(default = "default_provider")]
+    #[serde(default = "default_embedding_provider")]
     pub provider: String,
     #[serde(default = "default_create_vector_index")]
     pub create_vector_index: bool,
-}
-
-fn default_chunk_mode() -> String {
-    "auto".to_string()
-}
-
-fn default_chunk_size() -> usize {
-    1000
-}
-
-fn default_overlap() -> usize {
-    100
-}
-
-fn default_provider() -> String {
-    "fasttext".to_string()
 }
 
 fn default_create_vector_index() -> bool {
@@ -220,9 +207,8 @@ fn handle_embed_document(
         .with_overlap(p.overlap)
         .with_mode(mode);
 
-    let chunks = chunk_content(&p.content, &options).map_err(|e| {
-        McpError::internal(format!("Chunking failed: {}", e))
-    })?;
+    let chunks = chunk_content(&p.content, &options)
+        .map_err(|e| McpError::internal(format!("Chunking failed: {}", e)))?;
 
     if chunks.is_empty() {
         return Ok(json!({
@@ -235,34 +221,46 @@ fn handle_embed_document(
 
     // Generate embeddings in batch (process in chunks of 100)
     let mut all_embeddings: Vec<Vec<f32>> = Vec::new();
+    // Pre-allocate to avoid OOM on large documents
+    all_embeddings.try_reserve(chunks.len()).map_err(|e| {
+        McpError::internal(format!(
+            "Cannot allocate memory for {} embeddings: {}",
+            chunks.len(),
+            e
+        ))
+    })?;
     let batch_size = 100;
 
     for batch in chunks.chunks(batch_size) {
         let texts: Vec<&str> = batch.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = provider.embed_batch(&texts).map_err(|e| {
-            McpError::internal(format!("Embedding generation failed: {}", e))
-        })?;
+        let embeddings = provider
+            .embed_batch(&texts)
+            .map_err(|e| McpError::internal(format!("Embedding generation failed: {}", e)))?;
         all_embeddings.extend(embeddings);
     }
 
     // Create collection if it doesn't exist
-    let _ = adapter.create_collection(&p.collection);
+    if let Err(e) = adapter.create_collection(&p.collection) {
+        tracing::debug!("Collection creation note: {} (may already exist)", e);
+    }
 
     // Create vector index if requested
     if p.create_vector_index {
         let dimension = provider.dimension();
         // Try to create index with default HNSW parameters, ignore if already exists
         // metric: cosine, max_vectors: 100000, m: 16, ef_construction: 100, ef_search: 50
-        let _ = adapter.create_vector_index(
+        if let Err(e) = adapter.create_vector_index(
             &p.collection,
             "embedding",
             dimension,
             "cosine",
-            100_000,  // max_vectors
-            16,       // m
-            100,      // ef_construction
-            50,       // ef_search
-        );
+            100_000, // max_vectors
+            16,      // m
+            100,     // ef_construction
+            50,      // ef_search
+        ) {
+            tracing::debug!("Vector index creation note: {} (may already exist)", e);
+        }
     }
 
     // Generate parent doc_id if not provided

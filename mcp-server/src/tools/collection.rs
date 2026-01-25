@@ -35,6 +35,7 @@ fn handle_collection_list(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
 
 fn handle_collection_create(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
     let p: CollectionCreateParams = CollectionCreateParams::parse(params)?;
+    validate_collection_name(&p.collection)?;
     adapter.create_collection(&p.collection)?;
     Ok(json!({"success": true, "collection": p.collection}))
 }

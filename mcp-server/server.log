@@ -1,22 +1,41 @@
-[2m2025-11-24T21:14:55.759259Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Starting MCP DOCJL Server v0.1.0
-[2m2025-11-24T21:14:55.759493Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Server listening on 127.0.0.1:8080
-[2m2025-11-24T21:15:25.344408Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_get_document
-[2m2025-11-24T21:15:25.344470Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764018925344_2d07cea8
-[2m2025-11-24T21:18:30.397301Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_get_document
-[2m2025-11-24T21:18:30.397363Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019110397_c9eed092
-[2m2025-11-24T21:20:21.633314Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
-[2m2025-11-24T21:20:21.633461Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221633_1b450e90
-[2m2025-11-24T21:20:21.673134Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
-[2m2025-11-24T21:20:21.673222Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221673_d81b494d
-[2m2025-11-24T21:20:21.712281Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
-[2m2025-11-24T21:20:21.712343Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221712_e1ce6273
-[2m2025-11-24T21:20:21.750805Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
-[2m2025-11-24T21:20:21.750859Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221750_1df35a60
-[2m2025-11-24T21:20:21.789687Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
-[2m2025-11-24T21:20:21.789753Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221789_828f6070
-[2m2025-11-24T21:20:21.827744Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_insert_block
-[2m2025-11-24T21:20:21.827797Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019221827_9dd5783b
-[2m2025-11-24T21:21:23.988533Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_list_documents
-[2m2025-11-24T21:21:23.988592Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019283988_842fadf2
-[2m2025-11-24T21:31:30.396044Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Executing command: mcp_docjl_get_document
-[2m2025-11-24T21:31:30.397560Z[0m [32m INFO[0m [2mmcp_docjl_server[0m[2m:[0m Command logged: audit_id=audit_1764019890396_5a64ec88
+[2m2026-01-25T05:34:46.044255Z[0m [32m INFO[0m [2mmcp_ironbase::http_server[0m[2m:[0m Starting MCP IronBase Server v1.0.276 (HTTP mode)
+[2m2026-01-25T05:34:46.044723Z[0m [32m INFO[0m [2mmcp_ironbase::monitoring[0m[2m:[0m Memory stats [3mallocated_mb[0m[2m=[0m"5.09" [3mresident_mb[0m[2m=[0m"9.68"
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 5 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 1 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 0 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 1 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 1 catalog entries (this may take a while)
+[2m2026-01-25T05:34:46.144976Z[0m [32m INFO[0m [2mmcp_ironbase::adapter[0m[2m:[0m Starting warm-up for 23 collections...
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 61 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 2 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 3 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 120 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 298 catalog entries (this may take a while)
+[2m2026-01-25T05:34:46.470710Z[0m [32m INFO[0m [2mmcp_ironbase::adapter[0m[2m:[0m Warmed up [5/23] 'scale_500' (298 docs) in 0.21s
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 0 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 12762 catalog entries (this may take a while)
+[2m2026-01-25T05:34:46.761424Z[0m [32m INFO[0m [2mmcp_ironbase::adapter[0m[2m:[0m Warmed up [7/23] 'ujszeged_csapadek' (12762 docs) in 0.29s
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 1 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 7 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 5 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 31 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 41 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 3 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 11 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 31 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 54103 catalog entries (this may take a while)
+[2m2026-01-25T05:34:48.383140Z[0m [32m INFO[0m [2mmcp_ironbase::adapter[0m[2m:[0m Warmed up [16/23] 'tisza_vizallas' (54103 docs) in 1.51s
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 132840 catalog entries (this may take a while)
+[2m2026-01-25T05:38:57.881452Z[0m [32m INFO[0m [2mmcp_ironbase::adapter[0m[2m:[0m Warmed up [17/23] 'emails' (129805 docs) in 236.50s
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 0 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 5 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 100 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 3 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 5 catalog entries (this may take a while)
+⚠️ [WARN] ironbase_core::database::collections: Rebuilding indexes due to dirty shutdown/crash - 100 catalog entries (this may take a while)
+[2m2026-01-25T05:38:57.971588Z[0m [32m INFO[0m [2mmcp_ironbase::adapter[0m[2m:[0m Warm-up complete: 23 collections in 238.83s
+[2m2026-01-25T05:38:57.978140Z[0m [32m INFO[0m [2mmcp_ironbase::scripting::limits[0m[2m:[0m Dynamic script limits initialized [3mavailable_mb[0m[2m=[0m"9729" [3mmax_result_mb[0m[2m=[0m"100.0" [3mmax_find_docs[0m[2m=[0m102400 [3mmax_log_mb[0m[2m=[0m"10.0"
+[2m2026-01-25T05:38:57.978499Z[0m [32m INFO[0m [2mmcp_ironbase::http_server[0m[2m:[0m No IRONBASE_FASTTEXT_MODEL configured, embeddings disabled
+[2m2026-01-25T05:38:57.979276Z[0m [32m INFO[0m [2mmcp_ironbase::http_server[0m[2m:[0m Job manager initialized
+[2m2026-01-25T05:38:57.985664Z[0m [32m INFO[0m [2mmcp_ironbase::http_server[0m[2m:[0m Server listening on https://0.0.0.0:8080 (TLS enabled, max body size: 1GB)
+[2m2026-01-25T05:40:06.355094Z[0m [32m INFO[0m [2mmcp_ironbase::http_server[0m[2m:[0m Periodic checkpoint completed [3mindexes_flushed[0m[2m=[0m46

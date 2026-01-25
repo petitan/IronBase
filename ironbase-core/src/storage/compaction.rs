@@ -85,6 +85,8 @@ pub struct CheckpointStats {
     pub wal_size_after: u64,
     /// Number of operations that were in the WAL
     pub wal_ops_cleared: u64,
+    /// Number of index files flushed to disk (.idx, .ftidx, .fzidx, .hnsw)
+    pub indexes_flushed: usize,
 }
 
 impl StorageEngine {

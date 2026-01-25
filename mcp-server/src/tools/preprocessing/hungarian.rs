@@ -19,36 +19,31 @@ impl HungarianPreprocessor {
     const SUFFIXES: &'static [&'static str] = &[
         // ============ 7+ karakteres összetett ragok ============
         "jaikkal", "jeikkel", // birtokos többes eszközhatározó
-        "jaikat", "jeiket",   // birtokos többes tárgyeset
+        "jaikat", "jeiket", // birtokos többes tárgyeset
         "okban", "ekben", "ökben", "akban", // helyhatározó többes
         // ============ 6 karakteres ragok ============
-        "jeiket", "aikat", "jeink", "aink", "jeibe", "aiba",
-        "aitok", "eitek", "jaink", "jeink",
+        "jeiket", "aikat", "jeink", "aink", "jeibe", "aiba", "aitok", "eitek", "jaink", "jeink",
         "ukkal", "ükkel", // birtokos eszközhatározó
         "unkat", "ünket", // birtokos tárgyeset (mi)
         // ============ 5 karakteres ragok ============
-        "ekkel", "okkal", "akkal", "ükkel",
-        "aikat", "eiket", // birtokos tárgyeset többes
+        "ekkel", "okkal", "akkal", "ükkel", "aikat", "eiket", // birtokos tárgyeset többes
         "jának", "jének", // birtokos részes
-        "ához", "éhez",   // birtokos -hoz
-        "ával", "ével",   // birtokos eszközhatározó
+        "ához", "éhez", // birtokos -hoz
+        "ával", "ével", // birtokos eszközhatározó
         "okat", "akat", "eket", "öket", // tárgyeset többes (KRITIKUS!)
         // ============ 4 karakteres ragok ============
-        "ként", "kor",
-        "ból", "ből", "tól", "től", "ról", "ről",
-        "nak", "nek", "val", "vel", "hoz", "hez", "höz",
-        "ban", "ben", "nál", "nél",
-        "ait", "eit", "jait", "jeit", // birtokos tárgyeset
-        "ját", "jét",  // egyes 3. személyű birtokos tárgyeset
-        "unk", "ünk",  // birtokos többes 1. személy
+        "ként", "kor", "ból", "ből", "tól", "től", "ról", "ről", "nak", "nek", "val", "vel", "hoz",
+        "hez", "höz", "ban", "ben", "nál", "nél", "ait", "eit", "jait",
+        "jeit", // birtokos tárgyeset
+        "ját", "jét", // egyes 3. személyű birtokos tárgyeset
+        "unk", "ünk", // birtokos többes 1. személy
         "tok", "tek", "tök", // birtokos többes 2. személy
         // ============ 3 karakteres ragok ============
         "ért",
         // Note: ból/ből/tól/től/nak/nek/ban/ben/hoz/hez/höz/val/vel/nál/nél/ról/ről
         // are in 4-char section above (they're 4 bytes due to accents, but 3 chars)
         // ============ 2 karakteres ragok ============
-        "ba", "be", "ra", "re", "ig",
-        "at", "et", "ot", "öt", // tárgyeset egyes
+        "ba", "be", "ra", "re", "ig", "at", "et", "ot", "öt", // tárgyeset egyes
         "ok", "ek", "ök", "ak", // többes szám
         "ja", "je", "ai", "ei", // birtokos
         "ám", "ém", "om", "em", "öm", // birtokos 1. személy
@@ -59,27 +54,97 @@ impl HungarianPreprocessor {
     /// Hungarian stop words (common words without semantic value)
     const STOP_WORDS: &'static [&'static str] = &[
         // Létigék
-        "vannak", "voltak", "lenne", "lennének", "lesz", "lesznek", "volt", "van", "vagy",
-        "vagyok", "vagyunk", "vagytok",
+        "vannak",
+        "voltak",
+        "lenne",
+        "lennének",
+        "lesz",
+        "lesznek",
+        "volt",
+        "van",
+        "vagy",
+        "vagyok",
+        "vagyunk",
+        "vagytok",
         // Kötőszavak, módosítószavak
-        "hogy", "mint", "amely", "amelyek", "amit", "amiket", "ahol", "amikor", "mivel", "mert",
-        "tehát", "vagyis", "illetve", "valamint", "pedig", "csak", "még", "már", "minden",
-        "összes", "egyik", "másik", "szerint", "között", "után", "előtt", "alatt", "felett",
-        "mellett", "által", "felé", "ellen", "miatt", "helyett", "ezek", "azok", "ilyen",
-        "olyan", "igen", "nem", "és", "egy", "kell", "kéne", "lehet", "lehetne",
+        "hogy",
+        "mint",
+        "amely",
+        "amelyek",
+        "amit",
+        "amiket",
+        "ahol",
+        "amikor",
+        "mivel",
+        "mert",
+        "tehát",
+        "vagyis",
+        "illetve",
+        "valamint",
+        "pedig",
+        "csak",
+        "még",
+        "már",
+        "minden",
+        "összes",
+        "egyik",
+        "másik",
+        "szerint",
+        "között",
+        "után",
+        "előtt",
+        "alatt",
+        "felett",
+        "mellett",
+        "által",
+        "felé",
+        "ellen",
+        "miatt",
+        "helyett",
+        "ezek",
+        "azok",
+        "ilyen",
+        "olyan",
+        "igen",
+        "nem",
+        "és",
+        "egy",
+        "kell",
+        "kéne",
+        "lehet",
+        "lehetne",
         // Névelők és mutató névmások
-        "az", "ezt", "azt", "ezen", "azon", "ebben", "abban", "ennek", "annak",
+        "az",
+        "ezt",
+        "azt",
+        "ezen",
+        "azon",
+        "ebben",
+        "abban",
+        "ennek",
+        "annak",
         // Segédigék
-        "tudja", "tudják", "tudjuk", "tud", "fog", "fogja", "fogják", "fogjuk",
+        "tudja",
+        "tudják",
+        "tudjuk",
+        "tud",
+        "fog",
+        "fogja",
+        "fogják",
+        "fogjuk",
         // Gyakori rövid szavak
-        "meg", "fel", "le", "ki", "be", // igekötők önállóan
+        "meg",
+        "fel",
+        "le",
+        "ki",
+        "be", // igekötők önállóan
     ];
 
     /// Hungarian question words
     const QUESTION_WORDS: &'static [&'static str] = &[
         "milyen", "milyenek", "hogyan", "miért", "mikor", "hol", "honnan", "hová", "mennyi",
-        "hány", "melyik", "melyeket", "kik", "kiket", "mik", "miket", "mit",
-        "mi", "ki", // rövid kérdőszavak
+        "hány", "melyik", "melyeket", "kik", "kiket", "mik", "miket", "mit", "mi",
+        "ki", // rövid kérdőszavak
     ];
 
     /// Strip the longest matching suffix from a word
@@ -219,8 +284,8 @@ mod tests {
     fn test_suffix_stripping() {
         // Test various suffixes
         let test_cases = vec![
-            ("házból", "ház"),     // -ból
-            ("könyvnek", "könyv"), // -nek
+            ("házból", "ház"),       // -ból
+            ("könyvnek", "könyv"),   // -nek
             ("emberekkel", "ember"), // -ekkel
             ("kutyáknak", "kutyák"), // -nak (kutyák is kept as stem)
         ];
@@ -314,7 +379,10 @@ mod tests {
         // -tat/-tet causative suffixes should NOT be stripped
         // "különböztet" = distinguish (causative verb) - should stay as-is
         let (stemmed, _) = HungarianPreprocessor::strip_suffix("különböztet");
-        assert_eq!(stemmed, "különböztet", "causative -tet should not be stripped");
+        assert_eq!(
+            stemmed, "különböztet",
+            "causative -tet should not be stripped"
+        );
 
         // "olvastat" = make someone read - should stay as-is
         let (stemmed, _) = HungarianPreprocessor::strip_suffix("olvastat");

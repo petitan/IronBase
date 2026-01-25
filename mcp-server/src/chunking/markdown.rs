@@ -21,7 +21,9 @@ pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError>
 
     // Pre-allocate with try_reserve for OOM protection
     let mut chunks = Vec::new();
-    chunks.try_reserve(total).map_err(|_| ChunkError::OutOfMemory { count: total })?;
+    chunks
+        .try_reserve(total)
+        .map_err(|_| ChunkError::OutOfMemory { count: total })?;
 
     let mut char_offset = 0;
     let mut section_path: Vec<String> = Vec::new();
@@ -100,10 +102,7 @@ mod tests {
 
     #[test]
     fn test_extract_heading() {
-        assert_eq!(
-            extract_heading("# Title"),
-            Some(("Title".to_string(), 1))
-        );
+        assert_eq!(extract_heading("# Title"), Some(("Title".to_string(), 1)));
         assert_eq!(
             extract_heading("## Section"),
             Some(("Section".to_string(), 2))

@@ -7,7 +7,9 @@ use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::helpers::{parse_projection_value, parse_sort_value, validate_collection_name, DEFAULT_QUERY_LIMIT};
+use super::helpers::{
+    parse_projection_value, parse_sort_value, validate_collection_name, DEFAULT_QUERY_LIMIT,
+};
 use super::params::{
     ExplainParams, FindWithHintParams, FulltextAnalyzeParams, FulltextIndexParams,
     FulltextSearchParams, FuzzyIndexParams, FuzzySearchParams, IndexCreateParams, IndexDropParams,
@@ -75,8 +77,12 @@ fn handle_index_list(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
 
     // Get all index types
     let btree_indexes = adapter.list_indexes(&p.collection)?;
-    let fulltext_indexes = adapter.list_fulltext_indexes(&p.collection).unwrap_or_default();
-    let vector_indexes = adapter.list_vector_indexes(&p.collection).unwrap_or_default();
+    let fulltext_indexes = adapter
+        .list_fulltext_indexes(&p.collection)
+        .unwrap_or_default();
+    let vector_indexes = adapter
+        .list_vector_indexes(&p.collection)
+        .unwrap_or_default();
 
     Ok(json!({
         "btree_indexes": btree_indexes,

@@ -67,9 +67,9 @@ fn handle_listener_add(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<
     // Validate before saving
     config.validate()?;
 
+    // Atomic upsert - set() returns true if updated, false if created (TOCTOU fix)
     let manager = ListenerManager::new(adapter.clone());
-    let is_update = manager.get(&p.id).unwrap_or(None).is_some();
-    manager.set(&config)?;
+    let is_update = manager.set(&config)?;
 
     Ok(json!({
         "success": true,

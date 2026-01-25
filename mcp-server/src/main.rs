@@ -30,12 +30,13 @@ use mcp_ironbase::{
 // ============================================================
 
 /// Install a global panic handler that:
-/// 1. Logs the panic to stderr
+/// 1. Logs the panic to stderr with detailed diagnostics
 /// 2. Attempts to flush any pending data
-/// 3. Exits with a non-zero status
+/// 3. Lets the normal panic unwinding continue (to run Drop implementations)
 ///
-/// This helps prevent data corruption by ensuring the process
-/// terminates cleanly rather than being killed by the OS.
+/// FIX #2: Don't call exit() - let panic propagate so destructors run.
+/// This helps prevent data corruption by ensuring Drop implementations
+/// (like database flush) are executed before the process terminates.
 fn install_panic_handler() {
     let default_hook = std::panic::take_hook();
 
@@ -66,15 +67,23 @@ fn install_panic_handler() {
         eprintln!("Backtrace:\n{}", std::backtrace::Backtrace::force_capture());
         eprintln!("=================================\n");
 
-        // Call the default panic hook for any additional handling
-        default_hook(panic_info);
-
-        // Force stderr flush
+        // Force stderr flush BEFORE calling default hook
         let _ = std::io::stderr().flush();
 
-        // Exit with error code - don't let the panic propagate
-        // This ensures a clean exit rather than potential undefined behavior
-        std::process::exit(101);
+        // Call the default panic hook - this will print to stderr and
+        // allow normal panic unwinding to continue, running Drop implementations.
+        // Do NOT call exit() here - that would skip destructors and potentially
+        // leave the database in an inconsistent state.
+        default_hook(panic_info);
+
+        // Note: After default_hook returns, the normal Rust panic behavior continues:
+        // - panic=unwind (default): Stack unwinding runs Drop implementations
+        // - panic=abort: Process aborts immediately (but that's configured at compile time)
+        //
+        // We intentionally do NOT call std::process::exit() because:
+        // 1. It would skip Drop implementations (database flush, file closes)
+        // 2. The default panic behavior already terminates the process
+        // 3. Exit code 101 is the standard panic exit code on Unix
     }));
 }
 
@@ -253,9 +262,15 @@ fn get_default_db_path() -> String {
 
         // Create directory if it doesn't exist
         if let Err(e) = std::fs::create_dir_all(&base_path) {
-            eprintln!("Warning: Failed to create data directory {:?}: {}", base_path, e);
+            eprintln!(
+                "Warning: Failed to create data directory {:?}: {}",
+                base_path, e
+            );
         }
-        return base_path.join("ironbase_data.mlite").to_string_lossy().to_string();
+        return base_path
+            .join("ironbase_data.mlite")
+            .to_string_lossy()
+            .to_string();
     }
 
     #[cfg(target_os = "macos")]
@@ -332,7 +347,10 @@ fn run_stdio_server(cli: &Cli) {
         if let Ok(model_path) = std::env::var("IRONBASE_FASTTEXT_MODEL") {
             match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
                 Ok(manager) if manager.has_providers() => {
-                    eprintln!("Embedding manager initialized with FastText model: {}", model_path);
+                    eprintln!(
+                        "Embedding manager initialized with FastText model: {}",
+                        model_path
+                    );
                     Some(Arc::new(manager))
                 }
                 Ok(_) => {
@@ -396,7 +414,13 @@ fn run_stdio_server(cli: &Cli) {
         };
 
         // Handle request with lifecycle enforcement
-        if let Some(response) = handle_request(&request, &adapter, &embedding_manager, &job_manager, &mut initialized) {
+        if let Some(response) = handle_request(
+            &request,
+            &adapter,
+            &embedding_manager,
+            &job_manager,
+            &mut initialized,
+        ) {
             // BUG #14 fix: Handle JSON serialization errors gracefully
             let response_str = serde_json::to_string(&response).unwrap_or_else(|e| {
                 eprintln!("Response serialization error: {}", e);
@@ -551,7 +575,17 @@ fn handle_request(
             let arguments = params.arguments.unwrap_or_else(|| serde_json::json!({}));
 
             // Note: stdio mode doesn't support cancellation (None cancel_flag)
-            match dispatch_tool(&params.name, arguments, adapter, None, None, None, None, embedding_manager, job_manager) {
+            match dispatch_tool(
+                &params.name,
+                arguments,
+                adapter,
+                None,
+                None,
+                None,
+                None,
+                embedding_manager,
+                job_manager,
+            ) {
                 Ok(result) => {
                     if is_notification {
                         return None;

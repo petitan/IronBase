@@ -8,9 +8,19 @@
 //! | Operation | Effect | When to Use |
 //! |-----------|--------|-------------|
 //! | `flush()` | Persist all pending changes + metadata | After critical writes |
-//! | `checkpoint()` | Clear WAL without full metadata sync | Long-running processes |
+//! | `checkpoint()` | **Flush indexes** + metadata + clear WAL | Long-running processes (MongoDB-style) |
 //! | `compact()` | Remove tombstones, reclaim space | Periodic maintenance |
 //! | `close()` | Full flush + release file lock | Before reopening in another process |
+//!
+//! # Checkpoint (MongoDB-style Index Persistence)
+//!
+//! The `checkpoint()` method implements MongoDB-style index persistence:
+//! 1. Flush all indexes to .idx/.ftidx/.fzidx/.hnsw files
+//! 2. Flush metadata (document_catalog)
+//! 3. Clear WAL
+//!
+//! This ensures indexes survive crashes without requiring graceful shutdown.
+//! Call periodically (e.g., every 60 seconds) in long-running servers.
 //!
 //! # Shutdown Sequence
 //!
@@ -73,6 +83,48 @@ impl DatabaseCore<StorageEngine> {
         storage.compact()
     }
 
+    /// Checkpoint - flush indexes and clear WAL (MongoDB-style)
+    ///
+    /// This is the recommended way to ensure index durability in long-running processes.
+    /// Unlike `close()`, this does NOT release the file lock, so the database remains usable.
+    ///
+    /// The checkpoint performs:
+    /// 1. Flush all indexes to .idx/.ftidx/.fzidx/.hnsw files
+    /// 2. Flush metadata to ensure document_catalog is persisted
+    /// 3. Clear the WAL (all operations already in main file)
+    ///
+    /// # MongoDB Comparison
+    ///
+    /// This is similar to MongoDB's WiredTiger checkpoint mechanism:
+    /// - MongoDB checkpoints every 60 seconds or 2GB of journal data
+    /// - IronBase checkpoints on-demand via this method or MCP `checkpoint` tool
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use ironbase_core::DatabaseCore;
+    /// use ironbase_core::storage::StorageEngine;
+    ///
+    /// let db = DatabaseCore::<StorageEngine>::open("data.mlite")?;
+    /// // ... many operations ...
+    /// let stats = db.checkpoint()?; // Flush indexes + clear WAL
+    /// println!("Flushed {} indexes, cleared {} WAL ops", stats.indexes_flushed, stats.wal_ops_cleared);
+    /// # Ok::<(), ironbase_core::IronBaseError>(())
+    /// ```
+    pub fn checkpoint(&self) -> Result<crate::storage::CheckpointStats> {
+        // 1. Flush all indexes to disk first (like MongoDB's checkpoint)
+        let indexes_flushed = self.flush_all_indexes_counted()?;
+
+        // 2. Flush metadata and clear WAL
+        let mut storage = self.storage.write();
+        let mut stats = storage.checkpoint()?;
+
+        // 3. Add index count to stats
+        stats.indexes_flushed = indexes_flushed;
+
+        Ok(stats)
+    }
+
     /// Close the database: flush all changes and release the file lock.
     ///
     /// This method is primarily useful for language bindings (Python, C#) where
@@ -97,12 +149,9 @@ impl DatabaseCore<StorageEngine> {
         // Mark as closed FIRST to prevent new operations
         self.is_closed.store(true, Ordering::SeqCst);
 
-        // Flush all indexes to disk before closing
-        // This enables fast restart (clean shutdown optimization)
-        self.flush_all_indexes()?;
-
-        // Flush all pending changes to disk
-        self.flush()?;
+        // Checkpoint: flush indexes + metadata + clear WAL
+        // This ensures all data is persisted and WAL is empty
+        self.checkpoint()?;
 
         // Mark as clean shutdown BEFORE releasing lock
         // This enables fast startup next time (indexes can be trusted)
@@ -118,20 +167,41 @@ impl DatabaseCore<StorageEngine> {
 
     /// Flush all indexes (B+ tree, fulltext, fuzzy, and vector) to disk
     fn flush_all_indexes(&self) -> Result<()> {
+        self.flush_all_indexes_counted()?;
+        Ok(())
+    }
+
+    /// Flush all indexes and return count of flushed index files
+    fn flush_all_indexes_counted(&self) -> Result<usize> {
         let db_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
         };
 
+        let mut total_flushed = 0usize;
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
-            manager.flush_fulltext_indexes()?;
-            manager.flush_fuzzy_indexes()?;
-            manager.flush_btree_indexes(&db_path)?;
-            manager.flush_vector_indexes(&db_path)?;
+            total_flushed += manager.flush_fulltext_indexes()?;
+            total_flushed += manager.flush_fuzzy_indexes()?;
+            total_flushed += manager.flush_btree_indexes(&db_path)?;
+            total_flushed += manager.flush_vector_indexes(&db_path)?;
         }
-        Ok(())
+        Ok(total_flushed)
+    }
+}
+
+// ============================================================================
+// MEMORYSTORAGE-SPECIFIC MAINTENANCE OPERATIONS
+// ============================================================================
+
+impl DatabaseCore<crate::storage::MemoryStorage> {
+    /// Checkpoint for MemoryStorage (no-op since there's no disk)
+    ///
+    /// Returns default stats. MemoryStorage doesn't persist to disk,
+    /// so checkpoint is a no-op. This method exists for API compatibility.
+    pub fn checkpoint(&self) -> Result<crate::storage::CheckpointStats> {
+        Ok(crate::storage::CheckpointStats::default())
     }
 }
 
@@ -205,15 +275,6 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         let mut storage = self.storage.write();
         storage.flush()
-    }
-
-    /// Checkpoint - Clear WAL without flushing metadata
-    /// Use this in long-running processes to prevent WAL file growth
-    ///
-    /// Returns checkpoint statistics including WAL size before/after.
-    pub fn checkpoint(&self) -> Result<crate::storage::CheckpointStats> {
-        let mut storage = self.storage.write();
-        storage.checkpoint()
     }
 
     /// Get database path

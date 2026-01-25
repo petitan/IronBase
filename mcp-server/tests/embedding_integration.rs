@@ -69,7 +69,10 @@ fn test_embedding_manager_auto_detect() {
     let models = manager.list_models();
     println!("\nAvailable models:");
     for m in &models {
-        println!("  - {} / {} (dim={}) - {}", m.provider, m.model, m.dimension, m.description);
+        println!(
+            "  - {} / {} (dim={}) - {}",
+            m.provider, m.model, m.dimension, m.description
+        );
     }
     assert!(!models.is_empty());
 

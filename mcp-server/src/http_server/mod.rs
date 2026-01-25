@@ -166,8 +166,45 @@ async fn run_http_server_internal(
     let host = config.host.clone();
     let port = config.port;
     let max_body_size = config.max_body_size;
+    let addr = format!("{}:{}", host, port);
 
-    // Initialize IronBase adapter
+    // FIX #3: Validate TLS config BEFORE creating adapter
+    // This ensures we don't open the database only to exit() on TLS error
+    let tls_config = if config.tls_enabled {
+        let cert_file = match config.tls_cert_file.as_ref() {
+            Some(path) => path.clone(),
+            None => {
+                tracing::error!("TLS enabled but tls.cert_file not set in config");
+                std::process::exit(1);
+            }
+        };
+        let key_file = match config.tls_key_file.as_ref() {
+            Some(path) => path.clone(),
+            None => {
+                tracing::error!("TLS enabled but tls.key_file not set in config");
+                std::process::exit(1);
+            }
+        };
+        let rustls_config = match load_rustls_config(&cert_file, &key_file) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to load TLS config: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let socket_addr: std::net::SocketAddr = match addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::error!("Invalid address '{}': {}", addr, e);
+                std::process::exit(1);
+            }
+        };
+        Some((rustls_config, socket_addr))
+    } else {
+        None
+    };
+
+    // Initialize IronBase adapter - only after config validation passes
     let adapter = match IronBaseAdapter::new(&config.database_path) {
         Ok(a) => Arc::new(a),
         Err(e) => {
@@ -282,6 +319,42 @@ async fn run_http_server_internal(
                 }
                 _ = &mut shutdown => {
                     tracing::debug!("Limits refresh task received shutdown signal");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Spawn periodic checkpoint task (every 60 seconds, MongoDB-style)
+    // This ensures indexes are persisted to disk for crash recovery
+    let adapter_for_checkpoint = adapter.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        // Skip the first immediate tick
+        interval.tick().await;
+        // Create a separate shutdown signal listener for this task
+        let shutdown = shutdown::shutdown_signal();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    match adapter_for_checkpoint.checkpoint() {
+                        Ok(stats) => {
+                            let indexes = stats.get("indexes_flushed").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if indexes > 0 {
+                                tracing::info!(
+                                    indexes_flushed = indexes,
+                                    "Periodic checkpoint completed"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Periodic checkpoint failed: {}", e);
+                        }
+                    }
+                }
+                _ = &mut shutdown => {
+                    tracing::debug!("Checkpoint task received shutdown signal");
                     break;
                 }
             }
@@ -552,8 +625,6 @@ async fn run_http_server_internal(
         .layer(DefaultBodyLimit::max(max_body_size))
         .with_state(app_state);
 
-    let addr = format!("{}:{}", host, port);
-
     // Create shutdown future based on source
     #[cfg(windows)]
     let shutdown_future: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
@@ -569,32 +640,19 @@ async fn run_http_server_internal(
     #[cfg(not(windows))]
     let shutdown_future = shutdown::shutdown_signal();
 
+    // Helper closure to close adapter and exit on fatal errors after adapter is created
+    // FIX #3: Ensures database is properly closed before exit
+    let fatal_exit = |adapter: &Arc<IronBaseAdapter>, msg: &str, e: &dyn std::fmt::Display| {
+        tracing::error!("{}: {}", msg, e);
+        if let Err(close_err) = adapter.close() {
+            tracing::error!("Error closing database during fatal exit: {}", close_err);
+        }
+        std::process::exit(1);
+    };
+
     // Run server - TLS or plain HTTP based on config
-    if config.tls_enabled {
-        // TLS mode with axum-server - validate config first
-        let cert_file = match config.tls_cert_file.as_ref() {
-            Some(path) => path,
-            None => {
-                tracing::error!("TLS enabled but tls.cert_file not set in config");
-                std::process::exit(1);
-            }
-        };
-        let key_file = match config.tls_key_file.as_ref() {
-            Some(path) => path,
-            None => {
-                tracing::error!("TLS enabled but tls.key_file not set in config");
-                std::process::exit(1);
-            }
-        };
-
-        let rustls_config = match load_rustls_config(cert_file, key_file) {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Failed to load TLS config: {}", e);
-                std::process::exit(1);
-            }
-        };
-
+    // FIX #3: TLS config already validated before adapter creation
+    if let Some((rustls_config, socket_addr)) = tls_config {
         info!(
             "Server listening on https://{} (TLS enabled, max body size: {})",
             addr,
@@ -611,14 +669,6 @@ async fn run_http_server_internal(
             shutdown_handle.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
         });
 
-        let socket_addr = match addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::error!("Invalid address '{}': {}", addr, e);
-                std::process::exit(1);
-            }
-        };
-
         // Use into_make_service_with_connect_info to enable ConnectInfo extraction
         let app_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
         if let Err(e) = axum_server::bind_rustls(socket_addr, rustls_config)
@@ -633,8 +683,8 @@ async fn run_http_server_internal(
         let listener = match TcpListener::bind(&addr).await {
             Ok(l) => l,
             Err(e) => {
-                tracing::error!("Failed to bind to {}: {}", addr, e);
-                std::process::exit(1);
+                fatal_exit(&adapter, &format!("Failed to bind to {}", addr), &e);
+                unreachable!()
             }
         };
 

@@ -75,6 +75,12 @@ pub struct IndexManager {
     vector_indexes: HashMap<String, HnswIndex>,
     /// File paths for persistent indexes (for two-phase commit)
     index_file_paths: HashMap<String, PathBuf>,
+    /// Dirty tracking for B+ tree indexes (modified since last flush)
+    dirty_btree_indexes: HashSet<String>,
+    /// Dirty tracking for fulltext indexes
+    dirty_fulltext_indexes: HashSet<String>,
+    /// Dirty tracking for fuzzy indexes
+    dirty_fuzzy_indexes: HashSet<String>,
 }
 
 impl IndexManager {
@@ -86,7 +92,33 @@ impl IndexManager {
             fulltext_indexes: HashMap::new(),
             vector_indexes: HashMap::new(),
             index_file_paths: HashMap::new(),
+            dirty_btree_indexes: HashSet::new(),
+            dirty_fulltext_indexes: HashSet::new(),
+            dirty_fuzzy_indexes: HashSet::new(),
         }
+    }
+
+    /// Check if any indexes need flushing
+    pub fn has_dirty_indexes(&self) -> bool {
+        !self.dirty_btree_indexes.is_empty()
+            || !self.dirty_fulltext_indexes.is_empty()
+            || !self.dirty_fuzzy_indexes.is_empty()
+            || self.vector_indexes.values().any(|idx| idx.is_dirty())
+    }
+
+    /// Mark a B+ tree index as dirty (modified since last flush)
+    pub fn mark_btree_dirty(&mut self, name: &str) {
+        self.dirty_btree_indexes.insert(name.to_string());
+    }
+
+    /// Mark a fulltext index as dirty
+    pub fn mark_fulltext_dirty(&mut self, name: &str) {
+        self.dirty_fulltext_indexes.insert(name.to_string());
+    }
+
+    /// Mark a fuzzy index as dirty
+    pub fn mark_fuzzy_dirty(&mut self, name: &str) {
+        self.dirty_fuzzy_indexes.insert(name.to_string());
     }
 
     /// Set file path for an index (required for two-phase commit)
@@ -244,7 +276,13 @@ impl IndexManager {
     }
 
     /// Get B+ tree index (mutable)
+    ///
+    /// Note: This automatically marks the index as dirty since mutable access
+    /// implies modification. The index will be flushed on next checkpoint.
     pub fn get_btree_index_mut(&mut self, name: &str) -> Option<&mut BPlusTree> {
+        if self.btree_indexes.contains_key(name) {
+            self.dirty_btree_indexes.insert(name.to_string());
+        }
         self.btree_indexes.get_mut(name)
     }
 
@@ -470,7 +508,11 @@ impl IndexManager {
     }
 
     /// Get fuzzy index (mutable)
+    /// Auto-marks the index as dirty for checkpoint persistence
     pub fn get_fuzzy_index_mut(&mut self, name: &str) -> Option<&mut FuzzyIndex> {
+        if self.fuzzy_indexes.contains_key(name) {
+            self.dirty_fuzzy_indexes.insert(name.to_string());
+        }
         self.fuzzy_indexes.get_mut(name)
     }
 
@@ -575,7 +617,13 @@ impl IndexManager {
     }
 
     /// Get fulltext index by name (mutable)
+    ///
+    /// Note: This automatically marks the index as dirty since mutable access
+    /// implies modification. The index will be flushed on next checkpoint.
     pub fn get_fulltext_index_mut(&mut self, name: &str) -> Option<&mut FulltextIndex> {
+        if self.fulltext_indexes.contains_key(name) {
+            self.dirty_fulltext_indexes.insert(name.to_string());
+        }
         self.fulltext_indexes.get_mut(name)
     }
 
@@ -621,41 +669,80 @@ impl IndexManager {
         self.fulltext_indexes.insert(name, index);
     }
 
-    /// Flush all fulltext indexes to disk
+    /// Flush dirty fulltext indexes to disk
     ///
     /// This should be called before database close or during checkpoint
     /// to persist fulltext index changes to .ftidx files.
-    pub fn flush_fulltext_indexes(&mut self) -> Result<()> {
-        for index in self.fulltext_indexes.values_mut() {
-            index.save_to_file()?;
+    /// Only indexes marked as dirty are written.
+    ///
+    /// Returns the number of indexes flushed.
+    /// On error, dirty flags are preserved for retry on next flush.
+    pub fn flush_fulltext_indexes(&mut self) -> Result<usize> {
+        // Collect names first to avoid borrowing issues
+        let dirty_names: Vec<String> = self.dirty_fulltext_indexes.iter().cloned().collect();
+        let mut count = 0;
+
+        for name in dirty_names {
+            if let Some(index) = self.fulltext_indexes.get_mut(&name) {
+                index.save_to_file()?;
+                // Only remove from dirty set AFTER successful write
+                self.dirty_fulltext_indexes.remove(&name);
+                count += 1;
+            }
         }
-        Ok(())
+        Ok(count)
     }
 
-    /// Flush all fuzzy indexes to .fzidx files
+    /// Flush dirty fuzzy indexes to .fzidx files
     ///
     /// This should be called before database close to enable fast restart
     /// (clean shutdown optimization - skip fuzzy index rebuild on next open).
-    pub fn flush_fuzzy_indexes(&self) -> Result<()> {
-        for index in self.fuzzy_indexes.values() {
-            if index.storage_path().is_some() {
-                index.save_to_file()?;
+    /// Only indexes marked as dirty are written.
+    ///
+    /// Returns the number of indexes flushed.
+    /// On error, dirty flags are preserved for retry on next flush.
+    pub fn flush_fuzzy_indexes(&mut self) -> Result<usize> {
+        // Collect names first to avoid borrowing issues
+        let dirty_names: Vec<String> = self.dirty_fuzzy_indexes.iter().cloned().collect();
+        let mut count = 0;
+
+        for name in dirty_names {
+            if let Some(index) = self.fuzzy_indexes.get(&name) {
+                if index.storage_path().is_some() {
+                    index.save_to_file()?;
+                    // Only remove from dirty set AFTER successful write
+                    self.dirty_fuzzy_indexes.remove(&name);
+                    count += 1;
+                }
             }
         }
-        Ok(())
+        Ok(count)
     }
 
-    /// Flush all B+ tree indexes to .idx files
+    /// Flush dirty B+ tree indexes to .idx files
     ///
     /// This should be called before database close to enable fast restart
     /// (clean shutdown optimization - skip index rebuild on next open).
-    pub fn flush_btree_indexes(&mut self, db_path: &str) -> Result<()> {
+    /// Only indexes marked as dirty are written.
+    ///
+    /// Returns the number of indexes flushed.
+    /// On error, dirty flags are preserved for retry on next flush.
+    pub fn flush_btree_indexes(&mut self, db_path: &str) -> Result<usize> {
         use crate::collection_core::persist_index_to_disk;
 
-        for (name, tree) in self.btree_indexes.iter_mut() {
-            persist_index_to_disk(db_path, name, |file| tree.save_to_file(file))?;
+        // Collect names first to avoid borrowing issues
+        let dirty_names: Vec<String> = self.dirty_btree_indexes.iter().cloned().collect();
+        let mut count = 0;
+
+        for name in dirty_names {
+            if let Some(tree) = self.btree_indexes.get_mut(&name) {
+                persist_index_to_disk(db_path, &name, |file| tree.save_to_file(file))?;
+                // Only remove from dirty set AFTER successful write
+                self.dirty_btree_indexes.remove(&name);
+                count += 1;
+            }
         }
-        Ok(())
+        Ok(count)
     }
 
     // ========== VECTOR INDEX METHODS ==========
@@ -768,7 +855,10 @@ impl IndexManager {
     ///
     /// This should be called before database close to enable fast restart.
     /// Only dirty indexes (modified since last save) are written.
-    pub fn flush_vector_indexes(&mut self, db_path: &str) -> Result<()> {
+    ///
+    /// Returns the number of indexes flushed.
+    pub fn flush_vector_indexes(&mut self, db_path: &str) -> Result<usize> {
+        let mut count = 0;
         for (name, index) in self.vector_indexes.iter_mut() {
             if index.is_dirty() {
                 // Build cache path: {db_dir}/{index_name}.hnsw
@@ -787,9 +877,10 @@ impl IndexManager {
                     name,
                     cache_path.display()
                 );
+                count += 1;
             }
         }
-        Ok(())
+        Ok(count)
     }
 
     /// Build the path for HNSW cache file
@@ -903,6 +994,90 @@ impl IndexManager {
         refreshed_count
     }
 
+    // ========== LAZY LOADING MONITORING ==========
+
+    /// Get total memory usage across all indexes (bytes)
+    ///
+    /// Uses the `LazyLoadable::memory_usage_bytes()` trait method for each index.
+    pub fn total_memory_usage(&self) -> usize {
+        use super::traits::IndexTrait;
+
+        let btree_mem: usize = self
+            .btree_indexes
+            .values()
+            .map(|idx| idx.memory_usage_bytes())
+            .sum();
+
+        let fuzzy_mem: usize = self
+            .fuzzy_indexes
+            .values()
+            .map(|idx| idx.memory_usage_bytes())
+            .sum();
+
+        let fulltext_mem: usize = self
+            .fulltext_indexes
+            .values()
+            .map(|idx| idx.memory_usage_bytes())
+            .sum();
+
+        let vector_mem: usize = self
+            .vector_indexes
+            .values()
+            .map(|idx| idx.memory_usage_bytes())
+            .sum();
+
+        btree_mem + fuzzy_mem + fulltext_mem + vector_mem
+    }
+
+    /// Count indexes currently in lazy mode (not fully loaded)
+    pub fn lazy_index_count(&self) -> usize {
+        use super::traits::LazyLoadable;
+
+        let btree_lazy = self
+            .btree_indexes
+            .values()
+            .filter(|idx| idx.is_lazy_mode())
+            .count();
+
+        let fuzzy_lazy = self
+            .fuzzy_indexes
+            .values()
+            .filter(|idx| idx.is_lazy_mode())
+            .count();
+
+        let fulltext_lazy = self
+            .fulltext_indexes
+            .values()
+            .filter(|idx| idx.is_lazy_mode())
+            .count();
+
+        // HNSW doesn't support lazy loading yet
+        btree_lazy + fuzzy_lazy + fulltext_lazy
+    }
+
+    /// Get total index count across all types
+    pub fn total_index_count(&self) -> usize {
+        self.btree_indexes.len()
+            + self.fuzzy_indexes.len()
+            + self.fulltext_indexes.len()
+            + self.vector_indexes.len()
+    }
+
+    /// Log lazy loading status (for startup diagnostics)
+    pub fn log_lazy_status(&self) {
+        let total = self.total_index_count();
+        let lazy = self.lazy_index_count();
+        let mem_mb = self.total_memory_usage() / (1024 * 1024);
+
+        tracing::info!(
+            total_indexes = total,
+            lazy_indexes = lazy,
+            loaded_indexes = total - lazy,
+            memory_mb = mem_mb,
+            "IndexManager initialized"
+        );
+    }
+
     // ========== CENTRALIZED INDEX OPERATIONS (FIX #19) ==========
 
     /// Add a document to all indexes (B+ tree and fuzzy)
@@ -982,6 +1157,8 @@ impl IndexManager {
                         !is_null || (index.metadata.unique && !index.metadata.sparse);
                     if should_index {
                         index.insert(index_key, doc_id.clone())?;
+                        // Mark dirty for checkpoint persistence
+                        self.dirty_btree_indexes.insert(index_name.clone());
                     }
                 }
             }
@@ -1002,6 +1179,8 @@ impl IndexManager {
                 if let Some(value) = get_nested_value(doc, &index.metadata.field) {
                     if let Some(s) = value.as_str() {
                         index.insert(s, doc_id.clone());
+                        // Mark dirty for checkpoint persistence
+                        self.dirty_fuzzy_indexes.insert(index_name.clone());
                     }
                 }
             }
@@ -1028,6 +1207,9 @@ impl IndexManager {
                                 index_name,
                                 e
                             );
+                        } else {
+                            // Mark dirty only if insert succeeded
+                            self.dirty_fulltext_indexes.insert(index_name.clone());
                         }
                     }
                 }
@@ -1150,6 +1332,8 @@ impl IndexManager {
 
             if let Some(index) = self.fuzzy_indexes.get_mut(&index_name) {
                 index.remove(doc_id);
+                // Mark dirty for checkpoint persistence
+                self.dirty_fuzzy_indexes.insert(index_name.clone());
             }
         }
 
@@ -1171,6 +1355,9 @@ impl IndexManager {
                         index_name,
                         e
                     );
+                } else {
+                    // Mark dirty only if remove succeeded
+                    self.dirty_fulltext_indexes.insert(index_name.clone());
                 }
             }
         }

@@ -367,8 +367,8 @@ impl Default for JobManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::types::JobStatus;
+    use super::*;
 
     #[test]
     fn test_create_job() {

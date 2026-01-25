@@ -11,6 +11,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::defaults::{
+    default_async, default_batch_size, default_chunk_mode, default_chunk_overlap,
+    default_chunk_size, is_allowed_system_collection, MAX_EMPTY_BATCHES,
+};
 use super::params::ParseParams;
 
 // ============================================================================
@@ -38,7 +42,7 @@ impl AutoEmbedEnableParams {
         if self.collection.is_empty() {
             return Err(McpError::invalid_params("collection name cannot be empty"));
         }
-        if self.collection.starts_with('_') && self.collection != "_system" {
+        if self.collection.starts_with('_') && !is_allowed_system_collection(&self.collection) {
             return Err(McpError::invalid_params(
                 "collection names starting with '_' are reserved for system collections",
             ));
@@ -82,7 +86,9 @@ impl AutoEmbedEnableParams {
         // Chunking validation
         if let Some(ref chunking) = self.chunking {
             if chunking.chunk_size == 0 {
-                return Err(McpError::invalid_params("chunk_size must be greater than 0"));
+                return Err(McpError::invalid_params(
+                    "chunk_size must be greater than 0",
+                ));
             }
             if chunking.overlap >= chunking.chunk_size {
                 return Err(McpError::invalid_params(
@@ -104,18 +110,6 @@ pub struct ChunkingParams {
     pub chunk_size: usize,
     #[serde(default = "default_chunk_overlap")]
     pub overlap: usize,
-}
-
-fn default_chunk_mode() -> String {
-    "auto".to_string()
-}
-
-fn default_chunk_size() -> usize {
-    1000
-}
-
-fn default_chunk_overlap() -> usize {
-    100
 }
 
 /// Parameters for `auto_embed_disable` tool
@@ -142,14 +136,6 @@ pub struct AutoEmbedBackfillParams {
     pub r#async: bool,
 }
 
-fn default_batch_size() -> usize {
-    100
-}
-
-fn default_async() -> bool {
-    true
-}
-
 // ============================================================================
 // Dispatch
 // ============================================================================
@@ -166,7 +152,9 @@ pub fn dispatch(
         "auto_embed_enable" => handle_auto_embed_enable(params, adapter, embedding_manager),
         "auto_embed_disable" => handle_auto_embed_disable(params, adapter),
         "auto_embed_status" => handle_auto_embed_status(params, adapter),
-        "auto_embed_backfill" => handle_auto_embed_backfill(params, adapter, embedding_manager, job_manager),
+        "auto_embed_backfill" => {
+            handle_auto_embed_backfill(params, adapter, embedding_manager, job_manager)
+        }
         _ => Err(McpError::invalid_params(format!(
             "Unknown auto-embed tool: {}",
             name
@@ -197,7 +185,11 @@ fn handle_auto_embed_enable(
 
     // Check if provider is available
     if manager.get_provider(&p.provider).is_none() {
-        let available: Vec<_> = manager.list_models().iter().map(|m| m.provider.clone()).collect();
+        let available: Vec<_> = manager
+            .list_models()
+            .iter()
+            .map(|m| m.provider.clone())
+            .collect();
         return Err(McpError::invalid_params(format!(
             "Provider '{}' not found. Available: {:?}",
             p.provider, available
@@ -305,11 +297,14 @@ fn handle_auto_embed_backfill(
     let p: AutoEmbedBackfillParams = AutoEmbedBackfillParams::parse(params)?;
 
     // Get auto-embedding config
-    let config = adapter.get_auto_embedding_config(&p.collection)?
-        .ok_or_else(|| McpError::invalid_params(format!(
-            "Auto-embedding not configured for collection '{}'. Use auto_embed_enable first.",
-            p.collection
-        )))?;
+    let config = adapter
+        .get_auto_embedding_config(&p.collection)?
+        .ok_or_else(|| {
+            McpError::invalid_params(format!(
+                "Auto-embedding not configured for collection '{}'. Use auto_embed_enable first.",
+                p.collection
+            ))
+        })?;
 
     if !config.enabled {
         return Err(McpError::invalid_params(format!(
@@ -320,7 +315,9 @@ fn handle_auto_embed_backfill(
 
     // Validate embedding manager
     let manager = embedding_manager.as_ref().ok_or_else(|| {
-        McpError::internal("Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.")
+        McpError::internal(
+            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+        )
     })?;
 
     // Check if provider is available
@@ -332,17 +329,14 @@ fn handle_auto_embed_backfill(
     let mut query = p.filter.clone().unwrap_or(json!({}));
     if let Some(obj) = query.as_object_mut() {
         // Only process documents that don't have the embedding field
-        obj.insert(
-            config.target_field.clone(),
-            json!({ "$exists": false })
-        );
+        obj.insert(config.target_field.clone(), json!({ "$exists": false }));
     }
 
     // For async backfill, use JobManager to run in background thread
     if p.r#async {
-        let job_mgr = job_manager.as_ref().ok_or_else(|| {
-            McpError::internal("Job manager not available for async operations")
-        })?;
+        let job_mgr = job_manager
+            .as_ref()
+            .ok_or_else(|| McpError::internal("Job manager not available for async operations"))?;
 
         // Check if shutdown is in progress
         if job_mgr.is_shutting_down() {
@@ -424,15 +418,27 @@ fn handle_auto_embed_backfill(
 
     // Process in batches
     for batch in result.documents.chunks(p.batch_size) {
-        // Extract texts from source field
-        let texts: Vec<&str> = batch
+        // Filter documents that have the source field with string value
+        // This ensures correct pairing between docs and embeddings
+        let docs_with_source: Vec<&Value> = batch
+            .iter()
+            .filter(|doc| {
+                doc.get(&config.source_field)
+                    .and_then(|v| v.as_str())
+                    .is_some()
+            })
+            .collect();
+
+        if docs_with_source.is_empty() {
+            continue;
+        }
+
+        // Extract texts from filtered documents
+        // Note: filter_map is defensive - docs_with_source already filtered, but this is safer
+        let texts: Vec<&str> = docs_with_source
             .iter()
             .filter_map(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()))
             .collect();
-
-        if texts.is_empty() {
-            continue;
-        }
 
         // Generate embeddings
         let embeddings = match provider.embed_batch(&texts) {
@@ -444,8 +450,8 @@ fn handle_auto_embed_backfill(
             }
         };
 
-        // Update documents with embeddings
-        for (doc, embedding) in batch.iter().zip(embeddings.iter()) {
+        // Update documents with embeddings - now correctly paired
+        for (doc, embedding) in docs_with_source.iter().zip(embeddings.iter()) {
             if let Some(id) = doc.get("_id") {
                 let filter = json!({ "_id": id });
                 let update = json!({
@@ -490,10 +496,7 @@ fn run_backfill_job(
     // Build filter: documents without target field
     let mut query = filter.unwrap_or(json!({}));
     if let Some(obj) = query.as_object_mut() {
-        obj.insert(
-            config.target_field.clone(),
-            json!({ "$exists": false })
-        );
+        obj.insert(config.target_field.clone(), json!({ "$exists": false }));
     }
 
     // Count total documents to process
@@ -506,11 +509,14 @@ fn run_backfill_job(
     };
 
     if total_count == 0 {
-        job_manager.complete_job(job_id, json!({
-            "processed": 0,
-            "errors": 0,
-            "message": "No documents found that need embedding"
-        }));
+        job_manager.complete_job(
+            job_id,
+            json!({
+                "processed": 0,
+                "errors": 0,
+                "message": "No documents found that need embedding"
+            }),
+        );
         return;
     }
 
@@ -520,7 +526,10 @@ fn run_backfill_job(
     let provider = match embedding_manager.get_provider(&config.provider) {
         Some(p) => p,
         None => {
-            job_manager.fail_job(job_id, format!("Provider '{}' not available", config.provider));
+            job_manager.fail_job(
+                job_id,
+                format!("Provider '{}' not available", config.provider),
+            );
             return;
         }
     };
@@ -528,7 +537,6 @@ fn run_backfill_job(
     let mut processed = 0;
     let mut errors = 0;
     let mut consecutive_empty_batches = 0;
-    const MAX_EMPTY_BATCHES: usize = 3; // Safety limit to prevent infinite loop
 
     loop {
         // Check if shutdown was requested
@@ -566,7 +574,8 @@ fn run_backfill_job(
         }
 
         // Extract texts from source field
-        let texts: Vec<&str> = result.documents
+        let texts: Vec<&str> = result
+            .documents
             .iter()
             .filter_map(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()))
             .collect();
@@ -578,9 +587,14 @@ fn run_backfill_job(
             match provider.embed_batch(&texts) {
                 Ok(embeddings) => {
                     // Update documents with embeddings
-                    let docs_with_source: Vec<_> = result.documents
+                    let docs_with_source: Vec<_> = result
+                        .documents
                         .iter()
-                        .filter(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()).is_some())
+                        .filter(|doc| {
+                            doc.get(&config.source_field)
+                                .and_then(|v| v.as_str())
+                                .is_some()
+                        })
                         .collect();
 
                     let mut batch_processed = 0;
@@ -650,10 +664,13 @@ fn run_backfill_job(
     }
 
     // Complete the job
-    job_manager.complete_job(job_id, json!({
-        "processed": processed,
-        "errors": errors,
-        "total": total_count,
-        "provider": config.provider
-    }));
+    job_manager.complete_job(
+        job_id,
+        json!({
+            "processed": processed,
+            "errors": errors,
+            "total": total_count,
+            "provider": config.provider
+        }),
+    );
 }

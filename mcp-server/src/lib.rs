@@ -27,15 +27,17 @@ pub mod transport;
 // Re-export main types
 pub use acl::{AclConfig, AclManager, CallerContext, InterfaceType, RequiredPermission};
 pub use adapter::{FindOptions, IronBaseAdapter, UpdateResult};
-pub use embedding::{EmbeddingCache, EmbeddingManager, EmbeddingProvider, EmbeddingError, ModelInfo};
-pub use jobs::{JobManager, JobId, JobInfo, JobStatus, JobType};
 pub use api_keys::ApiKeyCache;
+pub use embedding::{
+    EmbeddingCache, EmbeddingError, EmbeddingManager, EmbeddingProvider, ModelInfo,
+};
 pub use engine::{IronBaseService, ServiceContext, ToolRequest, ToolResult};
 pub use error::{ErrorCode, McpError, OperationContext, Result};
 pub use execution::{
     current_cancel_flag, current_deadline, current_execution_context, is_cancelled,
     set_execution_context, ExecutionContext, ExecutionGuard,
 };
+pub use jobs::{JobId, JobInfo, JobManager, JobStatus, JobType};
 pub use listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTION};
 pub use monitoring::{
     get_memory_stats, get_system_memory, health_check, log_memory_stats, HealthCheck, MemoryStats,

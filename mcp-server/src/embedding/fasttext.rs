@@ -111,8 +111,7 @@ impl FastTextProvider {
                 break;
             }
 
-            let word =
-                String::from_utf8_lossy(&mmap[word_start..offset]).to_string();
+            let word = String::from_utf8_lossy(&mmap[word_start..offset]).to_string();
             offset += 1; // Skip null terminator
 
             // The vector starts here
@@ -229,10 +228,7 @@ impl EmbeddingProvider for FastTextProvider {
         // Process in parallel for large batches
         if texts.len() > 10 {
             use rayon::prelude::*;
-            texts
-                .par_iter()
-                .map(|text| self.embed(text))
-                .collect()
+            texts.par_iter().map(|text| self.embed(text)).collect()
         } else {
             texts.iter().map(|text| self.embed(text)).collect()
         }

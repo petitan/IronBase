@@ -75,7 +75,7 @@ pub use fuzzy::{
 pub use key::{IndexKey, IndexPrefixInfo, OrderedFloat};
 pub use legacy::{Index, IndexDefinition, IndexType};
 pub use manager::IndexManager;
-pub use traits::{IndexTrait, LazyLoadable};
+pub use traits::{calculate_lazy_threshold, IndexTrait, LazyLoadable};
 
 // Re-export from central limits module for tests
 #[cfg(test)]

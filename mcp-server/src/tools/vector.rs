@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use super::defaults::{default_embedding_field, default_vector_limit, DEFAULT_MAX_VECTORS};
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::ParseParams;
 
@@ -36,7 +37,7 @@ fn default_metric() -> String {
     "cosine".to_string()
 }
 fn default_max_vectors() -> usize {
-    100_000
+    DEFAULT_MAX_VECTORS
 }
 fn default_m() -> usize {
     16
@@ -61,15 +62,6 @@ pub struct VectorIndexDropParams {
     pub index_name: String,
 }
 
-// Gaploader-compatible default field name
-fn default_embedding_field() -> String {
-    "embedding".to_string()
-}
-
-fn default_limit() -> usize {
-    10
-}
-
 /// Parameters for `vector_search` tool
 ///
 /// Field default matches gaploader schema: "embedding"
@@ -80,7 +72,7 @@ pub struct VectorSearchParams {
     #[serde(default = "default_embedding_field")]
     pub field: String,
     pub vector: Vec<f64>,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_vector_limit")]
     pub limit: usize,
     pub projection: Option<Value>,
 }
@@ -96,7 +88,7 @@ pub struct VectorSearchFilterParams {
     pub field: String,
     pub vector: Vec<f64>,
     pub filter: Value,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_vector_limit")]
     pub limit: usize,
     pub projection: Option<Value>,
 }
@@ -206,8 +198,13 @@ fn handle_vector_search_filter(params: Value, adapter: &Arc<IronBaseAdapter>) ->
     let query_vector: Vec<f32> = p.vector.iter().map(|&v| v as f32).collect();
 
     let projection = parse_projection_value(p.projection)?;
-    let results =
-        adapter.vector_search_with_filter(&p.collection, &p.field, &query_vector, &p.filter, p.limit)?;
+    let results = adapter.vector_search_with_filter(
+        &p.collection,
+        &p.field,
+        &query_vector,
+        &p.filter,
+        p.limit,
+    )?;
 
     // Apply projection if specified, or convert to simple format
     let results_json: Vec<Value> = if let Some(proj) = projection {

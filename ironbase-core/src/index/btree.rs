@@ -183,6 +183,12 @@ pub struct BPlusTree {
     /// Runtime statistics counters (not persisted)
     /// Tracks changes since last statistics refresh for staleness detection
     counters: StatisticsCounters,
+    /// Source file path for lazy loading (None = fully in-memory)
+    source_path: Option<PathBuf>,
+    /// Lazy loading mode - true if tree data is not yet in memory
+    lazy_mode: bool,
+    /// Persisted file size in bytes (for threshold comparison)
+    persisted_size: u64,
 }
 
 /// Index statistics for selectivity estimation
@@ -608,6 +614,9 @@ impl BPlusTree {
                 building: false,
             },
             counters: StatisticsCounters::default(),
+            source_path: None,
+            lazy_mode: false,
+            persisted_size: 0,
         }
     }
 
@@ -644,6 +653,9 @@ impl BPlusTree {
                 building: false,
             },
             counters: StatisticsCounters::default(),
+            source_path: None,
+            lazy_mode: false,
+            persisted_size: 0,
         }
     }
 
@@ -695,6 +707,9 @@ impl BPlusTree {
                 building: false,
             },
             counters: StatisticsCounters::default(),
+            source_path: None,
+            lazy_mode: false,
+            persisted_size: 0,
         }
     }
 
@@ -809,9 +824,46 @@ impl BPlusTree {
                 // Use in-memory children if available
                 if child_index < internal.children.len() {
                     self.search_in_node(&internal.children[child_index], key)
+                } else if child_index < internal.children_offsets.len() {
+                    // Lazy loading: load child from disk on-demand
+                    if let Some(ref path) = self.source_path {
+                        let offset = internal.children_offsets[child_index];
+                        match File::open(path) {
+                            Ok(mut file) => match Self::load_node(&mut file, offset) {
+                                Ok(child_node) => {
+                                    return self.search_in_node(&child_node, key);
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[LAZY_LOAD_ERROR] Failed to load node at offset {}: {:?}",
+                                        offset, e
+                                    );
+                                    None
+                                }
+                            },
+                            Err(e) => {
+                                eprintln!(
+                                    "[LAZY_LOAD_ERROR] Failed to open file {:?}: {:?}",
+                                    path, e
+                                );
+                                None
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "[LAZY_LOAD_ERROR] No source_path for lazy loading! children={}, offsets={}",
+                            internal.children.len(),
+                            internal.children_offsets.len()
+                        );
+                        None
+                    }
                 } else {
-                    // No in-memory children - would need to load from disk
-                    // This path is for file-based persistence (not yet implemented)
+                    eprintln!(
+                        "[LAZY_LOAD_ERROR] child_index {} out of bounds: children={}, offsets={}",
+                        child_index,
+                        internal.children.len(),
+                        internal.children_offsets.len()
+                    );
                     None
                 }
             }
@@ -828,6 +880,9 @@ impl BPlusTree {
     /// Insert key-value pair into index
     /// Handles automatic node splitting when nodes become too large
     pub fn insert(&mut self, key: IndexKey, doc_id: DocumentId) -> Result<()> {
+        // Ensure tree is fully loaded for traversal
+        self.ensure_fully_loaded()?;
+
         // Check unique constraint
         if self.metadata.unique && self.search(&key).is_some() {
             return Err(IronBaseError::IndexError(format!(
@@ -1118,6 +1173,9 @@ impl BPlusTree {
     /// Delete key-document pair from index
     /// Supports multi-level B+ trees by recursively finding the leaf
     pub fn delete(&mut self, key: &IndexKey, doc_id: &DocumentId) -> Result<()> {
+        // Ensure tree is fully loaded for traversal
+        self.ensure_fully_loaded()?;
+
         let deleted = Self::delete_from_node(&mut self.root, key, doc_id);
         if deleted {
             self.metadata.num_keys -= 1;
@@ -2211,13 +2269,14 @@ impl BPlusTree {
         }
     }
 
-    /// Load tree from file
+    /// Load tree from file (EAGER - loads all nodes)
     ///
     /// File format:
     /// - First 8 bytes: root_offset (u64 little-endian)
     /// - Remaining bytes: serialized nodes
     ///
-    /// Recursively loads all children into memory for full tree traversal support
+    /// Recursively loads all children into memory for full tree traversal support.
+    /// For lazy loading (memory efficient), use `load_from_path` instead.
     pub fn load_from_file(file: &mut File, mut metadata: IndexMetadata) -> Result<Self> {
         use std::io::{Read, Seek, SeekFrom};
 
@@ -2235,6 +2294,9 @@ impl BPlusTree {
             root,
             metadata,
             counters: StatisticsCounters::default(),
+            source_path: None,
+            lazy_mode: false,
+            persisted_size: 0,
         };
         // Sync num_keys with actual tree content
         // (metadata from CollectionData may be stale if not synced on every insert/delete)
@@ -2244,6 +2306,177 @@ impl BPlusTree {
         tree.metadata.stats.validate_and_fix(tree.metadata.num_keys);
 
         Ok(tree)
+    }
+
+    /// Load tree from path with optional lazy loading
+    ///
+    /// Loads the tree from the specified .idx file path.
+    /// Uses **lazy loading** if file size exceeds the RAM-based threshold
+    /// (calculated by `calculate_lazy_threshold()`).
+    ///
+    /// # Lazy Loading Behavior
+    ///
+    /// - **Below threshold**: Eager loading (all nodes in memory immediately)
+    /// - **Above threshold**: Only root node loaded, children loaded on-demand
+    ///   via `ensure_fully_loaded()` before search/insert/delete operations
+    ///
+    /// # Arguments
+    /// * `path` - Path to the .idx file
+    /// * `metadata` - Index metadata from collection catalog
+    pub fn load_from_path(path: PathBuf, mut metadata: IndexMetadata) -> Result<Self> {
+        use super::traits::calculate_lazy_threshold;
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = File::open(&path)?;
+
+        // Get file size for threshold comparison
+        let file_size = file.seek(SeekFrom::End(0))?;
+        let lazy_threshold = calculate_lazy_threshold();
+        let use_lazy = file_size > lazy_threshold;
+
+        // Read root offset from the file header (first 8 bytes)
+        file.seek(SeekFrom::Start(0))?;
+        let mut offset_bytes = [0u8; 8];
+        file.read_exact(&mut offset_bytes)?;
+        let root_offset = u64::from_le_bytes(offset_bytes);
+        metadata.root_offset = root_offset;
+
+        if use_lazy {
+            // LAZY LOADING: Only load root node, children loaded on-demand
+            let root = Box::new(Self::load_node(&mut file, root_offset)?);
+
+            tracing::debug!(
+                index = %metadata.name,
+                file_size_mb = file_size / (1024 * 1024),
+                threshold_mb = lazy_threshold / (1024 * 1024),
+                "B+ tree using lazy loading"
+            );
+
+            Ok(BPlusTree {
+                root,
+                metadata,
+                counters: StatisticsCounters::default(),
+                source_path: Some(path),
+                lazy_mode: true,
+                persisted_size: file_size,
+            })
+        } else {
+            // EAGER LOADING: Load all nodes immediately
+            let root = Box::new(Self::load_node_recursive(&mut file, root_offset)?);
+
+            let mut tree = BPlusTree {
+                root,
+                metadata,
+                counters: StatisticsCounters::default(),
+                source_path: None,
+                lazy_mode: false,
+                persisted_size: file_size,
+            };
+
+            // Sync num_keys with actual tree content
+            tree.sync_num_keys();
+
+            // Validate statistics against actual index size
+            tree.metadata.stats.validate_and_fix(tree.metadata.num_keys);
+
+            Ok(tree)
+        }
+    }
+
+    /// Ensure all children of an internal node are loaded into memory
+    ///
+    /// For lazy-loaded trees, this loads children from disk using their offsets.
+    /// For in-memory trees, this is a no-op.
+    fn ensure_children_loaded(&self, node: &mut InternalNode) -> Result<()> {
+        // If children are already loaded, nothing to do
+        if !node.children.is_empty() {
+            return Ok(());
+        }
+
+        // If no offsets, nothing to load (empty internal node)
+        if node.children_offsets.is_empty() {
+            return Ok(());
+        }
+
+        // Need source path to load from disk
+        let path = match &self.source_path {
+            Some(p) => p,
+            None => {
+                // This shouldn't happen - if we have offsets but no children,
+                // we should have a source path
+                return Err(IronBaseError::Corruption(
+                    "Cannot load children: index has offsets but no source path".to_string(),
+                ));
+            }
+        };
+
+        // Open file and load each child
+        let mut file = File::open(path)?;
+        let mut children = Vec::with_capacity(node.children_offsets.len());
+        for &child_offset in &node.children_offsets {
+            let child = Self::load_node(&mut file, child_offset)?;
+            children.push(Box::new(child));
+        }
+        node.children = children;
+
+        Ok(())
+    }
+
+    /// Recursively ensure all nodes in the tree are loaded (converts lazy to eager)
+    ///
+    /// Use this before operations that need full tree access (like sync_num_keys).
+    /// After loading, syncs num_keys with actual tree content.
+    ///
+    /// This method is idempotent - calling it multiple times is safe and fast
+    /// (early return if already loaded).
+    pub fn ensure_fully_loaded(&mut self) -> Result<()> {
+        // If no source path, already fully in-memory
+        let path = match &self.source_path {
+            Some(p) => p.clone(),
+            None => return Ok(()),
+        };
+
+        // Open file once for all loading
+        let mut file = File::open(&path)?;
+
+        // Load all children recursively
+        Self::load_children_recursive(&mut self.root, &mut file)?;
+
+        // After full load, we don't need source path anymore
+        self.source_path = None;
+        self.lazy_mode = false;
+
+        // Sync num_keys with actual tree content (catalog metadata may be stale)
+        self.sync_num_keys();
+
+        // Validate statistics against actual index size
+        self.metadata.stats.validate_and_fix(self.metadata.num_keys);
+
+        tracing::debug!(
+            index = %self.metadata.name,
+            num_keys = self.metadata.num_keys,
+            "B+ tree fully loaded from lazy mode"
+        );
+
+        Ok(())
+    }
+
+    /// Helper: recursively load all children from file
+    fn load_children_recursive(node: &mut BTreeNode, file: &mut File) -> Result<()> {
+        if let BTreeNode::Internal(ref mut internal) = node {
+            // Load children if not loaded
+            if internal.children.is_empty() && !internal.children_offsets.is_empty() {
+                for &child_offset in &internal.children_offsets {
+                    let child = Self::load_node(file, child_offset)?;
+                    internal.children.push(Box::new(child));
+                }
+            }
+            // Recursively load grandchildren
+            for child in &mut internal.children {
+                Self::load_children_recursive(child, file)?;
+            }
+        }
+        Ok(())
     }
 
     /// Load a node and all its children recursively
@@ -2315,5 +2548,71 @@ impl BPlusTree {
         }
 
         Ok(())
+    }
+}
+
+// ============================================================================
+// LazyLoadable Trait Implementation
+// ============================================================================
+
+use super::traits::{IndexTrait, LazyLoadable};
+
+impl IndexTrait for BPlusTree {
+    fn name(&self) -> &str {
+        &self.metadata.name
+    }
+
+    fn fields(&self) -> Vec<&str> {
+        self.metadata.fields.iter().map(|s| s.as_str()).collect()
+    }
+
+    fn entry_count(&self) -> usize {
+        self.metadata.num_keys as usize
+    }
+
+    fn memory_usage_bytes(&self) -> usize {
+        if self.lazy_mode {
+            // Lazy mode: only root node and metadata in memory
+            std::mem::size_of::<Self>() + 1024 // Approximate root node size
+        } else {
+            // Estimate based on num_keys: each entry ~100 bytes average
+            std::mem::size_of::<Self>() + (self.metadata.num_keys as usize) * 100
+        }
+    }
+
+    fn is_disk_backed(&self) -> bool {
+        self.source_path.is_some() || self.persisted_size > 0
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        // B+ trees are written via save_to_file(), not incremental flush
+        Ok(())
+    }
+}
+
+impl LazyLoadable for BPlusTree {
+    fn is_lazy_mode(&self) -> bool {
+        self.lazy_mode
+    }
+
+    fn ensure_fully_loaded(&mut self) -> Result<()> {
+        // Delegate to inherent method (BPlusTree::ensure_fully_loaded)
+        BPlusTree::ensure_fully_loaded(self)
+    }
+
+    fn persisted_size_bytes(&self) -> Option<u64> {
+        if self.persisted_size > 0 {
+            Some(self.persisted_size)
+        } else {
+            None
+        }
+    }
+
+    fn hot_ratio(&self) -> f32 {
+        if self.lazy_mode {
+            0.0
+        } else {
+            1.0
+        }
     }
 }

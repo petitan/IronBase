@@ -2282,6 +2282,75 @@ impl FulltextIndex {
 }
 
 // ============================================================================
+// LazyLoadable Trait Implementation
+// ============================================================================
+
+use crate::index::traits::{IndexTrait, LazyLoadable};
+
+impl IndexTrait for FulltextIndex {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn fields(&self) -> Vec<&str> {
+        vec![&self.field]
+    }
+
+    fn entry_count(&self) -> usize {
+        self.unique_token_count()
+    }
+
+    fn memory_usage_bytes(&self) -> usize {
+        // Delegate to existing method
+        FulltextIndex::memory_usage_bytes(self)
+    }
+
+    fn is_disk_backed(&self) -> bool {
+        self.storage_path.is_some()
+    }
+
+    fn flush(&mut self) -> crate::error::Result<()> {
+        // Fulltext indexes are written via save_to_file(), not incremental flush
+        Ok(())
+    }
+}
+
+impl LazyLoadable for FulltextIndex {
+    fn is_lazy_mode(&self) -> bool {
+        self.lazy_mode
+    }
+
+    fn ensure_fully_loaded(&mut self) -> crate::error::Result<()> {
+        // Fulltext lazy mode is different - it loads tokens on-demand during search
+        // There's no "load all" operation because tokens are streamed from disk
+        // For "Opció A" consistency, we mark as non-lazy after first full access
+        // But fulltext doesn't need preloading - it's efficient as-is
+        Ok(())
+    }
+
+    fn persisted_size_bytes(&self) -> Option<u64> {
+        self.storage_path.as_ref().and_then(|path| {
+            std::fs::metadata(path).ok().map(|m| m.len())
+        })
+    }
+
+    fn hot_ratio(&self) -> f32 {
+        if self.lazy_mode {
+            // In lazy mode, only token_offsets (metadata) is in memory
+            // Actual token entries are loaded on-demand
+            let total_tokens = self.token_offsets.len() + self.inverted_index.len();
+            if total_tokens == 0 {
+                return 1.0;
+            }
+            // inverted_index contains loaded/new tokens
+            self.inverted_index.len() as f32 / total_tokens as f32
+        } else {
+            1.0
+        }
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

@@ -70,3 +70,4 @@ mcp-server/config.toml
 *.exe
 *.ftidx
 *.hnsw
+*.mlite.compact

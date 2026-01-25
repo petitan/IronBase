@@ -211,14 +211,37 @@ fn service_main(arguments: Vec<OsString>) {
 
 #[cfg(windows)]
 fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
+    use std::sync::Arc;
+
     // Create a channel to receive stop events
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+    // Status handle needs to be shared between event handler and main thread
+    // so we can report StopPending immediately when Stop is received
+    let status_handle_for_event: Arc<std::sync::Mutex<Option<service_control_handler::ServiceStatusHandle>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let status_handle_clone = status_handle_for_event.clone();
 
     // Create service control handler
     let shutdown_tx_clone = shutdown_tx.clone();
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         match control_event {
             ServiceControl::Stop | ServiceControl::Shutdown => {
+                // FIX #1: Report StopPending IMMEDIATELY to SCM
+                // This prevents SCM from killing the service during graceful shutdown
+                if let Ok(guard) = status_handle_clone.lock() {
+                    if let Some(ref handle) = *guard {
+                        let _ = handle.set_service_status(ServiceStatus {
+                            service_type: SERVICE_TYPE,
+                            current_state: ServiceState::StopPending,
+                            controls_accepted: ServiceControlAccept::empty(),
+                            exit_code: ServiceExitCode::Win32(0),
+                            checkpoint: 1,
+                            wait_hint: Duration::from_secs(30), // Give 30s for graceful shutdown
+                            process_id: None,
+                        });
+                    }
+                }
                 let _ = shutdown_tx_clone.send(());
                 ServiceControlHandlerResult::NoError
             }
@@ -229,6 +252,11 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
 
     // Register service control handler
     let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)?;
+
+    // Store status handle for event handler to use
+    if let Ok(mut guard) = status_handle_for_event.lock() {
+        *guard = Some(status_handle.clone());
+    }
 
     // Report service as running
     status_handle.set_service_status(ServiceStatus {
@@ -250,8 +278,41 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
         });
     });
 
-    // Wait for the server to finish
-    let _ = server_handle.join();
+    // Wait for the server to finish with timeout
+    // FIX #1: Don't block forever - use join with periodic checkpoint updates
+    let shutdown_start = std::time::Instant::now();
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+    const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+
+    let mut checkpoint = 2u32;
+    loop {
+        // Check if server thread finished
+        if server_handle.is_finished() {
+            let _ = server_handle.join();
+            break;
+        }
+
+        // Check timeout
+        if shutdown_start.elapsed() > SHUTDOWN_TIMEOUT {
+            eprintln!("Service shutdown timeout after {:?}, forcing stop", SHUTDOWN_TIMEOUT);
+            // Thread will be killed when process exits
+            break;
+        }
+
+        // Update checkpoint to show SCM we're still working
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::StopPending,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint,
+            wait_hint: Duration::from_secs(10),
+            process_id: None,
+        });
+        checkpoint = checkpoint.saturating_add(1);
+
+        std::thread::sleep(CHECKPOINT_INTERVAL);
+    }
 
     // Report service as stopped
     status_handle.set_service_status(ServiceStatus {
@@ -260,7 +321,7 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
         controls_accepted: ServiceControlAccept::empty(),
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
-        wait_hint: Duration::from_secs(30),
+        wait_hint: Duration::from_secs(0),
         process_id: None,
     })?;
 

@@ -343,12 +343,49 @@ pub const SYSTEM_ACL_COLLECTION: &str = "_system.acl";
 pub const SYSTEM_LISTENERS_COLLECTION: &str = "_system.listeners";
 
 /// ACL configuration loaded from database
+///
+/// Uses indexed lookup for O(1) exact match + O(w) wildcard check
+/// instead of O(n) linear scan on every permission check.
 #[derive(Debug, Clone)]
 pub struct AclConfig {
     rules: Vec<CollectionAcl>,
+    /// Index for exact collection name matches: "users" -> rules index
+    /// O(1) lookup instead of O(n) linear scan
+    exact_match_index: std::collections::HashMap<String, usize>,
+    /// Indices of wildcard rules (*, prefix.*) in priority order
+    /// These are checked only if exact match fails
+    wildcard_rules: Vec<usize>,
 }
 
 impl AclConfig {
+    /// Rebuild indexes after rules change
+    /// Must be called after any modification to self.rules
+    fn rebuild_indexes(&mut self) {
+        self.exact_match_index.clear();
+        self.wildcard_rules.clear();
+
+        for (i, rule) in self.rules.iter().enumerate() {
+            if rule.collection.contains('*') {
+                // Wildcard rule: *, prefix.*, etc.
+                self.wildcard_rules.push(i);
+            } else {
+                // Exact match rule - first one wins (maintains priority)
+                self.exact_match_index.entry(rule.collection.clone()).or_insert(i);
+            }
+        }
+    }
+
+    /// Create new AclConfig with rules and build indexes
+    fn new_with_rules(rules: Vec<CollectionAcl>) -> Self {
+        let mut config = Self {
+            rules,
+            exact_match_index: std::collections::HashMap::new(),
+            wildcard_rules: Vec::new(),
+        };
+        config.rebuild_indexes();
+        config
+    }
+
     /// Built-in rules that cannot be overridden
     fn builtin_rules() -> Vec<CollectionAcl> {
         vec![
@@ -406,7 +443,7 @@ impl AclConfig {
     pub fn empty() -> Self {
         let mut rules = Self::builtin_rules();
         rules.extend(Self::default_rules());
-        Self { rules }
+        Self::new_with_rules(rules)
     }
 
     /// Load ACL configuration from database
@@ -431,10 +468,13 @@ impl AclConfig {
         // Add default rules at the end (lowest priority)
         rules.extend(Self::default_rules());
 
-        Ok(Self { rules })
+        Ok(Self::new_with_rules(rules))
     }
 
     /// Check if operation is permitted
+    ///
+    /// Performance: O(1) for exact collection match, O(w) for wildcard fallback
+    /// where w = number of wildcard rules (typically 2-3).
     pub fn check(
         &self,
         collection: &str,
@@ -452,22 +492,16 @@ impl AclConfig {
             )));
         }
 
-        // Find matching ACL rules
-        for acl in &self.rules {
+        // 1. Try exact match first - O(1)
+        if let Some(&idx) = self.exact_match_index.get(collection) {
+            return self.check_rule(&self.rules[idx], collection, caller, required);
+        }
+
+        // 2. Fall back to wildcard rules - O(w) where w is small
+        for &idx in &self.wildcard_rules {
+            let acl = &self.rules[idx];
             if acl.matches_collection(collection) {
-                // Find first matching principal
-                for rule in &acl.rules {
-                    if rule.principal.matches(caller) {
-                        if rule.permissions.allows(required) {
-                            return Ok(());
-                        } else {
-                            return Err(McpError::forbidden(format!(
-                                "'{}': {:?} permission required, not granted for {} client",
-                                collection, required, caller.interface
-                            )));
-                        }
-                    }
-                }
+                return self.check_rule(acl, collection, caller, required);
             }
         }
 
@@ -478,9 +512,42 @@ impl AclConfig {
         )))
     }
 
+    /// Check a single ACL rule against caller and required permission
+    fn check_rule(
+        &self,
+        acl: &CollectionAcl,
+        collection: &str,
+        caller: &CallerContext,
+        required: RequiredPermission,
+    ) -> Result<()> {
+        // Find first matching principal
+        for rule in &acl.rules {
+            if rule.principal.matches(caller) {
+                if rule.permissions.allows(required) {
+                    return Ok(());
+                } else {
+                    return Err(McpError::forbidden(format!(
+                        "'{}': {:?} permission required, not granted for {} client",
+                        collection, required, caller.interface
+                    )));
+                }
+            }
+        }
+        // No matching principal in this rule - deny
+        Err(McpError::forbidden(format!(
+            "'{}': no ACL rule for {} client",
+            collection, caller.interface
+        )))
+    }
+
     /// Get the ACL for a specific collection (for listing)
+    ///
+    /// Performance: O(1) using index lookup
     pub fn get_collection_acl(&self, collection: &str) -> Option<&CollectionAcl> {
-        self.rules.iter().find(|acl| acl.collection == collection)
+        // Use index for O(1) lookup instead of O(n) linear scan
+        self.exact_match_index
+            .get(collection)
+            .map(|&idx| &self.rules[idx])
     }
 
     /// Get all ACL rules (for listing)

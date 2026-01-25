@@ -21,7 +21,9 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
 
     // Pre-allocate with try_reserve for OOM protection
     let mut chunks = Vec::new();
-    chunks.try_reserve(total).map_err(|_| ChunkError::OutOfMemory { count: total })?;
+    chunks
+        .try_reserve(total)
+        .map_err(|_| ChunkError::OutOfMemory { count: total })?;
 
     let mut char_offset = 0;
 
