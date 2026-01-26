@@ -579,6 +579,9 @@ impl QueryPlanner {
     }
 
     /// Collect candidates from equality queries
+    ///
+    /// Handles both implicit equality `{"field": "value"}` and explicit
+    /// `{"field": {"$eq": "value"}}` syntax for MongoDB compatibility.
     fn collect_equality_candidates(
         query_json: &Value,
         index_fields: &[IndexPrefixInfo],
@@ -591,16 +594,41 @@ impl QueryPlanner {
                     continue;
                 }
 
-                // Skip if value contains operators
-                if let Value::Object(ref val_map) = value {
-                    if val_map.keys().any(|k| k.starts_with('$')) {
-                        continue;
+                // Determine the actual equality value:
+                // - {"field": {"$eq": X}} -> use X
+                // - {"field": X} where X is not an operator object -> use X
+                let equality_value: Option<&Value> = if let Value::Object(ref val_map) = value {
+                    if val_map.len() == 1 {
+                        if let Some(eq_val) = val_map.get("$eq") {
+                            // Explicit $eq operator: {"field": {"$eq": X}}
+                            Some(eq_val)
+                        } else if val_map.keys().any(|k| k.starts_with('$')) {
+                            // Other operators like $gt, $in, etc. - skip
+                            None
+                        } else {
+                            // Object value without operators - use as-is
+                            Some(value)
+                        }
+                    } else if val_map.keys().any(|k| k.starts_with('$')) {
+                        // Multiple operators or mixed - skip
+                        None
+                    } else {
+                        // Plain object value - use as-is
+                        Some(value)
                     }
-                }
+                } else {
+                    // Scalar or array value - use as-is
+                    Some(value)
+                };
+
+                let eq_val = match equality_value {
+                    Some(v) => v,
+                    None => continue,
+                };
 
                 // Find ALL matching indexes for this field (not just first)
                 for info in index_fields.iter().filter(|i| i.prefix_field == *field) {
-                    let key = IndexKey::from(value);
+                    let key = IndexKey::from(eq_val);
                     let plan = QueryPlan::IndexScan {
                         index_name: info.index_name.clone(),
                         field: field.clone(),
