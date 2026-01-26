@@ -480,6 +480,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Index hash collision** | b71c5012 | Fájl ütközés | 32-bit hash | 64-bit hash |
 | **read_data() boundary** | d37e442a | 1 doc különbség count-ban | `file_len` vs `data_end_offset` | `data_end_offset` használata |
 | **Lazy index get_all_entries** | 2026-01-26 | $group/distinct 0 eredmény | `lazy_mode` nem kezelt | Fájlból olvasás lazy mode-ban |
+| **Index building flag** | 9273a19b | explain() 0 availableIndexes | `set_index_ready()` hiányzik rebuild után | `set_index_ready()` hívás rebuild végén |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
