@@ -501,6 +501,22 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             drop(batch_docs);
         }
 
+        // FIX: Mark all rebuilt indexes as ready (building = false)
+        // Without this, indexes remain in "building" state and are invisible
+        // to the query planner (explain shows 0 availableIndexes)
+        if rebuild_id_index {
+            let _ = index_manager.set_index_ready(id_index_name);
+        }
+        for index_meta in &btree_indexes_to_rebuild {
+            let _ = index_manager.set_index_ready(&index_meta.name);
+        }
+        for (index_name, _) in &fuzzy_info {
+            let _ = index_manager.set_index_ready(index_name);
+        }
+        for (index_name, _) in &fulltext_info {
+            let _ = index_manager.set_index_ready(index_name);
+        }
+
         Ok(rebuilt_count)
     }
 
