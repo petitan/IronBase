@@ -1233,6 +1233,110 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         FindCursor::new_scan(self, query_json)
     }
 
+    /// Streaming cursor with cooperative cancellation support
+    ///
+    /// Same as `find_streaming()` but accepts optional cancellation parameters
+    /// for timeout enforcement during document collection phase.
+    ///
+    /// # Arguments
+    /// * `query_json` - Query filter
+    /// * `cancel_flag` - Optional atomic flag for external cancellation
+    /// * `deadline` - Optional deadline for timeout enforcement
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// use std::time::{Duration, Instant};
+    ///
+    /// let deadline = Instant::now() + Duration::from_secs(30);
+    /// let cursor = collection.find_streaming_with_options(&query, None, Some(deadline))?;
+    /// ```
+    pub fn find_streaming_with_options(
+        &self,
+        query_json: &Value,
+        cancel_flag: Option<&Arc<AtomicBool>>,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<FindCursor<'_, S>> {
+        self.check_not_closed()?;
+        let storage = self.storage.read();
+        if storage.get_file_path().is_empty() {
+            drop(storage);
+            let (doc_ids, _) = self.collect_doc_ids_with_options(
+                query_json,
+                None,
+                None,
+                false,
+                0,
+                None,
+                true,
+                0,
+                None,
+                cancel_flag,
+                deadline,
+            )?;
+            return Ok(FindCursor::new(self, doc_ids));
+        }
+        let has_catalog = storage
+            .get_collection_meta(&self.name)
+            .map(|meta| !meta.document_catalog.is_empty())
+            .unwrap_or(false);
+        drop(storage);
+
+        if QueryPlanner::extract_logical_clauses(query_json).is_some() {
+            if has_catalog {
+                let (doc_ids, _) = self.collect_doc_ids_with_options(
+                    query_json,
+                    None,
+                    None,
+                    false,
+                    0,
+                    None,
+                    true,
+                    0,
+                    None,
+                    cancel_flag,
+                    deadline,
+                )?;
+                return Ok(FindCursor::new(self, doc_ids));
+            }
+            // Note: new_scan path doesn't support deadline yet (iterates lazily)
+            // For aggregate, we rely on AggregationLimitContext.check_deadline() in pipeline
+            return FindCursor::new_scan(self, query_json);
+        }
+
+        let index_fields = {
+            let indexes = self.indexes.read();
+            indexes.list_indexes_with_compound_info()
+        };
+
+        if let Some((_field, plan)) =
+            QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
+        {
+            if let Some(cursor) = FindCursor::new_index_scan_from_plan(self, query_json, plan)? {
+                return Ok(cursor);
+            }
+        }
+
+        if has_catalog {
+            let (doc_ids, _) = self.collect_doc_ids_with_options(
+                query_json,
+                None,
+                None,
+                false,
+                0,
+                None,
+                true,
+                0,
+                None,
+                cancel_flag,
+                deadline,
+            )?;
+            return Ok(FindCursor::new(self, doc_ids));
+        }
+
+        // Note: new_scan path doesn't support deadline yet
+        FindCursor::new_scan(self, query_json)
+    }
+
     /// Find one document matching query
     ///
     /// Uses QueryPlanner for index optimization when available.

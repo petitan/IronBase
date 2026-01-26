@@ -257,7 +257,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // STREAMING EXECUTION with context
         // Get streaming cursor - uses index if match_query has indexed field
-        let mut cursor = self.find_streaming(&query)?;
+        // FIX: Propagate deadline from AggregationLimitContext to find_streaming
+        // This enables cooperative cancellation during document collection phase
+        let deadline = ctx.deadline();
+        let mut cursor = self.find_streaming_with_options(&query, None, deadline)?;
         let doc_iter = std::iter::from_fn(move || match cursor.next() {
             Ok(Some(doc)) => Some(Ok(doc)),
             Ok(None) => None,

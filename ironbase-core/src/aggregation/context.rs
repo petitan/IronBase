@@ -521,6 +521,14 @@ impl AggregationLimitContext {
         self.inner.borrow().has_leading_match
     }
 
+    /// Get the deadline for cooperative cancellation
+    ///
+    /// Returns the configured deadline if set, `None` otherwise.
+    /// Used by aggregate to propagate timeout to underlying find_streaming.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.inner.borrow().deadline
+    }
+
     /// Reset all counters (for reuse)
     pub fn reset(&self) {
         let mut inner = self.inner.borrow_mut();

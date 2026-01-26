@@ -76,6 +76,94 @@ fn test_aggregate_with_context_is_truly_streaming() {
     }
 }
 
+/// Test that aggregate respects deadline timeout
+///
+/// FIX: Timeout propagation from AggregationLimitContext to find_streaming
+/// This ensures long-running aggregate queries can be cancelled.
+#[test]
+fn test_aggregate_with_context_respects_deadline() {
+    use std::time::{Duration, Instant};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert 5,000 documents - enough to make collection scan take time
+    for i in 0..5_000 {
+        db.insert_one(
+            "test_timeout",
+            json_to_hashmap(json!({
+                "x": i,
+                "name": format!("item_{}", i),
+                // Add some bulk to slow down processing
+                "data": "x".repeat(100)
+            })),
+        )
+        .unwrap();
+    }
+
+    let coll = db.collection("test_timeout").unwrap();
+    let limits = AggregationLimits::default();
+
+    // Set a deadline that's already in the past (1ms ago)
+    // This simulates an expired timeout
+    let ctx = AggregationLimitContext::new(limits)
+        .with_deadline(Instant::now() - Duration::from_millis(1));
+
+    // Pipeline that requires full collection scan (no index on "nonexistent")
+    // The $exists check forces document-by-document evaluation
+    let pipeline = json!([
+        {"$match": {"nonexistent_field": {"$exists": true}}},
+        {"$limit": 5}
+    ]);
+
+    let result = coll.aggregate_with_context(&pipeline, &ctx);
+
+    // Should fail with timeout error
+    assert!(result.is_err(), "Should fail due to deadline timeout");
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("timed out") || err.contains("deadline"),
+        "Error should mention timeout: {}",
+        err
+    );
+}
+
+/// Test that aggregate completes normally when deadline is far in the future
+#[test]
+fn test_aggregate_with_context_completes_before_deadline() {
+    use std::time::{Duration, Instant};
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Insert some documents
+    for i in 0..100 {
+        db.insert_one("test_no_timeout", json_to_hashmap(json!({"x": i})))
+            .unwrap();
+    }
+
+    let coll = db.collection("test_no_timeout").unwrap();
+    let limits = AggregationLimits::default();
+
+    // Set a generous deadline (60 seconds)
+    let ctx = AggregationLimitContext::new(limits)
+        .with_deadline(Instant::now() + Duration::from_secs(60));
+
+    let pipeline = json!([
+        {"$match": {"x": {"$gte": 50}}},
+        {"$group": {"_id": null, "count": {"$sum": 1}}}
+    ]);
+
+    let result = coll.aggregate_with_context(&pipeline, &ctx);
+
+    // Should succeed
+    assert!(result.is_ok(), "Should complete before deadline");
+    let groups = result.unwrap();
+    assert_eq!(groups.len(), 1);
+
+    // Should have counted 50 docs (x >= 50 means 50..99 = 50 docs)
+    let count = groups[0].get("count").and_then(|v| v.as_i64()).unwrap();
+    assert_eq!(count, 50);
+}
+
 /// Test that group limit still works
 #[test]
 fn test_aggregate_with_context_respects_group_limit() {
