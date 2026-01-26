@@ -194,7 +194,66 @@ Konvenciók: [naming, error, stb.]
 
 ---
 
+## Adatstruktúra Védelem
+
+**SOHA NE MÓDOSÍTS KÉRDÉS NÉLKÜL:**
+- Adatbázis séma (új mező, tábla, index)
+- Meglévő mezők típusa/neve
+- Konfiguráció
+- API interface
+- Publikus struktúrák
+
+**HA "EGYSZERŰBB LENNE" ÚJ MEZŐVEL:**
+1. ÁLLJ MEG
+2. Kérdezd meg: "Létrehozhatok egy új mezőt: [név], [típus], [cél]?"
+3. VÁRD MEG A VÁLASZT
+4. "Egyszerűbb" ≠ "Szabad"
+
+**INDOKLÁS:**
+- Az adat struktúra ARCHITEKTÚRA döntés
+- Te NEM vagy architekt
+- A "gyors fix" === technikai adósság
+- Migrációs költség > a te kényelmed
+
+> **Nincs jogod módosítani amit nem te terveztél. Kérdezz. Mindig.**
+
+---
+
 ## Hibakezelési Protokoll
+
+### 0. ALAPELV - TE DETEKTÍV VAGY, NEM MEGOLDÓ
+
+> **Az adat szemét. A hiba érték. A megértés cél.**
+
+A feladatod NEM a probléma megoldása. A feladatod a probléma **MEGÉRTÉSE**.
+
+**TILOS:**
+- Workaround írása
+- "Másik megközelítés" javaslata
+- A hiba megkerülése
+- "Ez így is működik" megoldás
+- Kód futtatása DIAGNÓZIS NÉLKÜL
+
+**KÖTELEZŐ SORREND:**
+1. ÁLLJ MEG
+2. Mi a PONTOS hibaüzenet?
+3. MELYIK SORBAN keletkezik?
+4. MIÉRT keletkezik?
+5. Mi a ROOT CAUSE?
+
+**Amíg az 5. pontra nincs válaszod → NEM NYÚLSZ A KÓDHOZ.**
+
+**HA KÓDOT AKARSZ ÍRNI, ELŐBB MONDD EL:**
+- Mi a hiba oka (1 mondat)
+- Honnan tudod (bizonyíték)
+- Miért pont ez a javítás
+
+Ha nem tudod → TOVÁBB DEBUGOLSZ, nem kódolsz.
+
+**EMLÉKEZTETŐ:**
+- A hiba MEGKERÜLÉSE ≠ MEGOLDÁS
+- A hiba ELREJTÉSE ≠ JAVÍTÁS
+- A kód MŰKÖDIK ≠ A kód JÓ
 
 ### 1. STOP Szabály
 
@@ -419,6 +478,116 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Fulltext count** | 169e2e6b | Dupla számolás | Lazy mode bug | HashSet union |
 | **HNSW PRNG race** | b71c5012 | Thread-safety | Random level race | `compare_exchange_weak` |
 | **Index hash collision** | b71c5012 | Fájl ütközés | 32-bit hash | 64-bit hash |
+| **read_data() boundary** | d37e442a | 1 doc különbség count-ban | `file_len` vs `data_end_offset` | `data_end_offset` használata |
+| **Lazy index get_all_entries** | 2026-01-26 | $group/distinct 0 eredmény | `lazy_mode` nem kezelt | Fájlból olvasás lazy mode-ban |
+
+<details>
+<summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
+
+**Probléma:** `$group` aggregáció és `distinct()` 0 eredményt adott vissza nagy kollekciókon (130K+ doc).
+
+**Érintett kód:** `ironbase-core/src/index/btree.rs` - `get_all_entries()`
+
+**Root Cause:**
+- Ha az index **lazy mode**-ban van (nagy fájl, vagy dirty shutdown után), a `self.root` üres
+- A `get_all_entries()` NEM ellenőrizte a `lazy_mode` flag-et
+- Így a `collect_entries_recursive(üres_root)` mindig üres Vec-et adott vissza
+
+**Tünetek:**
+- `$group` aggregáció: 0 csoport
+- `distinct()`: 0 egyedi érték
+- DE: `count_documents()`, `find()` működött (nem használják `get_all_entries()`-t)
+
+**Fix:**
+```rust
+pub fn get_all_entries(&self) -> Vec<(IndexKey, DocumentId)> {
+    // LAZY MODE: read directly from file
+    if self.lazy_mode {
+        if let Some(ref path) = self.source_path {
+            if let Ok(mut file) = File::open(path) {
+                if let Ok(entries) = self.get_all_entries_with_file(&mut file) {
+                    return entries;
+                }
+            }
+        }
+    }
+    // IN-MEMORY PATH (existing logic)
+    ...
+}
+```
+
+**Érintett függvények:**
+- `aggregation/stages/group_stage.rs:664` - `try_index_based_execute_with_context()`
+- `collection_core/distinct.rs:188` - `try_index_based_distinct()`
+
+</details>
+
+<details>
+<summary>read_data() Boundary Bug (d37e442a) - Részletes elemzés</summary>
+
+**Probléma:** Duplikátum keresésnél 1 dokumentumnyi különbség volt a várt és tényleges count között.
+
+**.mlite fájl szerkezete:**
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Header (256 bytes)                                              │
+│ ├─ magic: "MONGOLTE"                                            │
+│ ├─ data_end_offset: u64  ← dokumentumok vége                    │
+│ └─ metadata_offset: u64  ← metaadatok kezdete                   │
+├─────────────────────────────────────────────────────────────────┤
+│ Document Region (append-only)                                   │
+│ ├─ [len:4][JSON doc 1]                                          │
+│ ├─ [len:4][JSON doc 2]                                          │
+│ └─ ...                                                          │
+│ ↑ offset: 256 .. data_end_offset                                │
+├─────────────────────────────────────────────────────────────────┤
+│ Padding (változó hossz)                                         │
+│ ↑ data_end_offset .. metadata_offset                            │
+├─────────────────────────────────────────────────────────────────┤
+│ Collection Metadata (JSON)                                      │
+│ ├─ document_catalog: HashMap<DocumentId, offset>                │
+│ ├─ live_document_count: u64                                     │
+│ └─ indexes, schemas...                                          │
+│ ↑ metadata_offset .. FILE_END                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Root Cause:** Két különböző határ!
+
+| Érték | Mit mér | Tartalmazza |
+|-------|---------|-------------|
+| `file.metadata()?.len()` | Teljes fájl | Header + Docs + Padding + **Metadata** |
+| `data_end_offset` | Dokumentum régió | Header + Docs (metadata NÉLKÜL) |
+
+**Hogyan okozott 1 doc különbséget:**
+```rust
+// Régi kód (HIBÁS):
+pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
+    let file_len = self.file.metadata()?.len();  // ← SYSCALL + rossz határ
+    if offset >= file_len { ... }  // ← padding/metadata-t is "dokumentumnak" látta
+}
+
+// Új kód (HELYES):
+pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
+    let data_boundary = self.header.data_end_offset;  // ← Cached + helyes határ
+    if offset >= data_boundary { ... }  // ← csak dokumentum régiót nézi
+}
+```
+
+**Eredmények:**
+
+| Metrika | Előtte | Utána |
+|---------|--------|-------|
+| Határ ellenőrzés | Teljes fájl | Csak dokumentum régió |
+| Syscall / olvasás | 1 fstat() | 0 |
+| Index rebuild 133K doc | ~60 perc | ~15 perc |
+| Duplikátum különbség | 1 doc | 0 |
+
+**Érintett fájlok:**
+- `storage/io.rs:57-119` - `read_data()` javítva
+- `storage/io.rs:141,199` - `read_data_at()` már korábban `data_end_offset`-et használt
+
+</details>
 
 <details>
 <summary>Workaround-ok (kattints)</summary>

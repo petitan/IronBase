@@ -1235,8 +1235,51 @@ impl BPlusTree {
     /// NOTE: This method now supports multi-level B+ trees through recursive traversal.
     /// For Internal nodes, it recursively collects entries from all children.
     ///
+    /// LAZY MODE SUPPORT: If the index is in lazy mode (not fully loaded from disk),
+    /// this method will read entries directly from the file without modifying the tree.
+    /// This ensures correct results even when the index hasn't been fully loaded.
+    ///
     /// OOM Protection: Pre-allocates based on known num_keys.
     pub fn get_all_entries(&self) -> Vec<(IndexKey, DocumentId)> {
+        // LAZY MODE: If index is in lazy mode, read directly from file
+        // This fixes the bug where lazy indexes returned empty results
+        if self.lazy_mode {
+            if let Some(ref path) = self.source_path {
+                match File::open(path) {
+                    Ok(mut file) => {
+                        match self.get_all_entries_with_file(&mut file) {
+                            Ok(entries) => {
+                                tracing::debug!(
+                                    index = %self.metadata.name,
+                                    num_entries = entries.len(),
+                                    "get_all_entries: read from lazy index file"
+                                );
+                                return entries;
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    index = %self.metadata.name,
+                                    error = %e,
+                                    "get_all_entries: failed to read lazy index file, falling back to in-memory"
+                                );
+                                // Fall through to in-memory path
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            index = %self.metadata.name,
+                            path = %path.display(),
+                            error = %e,
+                            "get_all_entries: failed to open lazy index file"
+                        );
+                        // Fall through to in-memory path (will likely return empty)
+                    }
+                }
+            }
+        }
+
+        // IN-MEMORY PATH: Index is fully loaded
         let mut results = Vec::new();
         // OOM protection: try to pre-allocate based on known entry count
         let estimated = self.metadata.num_keys as usize;
