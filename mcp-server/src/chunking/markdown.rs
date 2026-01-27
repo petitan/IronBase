@@ -6,6 +6,13 @@
 use super::{Chunk, ChunkError};
 use text_splitter::MarkdownSplitter;
 
+/// Convert byte offset to character offset in a UTF-8 string
+fn byte_to_char_offset(content: &str, byte_offset: usize) -> usize {
+    content[..byte_offset.min(content.len())]
+        .chars()
+        .count()
+}
+
 /// Split markdown content into chunks
 ///
 /// Respects markdown structure and preserves heading hierarchy.
@@ -25,7 +32,7 @@ pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError>
         .try_reserve(total)
         .map_err(|_| ChunkError::OutOfMemory { count: total })?;
 
-    let mut char_offset = 0;
+    let mut byte_offset = 0;
     let mut section_path: Vec<String> = Vec::new();
     let mut current_heading: Option<(String, u8)> = None;
 
@@ -39,13 +46,17 @@ pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError>
             current_heading = Some((heading, level));
         }
 
-        // Calculate character offsets
-        let start_char = if let Some(pos) = content[char_offset..].find(trimmed) {
-            char_offset + pos
+        // Calculate byte offsets first, then convert to character offsets
+        let start_byte = if let Some(pos) = content[byte_offset..].find(trimmed) {
+            byte_offset + pos
         } else {
-            char_offset
+            byte_offset
         };
-        let end_char = start_char + raw_chunk.len();
+        let end_byte = start_byte + raw_chunk.len();
+
+        // Convert byte offsets to character offsets for proper UTF-8 handling
+        let start_char = byte_to_char_offset(content, start_byte);
+        let end_char = byte_to_char_offset(content, end_byte);
 
         let mut chunk = Chunk::new(index, total, raw_chunk.to_string(), start_char, end_char);
 
@@ -59,7 +70,7 @@ pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError>
         }
 
         chunks.push(chunk);
-        char_offset = end_char;
+        byte_offset = end_byte;
     }
 
     Ok(chunks)

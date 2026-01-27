@@ -33,6 +33,16 @@ const RRF_K: f64 = 60.0;
 /// Maximum internal limit to prevent OOM
 const MAX_INTERNAL_LIMIT: usize = 1000;
 
+/// Reserved metadata keys that cannot be overwritten by user input (security)
+const RESERVED_METADATA_KEYS: &[&str] = &[
+    "_id",
+    "doc_id",
+    "chunk_index",
+    "chunk_total",
+    "start_char",
+    "end_char",
+];
+
 // ============================================================================
 // RAG Config Storage
 // ============================================================================
@@ -70,8 +80,10 @@ fn get_rag_config(adapter: &IronBaseAdapter, collection: &str) -> Result<Option<
 
 /// Save RAG config to _system.rag collection
 fn save_rag_config(adapter: &IronBaseAdapter, config: &RagConfig) -> Result<()> {
-    // Ensure system collection exists
-    let _ = adapter.create_collection(RAG_CONFIG_COLLECTION);
+    // Ensure system collection exists (log errors but continue)
+    if let Err(e) = adapter.create_collection(RAG_CONFIG_COLLECTION) {
+        tracing::debug!("RAG config collection creation: {} (may already exist)", e);
+    }
 
     // Upsert config
     let filter = json!({"collection": config.collection});
@@ -154,32 +166,46 @@ fn handle_rag_collection_create(
     let dimension = provider.dimension();
 
     // 1. Create collection if not exists
-    let collection_created = adapter.create_collection(&p.collection).is_ok();
+    let collection_created = match adapter.create_collection(&p.collection) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!("Collection creation: {} (may already exist)", e);
+            false
+        }
+    };
 
     // 2. Create vector index (HNSW)
-    let vector_index_created = adapter
-        .create_vector_index(
-            &p.collection,
-            &p.embedding_field,
-            dimension,
-            "cosine",
-            100_000, // max_vectors
-            16,      // m
-            100,     // ef_construction
-            50,      // ef_search
-        )
-        .is_ok();
+    let vector_index_created = match adapter.create_vector_index(
+        &p.collection,
+        &p.embedding_field,
+        dimension,
+        "cosine",
+        100_000, // max_vectors
+        16,      // m
+        100,     // ef_construction
+        50,      // ef_search
+    ) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::debug!("Vector index creation: {} (may already exist)", e);
+            false
+        }
+    };
 
     // 3. Create fulltext index
-    let fulltext_index_created = adapter
-        .create_fulltext_index(
-            &p.collection,
-            &p.text_field,
-            &p.language,
-            Some(2),    // min_word_length
-            Some(true), // accent_folding
-        )
-        .is_ok();
+    let fulltext_index_created = match adapter.create_fulltext_index(
+        &p.collection,
+        &p.text_field,
+        &p.language,
+        Some(2),    // min_word_length
+        Some(true), // accent_folding
+    ) {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::debug!("Fulltext index creation: {} (may already exist)", e);
+            false
+        }
+    };
 
     // 4. Save RAG config
     let config = RagConfig {
@@ -351,10 +377,27 @@ fn handle_rag_document_import(
         if let Some(ref path) = chunk.section_path {
             doc["section_path"] = json!(path);
         }
+        // Add custom metadata (with security filtering)
         if let Some(ref metadata) = p.metadata {
             if let Some(meta_obj) = metadata.as_object() {
                 if let Some(doc_obj) = doc.as_object_mut() {
                     for (k, v) in meta_obj {
+                        // SECURITY: Skip reserved keys to prevent injection
+                        if RESERVED_METADATA_KEYS.contains(&k.as_str()) {
+                            tracing::warn!(
+                                "Ignoring reserved metadata key '{}' in rag_document_import",
+                                k
+                            );
+                            continue;
+                        }
+                        // Also skip embedding and text fields
+                        if k == &embedding_field || k == &text_field {
+                            tracing::warn!(
+                                "Ignoring protected field '{}' in rag_document_import metadata",
+                                k
+                            );
+                            continue;
+                        }
                         doc_obj.insert(k.clone(), v.clone());
                     }
                 }
@@ -509,13 +552,26 @@ fn handle_rag_search(
     let default_rank = internal_limit + 1;
     let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
 
+    // Normalize weights to ensure they sum to 1.0 for consistent RRF scoring
+    let total_weight = p.vector_weight + p.fulltext_weight;
+    let norm_vector_weight = if total_weight > 0.0 {
+        p.vector_weight / total_weight
+    } else {
+        0.5
+    };
+    let norm_fulltext_weight = if total_weight > 0.0 {
+        p.fulltext_weight / total_weight
+    } else {
+        0.5
+    };
+
     for id in all_ids.iter() {
         let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
         let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
 
-        // RRF score formula: weight * 1/(k + rank)
-        let rrf_score = p.vector_weight * (1.0 / (RRF_K + v_rank as f64))
-            + p.fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
+        // RRF score formula with normalized weights: weight * 1/(k + rank)
+        let rrf_score = norm_vector_weight * (1.0 / (RRF_K + v_rank as f64))
+            + norm_fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
 
         let v_score = vector_docs.get(id).map(|(_, s)| *s);
         let t_score = text_docs.get(id).map(|(_, s)| *s);
@@ -699,23 +755,41 @@ fn id_to_string(id: &Value) -> Option<String> {
     }
 }
 
-/// Strip punctuation for phrase matching
+/// Strip punctuation for phrase matching (optimized: single allocation)
 fn strip_punctuation(s: &str) -> String {
-    s.chars()
+    let filtered: String = s
+        .chars()
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    // Normalize whitespace in-place without extra Vec allocation
+    let mut result = String::with_capacity(filtered.len());
+    let mut prev_space = true; // Start true to skip leading spaces
+    for c in filtered.chars() {
+        if c.is_whitespace() {
+            if !prev_space {
+                result.push(' ');
+                prev_space = true;
+            }
+        } else {
+            result.push(c);
+            prev_space = false;
+        }
+    }
+    // Trim trailing space
+    if result.ends_with(' ') {
+        result.pop();
+    }
+    result
 }
 
 /// Rerank results by phrase match, keyword density, and content length
 fn rerank_results(results: &mut [FusedResult], query: &str, text_field: &str) {
-    // Build query word sets
+    // Build query word sets (filter words with at least 3 bytes - fast approximation)
+    // Note: 3 bytes = at least 1-3 UTF-8 chars, good enough for filtering short words
     let query_words: HashSet<String> = query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| w.chars().count() >= 3)
+        .filter(|w| w.len() >= 3)
         .map(|s| s.to_string())
         .collect();
 

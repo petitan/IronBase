@@ -5,6 +5,13 @@
 use super::{Chunk, ChunkError};
 use text_splitter::TextSplitter;
 
+/// Convert byte offset to character offset in a UTF-8 string
+fn byte_to_char_offset(content: &str, byte_offset: usize) -> usize {
+    content[..byte_offset.min(content.len())]
+        .chars()
+        .count()
+}
+
 /// Split plain text into chunks with overlap
 pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chunk>, ChunkError> {
     // text-splitter uses a range for chunk size
@@ -25,12 +32,17 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
         .try_reserve(total)
         .map_err(|_| ChunkError::OutOfMemory { count: total })?;
 
-    let mut char_offset = 0;
+    let mut byte_offset = 0;
 
     // Second pass: create chunks
     for (index, raw_chunk) in splitter.chunks(content).enumerate() {
-        let start_char = char_offset;
-        let end_char = start_char + raw_chunk.len();
+        // Calculate byte offsets first
+        let start_byte = byte_offset;
+        let end_byte = start_byte + raw_chunk.len();
+
+        // Convert byte offsets to character offsets for proper UTF-8 handling
+        let start_char = byte_to_char_offset(content, start_byte);
+        let end_char = byte_to_char_offset(content, end_byte);
 
         let chunk = Chunk::new(index, total, raw_chunk.to_string(), start_char, end_char);
         chunks.push(chunk);
@@ -38,11 +50,11 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
         // Move offset, accounting for overlap
         // In text-splitter, chunks can overlap, so we find where this chunk
         // actually starts in the original content
-        if let Some(pos) = content[char_offset..].find(raw_chunk) {
-            char_offset += pos + raw_chunk.len();
-            // Subtract overlap for next chunk
+        if let Some(pos) = content[byte_offset..].find(raw_chunk) {
+            byte_offset += pos + raw_chunk.len();
+            // Subtract overlap for next chunk (in bytes)
             if overlap > 0 && index < total - 1 {
-                char_offset = char_offset.saturating_sub(overlap);
+                byte_offset = byte_offset.saturating_sub(overlap);
             }
         }
     }

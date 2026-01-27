@@ -1274,6 +1274,7 @@ fn rag_search_impl(
     let fulltext_weight = get_float_option_or(&opts, "fulltext_weight", 0.5);
     let rerank = get_bool_option_or(&opts, "rerank", true);
     let deduplicate = get_bool_option_or(&opts, "deduplicate", true);
+    let dedup_threshold = get_int_option_or(&opts, "dedup_threshold", 100) as usize;
 
     // Get RAG config or use defaults
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
@@ -1364,15 +1365,28 @@ fn rag_search_impl(
         t_score: Option<f64>,
     }
 
+    // Normalize weights to ensure they sum to 1.0 for consistent RRF scoring
+    let total_weight = vector_weight + fulltext_weight;
+    let norm_vector_weight = if total_weight > 0.0 {
+        vector_weight / total_weight
+    } else {
+        0.5
+    };
+    let norm_fulltext_weight = if total_weight > 0.0 {
+        fulltext_weight / total_weight
+    } else {
+        0.5
+    };
+
     let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
 
     for id in all_ids.iter() {
         let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
         let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
 
-        // RRF score formula
-        let rrf_score = vector_weight * (1.0 / (RRF_K + v_rank as f64))
-            + fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
+        // RRF score formula with normalized weights
+        let rrf_score = norm_vector_weight * (1.0 / (RRF_K + v_rank as f64))
+            + norm_fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
 
         let v_score = vector_docs.get(id).map(|(_, s)| *s);
         let t_score = text_docs.get(id).map(|(_, s)| *s);
@@ -1406,10 +1420,11 @@ fn rag_search_impl(
 
     // Reranking (simple keyword density boost)
     if rerank {
+        // Filter words with at least 3 bytes (fast approximation for short word filtering)
         let query_words: HashSet<String> = query
             .to_lowercase()
             .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.chars().count() >= 3)
+            .filter(|w| w.len() >= 3)
             .map(|s| s.to_string())
             .collect();
 
@@ -1448,7 +1463,7 @@ fn rag_search_impl(
         });
     }
 
-    // Deduplication
+    // Deduplication using configurable prefix threshold
     if deduplicate {
         let mut seen_prefixes: HashSet<String> = HashSet::new();
         fused.retain(|item| {
@@ -1457,7 +1472,7 @@ fn rag_search_impl(
                 .get(&text_field)
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let prefix: String = content.chars().take(100).collect();
+            let prefix: String = content.chars().take(dedup_threshold).collect();
             if seen_prefixes.contains(&prefix) {
                 return false;
             }
