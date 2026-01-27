@@ -26,6 +26,7 @@ mod hybrid;
 mod index;
 mod jobs;
 mod listener;
+mod rag;
 mod schema;
 mod script;
 mod transaction;
@@ -84,6 +85,9 @@ pub fn get_all_tools_json() -> Value {
 
     // Job Management
     tools.extend(jobs::tools());
+
+    // RAG Operations (semantic search with auto-embedding)
+    tools.extend(rag::tools());
 
     json!({ "tools": tools })
 }

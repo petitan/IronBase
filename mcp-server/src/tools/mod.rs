@@ -26,6 +26,7 @@ pub mod jobs;
 pub mod listener;
 pub mod params;
 pub mod preprocessing;
+pub mod rag;
 pub mod script;
 pub mod transaction;
 pub mod vector;
@@ -397,6 +398,12 @@ fn dispatch_tool_inner(
         "embed_job_status" | "embed_job_list" | "embed_job_cancel" => {
             jobs::dispatch(name, params, job_manager)
         }
+
+        // RAG operations (semantic search with auto-embedding)
+        "rag_collection_create"
+        | "rag_document_import"
+        | "rag_search"
+        | "rag_collection_stats" => rag::dispatch(name, params, adapter, embedding_manager),
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),
     }

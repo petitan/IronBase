@@ -65,6 +65,9 @@ pub fn default_batch_size() -> usize {
 /// Default embedding field name (gaploader compatible)
 pub const DEFAULT_EMBEDDING_FIELD: &str = "embedding";
 
+/// Default text/content field name (gaploader compatible)
+pub const DEFAULT_TEXT_FIELD: &str = "content";
+
 /// Default vector search limit
 pub const DEFAULT_VECTOR_LIMIT: usize = 10;
 
@@ -74,6 +77,11 @@ pub const DEFAULT_MAX_VECTORS: usize = 100_000;
 /// Default function for serde
 pub fn default_embedding_field() -> String {
     DEFAULT_EMBEDDING_FIELD.to_string()
+}
+
+/// Default function for serde
+pub fn default_text_field() -> String {
+    DEFAULT_TEXT_FIELD.to_string()
 }
 
 /// Default function for serde
@@ -88,6 +96,7 @@ pub fn default_vector_limit() -> usize {
 /// List of allowed system collection names (starting with '_')
 pub const ALLOWED_SYSTEM_COLLECTIONS: &[&str] = &[
     "_system",
+    "_system.rag",
     "_chunks",
     "_cache",
     "_embeddings",

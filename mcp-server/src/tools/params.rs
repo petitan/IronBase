@@ -6,6 +6,11 @@
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use super::defaults::{
+    default_chunk_mode, default_chunk_overlap, default_chunk_size,
+    default_embedding_provider,
+};
+
 /// Default value for query fields: empty object {}
 fn empty_object() -> Value {
     json!({})
@@ -615,6 +620,74 @@ fn default_deduplicate() -> bool {
 }
 fn default_dedup_threshold() -> usize {
     100
+}
+
+// ============================================================================
+// RAG Tool Parameters
+// ============================================================================
+
+fn default_rag_language() -> String {
+    "none".to_string()
+}
+
+/// Parameters for `rag_collection_create` tool
+#[derive(Debug, Deserialize)]
+pub struct RagCollectionCreateParams {
+    pub collection: String,
+    #[serde(default = "default_vector_field")]
+    pub embedding_field: String,
+    #[serde(default = "default_text_field")]
+    pub text_field: String,
+    #[serde(default = "default_embedding_provider")]
+    pub provider: String,
+    #[serde(default = "default_rag_language")]
+    pub language: String,
+}
+
+/// Parameters for `rag_document_import` tool
+#[derive(Debug, Deserialize)]
+pub struct RagDocumentImportParams {
+    pub collection: String,
+    pub content: String,
+    pub title: Option<String>,
+    pub metadata: Option<Value>,
+    pub doc_id: Option<String>,
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: usize,
+    #[serde(default = "default_chunk_overlap")]
+    pub overlap: usize,
+    #[serde(default = "default_chunk_mode")]
+    pub mode: String,
+    pub provider: Option<String>,
+}
+
+/// Parameters for `rag_search` tool - THE KEY TOOL
+/// Unlike hybrid_search, this takes a TEXT query and embeds it automatically
+#[derive(Debug, Deserialize)]
+pub struct RagSearchParams {
+    pub collection: String,
+    /// Natural language query (auto-embedded)
+    pub query: String,
+    #[serde(default = "default_hybrid_limit")]
+    pub limit: usize,
+    #[serde(default = "default_vector_weight")]
+    pub vector_weight: f64,
+    #[serde(default = "default_fulltext_weight")]
+    pub fulltext_weight: f64,
+    #[serde(default = "default_rerank")]
+    pub rerank: bool,
+    #[serde(default = "default_deduplicate")]
+    pub deduplicate: bool,
+    #[serde(default = "default_dedup_threshold")]
+    pub dedup_threshold: usize,
+    pub projection: Option<Value>,
+    pub provider: Option<String>,
+}
+
+/// Parameters for `rag_collection_stats` tool
+#[derive(Debug, Deserialize)]
+pub struct RagCollectionStatsParams {
+    pub collection: String,
 }
 
 // ============================================================================
