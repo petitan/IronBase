@@ -3,6 +3,7 @@
 //! Uses typed parameter structs for compile-time validation.
 
 use crate::adapter::IronBaseAdapter;
+use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use crate::scripting::{RhaiEngine, ScriptListFilter, ScriptManager, ScriptOptions};
 use serde_json::{json, Value};
@@ -15,14 +16,19 @@ use super::params::{
 };
 
 /// Dispatch script tool calls
-pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+pub fn dispatch(
+    name: &str,
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     match name {
         "script_save" => handle_script_save(params, adapter),
         "script_list" => handle_script_list(params, adapter),
         "script_get" => handle_script_get(params, adapter),
         "script_delete" => handle_script_delete(params, adapter),
-        "script_run" => handle_script_run(params, adapter),
-        "script_exec" => handle_script_exec(params, adapter),
+        "script_run" => handle_script_run(params, adapter, embedding_manager),
+        "script_exec" => handle_script_exec(params, adapter, embedding_manager),
         "script_history" => handle_script_history(params, adapter),
         "script_rollback" => handle_script_rollback(params, adapter),
         "script_version_get" => handle_script_version_get(params, adapter),
@@ -101,12 +107,16 @@ fn handle_script_delete(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
 }
 
-fn handle_script_run(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+fn handle_script_run(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     let p: ScriptRunParams = ScriptRunParams::parse(params)?;
     let options = p.max_operations.map(ScriptOptions::with_max_operations);
 
     let manager = ScriptManager::new(Arc::clone(adapter));
-    let engine = RhaiEngine::new(Arc::clone(adapter));
+    let engine = RhaiEngine::new(Arc::clone(adapter), embedding_manager.clone());
     let result = manager.run_script_with_options(&p.name, p.params, &engine, options)?;
 
     Ok(json!({
@@ -117,11 +127,15 @@ fn handle_script_run(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Va
     }))
 }
 
-fn handle_script_exec(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+fn handle_script_exec(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     let p: ScriptExecParams = ScriptExecParams::parse(params)?;
     let options = p.max_operations.map(ScriptOptions::with_max_operations);
 
-    let engine = RhaiEngine::new(Arc::clone(adapter));
+    let engine = RhaiEngine::new(Arc::clone(adapter), embedding_manager.clone());
     let result = match options {
         Some(opts) => engine.run_with_options(&p.code, p.params, opts)?,
         None => engine.run(&p.code, p.params)?,

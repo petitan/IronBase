@@ -334,11 +334,11 @@ fn dispatch_tool_inner(
             acl::dispatch(name, params, adapter)
         }
 
-        // Script operations
+        // Script operations (with embedding_manager for RAG functions in scripts)
         "script_save" | "script_list" | "script_get" | "script_delete" | "script_run"
         | "script_exec" | "script_history" | "script_rollback" | "script_version_get"
         | "script_tags_add" | "script_tags_remove" | "script_stats" => {
-            script::dispatch(name, params, adapter)
+            script::dispatch(name, params, adapter, embedding_manager)
         }
 
         // Listener operations

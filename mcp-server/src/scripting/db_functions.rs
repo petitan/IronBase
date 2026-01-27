@@ -5,12 +5,16 @@
 //! - Aggregation
 //! - Index management (B+ tree, fuzzy, fulltext, vector)
 //! - Fuzzy, fulltext, and vector similarity search
+//! - RAG operations (semantic search with auto-embedding)
 //!
 //! All functions include safety limits to prevent OOM attacks.
 
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
+use crate::chunking::{chunk_content, ChunkMode, ChunkOptions};
+use crate::embedding::EmbeddingManager;
 use rhai::{Dynamic, Engine, Map};
-use std::collections::HashMap;
+use serde_json::json;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::conversion::{dynamic_to_json, json_to_dynamic, map_to_json};
@@ -102,10 +106,20 @@ fn projection_from_dynamic(value: &Dynamic) -> Result<Option<HashMap<String, i32
 /// - `db_vector_search(collection, field, query_vector, limit)` - Vector similarity search
 /// - `db_vector_search_filter(collection, field, query_vector, filter, limit)` - Vector search with filter
 ///
+/// ## RAG Operations (require embedding_manager)
+/// - `db_rag_search(collection, query)` - Simple RAG search
+/// - `db_rag_search(collection, query, options)` - RAG search with options
+/// - `db_rag_import(collection, content, title)` - Import document with chunking
+/// - `db_rag_import(collection, content, options)` - Import with options
+/// - `db_rag_create(collection)` - Create RAG collection with defaults
+/// - `db_rag_create(collection, options)` - Create RAG collection with options
+/// - `db_rag_stats(collection)` - Get RAG collection statistics
+///
 /// # Arguments
 ///
 /// * `engine` - The Rhai engine to register functions into
 /// * `adapter` - Database adapter for executing operations
+/// * `embedding_manager` - Optional embedding manager for RAG operations
 /// * `limits` - Resource limits for query operations
 ///
 /// # Security
@@ -115,13 +129,15 @@ fn projection_from_dynamic(value: &Dynamic) -> Result<Option<HashMap<String, i32
 pub fn register_db_functions(
     engine: &mut Engine,
     adapter: Arc<IronBaseAdapter>,
+    embedding_manager: Option<Arc<EmbeddingManager>>,
     limits: &ScriptLimits,
 ) {
     register_read_functions(engine, adapter.clone(), limits);
     register_write_functions(engine, adapter.clone());
     register_index_functions(engine, adapter.clone());
     register_search_functions(engine, adapter.clone(), limits);
-    register_vector_functions(engine, adapter, limits);
+    register_vector_functions(engine, adapter.clone(), limits);
+    register_rag_functions(engine, adapter, embedding_manager, limits);
 }
 
 // ============================================================
@@ -942,4 +958,820 @@ fn register_vector_functions(
             }
         },
     );
+}
+
+// ============================================================
+// RAG Operations
+// ============================================================
+
+/// RRF constant - empirically optimal value (Cormack et al., 2009)
+const RRF_K: f64 = 60.0;
+
+/// Maximum internal limit to prevent OOM
+const MAX_INTERNAL_LIMIT: usize = 1000;
+
+/// System collection for RAG configs
+const RAG_CONFIG_COLLECTION: &str = "_system.rag";
+
+/// Default embedding field name
+const DEFAULT_EMBEDDING_FIELD: &str = "embedding";
+
+/// Default text field name
+const DEFAULT_TEXT_FIELD: &str = "content";
+
+/// Default embedding provider
+const DEFAULT_EMBEDDING_PROVIDER: &str = "fasttext";
+
+fn register_rag_functions(
+    engine: &mut Engine,
+    adapter: Arc<IronBaseAdapter>,
+    embedding_manager: Option<Arc<EmbeddingManager>>,
+    limits: &ScriptLimits,
+) {
+    let max_find_documents = limits.max_find_documents;
+
+    // db_rag_search(collection, query) -> array of result documents
+    let adapter_rag1 = adapter.clone();
+    let emb_mgr1 = embedding_manager.clone();
+    engine.register_fn(
+        "db_rag_search",
+        move |collection: &str, query: &str| -> Dynamic {
+            rag_search_impl(&adapter_rag1, &emb_mgr1, collection, query, None, max_find_documents)
+        },
+    );
+
+    // db_rag_search(collection, query, options) -> array of result documents
+    let adapter_rag2 = adapter.clone();
+    let emb_mgr2 = embedding_manager.clone();
+    engine.register_fn(
+        "db_rag_search",
+        move |collection: &str, query: &str, options: Map| -> Dynamic {
+            rag_search_impl(
+                &adapter_rag2,
+                &emb_mgr2,
+                collection,
+                query,
+                Some(options),
+                max_find_documents,
+            )
+        },
+    );
+
+    // db_rag_import(collection, content, title) -> #{doc_id, chunks_created}
+    let adapter_imp1 = adapter.clone();
+    let emb_mgr3 = embedding_manager.clone();
+    engine.register_fn(
+        "db_rag_import",
+        move |collection: &str, content: &str, title: &str| -> Dynamic {
+            let mut options = Map::new();
+            options.insert("title".into(), Dynamic::from(title.to_string()));
+            rag_import_impl(&adapter_imp1, &emb_mgr3, collection, content, options)
+        },
+    );
+
+    // db_rag_import(collection, content, options) -> #{doc_id, chunks_created}
+    let adapter_imp2 = adapter.clone();
+    let emb_mgr4 = embedding_manager.clone();
+    engine.register_fn(
+        "db_rag_import",
+        move |collection: &str, content: &str, options: Map| -> Dynamic {
+            rag_import_impl(&adapter_imp2, &emb_mgr4, collection, content, options)
+        },
+    );
+
+    // db_rag_create(collection) -> #{success, config}
+    let adapter_cr1 = adapter.clone();
+    let emb_mgr5 = embedding_manager.clone();
+    engine.register_fn("db_rag_create", move |collection: &str| -> Dynamic {
+        rag_create_impl(&adapter_cr1, &emb_mgr5, collection, None)
+    });
+
+    // db_rag_create(collection, options) -> #{success, config}
+    let adapter_cr2 = adapter.clone();
+    let emb_mgr6 = embedding_manager.clone();
+    engine.register_fn(
+        "db_rag_create",
+        move |collection: &str, options: Map| -> Dynamic {
+            rag_create_impl(&adapter_cr2, &emb_mgr6, collection, Some(options))
+        },
+    );
+
+    // db_rag_stats(collection) -> #{chunk_count, source_document_count, ...}
+    let adapter_st = adapter;
+    let emb_mgr7 = embedding_manager;
+    engine.register_fn("db_rag_stats", move |collection: &str| -> Dynamic {
+        rag_stats_impl(&adapter_st, &emb_mgr7, collection)
+    });
+}
+
+// ============================================================
+// RAG Implementation Functions
+// ============================================================
+
+/// Get RAG config for a collection from _system.rag
+fn get_rag_config(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+) -> Option<(String, String, String, String)> {
+    // (embedding_field, text_field, provider, language)
+    let result = adapter.find_one(RAG_CONFIG_COLLECTION, json!({"collection": collection}));
+
+    match result {
+        Ok(Some(doc)) => {
+            let embedding_field = doc
+                .get("embedding_field")
+                .and_then(|v| v.as_str())
+                .unwrap_or(DEFAULT_EMBEDDING_FIELD)
+                .to_string();
+            let text_field = doc
+                .get("text_field")
+                .and_then(|v| v.as_str())
+                .unwrap_or(DEFAULT_TEXT_FIELD)
+                .to_string();
+            let provider = doc
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .unwrap_or(DEFAULT_EMBEDDING_PROVIDER)
+                .to_string();
+            let language = doc
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("none")
+                .to_string();
+            Some((embedding_field, text_field, provider, language))
+        }
+        _ => None,
+    }
+}
+
+/// Save RAG config to _system.rag collection
+fn save_rag_config(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+    embedding_field: &str,
+    text_field: &str,
+    provider: &str,
+    language: &str,
+    dimension: usize,
+) -> Result<(), String> {
+    // Ensure system collection exists
+    let _ = adapter.create_collection(RAG_CONFIG_COLLECTION);
+
+    let config = json!({
+        "collection": collection,
+        "embedding_field": embedding_field,
+        "text_field": text_field,
+        "provider": provider,
+        "language": language,
+        "dimension": dimension,
+        "created_at": chrono::Utc::now().to_rfc3339()
+    });
+
+    // Try update first, if no match then insert
+    let filter = json!({"collection": collection});
+    let update_result = adapter.update_one(RAG_CONFIG_COLLECTION, filter, json!({"$set": config.clone()}));
+
+    match update_result {
+        Ok(result) if result.modified_count > 0 => Ok(()),
+        _ => {
+            adapter
+                .insert_one(RAG_CONFIG_COLLECTION, config)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+    }
+}
+
+/// Convert Value _id to String for HashMap key
+fn id_to_string(id: &serde_json::Value) -> Option<String> {
+    match id {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => Some(id.to_string()),
+    }
+}
+
+/// RAG search implementation
+fn rag_search_impl(
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    collection: &str,
+    query: &str,
+    options: Option<Map>,
+    max_find_documents: usize,
+) -> Dynamic {
+    // Validate inputs
+    if collection.is_empty() {
+        return Dynamic::from("Error: collection name cannot be empty".to_string());
+    }
+    if query.is_empty() {
+        return Dynamic::from("Error: query cannot be empty".to_string());
+    }
+
+    // Get embedding manager
+    let manager = match embedding_manager {
+        Some(m) => m,
+        None => {
+            return Dynamic::from(
+                "Error: Embedding manager not available. Set IRONBASE_FASTTEXT_MODEL.".to_string(),
+            )
+        }
+    };
+
+    // Parse options
+    let opts = options.unwrap_or_default();
+    let limit = opts
+        .get("limit")
+        .and_then(|v| v.as_int().ok())
+        .map(|v| v as usize)
+        .unwrap_or(10)
+        .min(max_find_documents);
+    let vector_weight = opts
+        .get("vector_weight")
+        .and_then(|v| v.as_float().ok())
+        .unwrap_or(0.5);
+    let fulltext_weight = opts
+        .get("fulltext_weight")
+        .and_then(|v| v.as_float().ok())
+        .unwrap_or(0.5);
+    let rerank = opts
+        .get("rerank")
+        .and_then(|v| v.as_bool().ok())
+        .unwrap_or(true);
+    let deduplicate = opts
+        .get("deduplicate")
+        .and_then(|v| v.as_bool().ok())
+        .unwrap_or(true);
+
+    // Get RAG config or use defaults
+    let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
+        Some((ef, tf, prov, _)) => (ef, tf, prov),
+        None => (
+            DEFAULT_EMBEDDING_FIELD.to_string(),
+            DEFAULT_TEXT_FIELD.to_string(),
+            DEFAULT_EMBEDDING_PROVIDER.to_string(),
+        ),
+    };
+
+    // Get provider and embed query
+    let query_vector = match manager.embed(query, Some(&provider_name)) {
+        Ok(v) => v,
+        Err(e) => return Dynamic::from(format!("Error: Query embedding failed: {}", e)),
+    };
+
+    // Internal limit for better fusion coverage
+    let internal_limit = (limit * 3).min(MAX_INTERNAL_LIMIT);
+
+    // Vector search
+    let vector_results = match adapter.vector_search(collection, &embedding_field, &query_vector, internal_limit) {
+        Ok(r) => r,
+        Err(e) => return Dynamic::from(format!("Error: Vector search failed: {}", e)),
+    };
+
+    // Build vector rank map (1-indexed)
+    let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
+    let mut vector_docs: HashMap<String, (serde_json::Value, f32)> =
+        HashMap::with_capacity(vector_results.len());
+    for (rank, (doc, score)) in vector_results.into_iter().enumerate() {
+        if let Some(id) = doc.get("_id").and_then(id_to_string) {
+            vector_ranks.insert(id.clone(), rank + 1);
+            vector_docs.insert(id, (doc, score));
+        }
+    }
+
+    // Fulltext search
+    let text_options = FulltextSearchOptions {
+        limit: Some(internal_limit),
+        skip: None,
+        min_score: None,
+        projection: None,
+        filter: None,
+        highlight: false,
+        highlight_context: None,
+        highlight_max_snippets: None,
+    };
+
+    // Fulltext index may not exist, so default to empty results
+    let text_results = adapter
+        .fulltext_search(collection, &text_field, query, text_options)
+        .unwrap_or_default();
+
+    // Build fulltext rank map (1-indexed)
+    let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
+    let mut text_docs: HashMap<String, (serde_json::Value, f64)> =
+        HashMap::with_capacity(text_results.len());
+    for (rank, res) in text_results.into_iter().enumerate() {
+        if let Some(id) = res.document.get("_id").and_then(id_to_string) {
+            text_ranks.insert(id.clone(), rank + 1);
+            text_docs.insert(id, (res.document, res.score));
+        }
+    }
+
+    // RRF Fusion
+    let mut all_ids: HashSet<String> = HashSet::new();
+    all_ids.extend(vector_ranks.keys().cloned());
+    all_ids.extend(text_ranks.keys().cloned());
+
+    let default_rank = internal_limit + 1;
+
+    struct FusedResult {
+        doc: serde_json::Value,
+        rrf_score: f64,
+        final_score: f64,
+        v_rank: usize,
+        t_rank: usize,
+        v_score: Option<f32>,
+        t_score: Option<f64>,
+    }
+
+    let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
+
+    for id in all_ids.iter() {
+        let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
+        let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
+
+        // RRF score formula
+        let rrf_score = vector_weight * (1.0 / (RRF_K + v_rank as f64))
+            + fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
+
+        let v_score = vector_docs.get(id).map(|(_, s)| *s);
+        let t_score = text_docs.get(id).map(|(_, s)| *s);
+
+        let doc = match vector_docs
+            .get(id)
+            .map(|(d, _)| d.clone())
+            .or_else(|| text_docs.get(id).map(|(d, _)| d.clone()))
+        {
+            Some(d) => d,
+            None => continue,
+        };
+
+        fused.push(FusedResult {
+            doc,
+            rrf_score,
+            final_score: rrf_score,
+            v_rank,
+            t_rank,
+            v_score,
+            t_score,
+        });
+    }
+
+    // Sort by RRF score
+    fused.sort_by(|a, b| {
+        b.rrf_score
+            .partial_cmp(&a.rrf_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Reranking (simple keyword density boost)
+    if rerank {
+        let query_words: HashSet<String> = query
+            .to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.chars().count() >= 3)
+            .map(|s| s.to_string())
+            .collect();
+
+        for item in fused.iter_mut() {
+            let content = item
+                .doc
+                .get(&text_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let content_lower = content.to_lowercase();
+            let content_words: Vec<&str> = content_lower
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+
+            let mut boost = 1.0;
+            if !content_words.is_empty() {
+                #[allow(clippy::unnecessary_to_owned)]
+                let matches = content_words
+                    .iter()
+                    .filter(|w| query_words.contains(&w.to_string()))
+                    .count();
+                let density = matches as f64 / content_words.len() as f64;
+                boost *= 1.0 + density.min(0.1);
+            }
+            if content.len() < 100 {
+                boost *= 0.8;
+            }
+            item.final_score = item.rrf_score * boost;
+        }
+
+        fused.sort_by(|a, b| {
+            b.final_score
+                .partial_cmp(&a.final_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    // Deduplication
+    if deduplicate {
+        let mut seen_prefixes: HashSet<String> = HashSet::new();
+        fused.retain(|item| {
+            let content = item
+                .doc
+                .get(&text_field)
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let prefix: String = content.chars().take(100).collect();
+            if seen_prefixes.contains(&prefix) {
+                return false;
+            }
+            seen_prefixes.insert(prefix);
+            true
+        });
+    }
+
+    // Truncate and build result
+    fused.truncate(limit);
+
+    let results: Vec<Dynamic> = fused
+        .into_iter()
+        .map(|item| {
+            let result = json_to_dynamic(&item.doc);
+            if let Some(mut map) = result.clone().try_cast::<Map>() {
+                map.insert("_rrf_score".into(), Dynamic::from(item.rrf_score));
+                map.insert("_final_score".into(), Dynamic::from(item.final_score));
+                map.insert("_vector_rank".into(), Dynamic::from(item.v_rank as i64));
+                map.insert("_text_rank".into(), Dynamic::from(item.t_rank as i64));
+                if let Some(vs) = item.v_score {
+                    map.insert("_vector_score".into(), Dynamic::from(vs as f64));
+                }
+                if let Some(ts) = item.t_score {
+                    map.insert("_text_score".into(), Dynamic::from(ts));
+                }
+                Dynamic::from(map)
+            } else {
+                result
+            }
+        })
+        .collect();
+
+    Dynamic::from(results)
+}
+
+/// RAG import implementation
+fn rag_import_impl(
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    collection: &str,
+    content: &str,
+    options: Map,
+) -> Dynamic {
+    // Validate inputs
+    if collection.is_empty() {
+        return Dynamic::from("Error: collection name cannot be empty".to_string());
+    }
+    if content.is_empty() {
+        return Dynamic::from("Error: content cannot be empty".to_string());
+    }
+
+    // Get embedding manager
+    let manager = match embedding_manager {
+        Some(m) => m,
+        None => {
+            return Dynamic::from(
+                "Error: Embedding manager not available. Set IRONBASE_FASTTEXT_MODEL.".to_string(),
+            )
+        }
+    };
+
+    // Parse options
+    let title = options
+        .get("title")
+        .and_then(|v| v.clone().try_cast::<String>())
+        .unwrap_or_default();
+    let doc_id = options
+        .get("doc_id")
+        .and_then(|v| v.clone().try_cast::<String>())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let chunk_size = options
+        .get("chunk_size")
+        .and_then(|v| v.as_int().ok())
+        .map(|v| v as usize)
+        .unwrap_or(1000);
+    let overlap = options
+        .get("overlap")
+        .and_then(|v| v.as_int().ok())
+        .map(|v| v as usize)
+        .unwrap_or(100);
+    let mode_str = options
+        .get("mode")
+        .and_then(|v| v.clone().try_cast::<String>())
+        .unwrap_or_else(|| "auto".to_string());
+
+    // Get RAG config or use defaults
+    let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
+        Some((ef, tf, prov, _)) => (ef, tf, prov),
+        None => (
+            DEFAULT_EMBEDDING_FIELD.to_string(),
+            DEFAULT_TEXT_FIELD.to_string(),
+            DEFAULT_EMBEDDING_PROVIDER.to_string(),
+        ),
+    };
+
+    // Get provider
+    let provider = match manager.get_provider(&provider_name) {
+        Some(p) => p,
+        None => {
+            return Dynamic::from(format!(
+                "Error: Provider '{}' not available",
+                provider_name
+            ))
+        }
+    };
+
+    // Chunk content
+    let mode = ChunkMode::parse(&mode_str);
+    let chunk_options = ChunkOptions::default()
+        .with_chunk_size(chunk_size)
+        .with_overlap(overlap)
+        .with_mode(mode);
+
+    let chunks = match chunk_content(content, &chunk_options) {
+        Ok(c) => c,
+        Err(e) => return Dynamic::from(format!("Error: Chunking failed: {}", e)),
+    };
+
+    if chunks.is_empty() {
+        let mut result = Map::new();
+        result.insert("success".into(), Dynamic::from(true));
+        result.insert("doc_id".into(), Dynamic::from(doc_id));
+        result.insert("chunks_created".into(), Dynamic::from(0_i64));
+        result.insert(
+            "message".into(),
+            Dynamic::from("No chunks generated from content".to_string()),
+        );
+        return Dynamic::from(result);
+    }
+
+    // Generate embeddings
+    let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+    let embeddings = match provider.embed_batch(&texts) {
+        Ok(e) => e,
+        Err(e) => return Dynamic::from(format!("Error: Embedding failed: {}", e)),
+    };
+
+    // Ensure collection exists
+    let _ = adapter.create_collection(collection);
+
+    // Ensure indexes exist
+    let _ = adapter.create_vector_index(
+        collection,
+        &embedding_field,
+        provider.dimension(),
+        "cosine",
+        100_000,
+        16,
+        100,
+        50,
+    );
+    let _ = adapter.create_fulltext_index(collection, &text_field, "none", Some(2), Some(true));
+
+    // Build and insert documents
+    let mut documents: Vec<serde_json::Value> = Vec::with_capacity(chunks.len());
+    for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
+        let mut doc = json!({
+            "doc_id": doc_id,
+            "chunk_index": chunk.index,
+            "chunk_total": chunk.total,
+            "start_char": chunk.start_char,
+            "end_char": chunk.end_char
+        });
+
+        if let Some(obj) = doc.as_object_mut() {
+            obj.insert(text_field.clone(), json!(chunk.text));
+            obj.insert(embedding_field.clone(), json!(embedding));
+        }
+
+        if !title.is_empty() {
+            doc["title"] = json!(title);
+        }
+        if let Some(ref heading) = chunk.heading {
+            doc["section"] = json!(heading);
+        }
+
+        // Add custom metadata from options
+        if let Some(metadata) = options.get("metadata") {
+            let meta_json = dynamic_to_json(metadata);
+            if let Some(meta_obj) = meta_json.as_object() {
+                if let Some(doc_obj) = doc.as_object_mut() {
+                    for (k, v) in meta_obj {
+                        doc_obj.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        documents.push(doc);
+    }
+
+    // Insert documents
+    match adapter.insert_many(collection, documents) {
+        Ok(ids) => {
+            let mut result = Map::new();
+            result.insert("success".into(), Dynamic::from(true));
+            result.insert("doc_id".into(), Dynamic::from(doc_id));
+            result.insert("chunks_created".into(), Dynamic::from(ids.len() as i64));
+            result.insert("dimension".into(), Dynamic::from(provider.dimension() as i64));
+            result.insert("provider".into(), Dynamic::from(provider_name));
+            Dynamic::from(result)
+        }
+        Err(e) => Dynamic::from(format!("Error: Insert failed: {}", e)),
+    }
+}
+
+/// RAG create implementation
+fn rag_create_impl(
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    collection: &str,
+    options: Option<Map>,
+) -> Dynamic {
+    // Validate inputs
+    if collection.is_empty() {
+        return Dynamic::from("Error: collection name cannot be empty".to_string());
+    }
+
+    // Get embedding manager
+    let manager = match embedding_manager {
+        Some(m) => m,
+        None => {
+            return Dynamic::from(
+                "Error: Embedding manager not available. Set IRONBASE_FASTTEXT_MODEL.".to_string(),
+            )
+        }
+    };
+
+    // Parse options
+    let opts = options.unwrap_or_default();
+    let language = opts
+        .get("language")
+        .and_then(|v| v.clone().try_cast::<String>())
+        .unwrap_or_else(|| "none".to_string());
+    let embedding_field = opts
+        .get("embedding_field")
+        .and_then(|v| v.clone().try_cast::<String>())
+        .unwrap_or_else(|| DEFAULT_EMBEDDING_FIELD.to_string());
+    let text_field = opts
+        .get("text_field")
+        .and_then(|v| v.clone().try_cast::<String>())
+        .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+    let provider_name = opts
+        .get("provider")
+        .and_then(|v| v.clone().try_cast::<String>())
+        .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string());
+
+    // Get provider
+    let provider = match manager.get_provider(&provider_name) {
+        Some(p) => p,
+        None => {
+            let available: Vec<_> = manager
+                .list_models()
+                .iter()
+                .map(|m| m.provider.clone())
+                .collect();
+            return Dynamic::from(format!(
+                "Error: Provider '{}' not found. Available: {:?}",
+                provider_name, available
+            ));
+        }
+    };
+
+    let dimension = provider.dimension();
+
+    // Create collection
+    let collection_created = adapter.create_collection(collection).is_ok();
+
+    // Create vector index
+    let vector_created = adapter
+        .create_vector_index(
+            collection,
+            &embedding_field,
+            dimension,
+            "cosine",
+            100_000,
+            16,
+            100,
+            50,
+        )
+        .is_ok();
+
+    // Create fulltext index
+    let fulltext_created = adapter
+        .create_fulltext_index(collection, &text_field, &language, Some(2), Some(true))
+        .is_ok();
+
+    // Save RAG config
+    if let Err(e) = save_rag_config(
+        adapter,
+        collection,
+        &embedding_field,
+        &text_field,
+        &provider_name,
+        &language,
+        dimension,
+    ) {
+        return Dynamic::from(format!("Error: Failed to save RAG config: {}", e));
+    }
+
+    let mut result = Map::new();
+    result.insert("success".into(), Dynamic::from(true));
+    result.insert("collection".into(), Dynamic::from(collection.to_string()));
+
+    let mut config = Map::new();
+    config.insert("embedding_field".into(), Dynamic::from(embedding_field));
+    config.insert("text_field".into(), Dynamic::from(text_field));
+    config.insert("provider".into(), Dynamic::from(provider_name));
+    config.insert("language".into(), Dynamic::from(language));
+    config.insert("dimension".into(), Dynamic::from(dimension as i64));
+    result.insert("config".into(), Dynamic::from(config));
+
+    let mut indexes = Map::new();
+    indexes.insert("collection_created".into(), Dynamic::from(collection_created));
+    indexes.insert("vector_created".into(), Dynamic::from(vector_created));
+    indexes.insert("fulltext_created".into(), Dynamic::from(fulltext_created));
+    result.insert("indexes".into(), Dynamic::from(indexes));
+
+    Dynamic::from(result)
+}
+
+/// RAG stats implementation
+fn rag_stats_impl(
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    collection: &str,
+) -> Dynamic {
+    // Validate inputs
+    if collection.is_empty() {
+        return Dynamic::from("Error: collection name cannot be empty".to_string());
+    }
+
+    // Get RAG config
+    let rag_config = get_rag_config(adapter, collection);
+
+    // Get document count (chunks)
+    let chunk_count = adapter
+        .count_documents(collection, json!({}))
+        .unwrap_or(0);
+
+    // Get unique doc_ids (source documents)
+    let source_doc_count = adapter
+        .distinct(collection, "doc_id", json!({}))
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    // Get vector indexes
+    let vector_indexes = adapter.list_vector_indexes(collection).unwrap_or_default();
+
+    // Get fulltext indexes
+    let fulltext_indexes = adapter
+        .list_fulltext_indexes(collection)
+        .unwrap_or_default();
+
+    let mut result = Map::new();
+    result.insert("collection".into(), Dynamic::from(collection.to_string()));
+    result.insert("rag_enabled".into(), Dynamic::from(rag_config.is_some()));
+
+    if let Some((ef, tf, prov, lang)) = rag_config {
+        let mut config = Map::new();
+        config.insert("embedding_field".into(), Dynamic::from(ef));
+        config.insert("text_field".into(), Dynamic::from(tf));
+        config.insert("provider".into(), Dynamic::from(prov.clone()));
+        config.insert("language".into(), Dynamic::from(lang));
+        result.insert("config".into(), Dynamic::from(config));
+
+        // Provider info
+        if let Some(ref mgr) = embedding_manager {
+            if let Some(provider) = mgr.get_provider(&prov) {
+                let mut prov_info = Map::new();
+                prov_info.insert("name".into(), Dynamic::from(prov));
+                prov_info.insert("dimension".into(), Dynamic::from(provider.dimension() as i64));
+                prov_info.insert("model".into(), Dynamic::from(provider.model_name().to_string()));
+                result.insert("provider_info".into(), Dynamic::from(prov_info));
+            }
+        }
+    }
+
+    let mut stats = Map::new();
+    stats.insert("chunk_count".into(), Dynamic::from(chunk_count as i64));
+    stats.insert(
+        "source_document_count".into(),
+        Dynamic::from(source_doc_count as i64),
+    );
+    stats.insert(
+        "vector_index_count".into(),
+        Dynamic::from(vector_indexes.len() as i64),
+    );
+    stats.insert(
+        "fulltext_index_count".into(),
+        Dynamic::from(fulltext_indexes.len() as i64),
+    );
+    result.insert("stats".into(), Dynamic::from(stats));
+
+    Dynamic::from(result)
 }

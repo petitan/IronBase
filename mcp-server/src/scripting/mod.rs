@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn test_rhai_simple_arithmetic() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine.run("1 + 2", None).unwrap();
         assert_eq!(result.result, json!(3));
@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn test_rhai_with_params() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine
             .run("params.x + params.y", Some(json!({"x": 10, "y": 5})))
@@ -236,7 +236,7 @@ mod tests {
     #[test]
     fn test_rhai_db_insert_and_find() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine
             .run(
@@ -256,7 +256,7 @@ mod tests {
     #[test]
     fn test_rhai_db_find_with_limit() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine
             .run(

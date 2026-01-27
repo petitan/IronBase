@@ -7,6 +7,7 @@
 //! - Graceful cancellation support
 
 use crate::adapter::IronBaseAdapter;
+use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use parking_lot::Mutex;
 use rhai::{Dynamic, Engine, Scope};
@@ -30,7 +31,7 @@ use super::utility_functions::register_utility_functions;
 /// # Example
 ///
 /// ```rust,ignore
-/// let engine = RhaiEngine::new(adapter);
+/// let engine = RhaiEngine::new(adapter, None);
 ///
 /// // Simple execution
 /// let result = engine.run("1 + 2", None)?;
@@ -43,9 +44,14 @@ use super::utility_functions::register_utility_functions;
 /// // With custom limits
 /// let limits = ScriptLimits::with_timeout(5000); // 5 seconds
 /// let result = engine.run_with_limits("long_computation()", None, &limits)?;
+///
+/// // With embedding manager for RAG functions
+/// let engine = RhaiEngine::new(adapter, Some(embedding_manager));
+/// let result = engine.run("db_rag_search(\"kb\", \"query\")", None)?;
 /// ```
 pub struct RhaiEngine {
     adapter: Arc<IronBaseAdapter>,
+    embedding_manager: Option<Arc<EmbeddingManager>>,
 }
 
 impl RhaiEngine {
@@ -54,8 +60,15 @@ impl RhaiEngine {
     /// # Arguments
     ///
     /// * `adapter` - Database adapter for db_* functions
-    pub fn new(adapter: Arc<IronBaseAdapter>) -> Self {
-        Self { adapter }
+    /// * `embedding_manager` - Optional embedding manager for db_rag_* functions
+    pub fn new(
+        adapter: Arc<IronBaseAdapter>,
+        embedding_manager: Option<Arc<EmbeddingManager>>,
+    ) -> Self {
+        Self {
+            adapter,
+            embedding_manager,
+        }
     }
 
     /// Run a script with optional parameters (uses default limits).
@@ -184,8 +197,13 @@ impl RhaiEngine {
             log_collector_clone.lock().push(s);
         });
 
-        // Register database functions with limits
-        register_db_functions(&mut engine, self.adapter.clone(), limits);
+        // Register database functions with limits (including RAG functions if embedding_manager is available)
+        register_db_functions(
+            &mut engine,
+            self.adapter.clone(),
+            self.embedding_manager.clone(),
+            limits,
+        );
 
         // Register utility functions
         register_utility_functions(&mut engine);
@@ -288,12 +306,13 @@ impl RhaiEngine {
 
         let code = code.to_string();
         let adapter = self.adapter.clone();
+        let embedding_manager = self.embedding_manager.clone();
         let limits = limits.clone();
         let params = params.clone();
 
         // Spawn blocking task for Rhai execution
         let handle = tokio::task::spawn_blocking(move || {
-            let engine = RhaiEngine::new(adapter);
+            let engine = RhaiEngine::new(adapter, embedding_manager);
             engine.run_with_cancellation(&code, params, &limits, cancelled_clone)
         });
 
@@ -363,7 +382,7 @@ mod tests {
     #[test]
     fn test_simple_arithmetic() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine.run("1 + 2", None).unwrap();
         assert_eq!(result.result, json!(3));
@@ -372,7 +391,7 @@ mod tests {
     #[test]
     fn test_with_params() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine
             .run("params.x + params.y", Some(json!({"x": 10, "y": 5})))
@@ -383,7 +402,7 @@ mod tests {
     #[test]
     fn test_print_captures_logs() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine
             .run(
@@ -405,7 +424,7 @@ mod tests {
     #[test]
     fn test_db_operations() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let result = engine
             .run(
@@ -425,7 +444,7 @@ mod tests {
     #[test]
     fn test_result_size_limit() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         // Create limits with very small result size
         let limits = ScriptLimits {
@@ -444,7 +463,7 @@ mod tests {
     #[test]
     fn test_log_truncation() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let limits = ScriptLimits {
             max_log_entry_size: 10, // 10 bytes per entry
@@ -465,7 +484,7 @@ mod tests {
     #[test]
     fn test_cancellation() {
         let (adapter, _temp) = create_test_adapter();
-        let engine = RhaiEngine::new(adapter);
+        let engine = RhaiEngine::new(adapter, None);
 
         let cancelled = Arc::new(AtomicBool::new(true)); // Pre-cancelled
 
