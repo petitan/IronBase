@@ -64,6 +64,57 @@ fn projection_from_dynamic(value: &Dynamic) -> Result<Option<HashMap<String, i32
     }
 }
 
+// ============================================================
+// Option Parsing Helpers (reduce code duplication)
+// ============================================================
+
+/// Extract string option from Map, avoiding unnecessary clones where possible
+fn get_string_option(options: &Map, key: &str) -> Option<String> {
+    options.get(key).and_then(|v| {
+        // Try to get immutable string reference first
+        if let Some(s) = v.read_lock::<rhai::ImmutableString>() {
+            return Some(s.to_string());
+        }
+        // Fallback to clone + cast
+        v.clone().try_cast::<String>()
+    })
+}
+
+/// Extract string option with default value
+fn get_string_option_or(options: &Map, key: &str, default: &str) -> String {
+    get_string_option(options, key).unwrap_or_else(|| default.to_string())
+}
+
+/// Extract integer option from Map
+fn get_int_option(options: &Map, key: &str) -> Option<i64> {
+    options.get(key).and_then(|v| v.as_int().ok())
+}
+
+/// Extract integer option with default value
+fn get_int_option_or(options: &Map, key: &str, default: i64) -> i64 {
+    get_int_option(options, key).unwrap_or(default)
+}
+
+/// Extract float option from Map
+fn get_float_option(options: &Map, key: &str) -> Option<f64> {
+    options.get(key).and_then(|v| v.as_float().ok())
+}
+
+/// Extract float option with default value
+fn get_float_option_or(options: &Map, key: &str, default: f64) -> f64 {
+    get_float_option(options, key).unwrap_or(default)
+}
+
+/// Extract bool option from Map
+fn get_bool_option(options: &Map, key: &str) -> Option<bool> {
+    options.get(key).and_then(|v| v.as_bool().ok())
+}
+
+/// Extract bool option with default value
+fn get_bool_option_or(options: &Map, key: &str, default: bool) -> bool {
+    get_bool_option(options, key).unwrap_or(default)
+}
+
 /// Register all database functions into a Rhai engine.
 ///
 /// # Functions Registered
@@ -320,6 +371,7 @@ fn register_read_functions(
     });
 
     // db_aggregate(collection, pipeline) -> array of documents
+    // SECURITY: Limit output to MAX_AGGREGATE_DOCUMENTS to prevent OOM
     let adapter_agg = adapter.clone();
     engine.register_fn(
         "db_aggregate",
@@ -328,8 +380,19 @@ fn register_read_functions(
                 pipeline.iter().map(dynamic_to_json).collect();
             match adapter_agg.aggregate(collection, pipeline_vec) {
                 Ok(docs) => {
-                    let result: Vec<Dynamic> =
-                        docs.into_iter().map(|d| json_to_dynamic(&d)).collect();
+                    // OOM protection: limit output documents
+                    let truncated = docs.len() > MAX_AGGREGATE_DOCUMENTS;
+                    let result: Vec<Dynamic> = docs
+                        .into_iter()
+                        .take(MAX_AGGREGATE_DOCUMENTS)
+                        .map(|d| json_to_dynamic(&d))
+                        .collect();
+                    if truncated {
+                        tracing::warn!(
+                            "db_aggregate result truncated to {} documents (OOM protection)",
+                            MAX_AGGREGATE_DOCUMENTS
+                        );
+                    }
                     Dynamic::from(result)
                 }
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
@@ -338,6 +401,7 @@ fn register_read_functions(
     );
 
     // db_distinct(collection, field, query) -> array of unique values
+    // SECURITY: Limit output to MAX_DISTINCT_VALUES to prevent OOM
     let adapter_dist = adapter;
     engine.register_fn(
         "db_distinct",
@@ -345,8 +409,19 @@ fn register_read_functions(
             let query_json = map_to_json(&query);
             match adapter_dist.distinct(collection, field, query_json) {
                 Ok(values) => {
-                    let result: Vec<Dynamic> =
-                        values.into_iter().map(|v| json_to_dynamic(&v)).collect();
+                    // OOM protection: limit unique values
+                    let truncated = values.len() > MAX_DISTINCT_VALUES;
+                    let result: Vec<Dynamic> = values
+                        .into_iter()
+                        .take(MAX_DISTINCT_VALUES)
+                        .map(|v| json_to_dynamic(&v))
+                        .collect();
+                    if truncated {
+                        tracing::warn!(
+                            "db_distinct result truncated to {} values (OOM protection)",
+                            MAX_DISTINCT_VALUES
+                        );
+                    }
                     Dynamic::from(result)
                 }
                 Err(e) => Dynamic::from(format!("Error: {}", e)),
@@ -970,6 +1045,15 @@ const RRF_K: f64 = 60.0;
 /// Maximum internal limit to prevent OOM
 const MAX_INTERNAL_LIMIT: usize = 1000;
 
+/// Maximum documents returned by aggregate to prevent OOM
+const MAX_AGGREGATE_DOCUMENTS: usize = 10_000;
+
+/// Maximum unique values from distinct to prevent OOM
+const MAX_DISTINCT_VALUES: usize = 10_000;
+
+/// Reserved metadata keys that cannot be overwritten by user input
+const RESERVED_METADATA_KEYS: &[&str] = &["_id", "doc_id", "chunk_index", "chunk_total"];
+
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
 
@@ -1114,8 +1198,11 @@ fn save_rag_config(
     language: &str,
     dimension: usize,
 ) -> Result<(), String> {
-    // Ensure system collection exists
-    let _ = adapter.create_collection(RAG_CONFIG_COLLECTION);
+    // Ensure system collection exists - log errors but continue
+    if let Err(e) = adapter.create_collection(RAG_CONFIG_COLLECTION) {
+        // Collection may already exist, which is fine
+        tracing::debug!("RAG config collection creation: {}", e);
+    }
 
     let config = json!({
         "collection": collection,
@@ -1129,17 +1216,19 @@ fn save_rag_config(
 
     // Try update first, if no match then insert
     let filter = json!({"collection": collection});
-    let update_result = adapter.update_one(RAG_CONFIG_COLLECTION, filter, json!({"$set": config.clone()}));
+    let update_result = adapter
+        .update_one(RAG_CONFIG_COLLECTION, filter, json!({"$set": config.clone()}))
+        .map_err(|e| format!("Failed to update RAG config: {}", e))?;
 
-    match update_result {
-        Ok(result) if result.modified_count > 0 => Ok(()),
-        _ => {
-            adapter
-                .insert_one(RAG_CONFIG_COLLECTION, config)
-                .map(|_| ())
-                .map_err(|e| e.to_string())
-        }
+    if update_result.modified_count > 0 || update_result.matched_count > 0 {
+        return Ok(());
     }
+
+    // No existing config found, insert new one
+    adapter
+        .insert_one(RAG_CONFIG_COLLECTION, config)
+        .map(|_| ())
+        .map_err(|e| format!("Failed to insert RAG config: {}", e))
 }
 
 /// Convert Value _id to String for HashMap key
@@ -1178,30 +1267,13 @@ fn rag_search_impl(
         }
     };
 
-    // Parse options
+    // Parse options using helper functions
     let opts = options.unwrap_or_default();
-    let limit = opts
-        .get("limit")
-        .and_then(|v| v.as_int().ok())
-        .map(|v| v as usize)
-        .unwrap_or(10)
-        .min(max_find_documents);
-    let vector_weight = opts
-        .get("vector_weight")
-        .and_then(|v| v.as_float().ok())
-        .unwrap_or(0.5);
-    let fulltext_weight = opts
-        .get("fulltext_weight")
-        .and_then(|v| v.as_float().ok())
-        .unwrap_or(0.5);
-    let rerank = opts
-        .get("rerank")
-        .and_then(|v| v.as_bool().ok())
-        .unwrap_or(true);
-    let deduplicate = opts
-        .get("deduplicate")
-        .and_then(|v| v.as_bool().ok())
-        .unwrap_or(true);
+    let limit = (get_int_option_or(&opts, "limit", 10) as usize).min(max_find_documents);
+    let vector_weight = get_float_option_or(&opts, "vector_weight", 0.5);
+    let fulltext_weight = get_float_option_or(&opts, "fulltext_weight", 0.5);
+    let rerank = get_bool_option_or(&opts, "rerank", true);
+    let deduplicate = get_bool_option_or(&opts, "deduplicate", true);
 
     // Get RAG config or use defaults
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
@@ -1251,10 +1323,18 @@ fn rag_search_impl(
         highlight_max_snippets: None,
     };
 
-    // Fulltext index may not exist, so default to empty results
-    let text_results = adapter
-        .fulltext_search(collection, &text_field, query, text_options)
-        .unwrap_or_default();
+    // Fulltext search - warn if index doesn't exist
+    let text_results = match adapter.fulltext_search(collection, &text_field, query, text_options) {
+        Ok(r) => r,
+        Err(e) => {
+            // Log warning about missing fulltext index
+            tracing::debug!(
+                "RAG search: fulltext index not available for '{}.{}': {}. Using vector-only search.",
+                collection, text_field, e
+            );
+            Vec::new()
+        }
+    };
 
     // Build fulltext rank map (1-indexed)
     let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
@@ -1440,29 +1520,13 @@ fn rag_import_impl(
         }
     };
 
-    // Parse options
-    let title = options
-        .get("title")
-        .and_then(|v| v.clone().try_cast::<String>())
-        .unwrap_or_default();
-    let doc_id = options
-        .get("doc_id")
-        .and_then(|v| v.clone().try_cast::<String>())
+    // Parse options using helper functions
+    let title = get_string_option(&options, "title").unwrap_or_default();
+    let doc_id = get_string_option(&options, "doc_id")
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let chunk_size = options
-        .get("chunk_size")
-        .and_then(|v| v.as_int().ok())
-        .map(|v| v as usize)
-        .unwrap_or(1000);
-    let overlap = options
-        .get("overlap")
-        .and_then(|v| v.as_int().ok())
-        .map(|v| v as usize)
-        .unwrap_or(100);
-    let mode_str = options
-        .get("mode")
-        .and_then(|v| v.clone().try_cast::<String>())
-        .unwrap_or_else(|| "auto".to_string());
+    let chunk_size = get_int_option_or(&options, "chunk_size", 1000) as usize;
+    let overlap = get_int_option_or(&options, "overlap", 100) as usize;
+    let mode_str = get_string_option_or(&options, "mode", "auto");
 
     // Get RAG config or use defaults
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
@@ -1555,12 +1619,28 @@ fn rag_import_impl(
             doc["section"] = json!(heading);
         }
 
-        // Add custom metadata from options
+        // Add custom metadata from options (with security filtering)
         if let Some(metadata) = options.get("metadata") {
             let meta_json = dynamic_to_json(metadata);
             if let Some(meta_obj) = meta_json.as_object() {
                 if let Some(doc_obj) = doc.as_object_mut() {
                     for (k, v) in meta_obj {
+                        // SECURITY: Skip reserved keys to prevent injection
+                        if RESERVED_METADATA_KEYS.contains(&k.as_str()) {
+                            tracing::warn!(
+                                "Ignoring reserved metadata key '{}' in rag_import",
+                                k
+                            );
+                            continue;
+                        }
+                        // Also skip embedding and text fields
+                        if k == &embedding_field || k == &text_field {
+                            tracing::warn!(
+                                "Ignoring protected field '{}' in rag_import metadata",
+                                k
+                            );
+                            continue;
+                        }
                         doc_obj.insert(k.clone(), v.clone());
                     }
                 }
@@ -1607,24 +1687,12 @@ fn rag_create_impl(
         }
     };
 
-    // Parse options
+    // Parse options using helper functions
     let opts = options.unwrap_or_default();
-    let language = opts
-        .get("language")
-        .and_then(|v| v.clone().try_cast::<String>())
-        .unwrap_or_else(|| "none".to_string());
-    let embedding_field = opts
-        .get("embedding_field")
-        .and_then(|v| v.clone().try_cast::<String>())
-        .unwrap_or_else(|| DEFAULT_EMBEDDING_FIELD.to_string());
-    let text_field = opts
-        .get("text_field")
-        .and_then(|v| v.clone().try_cast::<String>())
-        .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
-    let provider_name = opts
-        .get("provider")
-        .and_then(|v| v.clone().try_cast::<String>())
-        .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string());
+    let language = get_string_option_or(&opts, "language", "none");
+    let embedding_field = get_string_option_or(&opts, "embedding_field", DEFAULT_EMBEDDING_FIELD);
+    let text_field = get_string_option_or(&opts, "text_field", DEFAULT_TEXT_FIELD);
+    let provider_name = get_string_option_or(&opts, "provider", DEFAULT_EMBEDDING_PROVIDER);
 
     // Get provider
     let provider = match manager.get_provider(&provider_name) {

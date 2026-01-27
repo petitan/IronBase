@@ -22,6 +22,9 @@ use super::types::{
     Script, ScriptInfo, ScriptListFilter, ScriptResult, ScriptStats, ScriptVersion,
 };
 
+/// Maximum recursion depth for dependency resolution to prevent stack overflow
+const MAX_DEPENDENCY_DEPTH: usize = 100;
+
 /// Script Manager - CRUD operations for scripts.
 ///
 /// Manages scripts stored in the `_system.scripts` collection,
@@ -470,19 +473,28 @@ impl ScriptManager {
         stack.insert(script_name.to_string());
 
         for dep in deps {
-            self.detect_circular(dep, &mut visited, &mut stack)?;
+            self.detect_circular(dep, &mut visited, &mut stack, 0)?;
         }
 
         Ok(())
     }
 
-    /// Detect circular dependencies using DFS.
+    /// Detect circular dependencies using DFS with depth limit.
     fn detect_circular(
         &self,
         name: &str,
         visited: &mut HashSet<String>,
         stack: &mut HashSet<String>,
+        depth: usize,
     ) -> Result<()> {
+        // SECURITY: Prevent stack overflow from deeply nested dependencies
+        if depth >= MAX_DEPENDENCY_DEPTH {
+            return Err(McpError::script_error(format!(
+                "Dependency chain too deep (max {} levels) at '{}'",
+                MAX_DEPENDENCY_DEPTH, name
+            )));
+        }
+
         if stack.contains(name) {
             return Err(McpError::script_error(format!(
                 "Circular dependency detected involving '{}'",
@@ -498,7 +510,7 @@ impl ScriptManager {
 
         if let Some(script) = self.get(name)? {
             for dep in &script.dependencies {
-                self.detect_circular(dep, visited, stack)?;
+                self.detect_circular(dep, visited, stack, depth + 1)?;
             }
         }
 
@@ -521,7 +533,7 @@ impl ScriptManager {
     pub fn resolve_dependencies(&self, name: &str) -> Result<Vec<String>> {
         let mut result = Vec::new();
         let mut visited = HashSet::new();
-        self.resolve_deps_recursive(name, &mut result, &mut visited)?;
+        self.resolve_deps_recursive(name, &mut result, &mut visited, 0)?;
         Ok(result)
     }
 
@@ -530,7 +542,16 @@ impl ScriptManager {
         name: &str,
         result: &mut Vec<String>,
         visited: &mut HashSet<String>,
+        depth: usize,
     ) -> Result<()> {
+        // SECURITY: Prevent stack overflow from deeply nested dependencies
+        if depth >= MAX_DEPENDENCY_DEPTH {
+            return Err(McpError::script_error(format!(
+                "Dependency chain too deep (max {} levels) at '{}'",
+                MAX_DEPENDENCY_DEPTH, name
+            )));
+        }
+
         if visited.contains(name) {
             return Ok(());
         }
@@ -538,7 +559,7 @@ impl ScriptManager {
 
         if let Some(script) = self.get(name)? {
             for dep in &script.dependencies {
-                self.resolve_deps_recursive(dep, result, visited)?;
+                self.resolve_deps_recursive(dep, result, visited, depth + 1)?;
             }
         }
 
