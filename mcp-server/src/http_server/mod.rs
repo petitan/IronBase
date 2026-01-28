@@ -398,6 +398,48 @@ async fn run_http_server_internal(
         request_tracker: Arc::new(crate::cancellation::RequestTracker::new()),
     });
 
+    // Sanitize request body for logging - mask API keys to prevent leakage
+    fn sanitize_body_for_log(body: &str) -> String {
+        let mut result = body.to_string();
+
+        // Mask api_key values: "api_key":"value" or "api_key": "value"
+        for key_pattern in &["\"api_key\":", "\"token\":", "\"authorization\":"] {
+            if let Some(start) = result.to_lowercase().find(key_pattern) {
+                // Find the value start (after the colon and optional whitespace/quote)
+                let after_key = start + key_pattern.len();
+                if let Some(rest) = result.get(after_key..) {
+                    // Skip whitespace
+                    let trimmed = rest.trim_start();
+                    let skip_ws = rest.len() - trimmed.len();
+
+                    if trimmed.starts_with('"') {
+                        // Find closing quote
+                        let value_start = after_key + skip_ws + 1; // after opening quote
+                        if let Some(end_quote) = result[value_start..].find('"') {
+                            let value_end = value_start + end_quote;
+                            let value_len = value_end - value_start;
+                            if value_len > 4 {
+                                // Keep first 4 chars, mask rest
+                                let masked = format!(
+                                    "{}****",
+                                    &result[value_start..value_start + 4]
+                                );
+                                result = format!(
+                                    "{}\"{}\"{}",
+                                    &result[..value_start - 1],
+                                    masked,
+                                    &result[value_end + 1..]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        result
+    }
+
     // HTTP request handler
     async fn http_handle_mcp_request(
         State(state): State<Arc<HttpAppState>>,
@@ -409,18 +451,19 @@ async fn run_http_server_internal(
         let trace_id = uuid::Uuid::new_v4().to_string()[..8].to_string();
         let request_start = std::time::Instant::now();
 
-        // RAW request logging with trace ID
+        // RAW request logging with trace ID (sanitized to prevent API key leakage)
         let body_str = String::from_utf8_lossy(&body);
-        tracing::debug!(trace_id = %trace_id, remote = %remote_addr, ">>> MCP REQUEST: {}", body_str);
+        let sanitized_body = sanitize_body_for_log(&body_str);
+        tracing::debug!(trace_id = %trace_id, remote = %remote_addr, ">>> MCP REQUEST: {}", sanitized_body);
 
         // Parse JSON
         let request: McpRequest = match serde_json::from_slice(&body) {
             Ok(req) => req,
             Err(e) => {
                 let elapsed = request_start.elapsed();
-                let error_response = format!("Failed to parse the request body as JSON: {}", e);
-                tracing::error!(trace_id = %trace_id, elapsed_ms = elapsed.as_millis(), "<<< MCP PARSE ERROR: {}", error_response);
-                return (StatusCode::BAD_REQUEST, error_response).into_response();
+                // Log detailed error internally, but return generic message to client
+                tracing::error!(trace_id = %trace_id, elapsed_ms = elapsed.as_millis(), "<<< MCP PARSE ERROR: {}", e);
+                return (StatusCode::BAD_REQUEST, "Invalid JSON request").into_response();
             }
         };
 
@@ -569,17 +612,17 @@ async fn run_http_server_internal(
                 StatusCode::NO_CONTENT.into_response()
             }
             Ok(Err(join_error)) => {
-                // spawn_blocking task panicked
-                let error_msg = format!("Internal error: task panicked: {}", join_error);
+                // spawn_blocking task panicked - log details internally, return generic to client
                 tracing::error!(
                     trace_id = %trace_id_clone,
                     method = %request_method,
                     tool = %tool_name_owned,
                     elapsed_ms = elapsed.as_millis(),
                     status = "panic",
-                    "<<< MCP ERROR: {}", error_msg
+                    "<<< MCP ERROR: task panicked: {}", join_error
                 );
-                let error_response = create_error_response(-32603, &error_msg, request_id);
+                // Generic error message to prevent information leakage
+                let error_response = create_error_response(-32603, "Internal server error", request_id);
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
             }
             Err(_) => {
