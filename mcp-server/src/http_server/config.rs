@@ -96,7 +96,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
         let db_path =
             std::env::var("IRONBASE_PATH").unwrap_or_else(|_| "ironbase_data.mlite".to_string());
         Config {
-            host: "127.0.0.1".to_string(), // Default to localhost for security
+            host: "0.0.0.0".to_string(),
             port: 8080,
             database_path: PathBuf::from(db_path),
             max_body_size: DEFAULT_MAX_BODY_SIZE,
