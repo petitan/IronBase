@@ -422,9 +422,15 @@ impl HttpEmbeddingProvider {
 
         // Cache dimension from first result
         if !vectors.is_empty() {
-            if let Ok(mut dim_guard) = self.cached_dimension.lock() {
-                if dim_guard.is_none() {
-                    *dim_guard = Some(vectors[0].len());
+            match self.cached_dimension.lock() {
+                Ok(mut dim_guard) => {
+                    if dim_guard.is_none() {
+                        *dim_guard = Some(vectors[0].len());
+                    }
+                }
+                Err(e) => {
+                    // Mutex poisoned - log but don't fail
+                    tracing::warn!("Dimension cache mutex poisoned: {}", e);
                 }
             }
         }
@@ -502,6 +508,9 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
 // Helper Functions
 // ============================================================================
 
+/// Dangerous path components that could be used for prototype pollution attacks
+const DANGEROUS_PATH_PARTS: &[&str] = &["__proto__", "constructor", "prototype"];
+
 /// Get value from JSON using dot notation path
 fn get_json_path<'a>(json: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     if path.is_empty() {
@@ -510,6 +519,11 @@ fn get_json_path<'a>(json: &'a serde_json::Value, path: &str) -> Option<&'a serd
 
     let mut current = json;
     for part in path.split('.') {
+        // Security: reject dangerous path components
+        if DANGEROUS_PATH_PARTS.contains(&part) {
+            tracing::warn!("Rejecting dangerous JSON path component: {}", part);
+            return None;
+        }
         current = current.get(part)?;
     }
     Some(current)

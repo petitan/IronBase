@@ -135,6 +135,9 @@ fn handle_embed_text(params: Value, manager: &EmbeddingManager) -> Result<Value>
     }))
 }
 
+/// Maximum total characters allowed in a batch to prevent OOM
+const MAX_BATCH_TOTAL_CHARS: usize = 10_000_000; // 10MB
+
 fn handle_embed_batch(params: Value, manager: &EmbeddingManager) -> Result<Value> {
     let p: EmbedBatchParams = EmbedBatchParams::parse(params)?;
 
@@ -146,6 +149,15 @@ fn handle_embed_batch(params: Value, manager: &EmbeddingManager) -> Result<Value
         return Err(McpError::invalid_params(
             "texts array cannot have more than 100 elements",
         ));
+    }
+
+    // Validate total character count to prevent OOM
+    let total_chars: usize = p.texts.iter().map(|s| s.len()).sum();
+    if total_chars > MAX_BATCH_TOTAL_CHARS {
+        return Err(McpError::invalid_params(format!(
+            "Total text size {} bytes exceeds limit {} bytes",
+            total_chars, MAX_BATCH_TOTAL_CHARS
+        )));
     }
 
     // Convert Vec<String> to Vec<&str>

@@ -345,6 +345,14 @@ fn handle_auto_embed_backfill(
             ));
         }
 
+        // Check job concurrency limit (prevents memory exhaustion from too many parallel jobs)
+        if !job_mgr.can_start_job() {
+            return Err(McpError::internal(format!(
+                "Maximum concurrent jobs limit ({}) reached. Wait for existing jobs to complete or cancel them.",
+                job_mgr.max_concurrent_jobs()
+            )));
+        }
+
         // Create job
         let job_type = JobType::EmbedBackfill {
             collection: p.collection.clone(),

@@ -406,6 +406,18 @@ fn handle_rag_document_import(
         documents.push(doc);
     }
 
+    // Validate embedding dimension matches expected (if RAG config exists)
+    if let Some(ref cfg) = rag_config {
+        let expected_dim = cfg.dimension;
+        let actual_dim = provider.dimension();
+        if expected_dim != actual_dim {
+            return Err(McpError::invalid_params(format!(
+                "Embedding dimension mismatch: collection '{}' expects {} dimensions (from RAG config), but provider '{}' produces {} dimensions",
+                p.collection, expected_dim, provider_name, actual_dim
+            )));
+        }
+    }
+
     // Insert documents
     let inserted_ids = adapter.insert_many(&p.collection, documents)?;
 
@@ -628,33 +640,36 @@ fn handle_rag_search(
     fused.truncate(p.limit);
     let projection = parse_projection_value(p.projection)?;
 
-    let results: Vec<Value> = fused
-        .into_iter()
-        .map(|item| {
-            let doc_projected = if let Some(ref proj) = projection {
-                apply_projection(&item.doc, proj)
-            } else {
-                item.doc
-            };
+    // Pre-allocate with try_reserve for OOM protection
+    let mut results: Vec<Value> = Vec::new();
+    results.try_reserve(fused.len()).map_err(|e| {
+        McpError::internal(format!("OOM: cannot allocate {} results: {}", fused.len(), e))
+    })?;
 
-            let mut result = doc_projected;
-            if let Value::Object(ref mut obj) = result {
-                obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
-                obj.insert("_final_score".to_string(), json!(item.final_score));
-                obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
-                obj.insert("_vector_rank".to_string(), json!(item.v_rank));
-                obj.insert("_text_rank".to_string(), json!(item.t_rank));
-                if let Some(vs) = item.v_score {
-                    obj.insert("_vector_score".to_string(), json!(vs));
-                }
-                if let Some(ts) = item.t_score {
-                    obj.insert("_text_score".to_string(), json!(ts));
-                }
+    for item in fused {
+        let doc_projected = if let Some(ref proj) = projection {
+            apply_projection(&item.doc, proj)
+        } else {
+            item.doc
+        };
+
+        let mut result = doc_projected;
+        if let Value::Object(ref mut obj) = result {
+            obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
+            obj.insert("_final_score".to_string(), json!(item.final_score));
+            obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
+            obj.insert("_vector_rank".to_string(), json!(item.v_rank));
+            obj.insert("_text_rank".to_string(), json!(item.t_rank));
+            if let Some(vs) = item.v_score {
+                obj.insert("_vector_score".to_string(), json!(vs));
             }
+            if let Some(ts) = item.t_score {
+                obj.insert("_text_score".to_string(), json!(ts));
+            }
+        }
 
-            result
-        })
-        .collect();
+        results.push(result);
+    }
 
     Ok(json!({
         "results": results,

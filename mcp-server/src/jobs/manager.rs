@@ -20,6 +20,9 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 /// Default timeout for graceful shutdown (30 seconds)
 const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Maximum number of concurrent background jobs (prevents memory exhaustion)
+const MAX_CONCURRENT_JOBS: usize = 4;
+
 /// Job manager for tracking and managing async operations
 ///
 /// Supports graceful shutdown: when `shutdown()` is called, all active jobs
@@ -234,6 +237,27 @@ impl JobManager {
             .collect()
     }
 
+    /// Count currently active (running) jobs
+    pub fn active_job_count(&self) -> usize {
+        self.jobs
+            .read()
+            .values()
+            .filter(|j| j.read().info.status.is_running())
+            .count()
+    }
+
+    /// Check if we can start a new job (respects MAX_CONCURRENT_JOBS limit)
+    ///
+    /// Returns true if a new job can be started, false if the limit is reached.
+    pub fn can_start_job(&self) -> bool {
+        self.active_job_count() < MAX_CONCURRENT_JOBS
+    }
+
+    /// Get the maximum concurrent jobs limit
+    pub fn max_concurrent_jobs(&self) -> usize {
+        MAX_CONCURRENT_JOBS
+    }
+
     /// Cancel a job
     pub fn cancel_job(&self, id: &str) -> bool {
         if let Some(job) = self.jobs.read().get(id) {
@@ -291,15 +315,6 @@ impl JobManager {
             .get(id)
             .map(|j| j.read().is_cancelled())
             .unwrap_or(false)
-    }
-
-    /// Get count of active (non-terminal) jobs
-    pub fn active_job_count(&self) -> usize {
-        self.jobs
-            .read()
-            .values()
-            .filter(|j| !j.read().info.status.is_terminal())
-            .count()
     }
 
     /// Try to run cleanup if enough time has passed
