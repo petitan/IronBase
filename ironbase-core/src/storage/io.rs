@@ -415,11 +415,20 @@ impl StorageEngine {
         let write_offset = if self.header.data_end_offset >= super::HEADER_SIZE {
             self.header.data_end_offset
         } else {
-            // Migration from v2: calculate from catalog or use file end
+            // Migration from v2: calculate from catalog
+            // SAFETY: Do NOT fallback to SeekFrom::End(0) - this can reintroduce sparse hole bugs
             let (max_offset, has_docs) = Self::find_max_document_offset(&self.collections);
             if has_docs {
-                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset)
-                    .unwrap_or(self.file.seek(SeekFrom::End(0))?)
+                Self::calculate_data_end_from_last_doc(&mut self.file, max_offset).map_err(|e| {
+                    IronBaseError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "Cannot determine data_end_offset for v2 migration: {}. \
+                             Database may be corrupted.",
+                            e
+                        ),
+                    ))
+                })?
             } else {
                 super::HEADER_SIZE
             }

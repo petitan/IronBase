@@ -10,6 +10,10 @@ use std::io::{Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Maximum memory (in bytes) allowed for document buffering during compaction
+/// If exceeded, forces a flush to prevent OOM
+const MAX_COMPACTION_MEMORY_BYTES: u64 = 256 * 1024 * 1024; // 256 MB
+
 /// Compaction configuration
 #[derive(Debug, Clone, Default)]
 pub struct CompactionConfig {
@@ -224,6 +228,7 @@ impl StorageEngine {
         // This ensures documents are written in their original insertion order,
         // which is important for consistent query results with implicit ordering.
         let mut chunk_count = 0;
+        let mut total_memory_bytes: u64 = 0; // Track actual memory usage across all collections
 
         for (coll_name, coll_meta) in collections_snapshot.iter() {
             // Check for cancellation at collection boundary
@@ -270,10 +275,12 @@ impl StorageEngine {
 
                         if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
                             if let Some(docs_by_id) = collection_docs.get_mut(coll_name.as_str()) {
-                                // Track memory usage
+                                // Track actual memory usage (approximate: doc bytes + HashMap overhead)
                                 let doc_size_bytes = doc_bytes.len() as u64;
-                                let current_memory_bytes = docs_by_id.len() as u64 * doc_size_bytes;
-                                let current_memory_mb = current_memory_bytes / (1024 * 1024);
+                                total_memory_bytes += doc_size_bytes + 64; // +64 for HashMap entry overhead
+
+                                // Update peak memory stats
+                                let current_memory_mb = total_memory_bytes / (1024 * 1024);
                                 if current_memory_mb > stats.peak_memory_mb {
                                     stats.peak_memory_mb = current_memory_mb;
                                 }
@@ -281,8 +288,12 @@ impl StorageEngine {
                                 docs_by_id.insert(doc_id.clone(), doc);
                                 chunk_count += 1;
 
-                                // If chunk is full, flush all collections
-                                if chunk_count >= config.chunk_size {
+                                // Force flush if memory limit exceeded OR chunk is full
+                                // This prevents OOM on large documents or many tombstones
+                                let should_flush = chunk_count >= config.chunk_size
+                                    || total_memory_bytes >= MAX_COMPACTION_MEMORY_BYTES;
+
+                                if should_flush {
                                     for (flush_coll_name, docs) in collection_docs.iter_mut() {
                                         if !docs.is_empty() {
                                             write_offset = self.flush_compaction_chunk(
@@ -297,6 +308,7 @@ impl StorageEngine {
                                         }
                                     }
                                     chunk_count = 0;
+                                    total_memory_bytes = 0; // Reset after flush
                                 }
                             }
                         }
