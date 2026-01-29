@@ -131,7 +131,7 @@ impl GroupStage {
             // Note: execute_streaming() has no limits - use execute_streaming_with_limits() for OOM protection
             for (field, accumulator) in &self.accumulators {
                 if let Some(state) = entry.states.get_mut(field) {
-                    state.update(&doc, accumulator);
+                    state.update(&doc, accumulator)?;
                 }
             }
             // doc is DROPPED here - not stored in memory!

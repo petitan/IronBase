@@ -23,6 +23,10 @@ use serde_json::Value;
 use std::cell::Cell;
 use std::rc::Rc;
 
+/// Maximum check interval for document limit enforcement.
+/// Balances overhead (too frequent) vs responsiveness (too infrequent).
+const MAX_LIMIT_CHECK_INTERVAL: usize = 1000;
+
 impl Pipeline {
     /// Create pipeline from JSON array
     pub fn from_json(pipeline_json: &Value) -> Result<Self> {
@@ -187,7 +191,10 @@ impl Pipeline {
 
         // Calculate check interval: every 1000 docs or 10% of limit, whichever is smaller
         // This ensures we catch limit violations promptly even for small limits
-        let check_interval = std::cmp::min(1000, doc_limit.saturating_div(10).max(1));
+        let check_interval = std::cmp::min(
+            MAX_LIMIT_CHECK_INTERVAL,
+            doc_limit.saturating_div(10).max(1),
+        );
 
         let counted_iter = streaming_iter.map(move |doc_result| {
             if doc_result.is_ok() {

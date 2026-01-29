@@ -249,9 +249,10 @@ impl AccumulatorState {
     ///
     /// **WARNING:** This method has NO LIMITS on $push/$addToSet!
     /// Use `update_with_limits()` for OOM protection.
-    pub(crate) fn update(&mut self, doc: &Value, accumulator: &Accumulator) {
+    pub(crate) fn update(&mut self, doc: &Value, accumulator: &Accumulator) -> Result<()> {
         // Delegate to unlimited version (backwards compatibility)
-        let _ = self.update_with_limits(doc, accumulator, usize::MAX, usize::MAX);
+        // Propagate errors (e.g. try_reserve OOM) instead of silently ignoring them
+        self.update_with_limits(doc, accumulator, usize::MAX, usize::MAX)
     }
 
     /// Update state with explicit limits for $push and $addToSet
