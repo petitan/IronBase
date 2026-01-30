@@ -29,17 +29,27 @@ use std::sync::Arc;
 
 /// Run HTTP server with default signal-based shutdown
 pub async fn run_http_server() {
-    run_http_server_internal(None).await;
+    run_http_server_internal(None, None).await;
 }
 
 /// Run HTTP server with an external shutdown receiver (used by Windows Service)
 #[cfg(windows)]
 pub async fn run_http_server_with_shutdown(shutdown_rx: std::sync::mpsc::Receiver<()>) {
-    run_http_server_internal(Some(shutdown_rx)).await;
+    run_http_server_internal(Some(shutdown_rx), None).await;
+}
+
+/// Run HTTP server for Windows Service with shutdown + ready signal
+#[cfg(windows)]
+pub async fn run_http_server_for_service(
+    shutdown_rx: std::sync::mpsc::Receiver<()>,
+    ready_tx: std::sync::mpsc::SyncSender<()>,
+) {
+    run_http_server_internal(Some(shutdown_rx), Some(ready_tx)).await;
 }
 
 async fn run_http_server_internal(
     #[allow(unused_variables)] external_shutdown: Option<std::sync::mpsc::Receiver<()>>,
+    #[allow(unused_variables)] ready_signal: Option<std::sync::mpsc::SyncSender<()>>,
 ) {
     use axum::{
         extract::{DefaultBodyLimit, State},
@@ -266,8 +276,12 @@ async fn run_http_server_internal(
     let limits_manager = crate::LimitsManager::new();
 
     // Initialize embedding manager if FastText model is configured
+    // Priority: IRONBASE_FASTTEXT_MODEL env var > config.toml [rag].fasttext_model
+    let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
+        .ok()
+        .or_else(|| config.fasttext_model.clone());
     let embedding_manager: Option<Arc<crate::EmbeddingManager>> =
-        if let Ok(model_path) = std::env::var("IRONBASE_FASTTEXT_MODEL") {
+        if let Some(model_path) = fasttext_path {
             match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
                 Ok(manager) if manager.has_providers() => {
                     info!(
@@ -286,7 +300,7 @@ async fn run_http_server_internal(
                 }
             }
         } else {
-            info!("No IRONBASE_FASTTEXT_MODEL configured, embeddings disabled");
+            info!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
             None
         };
 
@@ -732,6 +746,12 @@ async fn run_http_server_internal(
             format_size(max_body_size)
         );
 
+        // Signal ready to Windows Service SCM (server is accepting connections)
+        #[allow(unused_variables)]
+        if let Some(tx) = ready_signal {
+            let _ = tx.send(());
+        }
+
         // Use Handle for graceful shutdown with axum-server
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
@@ -766,6 +786,12 @@ async fn run_http_server_internal(
             addr,
             format_size(max_body_size)
         );
+
+        // Signal ready to Windows Service SCM (server is accepting connections)
+        #[allow(unused_variables)]
+        if let Some(tx) = ready_signal {
+            let _ = tx.send(());
+        }
 
         // Use into_make_service_with_connect_info to enable ConnectInfo extraction
         let app_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();

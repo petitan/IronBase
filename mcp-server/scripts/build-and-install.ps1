@@ -16,7 +16,7 @@ param(
     [string]$InstallDir,
     [string]$DataDir,
     [int]$Port = 8080,
-    [string]$Host = "0.0.0.0",
+    [string]$BindAddress = "0.0.0.0",
     [string]$AdminKey,
     [string]$RustTarget = "x86_64-pc-windows-msvc",
     [switch]$SkipBuild,
@@ -293,23 +293,32 @@ function Invoke-CargoBuild {
 
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
-    Push-Location $SrcPath
+    # mcp-server is excluded from workspace, must build from its own directory
+    Push-Location (Join-Path $SrcPath "mcp-server")
     try {
-        & cargo build --release -p mcp-ironbase-server 2>&1 | ForEach-Object {
-            if ($_ -match "error") {
-                Write-Host "  $_" -ForegroundColor Red
-            } elseif ($_ -match "warning") {
-                Write-Host "  $_" -ForegroundColor Yellow
+        # Temporarily allow stderr output from cargo (progress info goes to stderr)
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+
+        & cargo build --release 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            if ($line -match "error\[") {
+                Write-Host "  $line" -ForegroundColor Red
+            } elseif ($line -match "warning\[") {
+                Write-Host "  $line" -ForegroundColor Yellow
             } else {
-                Write-Host "  $_" -ForegroundColor DarkGray
+                Write-Host "  $line" -ForegroundColor DarkGray
             }
         }
+
+        $ErrorActionPreference = $prevPref
 
         if ($LASTEXITCODE -ne 0) {
             Write-Err "cargo build failed with exit code $LASTEXITCODE"
             exit 1
         }
     } finally {
+        $ErrorActionPreference = $prevPref
         Pop-Location
     }
 
@@ -317,7 +326,7 @@ function Invoke-CargoBuild {
     $elapsed = $sw.Elapsed
 
     # Verify binary exists
-    $builtExe = Join-Path $SrcPath "target\release\$ExeName"
+    $builtExe = Join-Path $SrcPath "mcp-server\target\release\$ExeName"
     if (-not (Test-Path $builtExe)) {
         Write-Err "Build succeeded but executable not found at: $builtExe"
         exit 1
@@ -392,12 +401,14 @@ function Install-IronBase {
     Write-Step "Installing IronBase"
 
     # Create directories
+    $logDir = Join-Path $TargetDataDir "log"
     Write-Info "Creating directories..."
     New-Item -ItemType Directory -Force -Path $TargetInstallDir | Out-Null
     New-Item -ItemType Directory -Force -Path $TargetDataDir | Out-Null
-    New-Item -ItemType Directory -Force -Path (Join-Path $TargetDataDir "logs") | Out-Null
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
     Write-Ok "Install: $TargetInstallDir"
     Write-Ok "Data:    $TargetDataDir"
+    Write-Ok "Logs:    $logDir"
 
     # Copy executable
     $destExe = Join-Path $TargetInstallDir $ExeName
@@ -405,36 +416,126 @@ function Install-IronBase {
     Copy-Item -Path $BuiltExePath -Destination $destExe -Force
     Write-Ok "Installed: $destExe"
 
-    # Generate config.toml (only if it does not already exist)
-    $configPath = Join-Path $TargetDataDir "config.toml"
+    # Copy embedding model if available in source
+    $embeddingDest = Join-Path $TargetDataDir "cc.hu.300.ironbase.bin"
+    if (-not (Test-Path $embeddingDest)) {
+        # Search for embedding model in source tree
+        $embeddingSources = @(
+            "models\cc.hu.300.ironbase.bin",
+            "mcp-server\models\cc.hu.300.ironbase.bin"
+        )
+        foreach ($relPath in $embeddingSources) {
+            $srcModel = Join-Path $script:SourceDir $relPath -ErrorAction SilentlyContinue
+            if ($srcModel -and (Test-Path $srcModel)) {
+                Write-Info "Copying embedding model..."
+                Copy-Item -Path $srcModel -Destination $embeddingDest -Force
+                Write-Ok "Embedding: $embeddingDest"
+                break
+            }
+        }
+        if (-not (Test-Path $embeddingDest)) {
+            Write-Warn "Embedding model not found in source. RAG features require manual setup."
+            Write-Info "Place cc.hu.300.ironbase.bin in: $TargetDataDir"
+        }
+    } else {
+        Write-Info "Embedding model already present."
+    }
+
+    # Generate admin key if not provided
+    $adminKeyValue = $script:AdminKey
+    if (-not $adminKeyValue) {
+        # Generate a random 32-char hex key
+        $bytes = New-Object byte[] 16
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $adminKeyValue = [BitConverter]::ToString($bytes) -replace '-', ''
+        Write-Ok "Generated admin key: $adminKeyValue"
+    }
+
+    # Generate config.toml next to the exe (so the server finds it in service context)
+    $configPath = Join-Path $TargetInstallDir "config.toml"
     if (-not (Test-Path $configPath)) {
-        Write-Info "Generating config.toml..."
-        $dataPathForward = ($TargetDataDir -replace '\\', '/') + "/data.mlite"
+        Write-Info "Generating config.toml (all parameters)..."
+        $dbPathForward = ($TargetDataDir -replace '\\', '/') + "/ironbase_data.mlite"
+        $logDirForward = $logDir -replace '\\', '/'
+        $embeddingPathForward = ($TargetDataDir -replace '\\', '/') + "/cc.hu.300.ironbase.bin"
 
         $configContent = @"
 # IronBase MCP Server Configuration
 # Generated by build-and-install.ps1 on $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+#
+# Environment variable overrides (take priority over this file):
+#   MCP_PORT, MCP_HOST, IRONBASE_PATH, IRONBASE_ADMIN_KEY,
+#   IRONBASE_LOG_DIR, IRONBASE_SYNC_LOG, IRONBASE_FASTTEXT_MODEL,
+#   RUST_LOG
 
+# ---------------------------------------------------------------------------
+# [server] - HTTP server settings
+# ---------------------------------------------------------------------------
 [server]
-host = "$($script:Host)"
+host = "$($script:BindAddress)"
 port = $($script:Port)
-# Max request body size (supports: B, KB, MB, GB)
+
+# Max HTTP request body size (supports: B, KB, MB, GB)
+# Default: 10MB. Use "1GB" for batch operations with large attachments.
 max_body_size = "1GB"
 
+# Tool execution timeout in seconds.
+# Must be less than Claude Desktop's 30s timeout if using stdio mode.
+# Default: 25. Use higher values for large import/aggregation operations.
+tool_timeout_secs = 3600
+
+# ---------------------------------------------------------------------------
+# [database] - IronBase storage
+# ---------------------------------------------------------------------------
 [database]
-path = "$dataPathForward"
+path = "$dbPathForward"
 
+# ---------------------------------------------------------------------------
+# [security] - API key protection
+# ---------------------------------------------------------------------------
+[security]
+# If true, all tool calls require a valid API key in the X-API-Key header.
+require_api_key = true
+
+# API key validation cache TTL in seconds (reduces repeated lookups).
+# Default: 60
+api_key_cache_ttl = 60
+
+# ---------------------------------------------------------------------------
+# [tls] - HTTPS (optional)
+# ---------------------------------------------------------------------------
+[tls]
+# Set to true to enable HTTPS. Requires cert_file and key_file.
+enabled = false
+
+# Path to TLS certificate (PEM format)
+# cert_file = "D:/data/cert.pem"
+
+# Path to TLS private key (PEM format)
+# key_file = "D:/data/key.pem"
+
+# ---------------------------------------------------------------------------
+# [logging] - Log configuration
+# ---------------------------------------------------------------------------
 [logging]
-level = "info"
-"@
+# Synchronous logging: slow but crash-safe (fsync after every write).
+# Default: false. Enable for production debugging.
+sync = false
 
-        if ($script:AdminKey) {
-            $configContent += @"
+# ironbase-core internal log level: error, warn, info, debug, trace
+# Shows index rebuild progress, query execution details, etc.
+# Can also be set via IRONBASE_LOG_LEVEL env var (env var takes priority).
+# Default: warn (production)
+core_level = "info"
 
-[auth]
-admin_key = "$($script:AdminKey)"
+# ---------------------------------------------------------------------------
+# [rag] - Embedding & RAG settings
+# ---------------------------------------------------------------------------
+[rag]
+# Path to FastText embedding model for local RAG/semantic search.
+# Also settable via IRONBASE_FASTTEXT_MODEL env var.
+fasttext_model = "$embeddingPathForward"
 "@
-        }
 
         $configContent | Set-Content -Path $configPath -Encoding UTF8
         Write-Ok "Config: $configPath"
@@ -442,11 +543,20 @@ admin_key = "$($script:AdminKey)"
         Write-Warn "Config already exists, not overwriting: $configPath"
     }
 
+    # Store admin key in a separate file for reference
+    $keyFile = Join-Path $TargetDataDir "admin.key"
+    if (-not (Test-Path $keyFile)) {
+        $adminKeyValue | Set-Content -Path $keyFile -Encoding UTF8
+        Write-Ok "Admin key saved to: $keyFile"
+    }
+
     # Install Windows Service
     if (-not $script:SkipService) {
         Write-Info "Installing Windows Service..."
-        $env:IRONBASE_PATH = Join-Path $TargetDataDir "data.mlite"
+        $env:IRONBASE_PATH = Join-Path $TargetDataDir "ironbase_data.mlite"
         $env:MCP_CONFIG = $configPath
+        $env:IRONBASE_ADMIN_KEY = $adminKeyValue
+        $env:IRONBASE_LOG_DIR = $logDir
 
         & $destExe install 2>&1 | ForEach-Object {
             Write-Host "  $_" -ForegroundColor DarkGray
@@ -602,7 +712,16 @@ function Write-Summary {
     Write-Host "  Install dir:   $TargetInstallDir" -ForegroundColor White
     Write-Host "  Data dir:      $TargetDataDir" -ForegroundColor White
     Write-Host "  Config:        $(Join-Path $TargetDataDir 'config.toml')" -ForegroundColor White
+    Write-Host "  DB:            $(Join-Path $TargetDataDir 'ironbase_data.mlite')" -ForegroundColor White
+    Write-Host "  Logs:          $(Join-Path $TargetDataDir 'log')" -ForegroundColor White
     Write-Host "  Port:          $($script:Port)" -ForegroundColor White
+
+    # Admin key
+    $keyFile = Join-Path $TargetDataDir "admin.key"
+    if (Test-Path $keyFile) {
+        $key = Get-Content $keyFile -Raw
+        Write-Host "  Admin key:     $($key.Trim())" -ForegroundColor Yellow
+    }
 
     # Service status
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
@@ -709,7 +828,7 @@ if (-not $InstallDir) {
     $InstallDir = "$env:ProgramFiles\IronBase"
 }
 if (-not $DataDir) {
-    $DataDir = "$env:ProgramData\IronBase"
+    $DataDir = "D:\data"
 }
 
 # --- Uninstall mode ---

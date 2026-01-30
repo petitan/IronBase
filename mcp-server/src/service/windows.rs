@@ -13,8 +13,9 @@ use std::time::Duration;
 use windows_service::{
     define_windows_service,
     service::{
-        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceErrorControl, ServiceExitCode,
-        ServiceInfo, ServiceStartType, ServiceState, ServiceStatus, ServiceType,
+        ServiceAccess, ServiceControl, ServiceControlAccept, ServiceDependency,
+        ServiceErrorControl, ServiceExitCode, ServiceInfo, ServiceStartType, ServiceState,
+        ServiceStatus, ServiceType,
     },
     service_control_handler::{self, ServiceControlHandlerResult},
     service_dispatcher,
@@ -56,7 +57,7 @@ pub fn install_service() -> ServiceResult<()> {
             error_control: ServiceErrorControl::Normal,
             executable_path: exe_path.clone(),
             launch_arguments: vec![OsString::from("--service")],
-            dependencies: vec![OsString::from("Tcpip")],
+            dependencies: vec![ServiceDependency::Service(OsString::from("Tcpip"))],
             account_name: None, // LocalSystem
             account_password: None,
         };
@@ -258,60 +259,124 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
         *guard = Some(status_handle.clone());
     }
 
-    // Report service as running
+    // Report StartPending while server initializes (warm-up, index rebuild, bind)
+    status_handle.set_service_status(ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: ServiceState::StartPending,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::from_secs(120), // Allow up to 120s for index rebuild
+        process_id: None,
+    })?;
+
+    // Create ready channel - server signals when it's accepting connections
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(1);
+
+    // Run the actual server in a separate thread
+    let server_handle = std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
+        rt.block_on(async {
+            crate::http_server::run_http_server_for_service(shutdown_rx, ready_tx).await;
+        });
+    });
+
+    // Wait for server to signal ready, updating StartPending checkpoints
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(300); // 5 min for large DBs
+    const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+    let startup_start = std::time::Instant::now();
+    let mut checkpoint = 1u32;
+
+    let server_ready = loop {
+        // Check if server thread crashed during startup
+        if server_handle.is_finished() {
+            eprintln!("Service: server thread exited during startup");
+            break false;
+        }
+
+        // Check if ready signal received
+        match ready_rx.recv_timeout(CHECKPOINT_INTERVAL) {
+            Ok(()) => {
+                break true;
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Update checkpoint so SCM knows we're still starting
+                checkpoint = checkpoint.saturating_add(1);
+                let _ = status_handle.set_service_status(ServiceStatus {
+                    service_type: SERVICE_TYPE,
+                    current_state: ServiceState::StartPending,
+                    controls_accepted: ServiceControlAccept::empty(),
+                    exit_code: ServiceExitCode::Win32(0),
+                    checkpoint,
+                    wait_hint: Duration::from_secs(120),
+                    process_id: None,
+                });
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                eprintln!("Service: ready channel disconnected (server failed to start)");
+                break false;
+            }
+        }
+
+        if startup_start.elapsed() > STARTUP_TIMEOUT {
+            eprintln!("Service: startup timeout after {:?}", STARTUP_TIMEOUT);
+            break false;
+        }
+    };
+
+    if !server_ready {
+        // Report failed start
+        let _ = status_handle.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(1),
+            checkpoint: 0,
+            wait_hint: Duration::from_secs(0),
+            process_id: None,
+        });
+        return Ok(());
+    }
+
+    // Server is ready - report Running
     status_handle.set_service_status(ServiceStatus {
         service_type: SERVICE_TYPE,
         current_state: ServiceState::Running,
         controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
         exit_code: ServiceExitCode::Win32(0),
         checkpoint: 0,
-        wait_hint: Duration::from_secs(30),
+        wait_hint: Duration::from_secs(0),
         process_id: None,
     })?;
 
-    // Run the actual server
-    // We use a separate thread for the async runtime
-    let server_handle = std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create runtime");
-        rt.block_on(async {
-            crate::http_server::run_http_server_with_shutdown(shutdown_rx).await;
-        });
-    });
-
-    // Wait for the server to finish with timeout
-    // FIX #1: Don't block forever - use join with periodic checkpoint updates
+    // Wait for server to finish (shutdown signal received)
     let shutdown_start = std::time::Instant::now();
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
-    const CHECKPOINT_INTERVAL: Duration = Duration::from_secs(5);
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
 
-    let mut checkpoint = 2u32;
+    let mut shutdown_checkpoint = 1u32;
     loop {
-        // Check if server thread finished
         if server_handle.is_finished() {
             let _ = server_handle.join();
             break;
         }
 
-        // Check timeout
         if shutdown_start.elapsed() > SHUTDOWN_TIMEOUT {
             eprintln!("Service shutdown timeout after {:?}, forcing stop", SHUTDOWN_TIMEOUT);
-            // Thread will be killed when process exits
             break;
         }
 
-        // Update checkpoint to show SCM we're still working
+        shutdown_checkpoint = shutdown_checkpoint.saturating_add(1);
         let _ = status_handle.set_service_status(ServiceStatus {
             service_type: SERVICE_TYPE,
             current_state: ServiceState::StopPending,
             controls_accepted: ServiceControlAccept::empty(),
             exit_code: ServiceExitCode::Win32(0),
-            checkpoint,
+            checkpoint: shutdown_checkpoint,
             wait_hint: Duration::from_secs(10),
             process_id: None,
         });
-        checkpoint = checkpoint.saturating_add(1);
 
-        std::thread::sleep(CHECKPOINT_INTERVAL);
+        std::thread::sleep(Duration::from_secs(5));
     }
 
     // Report service as stopped

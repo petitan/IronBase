@@ -36,6 +36,8 @@ pub struct Config {
     pub sync_logging: bool,
     /// Log level for ironbase-core internal logging (error, warn, info, debug, trace)
     pub core_log_level: Option<String>,
+    /// Path to FastText embedding model for RAG/semantic search
+    pub fasttext_model: Option<String>,
 }
 
 /// Load configuration from environment or config file
@@ -90,6 +92,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tool_timeout_secs: toml_config.server.tool_timeout_secs,
             sync_logging: toml_config.logging.sync,
             core_log_level: toml_config.logging.core_level,
+            fasttext_model: toml_config.rag.fasttext_model,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -108,6 +111,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             tool_timeout_secs: DEFAULT_TOOL_TIMEOUT_SECS,
             sync_logging: false,
             core_log_level: None,
+            fasttext_model: None,
         }
     };
 
@@ -141,6 +145,8 @@ struct TomlConfig {
     tls: TlsConfig,
     #[serde(default)]
     logging: LoggingConfig,
+    #[serde(default)]
+    rag: RagConfig,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -201,4 +207,11 @@ struct LoggingConfig {
     /// Default: warn (production), override with IRONBASE_LOG_LEVEL env var
     #[serde(default)]
     core_level: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, Default)]
+struct RagConfig {
+    /// Path to FastText embedding model (.bin or .ironbase.bin)
+    #[serde(default)]
+    fasttext_model: Option<String>,
 }

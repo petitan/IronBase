@@ -343,8 +343,26 @@ fn run_stdio_server(cli: &Cli) {
     );
 
     // Initialize embedding manager if FastText model is configured
+    // Priority: IRONBASE_FASTTEXT_MODEL env var > config.toml [rag].fasttext_model
+    let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL").ok().or_else(|| {
+        // Try reading from config.toml [rag].fasttext_model
+        let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+        let config_file = std::path::Path::new(&config_path);
+        if config_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(config_file) {
+                if let Ok(toml_val) = content.replace("\r\n", "\n").parse::<toml::Table>() {
+                    return toml_val
+                        .get("rag")
+                        .and_then(|r| r.get("fasttext_model"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
+            }
+        }
+        None
+    });
     let embedding_manager: Option<Arc<mcp_ironbase::EmbeddingManager>> =
-        if let Ok(model_path) = std::env::var("IRONBASE_FASTTEXT_MODEL") {
+        if let Some(model_path) = fasttext_path {
             match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
                 Ok(manager) if manager.has_providers() => {
                     eprintln!(
@@ -363,7 +381,7 @@ fn run_stdio_server(cli: &Cli) {
                 }
             }
         } else {
-            eprintln!("No IRONBASE_FASTTEXT_MODEL configured, embeddings disabled");
+            eprintln!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
             None
         };
 
