@@ -925,7 +925,11 @@ mod tests {
         assert!(OPERATOR_REGISTRY.contains_key("$regex"));
         assert!(OPERATOR_REGISTRY.contains_key("$fuzzy"));
         assert!(OPERATOR_REGISTRY.contains_key("$expr"));
-        assert_eq!(OPERATOR_REGISTRY.len(), 20); // Total operators implemented (19 + $fuzzy)
+        assert!(OPERATOR_REGISTRY.contains_key("$text"));
+        assert!(OPERATOR_REGISTRY.contains_key("$startsWith"));
+        assert!(OPERATOR_REGISTRY.contains_key("$endsWith"));
+        assert!(OPERATOR_REGISTRY.contains_key("$contains"));
+        assert_eq!(OPERATOR_REGISTRY.len(), 24); // Total operators: 20 + $text, $startsWith, $endsWith, $contains
     }
 
     #[test]
