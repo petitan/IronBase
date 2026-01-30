@@ -101,9 +101,9 @@ Metadata at END → no race conditions, no truncation.
 
 | Típus | Operátorok |
 |-------|-----------|
-| **Query (21)** | $eq $ne $gt $gte $lt $lte $in $nin · $and $or $not $nor · $exists $type · $all $elemMatch $size · $regex · $fuzzy · $** |
+| **Query (26)** | $eq $ne $gt $gte $lt $lte $in $nin · $and $or $not $nor · $exists $type · $all $elemMatch $size · $regex $fuzzy $text · $startsWith $endsWith $contains · $expr · $** |
 | **Update (7)** | $set $inc $unset $push $pull $addToSet $pop (+ dot notation + upsert) |
-| **Aggregation** | $match $group $project $sort $limit $skip · Accumulators: $sum $avg $min $max $first $last |
+| **Aggregation** | $match $group $project $count $sort $limit $skip $unwind · Accumulators: $sum $avg $min $max $first $last $push $addToSet |
 
 ---
 
@@ -745,9 +745,19 @@ coll.update_one_with_options(&filter, &update, opts)?;
 
 | Típus | API | Megjegyzés |
 |-------|-----|------------|
-| **Fuzzy** | `{"$fuzzy": "john"}` | jaro_winkler/levenshtein, threshold: 0.8 |
+| **Fuzzy** | `{"$fuzzy": "john"}` | jaro_winkler/levenshtein/damerau, threshold: 0.8 |
+| **Text** | `{"$text": "király"}` | Tokenizáció + stemming (HU/EN/DE), AND logika |
+| **StartsWith** | `{"$startsWith": "Al"}` | Prefix match, case-insensitive default |
+| **EndsWith** | `{"$endsWith": ".hu"}` | Suffix match, case-insensitive default |
+| **Contains** | `{"$contains": "Rust"}` | Substring match, case-insensitive default |
 | **Fulltext** | `fulltext_search(field, query, limit)` | TF-IDF, stemming, HU/EN/DE |
 | **RAG** | `rag_search(collection, query)` | FastText + HNSW |
+| **Hybrid** | `hybrid_search(collection, query)` | RRF score fusion (MCP tool) |
+
+`$text`, `$startsWith`, `$endsWith`, `$contains` mindegyik támogatja:
+- Egyszerű forma: `{"field": {"$op": "value"}}` (case-insensitive)
+- Bővített forma: `{"field": {"$op": {"$value"/"$search": "...", "$caseSensitive": true}}}`
+- Array mezők: bármely elem match → true
 
 <details>
 <summary>Fulltext példa</summary>
@@ -769,6 +779,51 @@ let results = coll.fulltext_search("content", "király", Some(10), None, None, N
 | `rag_collection_stats` | Statisztikák |
 
 Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
+</details>
+
+<details>
+<summary>Score Fusion Architektúra (2026-01-30)</summary>
+
+**Döntés: Score fusion MCP tool szinten marad, NEM query operátor.**
+
+**Indoklás:**
+- Query operátorok (`OperatorMatcher`) = stateless boolean predikátumok: `fn(doc_value, filter_value) -> bool`
+- Score fusion = ranked retrieval: score-okat ad vissza, nem igaz/hamis
+- Index hozzáférés szükséges (fulltext + HNSW), de operátorok stateless-ek
+
+**Meglévő implementáció:**
+
+| Tool | Fájl | Algoritmus |
+|------|------|-----------|
+| `hybrid_search` | `mcp-server/src/tools/hybrid.rs` | RRF fusion |
+| `rag_search` | `mcp-server/src/tools/rag.rs` | RRF fusion + auto-embed |
+
+**RRF formula:** `score = Σ(weight_i / (60 + rank_i))`
+
+**Reranking pipeline (multiplicatív boost):**
+- Exact phrase match: 1.3x
+- Keyword density: 1.0-1.1x
+- Short content penalty: 0.8x
+
+**Eredmény metadata:**
+```json
+{
+  "_rrf_score": 0.032,
+  "_final_score": 0.041,
+  "_rerank_boost": 1.3,
+  "_vector_rank": 2,
+  "_text_rank": 5,
+  "_vector_score": 0.89,
+  "_text_score": 12.4
+}
+```
+
+**Rétegek:**
+```
+Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
+Collection metódusok (fulltext_search...)    → scored results, index-alapú
+MCP tools (hybrid_search, rag_search)       → score fusion, ranked retrieval
+```
 </details>
 
 ### Auto-Embedding & Cache
