@@ -42,7 +42,10 @@ pub use element::{ExistsOperator, TypeOperator};
 pub use expression::ExprOperator;
 pub use filter::{matches_filter, matches_filter_value};
 pub use logical::{AndOperator, NorOperator, NotOperator, OrOperator};
-pub use text_search::{regex_match_with_options, FuzzyAlgorithm, FuzzyOperator, RegexOperator};
+pub use text_search::{
+    regex_match_with_options, ContainsOperator, EndsWithOperator, FuzzyAlgorithm, FuzzyOperator,
+    RegexOperator, StartsWithOperator, TextOperator,
+};
 pub use traits::OperatorMatcher;
 
 // ============================================================================
@@ -86,6 +89,14 @@ lazy_static! {
 
         // Fuzzy text search operators
         registry.insert("$fuzzy", Box::new(FuzzyOperator));
+
+        // Text search operator (tokenization + stemming)
+        registry.insert("$text", Box::new(TextOperator));
+
+        // String pattern operators
+        registry.insert("$startsWith", Box::new(StartsWithOperator));
+        registry.insert("$endsWith", Box::new(EndsWithOperator));
+        registry.insert("$contains", Box::new(ContainsOperator));
 
         // Logical operators
         registry.insert("$and", Box::new(AndOperator));
@@ -1973,5 +1984,304 @@ mod tests {
         // Test non-matching
         assert!(!op.matches(Some(&json!("three")), &filter, None).unwrap());
         assert!(!op.matches(Some(&json!(false)), &filter, None).unwrap());
+    }
+
+    // ========================================================================
+    // $text OPERATOR TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_text_operator_simple_form() {
+        let op = TextOperator;
+        // Simple tokenized match
+        assert!(op
+            .matches(Some(&json!("hello world")), &json!("hello"), None)
+            .unwrap());
+        assert!(op
+            .matches(Some(&json!("hello world")), &json!("world"), None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_text_operator_case_insensitive() {
+        let op = TextOperator;
+        // Default is case-insensitive (lowercase + accent folding)
+        assert!(op
+            .matches(Some(&json!("Hello World")), &json!("hello"), None)
+            .unwrap());
+        assert!(op
+            .matches(Some(&json!("RUST Programming")), &json!("rust"), None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_text_operator_multiple_tokens_and_logic() {
+        let op = TextOperator;
+        // ALL query tokens must be present (AND logic)
+        assert!(op
+            .matches(
+                Some(&json!("the quick brown fox")),
+                &json!("quick fox"),
+                None
+            )
+            .unwrap());
+        // "missing" is not in the document
+        assert!(!op
+            .matches(
+                Some(&json!("the quick brown fox")),
+                &json!("quick missing"),
+                None
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn test_text_operator_extended_form_hungarian() {
+        let op = TextOperator;
+        // Hungarian stemming: "autók" (cars plural) should match "autó" (car singular)
+        let filter = json!({"$search": "autók", "$language": "hungarian"});
+        assert!(op
+            .matches(Some(&json!("Az autó nagyon szép és gyors")), &filter, None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_text_operator_array_support() {
+        let op = TextOperator;
+        // Any array element matching should return true
+        let arr = json!(["apple pie", "cherry cake", "banana split"]);
+        assert!(op.matches(Some(&arr), &json!("cherry"), None).unwrap());
+        assert!(!op.matches(Some(&arr), &json!("mango"), None).unwrap());
+    }
+
+    #[test]
+    fn test_text_operator_none_and_non_string() {
+        let op = TextOperator;
+        // None field → false
+        assert!(!op.matches(None, &json!("hello"), None).unwrap());
+        // Non-string → false
+        assert!(!op.matches(Some(&json!(42)), &json!("hello"), None).unwrap());
+    }
+
+    #[test]
+    fn test_text_operator_empty_query() {
+        let op = TextOperator;
+        // Empty query → false
+        assert!(!op
+            .matches(Some(&json!("hello world")), &json!(""), None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_text_operator_invalid_filter() {
+        let op = TextOperator;
+        // Invalid filter type → error
+        let result = op.matches(Some(&json!("hello")), &json!(42), None);
+        assert!(result.is_err());
+
+        // Missing $search in object → error
+        let result = op.matches(
+            Some(&json!("hello")),
+            &json!({"$language": "hungarian"}),
+            None,
+        );
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // $startsWith OPERATOR TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_starts_with_operator_basic() {
+        let op = StartsWithOperator;
+        assert!(op
+            .matches(Some(&json!("Hello World")), &json!("hello"), None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("Hello World")), &json!("world"), None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_starts_with_operator_case_sensitive() {
+        let op = StartsWithOperator;
+        let filter = json!({"$value": "Hello", "$caseSensitive": true});
+        assert!(op
+            .matches(Some(&json!("Hello World")), &filter, None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("hello World")), &filter, None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_starts_with_operator_array() {
+        let op = StartsWithOperator;
+        let arr = json!(["apple", "banana", "cherry"]);
+        assert!(op.matches(Some(&arr), &json!("ban"), None).unwrap());
+        assert!(!op.matches(Some(&arr), &json!("mango"), None).unwrap());
+    }
+
+    #[test]
+    fn test_starts_with_operator_none_and_non_string() {
+        let op = StartsWithOperator;
+        assert!(!op.matches(None, &json!("hello"), None).unwrap());
+        assert!(!op.matches(Some(&json!(42)), &json!("hello"), None).unwrap());
+    }
+
+    #[test]
+    fn test_starts_with_operator_invalid_filter() {
+        let op = StartsWithOperator;
+        let result = op.matches(Some(&json!("hello")), &json!(42), None);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // $endsWith OPERATOR TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_ends_with_operator_basic() {
+        let op = EndsWithOperator;
+        assert!(op
+            .matches(Some(&json!("test@example.hu")), &json!(".hu"), None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("test@example.hu")), &json!(".com"), None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_ends_with_operator_case_sensitive() {
+        let op = EndsWithOperator;
+        let filter = json!({"$value": ".HU", "$caseSensitive": true});
+        assert!(!op
+            .matches(Some(&json!("test@example.hu")), &filter, None)
+            .unwrap());
+        assert!(op
+            .matches(Some(&json!("test@example.HU")), &filter, None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_ends_with_operator_array() {
+        let op = EndsWithOperator;
+        let arr = json!(["file.txt", "image.png", "doc.pdf"]);
+        assert!(op.matches(Some(&arr), &json!(".png"), None).unwrap());
+        assert!(!op.matches(Some(&arr), &json!(".doc"), None).unwrap());
+    }
+
+    #[test]
+    fn test_ends_with_operator_none_and_non_string() {
+        let op = EndsWithOperator;
+        assert!(!op.matches(None, &json!(".hu"), None).unwrap());
+        assert!(!op.matches(Some(&json!(42)), &json!(".hu"), None).unwrap());
+    }
+
+    // ========================================================================
+    // $contains OPERATOR TESTS
+    // ========================================================================
+
+    #[test]
+    fn test_contains_operator_basic() {
+        let op = ContainsOperator;
+        assert!(op
+            .matches(
+                Some(&json!("I love Rust programming")),
+                &json!("rust"),
+                None
+            )
+            .unwrap());
+        assert!(!op
+            .matches(
+                Some(&json!("I love Rust programming")),
+                &json!("python"),
+                None
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn test_contains_operator_case_sensitive() {
+        let op = ContainsOperator;
+        let filter = json!({"$value": "Rust", "$caseSensitive": true});
+        assert!(op
+            .matches(Some(&json!("I love Rust programming")), &filter, None)
+            .unwrap());
+        assert!(!op
+            .matches(Some(&json!("I love rust programming")), &filter, None)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_contains_operator_array() {
+        let op = ContainsOperator;
+        let arr = json!(["hello world", "goodbye", "hi there"]);
+        assert!(op.matches(Some(&arr), &json!("world"), None).unwrap());
+        assert!(!op.matches(Some(&arr), &json!("planet"), None).unwrap());
+    }
+
+    #[test]
+    fn test_contains_operator_none_and_non_string() {
+        let op = ContainsOperator;
+        assert!(!op.matches(None, &json!("hello"), None).unwrap());
+        assert!(!op.matches(Some(&json!(42)), &json!("hello"), None).unwrap());
+    }
+
+    #[test]
+    fn test_contains_operator_invalid_filter() {
+        let op = ContainsOperator;
+        let result = op.matches(Some(&json!("hello")), &json!(42), None);
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // INTEGRATION: New operators with matches_filter
+    // ========================================================================
+
+    #[test]
+    fn test_text_with_matches_filter() {
+        let doc = create_test_document(1, vec![("content", json!("Az autó nagyon gyors"))]);
+        let filter = json!({"content": {"$text": "gyors"}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_starts_with_filter() {
+        let doc = create_test_document(1, vec![("name", json!("Alice Smith"))]);
+        let filter = json!({"name": {"$startsWith": "alice"}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_ends_with_filter() {
+        let doc = create_test_document(1, vec![("email", json!("user@example.hu"))]);
+        let filter = json!({"email": {"$endsWith": ".hu"}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_contains_filter() {
+        let doc = create_test_document(1, vec![("bio", json!("Senior Rust developer"))]);
+        let filter = json!({"bio": {"$contains": "rust"}});
+        assert!(matches_filter(&doc, &filter).unwrap());
+    }
+
+    #[test]
+    fn test_combined_text_operators() {
+        let doc = create_test_document(
+            1,
+            vec![
+                ("name", json!("Alice Smith")),
+                ("email", json!("alice@example.hu")),
+            ],
+        );
+        // Combine $startsWith and $endsWith on different fields
+        let filter = json!({
+            "name": {"$startsWith": "alice"},
+            "email": {"$endsWith": ".hu"}
+        });
+        assert!(matches_filter(&doc, &filter).unwrap());
     }
 }

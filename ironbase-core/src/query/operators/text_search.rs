@@ -339,3 +339,323 @@ fn parse_fuzzy_filter(filter_value: &Value) -> Result<(String, FuzzyAlgorithm, f
         )),
     }
 }
+
+// ============================================================================
+// TEXT SEARCH OPERATOR ($text)
+// ============================================================================
+
+use crate::fulltext::{tokenize, FtsLanguage, FtsOptions};
+use std::collections::HashSet;
+
+/// $text operator: Matches strings using tokenization and optional stemming
+///
+/// # Syntax
+///
+/// Simple form (no stemming, accent folding ON):
+/// ```json
+/// { "content": { "$text": "király" } }
+/// ```
+///
+/// Extended form with language support:
+/// ```json
+/// { "content": { "$text": { "$search": "király története", "$language": "hungarian", "$caseSensitive": false } } }
+/// ```
+///
+/// # Supported Languages
+///
+/// - `"none"` (default): No stemming, just tokenization + accent folding
+/// - `"hungarian"`: Hungarian stemming + stop words
+/// - `"english"`: English stemming + stop words
+/// - `"german"`: German stemming + stop words
+///
+/// # Matching Logic
+///
+/// ALL query tokens must be present in the document field tokens (AND logic).
+/// Tokenization includes: lowercase, accent folding, stop word removal, optional stemming.
+///
+/// # Complexity: CC = 5
+pub struct TextOperator;
+
+impl OperatorMatcher for TextOperator {
+    fn name(&self) -> &'static str {
+        "$text"
+    }
+
+    fn matches(
+        &self,
+        doc_value: Option<&Value>,
+        filter_value: &Value,
+        _document: Option<&Document>,
+    ) -> Result<bool> {
+        let (search_text, language, case_sensitive) = parse_text_filter(filter_value)?;
+
+        match doc_value {
+            None => Ok(false),
+            Some(Value::String(s)) => text_matches(s, &search_text, language, case_sensitive),
+            Some(Value::Array(arr)) => {
+                for elem in arr {
+                    if let Value::String(s) = elem {
+                        if text_matches(s, &search_text, language, case_sensitive)? {
+                            return Ok(true);
+                        }
+                    }
+                }
+                Ok(false)
+            }
+            Some(_) => Ok(false),
+        }
+    }
+}
+
+/// Parse $text filter value into (search_text, language, case_sensitive)
+fn parse_text_filter(filter_value: &Value) -> Result<(String, FtsLanguage, bool)> {
+    match filter_value {
+        // Simple form: { "$text": "search terms" }
+        Value::String(s) => Ok((s.clone(), FtsLanguage::None, false)),
+
+        // Extended form: { "$text": { "$search": "...", "$language": "...", "$caseSensitive": false } }
+        Value::Object(obj) => {
+            let search = obj
+                .get("$search")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    IronBaseError::InvalidQuery(
+                        "$text object form requires '$search' field with string".to_string(),
+                    )
+                })?
+                .to_string();
+
+            let language = obj
+                .get("$language")
+                .and_then(|v| v.as_str())
+                .map(FtsLanguage::from_str)
+                .unwrap_or(FtsLanguage::None);
+
+            let case_sensitive = obj
+                .get("$caseSensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            Ok((search, language, case_sensitive))
+        }
+
+        _ => Err(IronBaseError::InvalidQuery(
+            "$text requires a string or object with '$search' field".to_string(),
+        )),
+    }
+}
+
+/// Check if document text matches the search text using tokenization
+fn text_matches(
+    doc_text: &str,
+    search_text: &str,
+    language: FtsLanguage,
+    case_sensitive: bool,
+) -> Result<bool> {
+    let options = FtsOptions::with_settings(language, 2, !case_sensitive);
+    let doc_tokens: HashSet<String> = tokenize(doc_text, &options).into_iter().collect();
+    let query_tokens = tokenize(search_text, &options);
+
+    if query_tokens.is_empty() {
+        return Ok(false);
+    }
+    Ok(query_tokens.iter().all(|qt| doc_tokens.contains(qt)))
+}
+
+// ============================================================================
+// STRING PATTERN OPERATORS ($startsWith, $endsWith, $contains)
+// ============================================================================
+
+/// Parse string pattern filter value into (pattern, case_sensitive)
+///
+/// Supports two forms:
+/// - Simple: `"pattern"` → case-insensitive
+/// - Extended: `{ "$value": "pattern", "$caseSensitive": true }`
+fn parse_string_pattern_filter(filter_value: &Value, op_name: &str) -> Result<(String, bool)> {
+    match filter_value {
+        // Simple form: case-insensitive by default
+        Value::String(s) => Ok((s.clone(), false)),
+
+        // Extended form with options
+        Value::Object(obj) => {
+            let value = obj
+                .get("$value")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    IronBaseError::InvalidQuery(format!(
+                        "{} object form requires '$value' field with string",
+                        op_name
+                    ))
+                })?
+                .to_string();
+
+            let case_sensitive = obj
+                .get("$caseSensitive")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            Ok((value, case_sensitive))
+        }
+
+        _ => Err(IronBaseError::InvalidQuery(format!(
+            "{} requires a string or object with '$value' field",
+            op_name
+        ))),
+    }
+}
+
+// Wrapper functions to avoid generic Pattern trait issues with fn pointers
+fn str_starts_with(haystack: &str, needle: &str) -> bool {
+    haystack.starts_with(needle)
+}
+
+fn str_ends_with(haystack: &str, needle: &str) -> bool {
+    haystack.ends_with(needle)
+}
+
+fn str_contains_substr(haystack: &str, needle: &str) -> bool {
+    haystack.contains(needle)
+}
+
+/// Generic string pattern matching for $startsWith, $endsWith, $contains
+///
+/// Applies the given `check` function to document value and pattern,
+/// with optional case-insensitive matching (default).
+fn string_pattern_matches(
+    doc_value: Option<&Value>,
+    filter_value: &Value,
+    op_name: &str,
+    check: fn(&str, &str) -> bool,
+) -> Result<bool> {
+    let (pattern, case_sensitive) = parse_string_pattern_filter(filter_value, op_name)?;
+
+    // Pre-compute lowercase pattern once (avoid redundant alloc in array loop)
+    let pattern_lower = if case_sensitive {
+        String::new() // unused, no allocation
+    } else {
+        pattern.to_lowercase()
+    };
+
+    match doc_value {
+        None => Ok(false),
+        Some(Value::String(s)) => {
+            if case_sensitive {
+                Ok(check(s, &pattern))
+            } else {
+                Ok(check(&s.to_lowercase(), &pattern_lower))
+            }
+        }
+        Some(Value::Array(arr)) => {
+            for elem in arr {
+                if let Value::String(s) = elem {
+                    let matches = if case_sensitive {
+                        check(s, &pattern)
+                    } else {
+                        check(&s.to_lowercase(), &pattern_lower)
+                    };
+                    if matches {
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        }
+        Some(_) => Ok(false),
+    }
+}
+
+/// $startsWith operator: Matches strings that start with a given prefix
+///
+/// # Syntax
+///
+/// Simple form (case-insensitive):
+/// ```json
+/// { "name": { "$startsWith": "Al" } }
+/// ```
+///
+/// Extended form:
+/// ```json
+/// { "name": { "$startsWith": { "$value": "Al", "$caseSensitive": true } } }
+/// ```
+///
+/// # Complexity: CC = 3
+pub struct StartsWithOperator;
+
+impl OperatorMatcher for StartsWithOperator {
+    fn name(&self) -> &'static str {
+        "$startsWith"
+    }
+
+    fn matches(
+        &self,
+        doc_value: Option<&Value>,
+        filter_value: &Value,
+        _document: Option<&Document>,
+    ) -> Result<bool> {
+        string_pattern_matches(doc_value, filter_value, "$startsWith", str_starts_with)
+    }
+}
+
+/// $endsWith operator: Matches strings that end with a given suffix
+///
+/// # Syntax
+///
+/// Simple form (case-insensitive):
+/// ```json
+/// { "email": { "$endsWith": ".hu" } }
+/// ```
+///
+/// Extended form:
+/// ```json
+/// { "email": { "$endsWith": { "$value": ".hu", "$caseSensitive": true } } }
+/// ```
+///
+/// # Complexity: CC = 3
+pub struct EndsWithOperator;
+
+impl OperatorMatcher for EndsWithOperator {
+    fn name(&self) -> &'static str {
+        "$endsWith"
+    }
+
+    fn matches(
+        &self,
+        doc_value: Option<&Value>,
+        filter_value: &Value,
+        _document: Option<&Document>,
+    ) -> Result<bool> {
+        string_pattern_matches(doc_value, filter_value, "$endsWith", str_ends_with)
+    }
+}
+
+/// $contains operator: Matches strings that contain a given substring
+///
+/// # Syntax
+///
+/// Simple form (case-insensitive):
+/// ```json
+/// { "bio": { "$contains": "Rust" } }
+/// ```
+///
+/// Extended form:
+/// ```json
+/// { "bio": { "$contains": { "$value": "Rust", "$caseSensitive": true } } }
+/// ```
+///
+/// # Complexity: CC = 3
+pub struct ContainsOperator;
+
+impl OperatorMatcher for ContainsOperator {
+    fn name(&self) -> &'static str {
+        "$contains"
+    }
+
+    fn matches(
+        &self,
+        doc_value: Option<&Value>,
+        filter_value: &Value,
+        _document: Option<&Document>,
+    ) -> Result<bool> {
+        string_pattern_matches(doc_value, filter_value, "$contains", str_contains_substr)
+    }
+}

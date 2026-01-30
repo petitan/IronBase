@@ -66,9 +66,17 @@ impl<R: Read + Seek> WALEntryIterator<R> {
             Err(e) => return Err(IronBaseError::Io(e)),
         }
 
-        let tx_id = u64::from_le_bytes(header[0..8].try_into().unwrap());
+        let tx_id = u64::from_le_bytes(
+            header[0..8]
+                .try_into()
+                .map_err(|_| IronBaseError::WALCorruption)?,
+        );
         let entry_type = WALEntryType::from_u8(header[8])?;
-        let data_len = u32::from_le_bytes(header[9..13].try_into().unwrap()) as usize;
+        let data_len = u32::from_le_bytes(
+            header[9..13]
+                .try_into()
+                .map_err(|_| IronBaseError::WALCorruption)?,
+        ) as usize;
 
         // SECURITY: Prevent OOM from malformed WAL with huge data_len
         if data_len > MAX_WAL_ENTRY_SIZE {

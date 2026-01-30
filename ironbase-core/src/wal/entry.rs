@@ -122,7 +122,11 @@ impl WALEntry {
         let mut offset = 0;
 
         // Transaction ID
-        let tx_id = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        let tx_id = u64::from_le_bytes(
+            data[offset..offset + 8]
+                .try_into()
+                .map_err(|_| IronBaseError::WALCorruption)?,
+        );
         offset += 8;
 
         // Entry Type
@@ -130,7 +134,11 @@ impl WALEntry {
         offset += 1;
 
         // Data Length
-        let data_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+        let data_len = u32::from_le_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .map_err(|_| IronBaseError::WALCorruption)?,
+        ) as usize;
         offset += 4;
 
         // SECURITY: Prevent OOM from malformed WAL with huge data_len
@@ -146,7 +154,11 @@ impl WALEntry {
         offset += data_len;
 
         // Checksum
-        let checksum = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        let checksum = u32::from_le_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .map_err(|_| IronBaseError::WALCorruption)?,
+        );
 
         let entry = WALEntry {
             transaction_id: tx_id,

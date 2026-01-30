@@ -894,7 +894,17 @@ impl StorageEngine {
         // Find the latest MetadataSnapshot entry
         let mut latest_snapshot: Option<MetadataWALEntry> = None;
 
-        for entry in iter.flatten() {
+        for entry_result in iter {
+            let entry = match entry_result {
+                Ok(e) => e,
+                Err(e) => {
+                    eprintln!(
+                        "[WARN] Skipping corrupted WAL entry during metadata recovery: {}",
+                        e
+                    );
+                    continue;
+                }
+            };
             if entry.entry_type == WALEntryType::MetadataSnapshot {
                 if let Ok(snapshot) = serde_json::from_slice::<MetadataWALEntry>(&entry.data) {
                     latest_snapshot = Some(snapshot);

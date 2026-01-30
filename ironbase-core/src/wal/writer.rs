@@ -152,29 +152,24 @@ impl WriteAheadLog {
         Ok(())
     }
 
+    /// Maximum WAL entries for checkpoint (OOM protection)
+    ///
+    /// If WAL has more entries than this, something is very wrong
+    /// (WAL clear should run every ~100 commits).
+    const MAX_CHECKPOINT_ENTRIES: usize = 1_000_000;
+
     /// Checkpoint: remove committed transactions from WAL
     ///
     /// Rewrites the WAL file keeping only uncommitted transactions.
+    /// Streams entries directly to temp file to minimize memory usage.
     pub fn checkpoint(&mut self, committed_tx_ids: &[TransactionId]) -> Result<()> {
         use std::io::BufReader;
 
-        // Read all entries using streaming iterator
+        // Stream entries directly to temp file (no full collect into memory)
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
         let iter = WALEntryIterator::new(reader)?;
 
-        let mut all_entries = Vec::new();
-        for entry_result in iter {
-            all_entries.push(entry_result?);
-        }
-
-        // Keep only uncommitted transactions
-        let active_entries: Vec<_> = all_entries
-            .into_iter()
-            .filter(|e| !committed_tx_ids.contains(&e.transaction_id))
-            .collect();
-
-        // Rewrite WAL file atomically
         let temp_path = self.path.with_extension("wal.tmp");
         let mut temp_file = OpenOptions::new()
             .create(true)
@@ -182,8 +177,28 @@ impl WriteAheadLog {
             .truncate(true)
             .open(&temp_path)?;
 
-        for entry in active_entries {
-            temp_file.write_all(&entry.serialize())?;
+        let mut entry_count: usize = 0;
+        for entry_result in iter {
+            let entry = entry_result?;
+            entry_count += 1;
+
+            // OOM protection: if WAL is absurdly large, abort checkpoint
+            if entry_count > Self::MAX_CHECKPOINT_ENTRIES {
+                // Clean up temp file
+                drop(temp_file);
+                let _ = std::fs::remove_file(&temp_path);
+                return Err(crate::error::IronBaseError::Io(std::io::Error::other(
+                    format!(
+                        "WAL checkpoint aborted: too many entries (>{}) - consider WAL clear instead",
+                        Self::MAX_CHECKPOINT_ENTRIES
+                    ),
+                )));
+            }
+
+            // Write only uncommitted entries to temp file
+            if !committed_tx_ids.contains(&entry.transaction_id) {
+                temp_file.write_all(&entry.serialize())?;
+            }
         }
         temp_file.sync_all()?;
         drop(temp_file);
