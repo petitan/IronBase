@@ -482,6 +482,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Lazy index get_all_entries** | 2026-01-26 | $group/distinct 0 eredmény | `lazy_mode` nem kezelt | Fájlból olvasás lazy mode-ban |
 | **Index building flag** | 9273a19b | explain() 0 availableIndexes | `set_index_ready()` hiányzik rebuild után | `set_index_ready()` hívás rebuild végén |
 | **$eq operator ignored** | 6f537dd5 | `{"field":{"$eq":"x"}}` CollectionScan | `collect_equality_candidates()` skip-elte | `$eq` érték kinyerése |
+| **Checkpoint lock contention** | 9e4499b4 | insert_one 14+ perc blokk | `flush_all_indexes_counted()` 1 lock / 22 index | Per-index flush: 22 lock / 1 index |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
@@ -604,6 +605,25 @@ pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
 - `storage/mod.rs` - `mark_clean_shutdown()` a Drop-ban
 - Érintett: `.idx`, `.fzidx`, `.ftidx`, `.hnsw`
 </details>
+
+### Checkpoint Per-Index Flush (2026-02-01)
+
+**Probléma:** A 60s-os periodikus checkpoint az `IndexManager` write lock-ot tartva flush-ölte az ÖSSZES dirty indexet. Az `emails` collection-nél (22 index, ~26K `file.flush()` syscall) ez percekig tartott alacsony RAM mellett, blokkolva minden `insert_one`-t.
+
+**Megoldás:** `flush_all_indexes_counted()` átírva per-index lock/unlock logikára.
+
+```
+Régi: 1 write lock → flush 22 index → unlock (percek)
+Új:   read lock → dirty nevek → unlock
+      for each dirty index:
+          write lock → flush 1 index → unlock (ms)
+```
+
+**Race condition:** Ha insert befut két flush között és dirty-re állít egy már flush-ölt indexet, az a KÖVETKEZŐ checkpoint-ban lesz kiírva. Adatvesztés nincs (WAL tartalmazza).
+
+**Key files:**
+- `ironbase-core/src/index/manager.rs` — `dirty_*_index_names()`, `flush_one_*_index()`
+- `ironbase-core/src/database/maintenance.rs` — `flush_all_indexes_counted()`
 
 ### C# / .NET Native Library Caching Issue
 When rebuilding the Rust FFI library (`libironbase_ffi.so`), .NET caches the native library in `Demo/bin/Debug/net8.0/`. Even if you copy the updated library to `runtimes/linux-x64/native/`, .NET continues using the cached version.
