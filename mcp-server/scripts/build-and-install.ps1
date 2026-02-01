@@ -360,6 +360,10 @@ function Remove-ExistingInstallation {
     # Stop service if running
     Stop-ExistingService -Timeout 30
 
+    # Kill any console-mode process still holding the exe
+    Get-Process -Name "mcp-ironbase-server" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+
     # Uninstall service if registered
     $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($service) {
@@ -410,11 +414,17 @@ function Install-IronBase {
     Write-Ok "Data:    $TargetDataDir"
     Write-Ok "Logs:    $logDir"
 
-    # Copy executable
+    # Copy executable (skip if source == destination, e.g. -SkipBuild found existing install)
     $destExe = Join-Path $TargetInstallDir $ExeName
-    Write-Info "Copying executable..."
-    Copy-Item -Path $BuiltExePath -Destination $destExe -Force
-    Write-Ok "Installed: $destExe"
+    $srcResolved = (Resolve-Path $BuiltExePath).Path
+    $destResolved = if (Test-Path $destExe) { (Resolve-Path $destExe).Path } else { "" }
+    if ($srcResolved -eq $destResolved) {
+        Write-Ok "Binary already in place: $destExe"
+    } else {
+        Write-Info "Copying executable..."
+        Copy-Item -Path $BuiltExePath -Destination $destExe -Force
+        Write-Ok "Installed: $destExe"
+    }
 
     # Copy embedding model if available in source
     $embeddingDest = Join-Path $TargetDataDir "cc.hu.300.ironbase.bin"
@@ -618,22 +628,17 @@ function Start-AndVerify {
 
     Write-Step "Starting service and verifying"
 
-    # Start service
-    try {
-        Start-Service -Name $ServiceName
-    } catch {
-        Write-Err "Failed to start service: $_"
-        Write-Info "Check logs at: $($script:DataDir)\logs\"
-        Write-Info "Try manually: sc.exe start $ServiceName"
-        return
-    }
+    # Use sc.exe start (non-blocking) instead of Start-Service which times out
+    # during long warm-up / index rebuild
+    & sc.exe start $ServiceName 2>$null | Out-Null
 
-    # Wait for Running status (max 30s)
+    # Poll for Running status (max 120s — allows warm-up + index rebuild)
     $waited = 0
-    $maxWait = 30
+    $maxWait = 120
+    Write-Info "Waiting for service to become Running (warm-up may take a while)..."
     while ($waited -lt $maxWait) {
-        Start-Sleep -Seconds 1
-        $waited++
+        Start-Sleep -Seconds 3
+        $waited += 3
         $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
         if ($svc.Status -eq "Running") {
             Write-Ok "Service is running (after ${waited}s)."
@@ -642,13 +647,18 @@ function Start-AndVerify {
         if ($svc.Status -eq "Stopped") {
             Write-Err "Service stopped unexpectedly."
             Write-Info "Check Windows Event Viewer or logs."
+            Write-Info "Try manually: & '$InstalledExe'"
             return
+        }
+        if ($waited % 15 -eq 0) {
+            Write-Info "  Still starting... (${waited}s, status: $($svc.Status))"
         }
     }
 
     $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
     if ($svc.Status -ne "Running") {
-        Write-Warn "Service not yet running after ${maxWait}s."
+        Write-Warn "Service not yet Running after ${maxWait}s (status: $($svc.Status))."
+        Write-Info "It may still be starting. Check: Get-Service $ServiceName"
         return
     }
 
