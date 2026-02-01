@@ -199,11 +199,44 @@ impl DatabaseCore<StorageEngine> {
         let mut total_flushed = 0usize;
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
-            let mut manager = index_manager.write();
-            total_flushed += manager.flush_fulltext_indexes()?;
-            total_flushed += manager.flush_fuzzy_indexes()?;
-            total_flushed += manager.flush_btree_indexes(&db_path)?;
-            total_flushed += manager.flush_vector_indexes(&db_path)?;
+            // 1. Collect dirty names under brief READ lock
+            let (dirty_bt, dirty_ft, dirty_fz, dirty_vec) = {
+                let mgr = index_manager.read();
+                (
+                    mgr.dirty_btree_index_names(),
+                    mgr.dirty_fulltext_index_names(),
+                    mgr.dirty_fuzzy_index_names(),
+                    mgr.dirty_vector_index_names(),
+                )
+            };
+
+            // 2. Flush one-by-one, lock/unlock between each index
+            //    This reduces lock hold time from O(all_indexes) to O(1_index),
+            //    allowing insert_one/add_to_indexes to proceed between flushes.
+            for name in &dirty_ft {
+                let mut mgr = index_manager.write();
+                if mgr.flush_one_fulltext_index(name)? {
+                    total_flushed += 1;
+                }
+            }
+            for name in &dirty_fz {
+                let mut mgr = index_manager.write();
+                if mgr.flush_one_fuzzy_index(name)? {
+                    total_flushed += 1;
+                }
+            }
+            for name in &dirty_bt {
+                let mut mgr = index_manager.write();
+                if mgr.flush_one_btree_index(name, &db_path)? {
+                    total_flushed += 1;
+                }
+            }
+            for name in &dirty_vec {
+                let mut mgr = index_manager.write();
+                if mgr.flush_one_vector_index(name, &db_path)? {
+                    total_flushed += 1;
+                }
+            }
         }
         Ok(total_flushed)
     }

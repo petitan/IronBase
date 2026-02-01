@@ -883,6 +883,124 @@ impl IndexManager {
         Ok(count)
     }
 
+    // ========== PER-INDEX FLUSH (for checkpoint lock contention fix) ==========
+
+    /// Get names of dirty B+ tree indexes (for per-index flush)
+    ///
+    /// Call under brief read lock, then flush one-by-one with write lock.
+    pub fn dirty_btree_index_names(&self) -> Vec<String> {
+        self.dirty_btree_indexes.iter().cloned().collect()
+    }
+
+    /// Get names of dirty fulltext indexes (for per-index flush)
+    pub fn dirty_fulltext_index_names(&self) -> Vec<String> {
+        self.dirty_fulltext_indexes.iter().cloned().collect()
+    }
+
+    /// Get names of dirty fuzzy indexes (for per-index flush)
+    pub fn dirty_fuzzy_index_names(&self) -> Vec<String> {
+        self.dirty_fuzzy_indexes.iter().cloned().collect()
+    }
+
+    /// Get names of dirty vector indexes (for per-index flush)
+    ///
+    /// Vector indexes track dirty state internally via `is_dirty()`.
+    pub fn dirty_vector_index_names(&self) -> Vec<String> {
+        self.vector_indexes
+            .iter()
+            .filter(|(_, idx)| idx.is_dirty())
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+
+    /// Flush a single fulltext index to disk
+    ///
+    /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
+    /// On error, the dirty flag is preserved for retry.
+    pub fn flush_one_fulltext_index(&mut self, name: &str) -> Result<bool> {
+        if !self.dirty_fulltext_indexes.contains(name) {
+            return Ok(false);
+        }
+        if let Some(index) = self.fulltext_indexes.get_mut(name) {
+            index.save_to_file()?;
+            self.dirty_fulltext_indexes.remove(name);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Flush a single fuzzy index to disk
+    ///
+    /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty, no storage path, or not found.
+    /// On error, the dirty flag is preserved for retry.
+    pub fn flush_one_fuzzy_index(&mut self, name: &str) -> Result<bool> {
+        if !self.dirty_fuzzy_indexes.contains(name) {
+            return Ok(false);
+        }
+        if let Some(index) = self.fuzzy_indexes.get(name) {
+            if index.storage_path().is_some() {
+                index.save_to_file()?;
+                self.dirty_fuzzy_indexes.remove(name);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Flush a single B+ tree index to disk
+    ///
+    /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
+    /// On error, the dirty flag is preserved for retry.
+    pub fn flush_one_btree_index(&mut self, name: &str, db_path: &str) -> Result<bool> {
+        use crate::collection_core::persist_index_to_disk;
+
+        if !self.dirty_btree_indexes.contains(name) {
+            return Ok(false);
+        }
+        if let Some(tree) = self.btree_indexes.get_mut(name) {
+            persist_index_to_disk(db_path, name, |file| tree.save_to_file(file))?;
+            self.dirty_btree_indexes.remove(name);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    /// Flush a single vector index to disk
+    ///
+    /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
+    /// On error, the index remains dirty for retry.
+    pub fn flush_one_vector_index(&mut self, name: &str, db_path: &str) -> Result<bool> {
+        if let Some(index) = self.vector_indexes.get_mut(name) {
+            if index.is_dirty() {
+                let cache_path = Self::build_vector_cache_path(db_path, name);
+                let bytes = index.to_bytes()?;
+                std::fs::write(&cache_path, &bytes).map_err(|e| {
+                    IronBaseError::Io(std::io::Error::other(format!(
+                        "Failed to write HNSW cache file '{}': {}",
+                        cache_path.display(),
+                        e
+                    )))
+                })?;
+                index.mark_clean();
+                crate::log_debug!(
+                    "Flushed vector index '{}' to {}",
+                    name,
+                    cache_path.display()
+                );
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            Ok(false)
+        }
+    }
+
     /// Build the path for HNSW cache file
     pub fn build_vector_cache_path(db_path: &str, index_name: &str) -> PathBuf {
         let db_path_buf = PathBuf::from(db_path);
