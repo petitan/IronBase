@@ -820,11 +820,31 @@ async fn run_http_server_internal(
 
         // Use into_make_service_with_connect_info to enable ConnectInfo extraction
         let app_service = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-        if let Err(e) = axum::serve(listener, app_service)
-            .with_graceful_shutdown(shutdown_future)
-            .await
-        {
-            tracing::error!("Server error: {}", e);
+
+        // Drain timeout: if in-flight requests don't complete within 10s
+        // after shutdown signal, force-close connections and proceed to close().
+        // Without this, a stuck spawn_blocking task blocks axum forever.
+        let (drain_tx, drain_rx) = tokio::sync::oneshot::channel::<()>();
+        let graceful_shutdown = async move {
+            shutdown_future.await;
+            let _ = drain_tx.send(());
+        };
+        let serve_future = axum::serve(listener, app_service)
+            .with_graceful_shutdown(graceful_shutdown);
+
+        tokio::select! {
+            result = serve_future => {
+                if let Err(e) = result {
+                    tracing::error!("Server error: {}", e);
+                }
+            }
+            _ = async {
+                let _ = drain_rx.await;
+                info!("Shutdown signal received, draining connections (10s deadline)...");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            } => {
+                warn!("Connection drain timed out after 10s, forcing server close");
+            }
         }
     }
 

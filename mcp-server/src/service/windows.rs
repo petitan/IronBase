@@ -216,6 +216,8 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
 
     // Create a channel to receive stop events
     let (shutdown_tx, shutdown_rx) = mpsc::channel();
+    // Watchdog channel: triggers a hard deadline timer when Stop is received
+    let (watchdog_tx, watchdog_rx) = mpsc::channel::<()>();
 
     // Status handle needs to be shared between event handler and main thread
     // so we can report StopPending immediately when Stop is received
@@ -244,6 +246,7 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
                     }
                 }
                 let _ = shutdown_tx_clone.send(());
+                let _ = watchdog_tx.send(()); // Trigger shutdown watchdog
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -349,10 +352,52 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
         process_id: None,
     })?;
 
+    // Hard deadline watchdog: if graceful shutdown hangs (stuck operations
+    // holding locks, blocked spawn_blocking tasks), force-exit after 60 seconds.
+    // Sends periodic StopPending checkpoints to keep SCM patient.
+    let shutdown_complete = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let shutdown_complete_watchdog = shutdown_complete.clone();
+    let status_handle_for_watchdog = status_handle.clone();
+    std::thread::spawn(move || {
+        // Block until Stop/Shutdown signal triggers the watchdog
+        if watchdog_rx.recv().is_err() {
+            return;
+        }
+        // Periodic StopPending updates (12 × 5s = 60s deadline)
+        for i in 0..12u32 {
+            std::thread::sleep(Duration::from_secs(5));
+            if shutdown_complete_watchdog.load(std::sync::atomic::Ordering::Relaxed) {
+                return; // Graceful shutdown succeeded, watchdog no longer needed
+            }
+            let _ = status_handle_for_watchdog.set_service_status(ServiceStatus {
+                service_type: SERVICE_TYPE,
+                current_state: ServiceState::StopPending,
+                controls_accepted: ServiceControlAccept::empty(),
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: i + 2, // checkpoint 2..13 (1 was sent by event handler)
+                wait_hint: Duration::from_secs(10),
+                process_id: None,
+            });
+        }
+        // 60s elapsed, graceful shutdown failed
+        eprintln!("Service: graceful shutdown timed out after 60s, forcing exit");
+        let _ = status_handle_for_watchdog.set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::from_secs(0),
+            process_id: None,
+        });
+        std::process::exit(0);
+    });
+
     // Wait for server to finish (blocks until shutdown signal is received and server stops).
-    // The event handler above reports StopPending to SCM when Stop/Shutdown control is received.
-    // We must NOT report StopPending here - that would tell SCM we're shutting down while Running.
     let _ = server_handle.join();
+
+    // Signal watchdog to stop (graceful shutdown succeeded)
+    shutdown_complete.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // Report service as stopped
     status_handle.set_service_status(ServiceStatus {
