@@ -361,29 +361,30 @@ fn run_stdio_server(cli: &Cli) {
         }
         None
     });
-    let embedding_manager: Option<Arc<mcp_ironbase::EmbeddingManager>> =
-        if let Some(model_path) = fasttext_path {
-            match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
-                Ok(manager) if manager.has_providers() => {
-                    eprintln!(
-                        "Embedding manager initialized with FastText model: {}",
-                        model_path
-                    );
-                    Some(Arc::new(manager))
-                }
-                Ok(_) => {
-                    eprintln!("Warning: FastText model configured but failed to load");
-                    None
-                }
-                Err(e) => {
-                    eprintln!("Warning: Failed to initialize embedding manager: {}", e);
-                    None
-                }
+    let embedding_manager: Option<Arc<mcp_ironbase::EmbeddingManager>> = if let Some(model_path) =
+        fasttext_path
+    {
+        match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+            Ok(manager) if manager.has_providers() => {
+                eprintln!(
+                    "Embedding manager initialized with FastText model: {}",
+                    model_path
+                );
+                Some(Arc::new(manager))
             }
-        } else {
-            eprintln!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
-            None
-        };
+            Ok(_) => {
+                eprintln!("Warning: FastText model configured but failed to load");
+                None
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to initialize embedding manager: {}", e);
+                None
+            }
+        }
+    } else {
+        eprintln!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
+        None
+    };
 
     // Initialize job manager for async operations
     let job_manager_instance = Arc::new(mcp_ironbase::JobManager::new());

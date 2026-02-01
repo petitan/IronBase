@@ -400,10 +400,9 @@ fn dispatch_tool_inner(
         }
 
         // RAG operations (semantic search with auto-embedding)
-        "rag_collection_create"
-        | "rag_document_import"
-        | "rag_search"
-        | "rag_collection_stats" => rag::dispatch(name, params, adapter, embedding_manager),
+        "rag_collection_create" | "rag_document_import" | "rag_search" | "rag_collection_stats" => {
+            rag::dispatch(name, params, adapter, embedding_manager)
+        }
 
         _ => Err(McpError::invalid_params(format!("Unknown tool: {}", name))),
     }

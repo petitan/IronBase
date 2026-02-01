@@ -1080,7 +1080,14 @@ fn register_rag_functions(
     engine.register_fn(
         "db_rag_search",
         move |collection: &str, query: &str| -> Dynamic {
-            rag_search_impl(&adapter_rag1, &emb_mgr1, collection, query, None, max_find_documents)
+            rag_search_impl(
+                &adapter_rag1,
+                &emb_mgr1,
+                collection,
+                query,
+                None,
+                max_find_documents,
+            )
         },
     );
 
@@ -1217,7 +1224,11 @@ fn save_rag_config(
     // Try update first, if no match then insert
     let filter = json!({"collection": collection});
     let update_result = adapter
-        .update_one(RAG_CONFIG_COLLECTION, filter, json!({"$set": config.clone()}))
+        .update_one(
+            RAG_CONFIG_COLLECTION,
+            filter,
+            json!({"$set": config.clone()}),
+        )
         .map_err(|e| format!("Failed to update RAG config: {}", e))?;
 
     if update_result.modified_count > 0 || update_result.matched_count > 0 {
@@ -1296,10 +1307,11 @@ fn rag_search_impl(
     let internal_limit = (limit * 3).min(MAX_INTERNAL_LIMIT);
 
     // Vector search
-    let vector_results = match adapter.vector_search(collection, &embedding_field, &query_vector, internal_limit) {
-        Ok(r) => r,
-        Err(e) => return Dynamic::from(format!("Error: Vector search failed: {}", e)),
-    };
+    let vector_results =
+        match adapter.vector_search(collection, &embedding_field, &query_vector, internal_limit) {
+            Ok(r) => r,
+            Err(e) => return Dynamic::from(format!("Error: Vector search failed: {}", e)),
+        };
 
     // Build vector rank map (1-indexed)
     let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
@@ -1537,8 +1549,8 @@ fn rag_import_impl(
 
     // Parse options using helper functions
     let title = get_string_option(&options, "title").unwrap_or_default();
-    let doc_id = get_string_option(&options, "doc_id")
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let doc_id =
+        get_string_option(&options, "doc_id").unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let chunk_size = get_int_option_or(&options, "chunk_size", 1000) as usize;
     let overlap = get_int_option_or(&options, "overlap", 100) as usize;
     let mode_str = get_string_option_or(&options, "mode", "auto");
@@ -1556,12 +1568,7 @@ fn rag_import_impl(
     // Get provider
     let provider = match manager.get_provider(&provider_name) {
         Some(p) => p,
-        None => {
-            return Dynamic::from(format!(
-                "Error: Provider '{}' not available",
-                provider_name
-            ))
-        }
+        None => return Dynamic::from(format!("Error: Provider '{}' not available", provider_name)),
     };
 
     // Chunk content
@@ -1642,10 +1649,7 @@ fn rag_import_impl(
                     for (k, v) in meta_obj {
                         // SECURITY: Skip reserved keys to prevent injection
                         if RESERVED_METADATA_KEYS.contains(&k.as_str()) {
-                            tracing::warn!(
-                                "Ignoring reserved metadata key '{}' in rag_import",
-                                k
-                            );
+                            tracing::warn!("Ignoring reserved metadata key '{}' in rag_import", k);
                             continue;
                         }
                         // Also skip embedding and text fields
@@ -1672,7 +1676,10 @@ fn rag_import_impl(
             result.insert("success".into(), Dynamic::from(true));
             result.insert("doc_id".into(), Dynamic::from(doc_id));
             result.insert("chunks_created".into(), Dynamic::from(ids.len() as i64));
-            result.insert("dimension".into(), Dynamic::from(provider.dimension() as i64));
+            result.insert(
+                "dimension".into(),
+                Dynamic::from(provider.dimension() as i64),
+            );
             result.insert("provider".into(), Dynamic::from(provider_name));
             Dynamic::from(result)
         }
@@ -1775,7 +1782,10 @@ fn rag_create_impl(
     result.insert("config".into(), Dynamic::from(config));
 
     let mut indexes = Map::new();
-    indexes.insert("collection_created".into(), Dynamic::from(collection_created));
+    indexes.insert(
+        "collection_created".into(),
+        Dynamic::from(collection_created),
+    );
     indexes.insert("vector_created".into(), Dynamic::from(vector_created));
     indexes.insert("fulltext_created".into(), Dynamic::from(fulltext_created));
     result.insert("indexes".into(), Dynamic::from(indexes));
@@ -1798,9 +1808,7 @@ fn rag_stats_impl(
     let rag_config = get_rag_config(adapter, collection);
 
     // Get document count (chunks)
-    let chunk_count = adapter
-        .count_documents(collection, json!({}))
-        .unwrap_or(0);
+    let chunk_count = adapter.count_documents(collection, json!({})).unwrap_or(0);
 
     // Get unique doc_ids (source documents)
     let source_doc_count = adapter
@@ -1833,8 +1841,14 @@ fn rag_stats_impl(
             if let Some(provider) = mgr.get_provider(&prov) {
                 let mut prov_info = Map::new();
                 prov_info.insert("name".into(), Dynamic::from(prov));
-                prov_info.insert("dimension".into(), Dynamic::from(provider.dimension() as i64));
-                prov_info.insert("model".into(), Dynamic::from(provider.model_name().to_string()));
+                prov_info.insert(
+                    "dimension".into(),
+                    Dynamic::from(provider.dimension() as i64),
+                );
+                prov_info.insert(
+                    "model".into(),
+                    Dynamic::from(provider.model_name().to_string()),
+                );
                 result.insert("provider_info".into(), Dynamic::from(prov_info));
             }
         }

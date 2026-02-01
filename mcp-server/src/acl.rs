@@ -370,7 +370,9 @@ impl AclConfig {
                 self.wildcard_rules.push(i);
             } else {
                 // Exact match rule - first one wins (maintains priority)
-                self.exact_match_index.entry(rule.collection.clone()).or_insert(i);
+                self.exact_match_index
+                    .entry(rule.collection.clone())
+                    .or_insert(i);
             }
         }
     }

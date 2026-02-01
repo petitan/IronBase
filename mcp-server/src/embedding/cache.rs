@@ -123,8 +123,8 @@ impl EmbeddingCache {
 
     /// Create a new embedding cache with custom configuration
     pub fn with_config(config: CacheConfig) -> Self {
-        let capacity = NonZeroUsize::new(config.max_entries.max(1))
-            .expect("max(1) ensures non-zero capacity");
+        let capacity =
+            NonZeroUsize::new(config.max_entries.max(1)).expect("max(1) ensures non-zero capacity");
         Self {
             cache: RwLock::new(LruCache::new(capacity)),
             config,

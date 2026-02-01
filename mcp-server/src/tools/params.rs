@@ -7,8 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::defaults::{
-    default_chunk_mode, default_chunk_overlap, default_chunk_size,
-    default_embedding_provider,
+    default_chunk_mode, default_chunk_overlap, default_chunk_size, default_embedding_provider,
 };
 
 /// Default value for query fields: empty object {}

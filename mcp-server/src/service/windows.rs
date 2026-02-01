@@ -221,8 +221,9 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
 
     // Status handle needs to be shared between event handler and main thread
     // so we can report StopPending immediately when Stop is received
-    let status_handle_for_event: Arc<std::sync::Mutex<Option<service_control_handler::ServiceStatusHandle>>> =
-        Arc::new(std::sync::Mutex::new(None));
+    let status_handle_for_event: Arc<
+        std::sync::Mutex<Option<service_control_handler::ServiceStatusHandle>>,
+    > = Arc::new(std::sync::Mutex::new(None));
     let status_handle_clone = status_handle_for_event.clone();
 
     // Create service control handler

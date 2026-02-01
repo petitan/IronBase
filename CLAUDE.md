@@ -879,7 +879,7 @@ Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pen
 
 **Dependencies:** serde, parking_lot, pyo3, maturin, ahash/dashmap, thiserror
 
-**MCP cím:** 192.168.0.136:8080
+**MCP cím:** 172.19.144.1:8080
 
 <details>
 <summary>Hot Backup</summary>

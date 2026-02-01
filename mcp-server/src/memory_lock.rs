@@ -73,11 +73,7 @@ mod platform {
         pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
 
         let ok = unsafe {
-            GetProcessMemoryInfo(
-                process,
-                &mut pmc as *mut PROCESS_MEMORY_COUNTERS,
-                pmc.cb,
-            )
+            GetProcessMemoryInfo(process, &mut pmc as *mut PROCESS_MEMORY_COUNTERS, pmc.cb)
         };
 
         if ok == 0 {
@@ -146,11 +142,7 @@ mod platform {
         pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
 
         let ok = unsafe {
-            GetProcessMemoryInfo(
-                process,
-                &mut pmc as *mut PROCESS_MEMORY_COUNTERS,
-                pmc.cb,
-            )
+            GetProcessMemoryInfo(process, &mut pmc as *mut PROCESS_MEMORY_COUNTERS, pmc.cb)
         };
 
         if ok != 0 {

@@ -7,9 +7,7 @@ use text_splitter::TextSplitter;
 
 /// Convert byte offset to character offset in a UTF-8 string
 fn byte_to_char_offset(content: &str, byte_offset: usize) -> usize {
-    content[..byte_offset.min(content.len())]
-        .chars()
-        .count()
+    content[..byte_offset.min(content.len())].chars().count()
 }
 
 /// Split plain text into chunks with overlap

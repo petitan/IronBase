@@ -43,7 +43,6 @@ pub fn tools() -> Vec<Value> {
                 "required": ["collection"]
             }
         }),
-
         // rag_document_import
         json!({
             "name": "rag_document_import",
@@ -97,7 +96,6 @@ pub fn tools() -> Vec<Value> {
                 "required": ["collection", "content"]
             }
         }),
-
         // rag_search - THE KEY TOOL
         json!({
             "name": "rag_search",
@@ -158,7 +156,6 @@ pub fn tools() -> Vec<Value> {
                 "required": ["collection", "query"]
             }
         }),
-
         // rag_collection_stats
         json!({
             "name": "rag_collection_stats",

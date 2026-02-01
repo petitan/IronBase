@@ -91,8 +91,11 @@ fn save_rag_config(adapter: &IronBaseAdapter, config: &RagConfig) -> Result<()> 
         serde_json::to_value(config).map_err(|e| McpError::internal(e.to_string()))?;
 
     // Try update first, if no match then insert
-    let update_result =
-        adapter.update_one(RAG_CONFIG_COLLECTION, filter.clone(), json!({"$set": config_json}));
+    let update_result = adapter.update_one(
+        RAG_CONFIG_COLLECTION,
+        filter.clone(),
+        json!({"$set": config_json}),
+    );
 
     match update_result {
         Ok(result) if result.modified_count > 0 => Ok(()),
@@ -118,9 +121,7 @@ pub fn dispatch(
     embedding_manager: &Option<Arc<EmbeddingManager>>,
 ) -> Result<Value> {
     match name {
-        "rag_collection_create" => {
-            handle_rag_collection_create(params, adapter, embedding_manager)
-        }
+        "rag_collection_create" => handle_rag_collection_create(params, adapter, embedding_manager),
         "rag_document_import" => handle_rag_document_import(params, adapter, embedding_manager),
         "rag_search" => handle_rag_search(params, adapter, embedding_manager),
         "rag_collection_stats" => handle_rag_collection_stats(params, adapter, embedding_manager),
@@ -266,9 +267,7 @@ fn handle_rag_document_import(
         Some(cfg) => (
             cfg.embedding_field.clone(),
             cfg.text_field.clone(),
-            p.provider
-                .clone()
-                .unwrap_or_else(|| cfg.provider.clone()),
+            p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
         ),
         None => (
             DEFAULT_EMBEDDING_FIELD.to_string(),
@@ -334,19 +333,12 @@ fn handle_rag_document_import(
             100,
             50,
         );
-        let _ = adapter.create_fulltext_index(
-            &p.collection,
-            &text_field,
-            "none",
-            Some(2),
-            Some(true),
-        );
+        let _ =
+            adapter.create_fulltext_index(&p.collection, &text_field, "none", Some(2), Some(true));
     }
 
     // Generate parent doc_id
-    let parent_id = p
-        .doc_id
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let parent_id = p.doc_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Build documents
     let mut documents: Vec<Value> = Vec::with_capacity(chunks.len());
@@ -475,9 +467,7 @@ fn handle_rag_search(
         Some(cfg) => (
             cfg.embedding_field.clone(),
             cfg.text_field.clone(),
-            p.provider
-                .clone()
-                .unwrap_or_else(|| cfg.provider.clone()),
+            p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
         ),
         None => (
             DEFAULT_EMBEDDING_FIELD.to_string(),
@@ -501,8 +491,12 @@ fn handle_rag_search(
     // ========================================================================
     // STEP 2: Vector search
     // ========================================================================
-    let vector_results =
-        adapter.vector_search(&p.collection, &embedding_field, &query_vector, internal_limit)?;
+    let vector_results = adapter.vector_search(
+        &p.collection,
+        &embedding_field,
+        &query_vector,
+        internal_limit,
+    )?;
 
     // Build vector rank map (1-indexed)
     let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
@@ -535,7 +529,8 @@ fn handle_rag_search(
         highlight_max_snippets: None,
     };
 
-    let text_results = adapter.fulltext_search(&p.collection, &text_field, &p.query, text_options)?;
+    let text_results =
+        adapter.fulltext_search(&p.collection, &text_field, &p.query, text_options)?;
 
     // Build fulltext rank map (1-indexed)
     let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
@@ -643,7 +638,11 @@ fn handle_rag_search(
     // Pre-allocate with try_reserve for OOM protection
     let mut results: Vec<Value> = Vec::new();
     results.try_reserve(fused.len()).map_err(|e| {
-        McpError::internal(format!("OOM: cannot allocate {} results: {}", fused.len(), e))
+        McpError::internal(format!(
+            "OOM: cannot allocate {} results: {}",
+            fused.len(),
+            e
+        ))
     })?;
 
     for item in fused {
@@ -723,18 +722,17 @@ fn handle_rag_collection_stats(
         .unwrap_or_default();
 
     // Provider info
-    let provider_info =
-        if let (Some(cfg), Some(mgr)) = (&rag_config, embedding_manager.as_ref()) {
-            mgr.get_provider(&cfg.provider).map(|p| {
-                json!({
-                    "name": cfg.provider,
-                    "dimension": p.dimension(),
-                    "model": p.model_name()
-                })
+    let provider_info = if let (Some(cfg), Some(mgr)) = (&rag_config, embedding_manager.as_ref()) {
+        mgr.get_provider(&cfg.provider).map(|p| {
+            json!({
+                "name": cfg.provider,
+                "dimension": p.dimension(),
+                "model": p.model_name()
             })
-        } else {
-            None
-        };
+        })
+    } else {
+        None
+    };
 
     Ok(json!({
         "collection": p.collection,

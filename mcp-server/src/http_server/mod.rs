@@ -12,8 +12,8 @@ mod size;
 mod state;
 mod tls;
 
-pub use config::{load_config, Config};
 pub(crate) use client::{client_identity, is_client_initialized, mark_client_initialized};
+pub use config::{load_config, Config};
 pub(crate) use handler::handle_request;
 pub(crate) use instructions::get_server_instructions;
 pub(crate) use logging::SyncFileWriter;
@@ -278,29 +278,30 @@ async fn run_http_server_internal(
     let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
         .ok()
         .or_else(|| config.fasttext_model.clone());
-    let embedding_manager: Option<Arc<crate::EmbeddingManager>> =
-        if let Some(model_path) = fasttext_path {
-            match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
-                Ok(manager) if manager.has_providers() => {
-                    info!(
-                        "Embedding manager initialized with FastText model: {}",
-                        model_path
-                    );
-                    Some(Arc::new(manager))
-                }
-                Ok(_) => {
-                    warn!("FastText model configured but failed to load, embeddings disabled");
-                    None
-                }
-                Err(e) => {
-                    warn!("Failed to initialize embedding manager: {}", e);
-                    None
-                }
+    let embedding_manager: Option<Arc<crate::EmbeddingManager>> = if let Some(model_path) =
+        fasttext_path
+    {
+        match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+            Ok(manager) if manager.has_providers() => {
+                info!(
+                    "Embedding manager initialized with FastText model: {}",
+                    model_path
+                );
+                Some(Arc::new(manager))
             }
-        } else {
-            info!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
-            None
-        };
+            Ok(_) => {
+                warn!("FastText model configured but failed to load, embeddings disabled");
+                None
+            }
+            Err(e) => {
+                warn!("Failed to initialize embedding manager: {}", e);
+                None
+            }
+        }
+    } else {
+        info!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
+        None
+    };
 
     // Initialize job manager for async operations (embedding backfill, etc.)
     let job_manager = Arc::new(crate::JobManager::new());
@@ -459,10 +460,8 @@ async fn run_http_server_internal(
                             let value_len = value_end - value_start;
                             if value_len > 4 {
                                 // Keep first 4 chars, mask rest
-                                let masked = format!(
-                                    "{}****",
-                                    &result[value_start..value_start + 4]
-                                );
+                                let masked =
+                                    format!("{}****", &result[value_start..value_start + 4]);
                                 result = format!(
                                     "{}\"{}\"{}",
                                     &result[..value_start - 1],
@@ -661,7 +660,8 @@ async fn run_http_server_internal(
                     "<<< MCP ERROR: task panicked: {}", join_error
                 );
                 // Generic error message to prevent information leakage
-                let error_response = create_error_response(-32603, "Internal server error", request_id);
+                let error_response =
+                    create_error_response(-32603, "Internal server error", request_id);
                 (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
             }
             Err(_) => {
@@ -829,8 +829,8 @@ async fn run_http_server_internal(
             shutdown_future.await;
             let _ = drain_tx.send(());
         };
-        let serve_future = axum::serve(listener, app_service)
-            .with_graceful_shutdown(graceful_shutdown);
+        let serve_future =
+            axum::serve(listener, app_service).with_graceful_shutdown(graceful_shutdown);
 
         tokio::select! {
             result = serve_future => {

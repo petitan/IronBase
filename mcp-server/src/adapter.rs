@@ -532,12 +532,7 @@ impl IronBaseAdapter {
         // Warm up user collections and count documents
         for (i, name) in user_collections.iter().enumerate() {
             // Log BEFORE starting - critical for diagnosing hangs/crashes
-            tracing::debug!(
-                "Warming up [{}/{}] '{}'...",
-                i + 1,
-                total,
-                name
-            );
+            tracing::debug!("Warming up [{}/{}] '{}'...", i + 1, total, name);
 
             let coll_start = std::time::Instant::now();
             let db = self.db.read();
@@ -551,13 +546,22 @@ impl IronBaseAdapter {
                     if count_elapsed.as_millis() > 500 {
                         tracing::info!(
                             "  [{}/{}] '{}': counted {} docs in {:.2}s",
-                            i + 1, total, name, count, count_elapsed.as_secs_f64()
+                            i + 1,
+                            total,
+                            name,
+                            count,
+                            count_elapsed.as_secs_f64()
                         );
                     }
                     self.collection_stats.set(name, count);
 
                     // Phase 2: Refresh index statistics (can be slow with many indexes)
-                    tracing::debug!("  [{}/{}] '{}': refreshing index stats...", i + 1, total, name);
+                    tracing::debug!(
+                        "  [{}/{}] '{}': refreshing index stats...",
+                        i + 1,
+                        total,
+                        name
+                    );
                     let index_start = std::time::Instant::now();
                     if let Err(e) = coll.refresh_index_stats() {
                         tracing::warn!("Failed to refresh index stats for '{}': {}", name, e);
@@ -566,19 +570,31 @@ impl IronBaseAdapter {
                     if index_elapsed.as_millis() > 500 {
                         tracing::info!(
                             "  [{}/{}] '{}': index stats refreshed in {:.2}s",
-                            i + 1, total, name, index_elapsed.as_secs_f64()
+                            i + 1,
+                            total,
+                            name,
+                            index_elapsed.as_secs_f64()
                         );
                     }
 
                     // Phase 3: Load vector indexes (can be slow for large HNSW indexes)
-                    tracing::debug!("  [{}/{}] '{}': loading vector indexes...", i + 1, total, name);
+                    tracing::debug!(
+                        "  [{}/{}] '{}': loading vector indexes...",
+                        i + 1,
+                        total,
+                        name
+                    );
                     let vector_start = std::time::Instant::now();
                     match coll.ensure_vector_indexes_loaded() {
                         Ok(loaded) if loaded > 0 => {
                             let vector_elapsed = vector_start.elapsed();
                             tracing::info!(
                                 "  [{}/{}] '{}': loaded {} vector index(es) in {:.2}s",
-                                i + 1, total, name, loaded, vector_elapsed.as_secs_f64()
+                                i + 1,
+                                total,
+                                name,
+                                loaded,
+                                vector_elapsed.as_secs_f64()
                             );
                         }
                         Err(e) => {
