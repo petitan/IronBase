@@ -14,6 +14,7 @@ pub mod execution;
 pub mod http_server;
 pub mod jobs;
 pub mod listener;
+pub mod memory_lock;
 pub mod monitoring;
 pub mod prompts;
 pub mod resources;
@@ -39,6 +40,7 @@ pub use execution::{
 };
 pub use jobs::{JobId, JobInfo, JobManager, JobStatus, JobType};
 pub use listener::{ListenerConfig, ListenerManager, SYSTEM_LISTENERS_COLLECTION};
+pub use memory_lock::{get_working_set_bytes, lock_working_set, WorkingSetLockResult};
 pub use monitoring::{
     get_memory_stats, get_system_memory, health_check, log_memory_stats, HealthCheck, MemoryStats,
     SystemMemory,

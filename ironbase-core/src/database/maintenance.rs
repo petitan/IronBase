@@ -165,14 +165,32 @@ impl DatabaseCore<StorageEngine> {
         storage.release_lock()
     }
 
+    /// Flush metadata and clear WAL only (without index flush).
+    ///
+    /// SAFETY: This clears the WAL, so all in-flight operations must have
+    /// completed their persist phase before calling this. The caller must
+    /// hold an exclusive lock (db.write()) to ensure no concurrent inserts
+    /// have committed to WAL but not yet persisted to storage.
+    ///
+    /// Use this together with `flush_all_indexes()` for two-phase checkpoint:
+    /// 1. `flush_all_indexes()` with db.read() (slow, but doesn't block inserts)
+    /// 2. `checkpoint_wal_only()` with db.write() (fast, blocks briefly)
+    pub fn checkpoint_wal_only(&self) -> Result<crate::storage::CheckpointStats> {
+        let mut storage = self.storage.write();
+        storage.checkpoint()
+    }
+
     /// Flush all indexes (B+ tree, fulltext, fuzzy, and vector) to disk
     fn flush_all_indexes(&self) -> Result<()> {
         self.flush_all_indexes_counted()?;
         Ok(())
     }
 
-    /// Flush all indexes and return count of flushed index files
-    fn flush_all_indexes_counted(&self) -> Result<usize> {
+    /// Flush all indexes and return count of flushed index files.
+    ///
+    /// This only writes index files (.idx, .ftidx, .fzidx, .hnsw) to disk.
+    /// It does NOT touch the WAL or metadata. Safe to call with db.read().
+    pub fn flush_all_indexes_counted(&self) -> Result<usize> {
         let db_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()

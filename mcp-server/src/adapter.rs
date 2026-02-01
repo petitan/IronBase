@@ -903,13 +903,32 @@ impl IronBaseAdapter {
     /// Returns checkpoint statistics including indexes flushed and WAL size.
     pub fn checkpoint(&self) -> Result<Value> {
         let start = std::time::Instant::now();
-        let db = self.db.write();
-        let result = db.checkpoint()?;
+
+        // TWO-PHASE CHECKPOINT:
+        //
+        // Phase 1: Flush indexes to disk (slow: writes .idx/.ftidx/.fzidx/.hnsw files)
+        // Uses db.read() so concurrent inserts/finds are NOT blocked.
+        let indexes_flushed = {
+            let db = self.db.read();
+            db.flush_all_indexes_counted()
+                .map_err(|e| crate::error::McpError::storage(e.to_string()))?
+        }; // db.read() released here
+
+        // Phase 2: Flush metadata + clear WAL (fast: ~ms)
+        // Uses db.write() to ensure all in-flight inserts have completed
+        // their persist phase before WAL is cleared. This prevents data loss
+        // if the server crashes between WAL commit and storage persist.
+        let result = {
+            let db = self.db.write();
+            db.checkpoint_wal_only()
+                .map_err(|e| crate::error::McpError::storage(e.to_string()))?
+        }; // db.write() released here
+
         let duration_ms = start.elapsed().as_millis() as u64;
 
         Ok(serde_json::json!({
             "success": true,
-            "indexes_flushed": result.indexes_flushed,
+            "indexes_flushed": indexes_flushed,
             "wal_size_before": format_bytes(result.wal_size_before),
             "wal_size_after": format_bytes(result.wal_size_after),
             "wal_size_before_bytes": result.wal_size_before,

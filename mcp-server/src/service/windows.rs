@@ -349,35 +349,10 @@ fn run_service(_arguments: Vec<OsString>) -> ServiceResult<()> {
         process_id: None,
     })?;
 
-    // Wait for server to finish (shutdown signal received)
-    let shutdown_start = std::time::Instant::now();
-    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(60);
-
-    let mut shutdown_checkpoint = 1u32;
-    loop {
-        if server_handle.is_finished() {
-            let _ = server_handle.join();
-            break;
-        }
-
-        if shutdown_start.elapsed() > SHUTDOWN_TIMEOUT {
-            eprintln!("Service shutdown timeout after {:?}, forcing stop", SHUTDOWN_TIMEOUT);
-            break;
-        }
-
-        shutdown_checkpoint = shutdown_checkpoint.saturating_add(1);
-        let _ = status_handle.set_service_status(ServiceStatus {
-            service_type: SERVICE_TYPE,
-            current_state: ServiceState::StopPending,
-            controls_accepted: ServiceControlAccept::empty(),
-            exit_code: ServiceExitCode::Win32(0),
-            checkpoint: shutdown_checkpoint,
-            wait_hint: Duration::from_secs(10),
-            process_id: None,
-        });
-
-        std::thread::sleep(Duration::from_secs(5));
-    }
+    // Wait for server to finish (blocks until shutdown signal is received and server stops).
+    // The event handler above reports StopPending to SCM when Stop/Shutdown control is received.
+    // We must NOT report StopPending here - that would tell SCM we're shutting down while Running.
+    let _ = server_handle.join();
 
     // Report service as stopped
     status_handle.set_service_status(ServiceStatus {

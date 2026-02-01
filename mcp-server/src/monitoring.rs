@@ -46,8 +46,45 @@ pub fn get_memory_stats() -> MemoryStats {
     }
 }
 
-/// Get current memory statistics (Windows/non-jemalloc fallback)
-#[cfg(not(all(unix, not(target_env = "msvc"))))]
+/// Get current memory statistics (Windows - uses GetProcessMemoryInfo)
+#[cfg(windows)]
+pub fn get_memory_stats() -> MemoryStats {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    let process = unsafe { GetCurrentProcess() };
+    let mut pmc: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            process,
+            &mut pmc as *mut PROCESS_MEMORY_COUNTERS,
+            pmc.cb,
+        )
+    };
+
+    if ok != 0 {
+        // PagefileUsage ≈ committed (allocated) memory
+        // WorkingSetSize ≈ resident memory (physical RAM pages)
+        let allocated = pmc.PagefileUsage as u64;
+        let resident = pmc.WorkingSetSize as u64;
+        MemoryStats {
+            allocated_bytes: allocated,
+            resident_bytes: resident,
+            allocated_mb: allocated as f64 / 1024.0 / 1024.0,
+            resident_mb: resident as f64 / 1024.0 / 1024.0,
+            available: true,
+        }
+    } else {
+        MemoryStats::default()
+    }
+}
+
+/// Get current memory statistics (non-Windows, non-jemalloc fallback)
+#[cfg(all(not(windows), not(all(unix, not(target_env = "msvc")))))]
 pub fn get_memory_stats() -> MemoryStats {
     MemoryStats::default()
 }
@@ -158,11 +195,11 @@ mod tests {
     #[test]
     fn test_memory_stats() {
         let stats = get_memory_stats();
-        // On Unix, should be available
-        #[cfg(all(unix, not(target_env = "msvc")))]
+        // On Unix (jemalloc) and Windows (GetProcessMemoryInfo), should be available
+        #[cfg(any(all(unix, not(target_env = "msvc")), windows))]
         assert!(stats.available);
-        // On Windows, should not be available
-        #[cfg(not(all(unix, not(target_env = "msvc"))))]
+        // On other platforms, should not be available
+        #[cfg(not(any(all(unix, not(target_env = "msvc")), windows)))]
         assert!(!stats.available);
     }
 

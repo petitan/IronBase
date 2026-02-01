@@ -100,12 +100,10 @@ async fn run_http_server_internal(
         .unwrap_or(false);
 
     // Create logs directory - use IRONBASE_LOG_DIR or fallback to DB path's parent/logs
+    // Use config.database_path (already loaded) instead of env var - works in Windows Service context
     let log_dir_path = std::env::var("IRONBASE_LOG_DIR").unwrap_or_else(|_| {
-        // Try to use database path's parent directory
-        if let Ok(db_path) = std::env::var("IRONBASE_PATH") {
-            if let Some(parent) = std::path::Path::new(&db_path).parent() {
-                return parent.join("logs").to_string_lossy().to_string();
-            }
+        if let Some(parent) = std::path::Path::new(&config.database_path).parent() {
+            return parent.join("logs").to_string_lossy().to_string();
         }
         // Final fallback to current directory
         "./logs".to_string()
@@ -310,6 +308,17 @@ async fn run_http_server_internal(
     let job_manager: Option<Arc<crate::JobManager>> = Some(job_manager);
     info!("Job manager initialized");
 
+    // Lock working set on Windows to prevent memory paging under pressure.
+    // Called after warm-up + FastText load so the floor captures all resident data.
+    if config.lock_working_set {
+        let ws_result = crate::memory_lock::lock_working_set();
+        if ws_result.success {
+            info!("{}", ws_result.message);
+        } else {
+            warn!("{}", ws_result.message);
+        }
+    }
+
     // Initialize listener configuration in database
     {
         use crate::listener::ListenerManager;
@@ -359,7 +368,15 @@ async fn run_http_server_internal(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    limits_for_refresh.refresh_if_needed();
+                    // IMPORTANT: refresh_if_needed() acquires parking_lot RwLock
+                    // which blocks the thread. Must use spawn_blocking to avoid
+                    // starving tokio worker threads.
+                    let limits_clone = limits_for_refresh.clone();
+                    if let Err(e) = tokio::task::spawn_blocking(move || {
+                        limits_clone.refresh_if_needed();
+                    }).await {
+                        tracing::warn!("Limits refresh task panicked: {}", e);
+                    }
                 }
                 _ = &mut shutdown => {
                     tracing::debug!("Limits refresh task received shutdown signal");
@@ -382,8 +399,12 @@ async fn run_http_server_internal(
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    match adapter_for_checkpoint.checkpoint() {
-                        Ok(stats) => {
+                    // IMPORTANT: checkpoint() acquires parking_lot write lock (db.write())
+                    // which blocks the thread. Must use spawn_blocking to avoid
+                    // starving tokio worker threads and freezing the entire runtime.
+                    let adapter_clone = adapter_for_checkpoint.clone();
+                    match tokio::task::spawn_blocking(move || adapter_clone.checkpoint()).await {
+                        Ok(Ok(stats)) => {
                             let indexes = stats.get("indexes_flushed").and_then(|v| v.as_u64()).unwrap_or(0);
                             if indexes > 0 {
                                 tracing::info!(
@@ -392,8 +413,11 @@ async fn run_http_server_internal(
                                 );
                             }
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             tracing::warn!("Periodic checkpoint failed: {}", e);
+                        }
+                        Err(e) => {
+                            tracing::warn!("Checkpoint task panicked: {}", e);
                         }
                     }
                 }

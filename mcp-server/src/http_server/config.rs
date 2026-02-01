@@ -38,6 +38,8 @@ pub struct Config {
     pub core_log_level: Option<String>,
     /// Path to FastText embedding model for RAG/semantic search
     pub fasttext_model: Option<String>,
+    /// If true, lock working set on Windows to prevent memory paging (default: true on Windows)
+    pub lock_working_set: bool,
 }
 
 /// Load configuration from environment or config file
@@ -93,6 +95,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             sync_logging: toml_config.logging.sync,
             core_log_level: toml_config.logging.core_level,
             fasttext_model: toml_config.rag.fasttext_model,
+            lock_working_set: toml_config.server.lock_working_set,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -112,6 +115,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             sync_logging: false,
             core_log_level: None,
             fasttext_model: None,
+            lock_working_set: cfg!(windows),
         }
     };
 
@@ -159,10 +163,17 @@ struct ServerConfig {
     /// Timeout for long-running tool operations in seconds (default: 300)
     #[serde(default = "default_tool_timeout")]
     tool_timeout_secs: u64,
+    /// If true, lock working set on Windows to prevent memory paging (default: true)
+    #[serde(default = "default_lock_working_set")]
+    lock_working_set: bool,
 }
 
 fn default_tool_timeout() -> u64 {
     DEFAULT_TOOL_TIMEOUT_SECS
+}
+
+fn default_lock_working_set() -> bool {
+    cfg!(windows)
 }
 
 #[derive(Debug, serde::Deserialize)]
