@@ -1703,7 +1703,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// FIX #19: Refactored to use IndexManager.add_document_to_indexes()
     /// which properly handles compound indexes.
     fn add_to_indexes(&self, doc: &Document) -> Result<()> {
+        let t = std::time::Instant::now();
         let mut indexes = self.indexes.write();
+        let lock_wait_ms = t.elapsed().as_millis() as u64;
+        if lock_wait_ms > 50 {
+            tracing::warn!(lock_wait_ms, collection = %self.name, "insert: indexes.write() slow acquire (add_to_indexes)");
+        }
         let id_index_name = format!("{}_id", self.name);
 
         // Add to _id index (handled separately due to DocumentId type)

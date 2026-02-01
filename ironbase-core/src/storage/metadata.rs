@@ -404,7 +404,9 @@ impl StorageEngine {
     ///
     /// OOM PROTECTION: Uses try_reserve() to return an error instead of panicking
     /// when memory allocation fails (e.g., 130K+ docs → ~6-8MB metadata).
-    fn serialize_metadata(collections: &HashMap<String, CollectionMeta>) -> Result<Vec<u8>> {
+    pub(crate) fn serialize_metadata(
+        collections: &HashMap<String, CollectionMeta>,
+    ) -> Result<Vec<u8>> {
         use std::io::Cursor;
 
         // Estimate buffer size: 4 bytes (count) + per-collection overhead
@@ -443,7 +445,7 @@ impl StorageEngine {
     /// 2. Update header struct with new metadata location
     /// 3. Rewrite header at file start
     /// 4. Sync all changes to disk
-    fn write_metadata_and_header(
+    pub(crate) fn write_metadata_and_header(
         file: &mut File,
         header: &mut Header,
         metadata_bytes: &[u8],

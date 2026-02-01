@@ -1581,7 +1581,15 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
     fn insert_one_persist(&self, prepared: InsertOnePrepared) -> Result<DocumentId> {
         // PHASE 4: Write to storage FIRST
         {
+            let t = std::time::Instant::now();
             let mut storage = self.storage.write();
+            let lock_wait_ms = t.elapsed().as_millis() as u64;
+            if lock_wait_ms > 50 {
+                tracing::warn!(
+                    lock_wait_ms,
+                    "insert: storage.write() slow acquire (persist)"
+                );
+            }
             let doc_json = prepared.document.to_json()?;
             storage.write_document_raw(
                 &prepared.collection_name,
@@ -1593,7 +1601,12 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
 
         // PHASE 4: Update indexes AFTER successful storage write
         // Constraint check was done in prepare phase, so this should not fail
+        let t = std::time::Instant::now();
         self.add_to_indexes(&prepared.document)?;
+        let index_ms = t.elapsed().as_millis() as u64;
+        if index_ms > 50 {
+            tracing::warn!(index_ms, collection = %prepared.collection_name, "insert: add_to_indexes slow");
+        }
 
         // Invalidate query cache (collection has changed)
         self.query_cache

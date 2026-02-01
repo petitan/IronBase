@@ -404,7 +404,7 @@ async fn run_http_server_internal(
                     // which blocks the thread. Must use spawn_blocking to avoid
                     // starving tokio worker threads and freezing the entire runtime.
                     let adapter_clone = adapter_for_checkpoint.clone();
-                    match tokio::task::spawn_blocking(move || adapter_clone.checkpoint()).await {
+                    match tokio::task::spawn_blocking(move || adapter_clone.checkpoint_periodic()).await {
                         Ok(Ok(stats)) => {
                             let indexes = stats.get("indexes_flushed").and_then(|v| v.as_u64()).unwrap_or(0);
                             if indexes > 0 {

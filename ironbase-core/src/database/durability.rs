@@ -220,7 +220,15 @@ impl DatabaseCore<StorageEngine> {
     /// 3. Metadata flush
     /// 4. WAL clear
     pub(crate) fn commit_auto_transaction(&self, mut transaction: Transaction) -> Result<()> {
+        let t = std::time::Instant::now();
         let mut storage = self.storage.write();
+        let lock_wait_ms = t.elapsed().as_millis() as u64;
+        if lock_wait_ms > 50 {
+            tracing::warn!(
+                lock_wait_ms,
+                "insert: storage.write() slow acquire (WAL commit)"
+            );
+        }
 
         // Write to WAL and commit
         storage.commit_transaction(&mut transaction)?;

@@ -167,17 +167,94 @@ impl DatabaseCore<StorageEngine> {
 
     /// Flush metadata and clear WAL only (without index flush).
     ///
-    /// SAFETY: This clears the WAL, so all in-flight operations must have
-    /// completed their persist phase before calling this. The caller must
-    /// hold an exclusive lock (db.write()) to ensure no concurrent inserts
-    /// have committed to WAL but not yet persisted to storage.
+    /// Uses a two-phase approach to minimize storage.write() lock hold time:
+    ///
+    /// **Phase A** (storage.read() — doesn't block inserts):
+    /// Pre-serialize metadata buffer (~6-12MB for 130K docs).
+    ///
+    /// **Phase B** (storage.write() — brief):
+    /// If no mutations happened since Phase A (guard check: data_end_offset + WAL size),
+    /// write pre-serialized buffer to file + fsync + WAL clear.
+    /// Otherwise, fall back to full checkpoint under lock.
+    ///
+    /// PERF FIX (v1.0.313): Previously held storage.write() for the entire
+    /// serialize + write + fsync cycle. With 130K+ docs under Windows memory
+    /// pressure, serialization alone took minutes due to page swapping,
+    /// blocking all concurrent insert_one operations.
     ///
     /// Use this together with `flush_all_indexes()` for two-phase checkpoint:
     /// 1. `flush_all_indexes()` with db.read() (slow, but doesn't block inserts)
-    /// 2. `checkpoint_wal_only()` with db.write() (fast, blocks briefly)
+    /// 2. `checkpoint_wal_only()` — pre-serialize + brief lock
     pub fn checkpoint_wal_only(&self) -> Result<crate::storage::CheckpointStats> {
+        // Phase A: Pre-serialize metadata under storage.read()
+        // NOTE: storage.read() DOES block storage.write() callers (insert WAL commit)
+        let pre_serialized = {
+            let t = std::time::Instant::now();
+            let storage = self.storage.read();
+            let lock_wait_ms = t.elapsed().as_millis() as u64;
+            if !storage.is_metadata_dirty() {
+                tracing::info!(
+                    lock_wait_ms,
+                    "Checkpoint WAL Phase A: metadata clean, skipping"
+                );
+                None
+            } else {
+                tracing::info!(
+                    lock_wait_ms,
+                    "Checkpoint WAL Phase A: storage.read() acquired, serializing..."
+                );
+                let serialize_start = std::time::Instant::now();
+                let metadata_bytes = StorageEngine::serialize_metadata(storage.collections_ref())?;
+                let serialize_ms = serialize_start.elapsed().as_millis() as u64;
+                let data_end_offset = storage.data_end_offset();
+                let wal_size = storage.wal_file_size();
+                tracing::info!(
+                    serialize_ms,
+                    bytes = metadata_bytes.len(),
+                    "Checkpoint WAL Phase A: serialized, releasing storage.read()"
+                );
+                Some((metadata_bytes, data_end_offset, wal_size))
+            }
+        }; // storage.read() released — inserts can proceed
+
+        // Phase B: Write + WAL clear under storage.write() (brief)
+        let t = std::time::Instant::now();
         let mut storage = self.storage.write();
-        storage.checkpoint()
+        let lock_wait_ms = t.elapsed().as_millis() as u64;
+        tracing::info!(
+            lock_wait_ms,
+            "Checkpoint WAL Phase B: storage.write() acquired"
+        );
+        match pre_serialized {
+            Some((metadata_bytes, snapshot_data_end, snapshot_wal_size))
+                if snapshot_data_end >= crate::storage::HEADER_SIZE
+                    && storage.data_end_offset() == snapshot_data_end
+                    && storage.wal_file_size() == snapshot_wal_size =>
+            {
+                // Guard PASS: no mutations since Phase A — use pre-serialized buffer
+                // Lock holds only: file write (~6MB) + header (256B) + fsync + WAL clear
+                //
+                // Guard conditions:
+                // 1. data_end_offset >= HEADER_SIZE: v3+ database (v2 needs migration
+                //    logic in flush_metadata that we don't replicate here)
+                // 2. data_end_offset unchanged: no new documents written since Phase A
+                // 3. WAL size unchanged: no new WAL commits since Phase A
+                //
+                // NOTE: Pre-serialized buffer uses collections' current data_offset/
+                // index_offset values without normalization (flush_metadata sets these
+                // to HEADER_SIZE). This is safe because: (a) v3+ databases always have
+                // HEADER_SIZE after any previous flush, and (b) create_collection()
+                // calls flush() which normalizes immediately.
+                storage.checkpoint_with_preserialized(metadata_bytes)
+            }
+            _ => {
+                // Guard FAIL: mutations happened between Phase A and B, v2 migration
+                // needed, or no dirty metadata.
+                // Fall back to full checkpoint under lock (serialize + write + fsync).
+                // This is the same as the previous behavior — no worse than before.
+                storage.checkpoint()
+            }
+        }
     }
 
     /// Flush all indexes (B+ tree, fulltext, fuzzy, and vector) to disk
@@ -190,6 +267,41 @@ impl DatabaseCore<StorageEngine> {
     ///
     /// This only writes index files (.idx, .ftidx, .fzidx, .hnsw) to disk.
     /// It does NOT touch the WAL or metadata. Safe to call with db.read().
+    ///
+    /// # Known issue: fulltext flush blocks insert_one (v1.0.314)
+    ///
+    /// Each index flush holds `index_manager.write()` for the ENTIRE serialize + file write.
+    /// Under memory pressure (page swapping), fulltext flush for 130K docs takes 13s+ (normal)
+    /// to 10+ MINUTES (swapping). During this time, `insert_one` blocks at
+    /// `check_index_constraints()` which needs `indexes.read()` — blocked by the writer.
+    ///
+    /// **Measured (v1.0.314 tracing):**
+    /// - `emails_body.plain_fts` fulltext: 13,203ms flush under `index_manager.write()`
+    /// - `attachment_contents_markdown_fts`: 4,060ms flush
+    /// - All btree indexes: < 300ms each
+    /// - Metadata serialize: 57ms (8.4MB) — NOT the bottleneck
+    ///
+    /// # TODO: Arc COW snapshot (iparági sztenderd megoldás)
+    ///
+    /// Wrap index data in `Arc<T>`, use copy-on-write to eliminate lock contention:
+    ///
+    /// ```text
+    /// FLUSH (checkpoint thread):
+    ///   1. Brief write lock: snapshot = Arc::clone(&self.data)  // microseconds
+    ///   2. Release lock
+    ///   3. Serialize snapshot → file                             // minutes, NO LOCK
+    ///   4. Brief write lock: dirty = false
+    ///
+    /// INSERT (concurrent):
+    ///   1. Arc::make_mut(&mut self.data)  // COW: clone only if flush holds a ref
+    ///   2. Modify in-place
+    /// ```
+    ///
+    /// Affected files:
+    /// - `ironbase-core/src/fulltext.rs` — FulltextIndex internals → Arc<FulltextData>
+    /// - `ironbase-core/src/index/fuzzy.rs` — FuzzyIndex internals → Arc<FuzzyData>
+    /// - `ironbase-core/src/index/manager.rs` — flush_one_* methods: Arc::clone + lockless write
+    /// - This file — flush loop: brief lock for Arc::clone, no lock for serialize+write
     pub fn flush_all_indexes_counted(&self) -> Result<usize> {
         let db_path = {
             let storage = self.storage.read();
@@ -198,7 +310,7 @@ impl DatabaseCore<StorageEngine> {
 
         let mut total_flushed = 0usize;
         let index_managers = self.index_managers.read();
-        for index_manager in index_managers.values() {
+        for (collection_name, index_manager) in index_managers.iter() {
             // 1. Collect dirty names under brief READ lock
             let (dirty_bt, dirty_ft, dirty_fz, dirty_vec) = {
                 let mgr = index_manager.read();
@@ -210,30 +322,123 @@ impl DatabaseCore<StorageEngine> {
                 )
             };
 
+            let dirty_total = dirty_bt.len() + dirty_ft.len() + dirty_fz.len() + dirty_vec.len();
+            if dirty_total > 0 {
+                tracing::info!(
+                    collection = %collection_name,
+                    btree = dirty_bt.len(),
+                    fulltext = dirty_ft.len(),
+                    fuzzy = dirty_fz.len(),
+                    vector = dirty_vec.len(),
+                    "Checkpoint: flushing dirty indexes"
+                );
+            }
+
             // 2. Flush one-by-one, lock/unlock between each index
             //    This reduces lock hold time from O(all_indexes) to O(1_index),
             //    allowing insert_one/add_to_indexes to proceed between flushes.
             for name in &dirty_ft {
+                let t = std::time::Instant::now();
                 let mut mgr = index_manager.write();
+                let lock_wait_ms = t.elapsed().as_millis() as u64;
                 if mgr.flush_one_fulltext_index(name)? {
+                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                    tracing::info!(
+                        collection = %collection_name, index = %name,
+                        kind = "fulltext", lock_wait_ms, flush_ms,
+                        "Index flushed"
+                    );
                     total_flushed += 1;
                 }
             }
             for name in &dirty_fz {
+                let t = std::time::Instant::now();
                 let mut mgr = index_manager.write();
+                let lock_wait_ms = t.elapsed().as_millis() as u64;
                 if mgr.flush_one_fuzzy_index(name)? {
+                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                    tracing::info!(
+                        collection = %collection_name, index = %name,
+                        kind = "fuzzy", lock_wait_ms, flush_ms,
+                        "Index flushed"
+                    );
                     total_flushed += 1;
                 }
             }
             for name in &dirty_bt {
+                let t = std::time::Instant::now();
                 let mut mgr = index_manager.write();
+                let lock_wait_ms = t.elapsed().as_millis() as u64;
                 if mgr.flush_one_btree_index(name, &db_path)? {
+                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                    tracing::info!(
+                        collection = %collection_name, index = %name,
+                        kind = "btree", lock_wait_ms, flush_ms,
+                        "Index flushed"
+                    );
                     total_flushed += 1;
                 }
             }
             for name in &dirty_vec {
+                let t = std::time::Instant::now();
                 let mut mgr = index_manager.write();
+                let lock_wait_ms = t.elapsed().as_millis() as u64;
                 if mgr.flush_one_vector_index(name, &db_path)? {
+                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                    tracing::info!(
+                        collection = %collection_name, index = %name,
+                        kind = "vector", lock_wait_ms, flush_ms,
+                        "Index flushed"
+                    );
+                    total_flushed += 1;
+                }
+            }
+        }
+        Ok(total_flushed)
+    }
+
+    /// Flush only B+ tree indexes to disk (skip fulltext, fuzzy, vector).
+    ///
+    /// Used by periodic checkpoint to avoid blocking `insert_one` for minutes.
+    /// Fulltext flush holds `index_manager.write()` for 13+ seconds (130K docs),
+    /// blocking `insert_one`'s `check_index_constraints()` which needs `indexes.read()`.
+    /// B+ tree indexes flush in < 300ms each — acceptable lock hold time.
+    ///
+    /// Fulltext/fuzzy/vector indexes are flushed during `close()` and `compact()` only.
+    /// On dirty shutdown, these indexes are rebuilt from documents (safe, just slower startup).
+    pub fn flush_btree_indexes_counted(&self) -> Result<usize> {
+        let db_path = {
+            let storage = self.storage.read();
+            storage.get_file_path().to_string()
+        };
+
+        let mut total_flushed = 0usize;
+        let index_managers = self.index_managers.read();
+        for (collection_name, index_manager) in index_managers.iter() {
+            let dirty_bt = {
+                let mgr = index_manager.read();
+                mgr.dirty_btree_index_names()
+            };
+
+            if !dirty_bt.is_empty() {
+                tracing::info!(
+                    collection = %collection_name,
+                    btree = dirty_bt.len(),
+                    "Checkpoint: flushing dirty btree indexes (fulltext/fuzzy skipped)"
+                );
+            }
+
+            for name in &dirty_bt {
+                let t = std::time::Instant::now();
+                let mut mgr = index_manager.write();
+                let lock_wait_ms = t.elapsed().as_millis() as u64;
+                if mgr.flush_one_btree_index(name, &db_path)? {
+                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                    tracing::info!(
+                        collection = %collection_name, index = %name,
+                        kind = "btree", lock_wait_ms, flush_ms,
+                        "Index flushed"
+                    );
                     total_flushed += 1;
                 }
             }

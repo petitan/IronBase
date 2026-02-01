@@ -850,11 +850,39 @@ impl StorageEngine {
         &mut self.file
     }
 
+    /// Whether metadata has been modified since last flush
+    pub(crate) fn is_metadata_dirty(&self) -> bool {
+        self.metadata_dirty
+    }
+
+    /// Current WAL file size in bytes (for checkpoint guard checks)
+    pub(crate) fn wal_file_size(&self) -> u64 {
+        self.wal.file_size().unwrap_or(0)
+    }
+
+    /// Reference to all collection metadata (for pre-serialization outside lock)
+    pub(crate) fn collections_ref(&self) -> &HashMap<String, CollectionMeta> {
+        &self.collections
+    }
+
     /// Checkpoint - flush metadata and clear WAL for durability
     /// Use this in long-running processes to ensure data survives restarts
     ///
     /// CRITICAL FIX: Must call flush_metadata() before clearing WAL!
     /// Without this, document_catalog only exists in memory and is lost on restart.
+    ///
+    /// PERF FIX (v1.0.313): Removed ensure_metadata_snapshot() from checkpoint.
+    /// Previously, checkpoint serialized metadata TWICE under storage.write() lock:
+    /// 1. ensure_metadata_snapshot() → deep clone + JSON serialize + WAL write + WAL fsync
+    /// 2. flush_metadata() → binary serialize + file write + fsync
+    /// With 130K+ docs this meant ~24MB allocation + 2× fsync under lock, taking
+    /// minutes under memory pressure (Windows page swapping).
+    ///
+    /// WAL MetadataSnapshot is unnecessary because:
+    /// - flush_metadata() writes metadata to main file BEFORE WAL clear
+    /// - Header write (256 bytes at offset 0) is effectively atomic (< sector size)
+    /// - If crash during metadata body write: old header → old valid metadata
+    /// - WAL transaction entries (BEGIN+Op+COMMIT) provide full crash recovery
     ///
     /// Returns checkpoint statistics including WAL size before/after.
     pub fn checkpoint(&mut self) -> Result<compaction::CheckpointStats> {
@@ -864,10 +892,9 @@ impl StorageEngine {
         // (2026-02-01 perf fix). WAL size is the meaningful metric now.
         let wal_ops_cleared = self.wal_ops_since_clear;
 
-        // First flush metadata to ensure document_catalog is persisted
-        if self.metadata_dirty {
-            self.ensure_metadata_snapshot()?;
-        }
+        // Flush metadata to ensure document_catalog is persisted
+        // NOTE: ensure_metadata_snapshot() intentionally NOT called here.
+        // See PERF FIX comment above for rationale.
         self.flush_metadata()?;
         self.metadata_snapshot_pending = false;
 
@@ -883,6 +910,54 @@ impl StorageEngine {
             wal_size_after,
             wal_ops_cleared: wal_ops_cleared as u64,
             indexes_flushed: 0, // Storage layer doesn't know about indexes; set by DatabaseCore
+        })
+    }
+
+    /// Checkpoint with a pre-serialized metadata buffer (lock-optimized path)
+    ///
+    /// Instead of serializing metadata under storage.write() lock, the caller
+    /// pre-serializes under storage.read() (which doesn't block inserts), then
+    /// calls this method which only does the file I/O under lock.
+    ///
+    /// The `data_end_offset` and `wal_size` are guard values from the pre-serialize
+    /// phase. If they don't match current state, the caller should fall back to
+    /// the regular `checkpoint()` method.
+    pub fn checkpoint_with_preserialized(
+        &mut self,
+        metadata_bytes: Vec<u8>,
+    ) -> Result<compaction::CheckpointStats> {
+        let wal_size_before = self.wal.file_size().unwrap_or(0);
+        let wal_ops_cleared = self.wal_ops_since_clear;
+
+        // Write pre-serialized metadata to file (no serialization needed)
+        // SAFETY: Caller (checkpoint_wal_only) guarantees data_end_offset >= HEADER_SIZE
+        // via guard check, ensuring v2 databases use the fallback path instead.
+        let metadata_offset = self.header.data_end_offset;
+
+        HeaderWriter::new(&mut self.header, &mut self.file)
+            .set_after_metadata(metadata_offset, metadata_bytes.len() as u64);
+
+        Self::write_metadata_and_header(
+            &mut self.file,
+            &mut self.header,
+            &metadata_bytes,
+            metadata_offset,
+        )?;
+
+        self.metadata_dirty = false;
+        self.metadata_snapshot_pending = false;
+
+        // Clear WAL (all operations now in main file)
+        self.wal.clear()?;
+        self.wal_ops_since_clear = 0;
+
+        let wal_size_after = self.wal.file_size().unwrap_or(0);
+
+        Ok(compaction::CheckpointStats {
+            wal_size_before,
+            wal_size_after,
+            wal_ops_cleared: wal_ops_cleared as u64,
+            indexes_flushed: 0,
         })
     }
 
