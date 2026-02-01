@@ -62,7 +62,7 @@
             <a href="#tools-admin" class="nav-item">Admin (8)</a>
             <a href="#tools-acl" class="nav-item">ACL (5)</a>
             <a href="#tools-listener" class="nav-item">Listeners (6)</a>
-            <a href="#tools-rag" class="nav-item">RAG (8)</a>
+            <a href="#tools-rag" class="nav-item">RAG (4)</a>
           </div>
         </div>
 
@@ -1528,66 +1528,135 @@ cd mcp-server && cargo build --release
 
       <h1 id="search-rag">RAG - Semantic Search</h1>
 
-      <p>Semantic search with FastText embeddings and HNSW indexing.</p>
+      <p>Semantic search with FastText embeddings and HNSW indexing. The <code>rag_search</code> <strong>automatically embeds the query</strong> - a single MCP call for complete hybrid search!</p>
 
       <div class="ascii-diagram">
         <pre>
-┌─────────────────────────────────────────────────────────────────┐
-│                      RAG Pipeline                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Document  ─▶  Chunking  ─▶  Embedding  ─▶  HNSW Index         │
-│     │            │              │               │               │
-│   markdown    1000 token    FastText       vectors             │
-│              100 overlap     300-dim                            │
-│                                                                 │
-│  Query  ─▶  Embedding  ─▶  HNSW Search  ─▶  Top-K chunks       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            RAG PIPELINE                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. SETUP                                                                   │
+│  ════════                                                                   │
+│  rag_collection_create(collection: "kb", language: "english")               │
+│         │                                                                   │
+│         ├──▶ Collection: "kb"                                               │
+│         ├──▶ HNSW index: 300 dim, cosine                                    │
+│         ├──▶ Fulltext index: english stemmer                                │
+│         └──▶ Config: _system.rag                                            │
+│                                                                             │
+│  2. IMPORT                                                                  │
+│  ═════════                                                                  │
+│  rag_document_import(collection: "kb", content: "...", title: "Guide")      │
+│         │                                                                   │
+│         ├──▶ Chunking: 1000 char, 100 overlap                               │
+│         ├──▶ Batch embedding: FastText 300-dim                              │
+│         └──▶ Insert chunks with vectors                                     │
+│                                                                             │
+│  3. SEARCH (1 MCP CALL!)                                                    │
+│  ════════════════════════                                                   │
+│  rag_search(collection: "kb", query: "database")                            │
+│         │                                                                   │
+│         ├──▶ AUTO-EMBED query ← KEY DIFFERENCE!                             │
+│         ├──▶ Vector search (HNSW)                                           │
+│         ├──▶ Fulltext search (TF-IDF)                                       │
+│         ├──▶ RRF fusion (k=60)                                              │
+│         ├──▶ Reranking (phrase match, density)                              │
+│         └──▶ Deduplication                                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
         </pre>
       </div>
 
-      <h3>Create RAG Collection</h3>
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Why is rag_search better?</div>
+        <p>The <code>hybrid_search</code> tool required <strong>2 MCP calls</strong> (embed_text + hybrid_search).
+        The <code>rag_search</code> <strong>automatically embeds</strong> the query - single call!</p>
+      </div>
+
+      <h2>RRF (Reciprocal Rank Fusion) Algorithm</h2>
+
+      <p>Hybrid search combines vector and fulltext results using RRF:</p>
 
       <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "rag_collection_create",
-  "arguments": {
-    "name": "knowledge_base",
-    "chunk_max_tokens": 1000,
-    "chunk_overlap": 100,
-    "admin_key": "..."
-  }
-}</code></pre>
+        <pre><code class="language-javascript">score = vector_weight × 1/(k + vector_rank) + fulltext_weight × 1/(k + text_rank)
+
+// Example (k=60, weights=0.5/0.5):
+// doc1: vector_rank=1, text_rank=1
+// score = 0.5 × 1/61 + 0.5 × 1/61 = 0.0164</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
-      <h3>Import Document</h3>
+      <h2>Reranking</h2>
+
+      <p>Result scores are modified by 3 factors:</p>
+
+      <table>
+        <tr>
+          <th>Factor</th>
+          <th>Boost</th>
+          <th>Condition</th>
+        </tr>
+        <tr>
+          <td>Exact phrase match</td>
+          <td>×1.3</td>
+          <td>Query &gt; 10 chars and found</td>
+        </tr>
+        <tr>
+          <td>Keyword density</td>
+          <td>×1.0-1.1</td>
+          <td>Query word ratio in content</td>
+        </tr>
+        <tr>
+          <td>Length penalty</td>
+          <td>×0.8</td>
+          <td>Content &lt; 100 chars</td>
+        </tr>
+      </table>
+
+      <h2>Quick Example</h2>
 
       <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "rag_document_import",
-  "arguments": {
-    "collection": "knowledge_base",
-    "doc_id": "guide_001",
-    "title": "IronBase User Guide",
-    "content": "# Introduction\n\nIronBase is a..."
-  }
-}</code></pre>
+        <pre><code class="language-json">// 1. Create collection (once)
+{"name": "rag_collection_create", "arguments": {
+  "collection": "knowledge_base", "language": "english"
+}}
+
+// 2. Import document
+{"name": "rag_document_import", "arguments": {
+  "collection": "knowledge_base",
+  "content": "IronBase is a high-performance embedded NoSQL database...",
+  "title": "Introduction"
+}}
+
+// 3. Search - SINGLE CALL!
+{"name": "rag_search", "arguments": {
+  "collection": "knowledge_base",
+  "query": "embedded database"
+}}</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
-      <h3>Semantic Search</h3>
-
+      <p><strong>Result:</strong></p>
       <div class="code-block">
         <pre><code class="language-json">{
-  "name": "rag_search",
-  "arguments": {
-    "collection": "knowledge_base",
-    "query": "how to create an index",
-    "limit": 5,
-    "min_score": 0.3
-  }
+  "results": [{
+    "content": "IronBase is a high-performance embedded NoSQL database...",
+    "title": "Introduction",
+    "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
+    "chunk_index": 0,
+    "_rrf_score": 0.01639,
+    "_final_score": 0.02344,
+    "_rerank_boost": 1.43,
+    "_vector_rank": 1,
+    "_text_rank": 1,
+    "_vector_score": 0.5578,
+    "_text_score": 4.852
+  }],
+  "count": 1,
+  "query": "embedded database",
+  "algorithm": "rag_hybrid_rrf",
+  "provider": "fasttext"
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
@@ -1959,46 +2028,315 @@ let filtered = db_rag_search("knowledge_base", "history", #{
         </div>
       </div>
 
-      <h1 id="tools-rag">RAG Tools (8 tools)</h1>
+      <h1 id="tools-rag">RAG Tools (4 tools)</h1>
 
-      <table>
-        <tr>
-          <th>Tool</th>
-          <th>Description</th>
-        </tr>
-        <tr>
-          <td><code>rag_collection_create</code></td>
-          <td>Create RAG collection</td>
-        </tr>
-        <tr>
-          <td><code>rag_collection_list</code></td>
-          <td>List collections</td>
-        </tr>
-        <tr>
-          <td><code>rag_collection_stats</code></td>
-          <td>Statistics</td>
-        </tr>
-        <tr>
-          <td><code>rag_collection_delete</code></td>
-          <td>Delete collection</td>
-        </tr>
-        <tr>
-          <td><code>rag_document_import</code></td>
-          <td>Import document</td>
-        </tr>
-        <tr>
-          <td><code>rag_document_list</code></td>
-          <td>List documents</td>
-        </tr>
-        <tr>
-          <td><code>rag_document_delete</code></td>
-          <td>Delete document</td>
-        </tr>
-        <tr>
-          <td><code>rag_search</code></td>
-          <td>Semantic search</td>
-        </tr>
-      </table>
+      <p>Semantic search with automatic query embedding. The <code>rag_search</code> performs complete hybrid search in a single MCP call!</p>
+
+      <div class="tool-card">
+        <h4><code>rag_collection_create</code> - Create RAG Collection</h4>
+        <p>Prepare collection for RAG: vector index + fulltext index + configuration.</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+          <tr>
+            <td>embedding_field</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Vector field (default: "embedding")</td>
+          </tr>
+          <tr>
+            <td>text_field</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Text field (default: "content")</td>
+          </tr>
+          <tr>
+            <td>provider</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Embedding provider (default: "fasttext")</td>
+          </tr>
+          <tr>
+            <td>language</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Fulltext language: hungarian | english | german | none</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_collection_create",
+  "arguments": {
+    "collection": "knowledge_base",
+    "language": "english"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "success": true,
+  "collection": "knowledge_base",
+  "config": {
+    "embedding_field": "embedding",
+    "text_field": "content",
+    "provider": "fasttext",
+    "language": "english",
+    "dimension": 300
+  },
+  "indexes": {
+    "collection_created": true,
+    "vector_created": true,
+    "fulltext_created": true
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>rag_document_import</code> - Import Document</h4>
+        <p>Automatic chunking and embedding.</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Target collection</td>
+          </tr>
+          <tr>
+            <td>content</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Document text</td>
+          </tr>
+          <tr>
+            <td>title</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Document title</td>
+          </tr>
+          <tr>
+            <td>metadata</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Extra fields for each chunk</td>
+          </tr>
+          <tr>
+            <td>doc_id</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Unique ID (default: auto UUID)</td>
+          </tr>
+          <tr>
+            <td>chunk_size</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Max chunk size in chars (default: 1000)</td>
+          </tr>
+          <tr>
+            <td>overlap</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Overlap between chunks (default: 100)</td>
+          </tr>
+          <tr>
+            <td>mode</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Chunking mode: auto | markdown | text</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_document_import",
+  "arguments": {
+    "collection": "knowledge_base",
+    "content": "# Introduction\n\nThis is the document content...",
+    "title": "User Guide",
+    "metadata": {"author": "John Doe", "version": "1.0"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "success": true,
+  "collection": "knowledge_base",
+  "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
+  "chunks_created": 5,
+  "dimension": 300,
+  "provider": "fasttext"
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <div class="info-box note">
+          <div class="info-box-title">📝 Markdown Mode</div>
+          <p><code>markdown</code> mode handles headings: each chunk includes <code>section</code>, <code>heading_level</code> and <code>section_path</code> fields.</p>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>rag_search</code> - Semantic Search</h4>
+        <p><strong>Automatic query embedding</strong> + hybrid RRF search in a single call!</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+          <tr>
+            <td>query</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Search text (NOT a vector!)</td>
+          </tr>
+          <tr>
+            <td>limit</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Max results (default: 10)</td>
+          </tr>
+          <tr>
+            <td>vector_weight</td>
+            <td>number</td>
+            <td><span class="badge badge-optional">optional</span> Vector weight 0.0-1.0 (default: 0.5)</td>
+          </tr>
+          <tr>
+            <td>fulltext_weight</td>
+            <td>number</td>
+            <td><span class="badge badge-optional">optional</span> Fulltext weight 0.0-1.0 (default: 0.5)</td>
+          </tr>
+          <tr>
+            <td>rerank</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Apply reranking (default: true)</td>
+          </tr>
+          <tr>
+            <td>deduplicate</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Filter duplicates (default: true)</td>
+          </tr>
+          <tr>
+            <td>projection</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Field filtering</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_search",
+  "arguments": {
+    "collection": "knowledge_base",
+    "query": "database indexing",
+    "limit": 5,
+    "vector_weight": 0.7,
+    "fulltext_weight": 0.3
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "results": [{
+    "_id": 1,
+    "content": "IronBase supports B+ tree indexing for fast queries...",
+    "title": "Indexing Guide",
+    "doc_id": "abc-123",
+    "chunk_index": 2,
+    "chunk_total": 5,
+    "_rrf_score": 0.01639,
+    "_final_score": 0.02344,
+    "_rerank_boost": 1.43,
+    "_vector_rank": 1,
+    "_text_rank": 1,
+    "_vector_score": 0.75,
+    "_text_score": 4.2
+  }],
+  "count": 1,
+  "query": "database indexing",
+  "algorithm": "rag_hybrid_rrf",
+  "rrf_k": 60.0,
+  "weights": {"vector": 0.7, "fulltext": 0.3},
+  "provider": "fasttext",
+  "dedup_removed": 0
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <div class="info-box tip">
+          <div class="info-box-title">💡 Weight Configuration</div>
+          <p>Vector-only search: <code>vector_weight: 1.0, fulltext_weight: 0.0</code><br>
+          Fulltext-only: <code>vector_weight: 0.0, fulltext_weight: 1.0</code></p>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>rag_collection_stats</code> - Statistics</h4>
+        <p>Detailed RAG collection statistics.</p>
+
+        <table class="param-table">
+          <tr><th>Parameter</th><th>Type</th><th>Description</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection name</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_collection_stats",
+  "arguments": {
+    "collection": "knowledge_base"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Result:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "collection": "knowledge_base",
+  "rag_enabled": true,
+  "config": {
+    "embedding_field": "embedding",
+    "text_field": "content",
+    "provider": "fasttext",
+    "language": "english",
+    "dimension": 300,
+    "created_at": "2026-01-27T08:17:58.495Z"
+  },
+  "stats": {
+    "chunk_count": 150,
+    "source_document_count": 12,
+    "vector_indexes": [{
+      "name": "knowledge_base_vec_embedding",
+      "dim": 300,
+      "metric": "cosine",
+      "hnsw_params": {"m": 16, "ef_construction": 100, "ef_search": 50}
+    }],
+    "fulltext_indexes": [{
+      "name": "knowledge_base_content_fts",
+      "language": "english",
+      "num_documents": 150,
+      "num_tokens": 12500
+    }]
+  },
+  "provider_info": {
+    "name": "fasttext",
+    "dimension": 300,
+    "model": "cc.en.300.ironbase"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
 
       <!-- Footer -->
       <hr style="margin-top: 60px;">

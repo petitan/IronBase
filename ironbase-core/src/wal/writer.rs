@@ -97,6 +97,9 @@ impl WriteAheadLog {
     /// Returns grouped transactions (only committed ones).
     /// This method uses the new streaming approach but returns the same
     /// format as the old method for backwards compatibility.
+    ///
+    /// OOM PROTECTION: Aborts if WAL contains more than MAX_WAL_ENTRIES entries.
+    /// This should never happen in normal operation (WAL cleared every flush/checkpoint).
     pub fn recover(&mut self) -> Result<Vec<Vec<WALEntry>>> {
         use std::collections::HashMap;
         use std::io::BufReader;
@@ -108,9 +111,22 @@ impl WriteAheadLog {
 
         // Group entries by transaction ID
         let mut txs: HashMap<TransactionId, Vec<WALEntry>> = HashMap::new();
+        let mut entry_count: usize = 0;
 
         for entry_result in iter {
             let entry = entry_result?;
+            entry_count += 1;
+
+            // OOM protection: abort if WAL is abnormally large
+            if entry_count > Self::MAX_WAL_ENTRIES {
+                return Err(crate::error::IronBaseError::OutOfMemory(format!(
+                    "WAL recovery aborted: too many entries (>{}) - \
+                     WAL file may be corrupted or was not cleared. \
+                     Consider deleting the .wal file (backup .mlite first)",
+                    Self::MAX_WAL_ENTRIES
+                )));
+            }
+
             txs.entry(entry.transaction_id).or_default().push(entry);
         }
 
@@ -152,11 +168,13 @@ impl WriteAheadLog {
         Ok(())
     }
 
-    /// Maximum WAL entries for checkpoint (OOM protection)
+    /// Maximum WAL entries for recovery/checkpoint (OOM protection)
     ///
     /// If WAL has more entries than this, something is very wrong
-    /// (WAL clear should run every ~100 commits).
-    const MAX_CHECKPOINT_ENTRIES: usize = 1_000_000;
+    /// (WAL clear should run on every flush/checkpoint).
+    /// With checkpoint every 120s and ~5K ops/sec Safe mode,
+    /// worst case is ~600K entries between checkpoints.
+    const MAX_WAL_ENTRIES: usize = 1_000_000;
 
     /// Checkpoint: remove committed transactions from WAL
     ///
@@ -183,14 +201,14 @@ impl WriteAheadLog {
             entry_count += 1;
 
             // OOM protection: if WAL is absurdly large, abort checkpoint
-            if entry_count > Self::MAX_CHECKPOINT_ENTRIES {
+            if entry_count > Self::MAX_WAL_ENTRIES {
                 // Clean up temp file
                 drop(temp_file);
                 let _ = std::fs::remove_file(&temp_path);
                 return Err(crate::error::IronBaseError::Io(std::io::Error::other(
                     format!(
                         "WAL checkpoint aborted: too many entries (>{}) - consider WAL clear instead",
-                        Self::MAX_CHECKPOINT_ENTRIES
+                        Self::MAX_WAL_ENTRIES
                     ),
                 )));
             }

@@ -13,6 +13,8 @@ pub struct PropertySchema {
     pub pattern: Option<Regex>,          // regex pattern validation
     pub min_items: Option<usize>,        // array minimum length
     pub max_items: Option<usize>,        // array maximum length
+    pub minimum: Option<f64>,            // numeric minimum value
+    pub maximum: Option<f64>,            // numeric maximum value
 }
 
 impl PropertySchema {
@@ -23,6 +25,8 @@ impl PropertySchema {
             pattern: None,
             min_items: None,
             max_items: None,
+            minimum: None,
+            maximum: None,
         }
     }
 }
@@ -177,6 +181,28 @@ impl CompiledSchema {
                         prop_schema.max_items = Some(max as usize);
                     }
 
+                    // Parse minimum (numeric constraint)
+                    if let Some(min_value) = spec.get("minimum") {
+                        let min = min_value.as_f64().ok_or_else(|| {
+                            IronBaseError::SchemaError(format!(
+                                "Property '{}' minimum must be a number",
+                                field
+                            ))
+                        })?;
+                        prop_schema.minimum = Some(min);
+                    }
+
+                    // Parse maximum (numeric constraint)
+                    if let Some(max_value) = spec.get("maximum") {
+                        let max = max_value.as_f64().ok_or_else(|| {
+                            IronBaseError::SchemaError(format!(
+                                "Property '{}' maximum must be a number",
+                                field
+                            ))
+                        })?;
+                        prop_schema.maximum = Some(max);
+                    }
+
                     properties.insert(field.clone(), prop_schema);
                 }
             }
@@ -232,6 +258,29 @@ impl CompiledSchema {
                             return Err(IronBaseError::SchemaError(format!(
                                 "Field '{}' does not match required pattern",
                                 field
+                            )));
+                        }
+                    }
+                }
+
+                // Numeric constraints validation (minimum/maximum)
+                if let Some(num) = field_value.as_f64() {
+                    // minimum validation
+                    if let Some(min) = prop_schema.minimum {
+                        if num < min {
+                            return Err(IronBaseError::SchemaError(format!(
+                                "Field '{}' value {} is less than minimum {}",
+                                field, num, min
+                            )));
+                        }
+                    }
+
+                    // maximum validation
+                    if let Some(max) = prop_schema.maximum {
+                        if num > max {
+                            return Err(IronBaseError::SchemaError(format!(
+                                "Field '{}' value {} is greater than maximum {}",
+                                field, num, max
                             )));
                         }
                     }
@@ -1076,5 +1125,216 @@ mod tests {
             "tags": ["important", "urgent"]
         });
         assert!(compiled.validate(&doc).is_ok());
+    }
+
+    // ========== Numeric constraints (minimum/maximum) tests ==========
+
+    #[test]
+    fn test_minimum_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "age": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"age": 25});
+        assert!(compiled.validate(&doc).is_ok());
+
+        let doc2 = json!({"age": 0});
+        assert!(compiled.validate(&doc2).is_ok());
+    }
+
+    #[test]
+    fn test_minimum_invalid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "age": {
+                    "type": "integer",
+                    "minimum": 0
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"age": -5});
+        let result = compiled.validate(&doc);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("is less than minimum"));
+    }
+
+    #[test]
+    fn test_maximum_valid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": {
+                    "type": "number",
+                    "maximum": 100
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"score": 85.5});
+        assert!(compiled.validate(&doc).is_ok());
+
+        let doc2 = json!({"score": 100});
+        assert!(compiled.validate(&doc2).is_ok());
+    }
+
+    #[test]
+    fn test_maximum_invalid() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": {
+                    "type": "number",
+                    "maximum": 100
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        let doc = json!({"score": 150});
+        let result = compiled.validate(&doc);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("is greater than maximum"));
+    }
+
+    #[test]
+    fn test_minimum_maximum_combined() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "percentage": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // Valid - within range
+        let doc = json!({"percentage": 50});
+        assert!(compiled.validate(&doc).is_ok());
+
+        // Valid - at boundaries
+        let doc2 = json!({"percentage": 0});
+        assert!(compiled.validate(&doc2).is_ok());
+
+        let doc3 = json!({"percentage": 100});
+        assert!(compiled.validate(&doc3).is_ok());
+
+        // Invalid - below minimum
+        let doc4 = json!({"percentage": -1});
+        assert!(compiled.validate(&doc4).is_err());
+
+        // Invalid - above maximum
+        let doc5 = json!({"percentage": 101});
+        assert!(compiled.validate(&doc5).is_err());
+    }
+
+    #[test]
+    fn test_minimum_with_float() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "temperature": {
+                    "type": "number",
+                    "minimum": -273.15
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // Valid - above absolute zero
+        let doc = json!({"temperature": -100.5});
+        assert!(compiled.validate(&doc).is_ok());
+
+        // Valid - at boundary
+        let doc2 = json!({"temperature": -273.15});
+        assert!(compiled.validate(&doc2).is_ok());
+
+        // Invalid - below absolute zero
+        let doc3 = json!({"temperature": -300});
+        assert!(compiled.validate(&doc3).is_err());
+    }
+
+    #[test]
+    fn test_minimum_not_number_error() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "age": {
+                    "type": "integer",
+                    "minimum": "zero"
+                }
+            }
+        });
+        let result = CompiledSchema::from_value(&schema);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("minimum must be a number"));
+    }
+
+    #[test]
+    fn test_maximum_not_number_error() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "score": {
+                    "type": "number",
+                    "maximum": "hundred"
+                }
+            }
+        });
+        let result = CompiledSchema::from_value(&schema);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("maximum must be a number"));
+    }
+
+    #[test]
+    fn test_minimum_maximum_with_integer_type() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 10
+                }
+            }
+        });
+        let compiled = CompiledSchema::from_value(&schema).unwrap();
+
+        // Valid integers
+        let doc = json!({"count": 5});
+        assert!(compiled.validate(&doc).is_ok());
+
+        // Invalid - below minimum
+        let doc2 = json!({"count": 0});
+        assert!(compiled.validate(&doc2).is_err());
+
+        // Invalid - above maximum
+        let doc3 = json!({"count": 11});
+        assert!(compiled.validate(&doc3).is_err());
     }
 }

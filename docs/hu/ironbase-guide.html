@@ -62,7 +62,7 @@
             <a href="#tools-admin" class="nav-item">Admin (8)</a>
             <a href="#tools-acl" class="nav-item">ACL (5)</a>
             <a href="#tools-listener" class="nav-item">Listeners (6)</a>
-            <a href="#tools-rag" class="nav-item">RAG (8)</a>
+            <a href="#tools-rag" class="nav-item">RAG (4)</a>
           </div>
         </div>
 
@@ -1691,86 +1691,137 @@ cd mcp-server && cargo build --release
         </tr>
       </table>
 
-      <h1 id="search-rag">RAG - Semantic Search</h1>
+      <h1 id="search-rag">RAG - Szemantikus Keresés</h1>
 
-      <p>Szemantikus keresés FastText embeddings és HNSW indexeléssel.</p>
+      <p>Szemantikus keresés FastText embeddings és HNSW indexeléssel. A <code>rag_search</code> <strong>automatikusan beágyazza a query-t</strong> - egyetlen MCP hívás a teljes hybrid kereséshez!</p>
 
       <div class="ascii-diagram">
         <pre>
-┌─────────────────────────────────────────────────────────────────┐
-│                      RAG Pipeline                               │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Document  ─▶  Chunking  ─▶  Embedding  ─▶  HNSW Index         │
-│     │            │              │               │               │
-│   markdown    1000 token    FastText       vektorok            │
-│              100 overlap     300-dim                            │
-│                                                                 │
-│  Query  ─▶  Embedding  ─▶  HNSW Search  ─▶  Top-K chunks       │
-│                                                                 │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            RAG PIPELINE                                      │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. SETUP                                                                   │
+│  ════════                                                                   │
+│  rag_collection_create(collection: "kb", language: "hungarian")             │
+│         │                                                                   │
+│         ├──▶ Collection: "kb"                                               │
+│         ├──▶ HNSW index: 300 dim, cosine                                    │
+│         ├──▶ Fulltext index: hungarian stemmer                              │
+│         └──▶ Config: _system.rag                                            │
+│                                                                             │
+│  2. IMPORT                                                                  │
+│  ═════════                                                                  │
+│  rag_document_import(collection: "kb", content: "...", title: "Mese")       │
+│         │                                                                   │
+│         ├──▶ Chunking: 1000 char, 100 overlap                               │
+│         ├──▶ Batch embedding: FastText 300-dim                              │
+│         └──▶ Insert chunks with vectors                                     │
+│                                                                             │
+│  3. SEARCH (1 MCP HÍVÁS!)                                                   │
+│  ═════════════════════════                                                  │
+│  rag_search(collection: "kb", query: "király")                              │
+│         │                                                                   │
+│         ├──▶ AUTO-EMBED query ← KULCS KÜLÖNBSÉG!                            │
+│         ├──▶ Vector search (HNSW)                                           │
+│         ├──▶ Fulltext search (TF-IDF)                                       │
+│         ├──▶ RRF fusion (k=60)                                              │
+│         ├──▶ Reranking (phrase match, density)                              │
+│         └──▶ Deduplication                                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
         </pre>
       </div>
 
-      <h3>RAG Collection létrehozása</h3>
+      <div class="info-box tip">
+        <div class="info-box-title">💡 Miért jobb a rag_search?</div>
+        <p>A <code>hybrid_search</code> tool-hoz <strong>2 MCP hívás</strong> kellett (embed_text + hybrid_search).
+        A <code>rag_search</code> <strong>automatikusan beágyazza</strong> a query-t - egyetlen hívás!</p>
+      </div>
+
+      <h2>RRF (Reciprocal Rank Fusion) Algoritmus</h2>
+
+      <p>A hybrid keresés a vektor és fulltext találatokat RRF-fel kombinálja:</p>
 
       <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "rag_collection_create",
-  "arguments": {
-    "name": "knowledge_base",
-    "chunk_max_tokens": 1000,
-    "chunk_overlap": 100,
-    "admin_key": "..."
-  }
-}</code></pre>
+        <pre><code class="language-javascript">score = vector_weight × 1/(k + vector_rank) + fulltext_weight × 1/(k + text_rank)
+
+// Példa (k=60, súlyok=0.5/0.5):
+// doc1: vector_rank=1, text_rank=1
+// score = 0.5 × 1/61 + 0.5 × 1/61 = 0.0164</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
-      <h3>Dokumentum importálása</h3>
+      <h2>Reranking</h2>
+
+      <p>A találatok pontszámát 3 tényező módosítja:</p>
+
+      <table>
+        <tr>
+          <th>Tényező</th>
+          <th>Boost</th>
+          <th>Feltétel</th>
+        </tr>
+        <tr>
+          <td>Exact phrase match</td>
+          <td>×1.3</td>
+          <td>Query &gt; 10 karakter és megtalálható</td>
+        </tr>
+        <tr>
+          <td>Keyword density</td>
+          <td>×1.0-1.1</td>
+          <td>Query szavak aránya a content-ben</td>
+        </tr>
+        <tr>
+          <td>Length penalty</td>
+          <td>×0.8</td>
+          <td>Content &lt; 100 karakter</td>
+        </tr>
+      </table>
+
+      <h2>Gyors példa</h2>
 
       <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "rag_document_import",
-  "arguments": {
-    "collection": "knowledge_base",
-    "doc_id": "guide_001",
-    "title": "IronBase használati útmutató",
-    "content": "# Bevezetés\n\nAz IronBase egy..."
-  }
-}</code></pre>
-        <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-      </div>
+        <pre><code class="language-json">// 1. Collection létrehozása (egyszer)
+{"name": "rag_collection_create", "arguments": {
+  "collection": "tudásbázis", "language": "hungarian"
+}}
 
-      <h3>Szemantikus keresés</h3>
+// 2. Dokumentum importálása
+{"name": "rag_document_import", "arguments": {
+  "collection": "tudásbázis",
+  "content": "A kis kakas gyémánt félkrajcárja...",
+  "title": "Kis kakas mese"
+}}
 
-      <div class="code-block">
-        <pre><code class="language-json">{
-  "name": "rag_search",
-  "arguments": {
-    "collection": "knowledge_base",
-    "query": "hogyan hozzak létre indexet",
-    "limit": 5,
-    "min_score": 0.3
-  }
-}</code></pre>
+// 3. Keresés - EGY HÍVÁS!
+{"name": "rag_search", "arguments": {
+  "collection": "tudásbázis",
+  "query": "kakas gyémánt"
+}}</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
 
       <p><strong>Eredmény:</strong></p>
       <div class="code-block">
         <pre><code class="language-json">{
-  "results": [
-    {
-      "doc_id": "guide_001",
-      "title": "IronBase használati útmutató",
-      "chunk_index": 5,
-      "content": "## Indexelés\n\nIndex létrehozásához használd...",
-      "score": 0.87
-    }
-  ],
+  "results": [{
+    "content": "A kis kakas gyémánt félkrajcárja...",
+    "title": "Kis kakas mese",
+    "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
+    "chunk_index": 0,
+    "_rrf_score": 0.01639,
+    "_final_score": 0.02344,
+    "_rerank_boost": 1.43,
+    "_vector_rank": 1,
+    "_text_rank": 1,
+    "_vector_score": 0.5578,
+    "_text_score": 4.852
+  }],
   "count": 1,
-  "query": "hogyan hozzak létre indexet"
+  "query": "kakas gyémánt",
+  "algorithm": "rag_hybrid_rrf",
+  "provider": "fasttext"
 }</code></pre>
         <button class="copy-btn" onclick="copyCode(this)">Copy</button>
       </div>
@@ -2174,46 +2225,315 @@ let filtered = db_rag_search("knowledge_base", "történelem", #{
         </div>
       </div>
 
-      <h1 id="tools-rag">RAG Tools (8 tool)</h1>
+      <h1 id="tools-rag">RAG Tools (4 tool)</h1>
 
-      <table>
-        <tr>
-          <th>Tool</th>
-          <th>Leírás</th>
-        </tr>
-        <tr>
-          <td><code>rag_collection_create</code></td>
-          <td>RAG collection létrehozása</td>
-        </tr>
-        <tr>
-          <td><code>rag_collection_list</code></td>
-          <td>Collection-ök listázása</td>
-        </tr>
-        <tr>
-          <td><code>rag_collection_stats</code></td>
-          <td>Statisztikák</td>
-        </tr>
-        <tr>
-          <td><code>rag_collection_delete</code></td>
-          <td>Collection törlése</td>
-        </tr>
-        <tr>
-          <td><code>rag_document_import</code></td>
-          <td>Dokumentum importálás</td>
-        </tr>
-        <tr>
-          <td><code>rag_document_list</code></td>
-          <td>Dokumentumok listázása</td>
-        </tr>
-        <tr>
-          <td><code>rag_document_delete</code></td>
-          <td>Dokumentum törlése</td>
-        </tr>
-        <tr>
-          <td><code>rag_search</code></td>
-          <td>Szemantikus keresés</td>
-        </tr>
-      </table>
+      <p>Szemantikus keresés automatikus query beágyazással. A <code>rag_search</code> egyetlen MCP hívásban végzi el a teljes hybrid keresést!</p>
+
+      <div class="tool-card">
+        <h4><code>rag_collection_create</code> - RAG Collection létrehozása</h4>
+        <p>Collection előkészítése RAG használatra: vektor index + fulltext index + konfiguráció.</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>embedding_field</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Vektor mező (default: "embedding")</td>
+          </tr>
+          <tr>
+            <td>text_field</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Szöveg mező (default: "content")</td>
+          </tr>
+          <tr>
+            <td>provider</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Embedding provider (default: "fasttext")</td>
+          </tr>
+          <tr>
+            <td>language</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Fulltext nyelv: hungarian | english | german | none</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_collection_create",
+  "arguments": {
+    "collection": "tudásbázis",
+    "language": "hungarian"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "success": true,
+  "collection": "tudásbázis",
+  "config": {
+    "embedding_field": "embedding",
+    "text_field": "content",
+    "provider": "fasttext",
+    "language": "hungarian",
+    "dimension": 300
+  },
+  "indexes": {
+    "collection_created": true,
+    "vector_created": true,
+    "fulltext_created": true
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>rag_document_import</code> - Dokumentum importálása</h4>
+        <p>Automatikus darabolás (chunking) és beágyazás (embedding).</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Cél collection</td>
+          </tr>
+          <tr>
+            <td>content</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Dokumentum szövege</td>
+          </tr>
+          <tr>
+            <td>title</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Dokumentum címe</td>
+          </tr>
+          <tr>
+            <td>metadata</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Extra mezők minden chunk-hoz</td>
+          </tr>
+          <tr>
+            <td>doc_id</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Egyedi ID (default: auto UUID)</td>
+          </tr>
+          <tr>
+            <td>chunk_size</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Max chunk méret karakterben (default: 1000)</td>
+          </tr>
+          <tr>
+            <td>overlap</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Átfedés chunk-ok között (default: 100)</td>
+          </tr>
+          <tr>
+            <td>mode</td>
+            <td>string</td>
+            <td><span class="badge badge-optional">optional</span> Darabolási mód: auto | markdown | text</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_document_import",
+  "arguments": {
+    "collection": "tudásbázis",
+    "content": "# Bevezetés\n\nEz a dokumentum tartalma...",
+    "title": "Útmutató",
+    "metadata": {"author": "Kiss Péter", "version": "1.0"}
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "success": true,
+  "collection": "tudásbázis",
+  "doc_id": "d0270b1e-93ea-4031-86cd-c46ec3c8c94e",
+  "chunks_created": 5,
+  "dimension": 300,
+  "provider": "fasttext"
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <div class="info-box note">
+          <div class="info-box-title">📝 Markdown mód</div>
+          <p>A <code>markdown</code> mód heading-eket is kezel: minden chunk tartalmazza a <code>section</code>, <code>heading_level</code> és <code>section_path</code> mezőket.</p>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>rag_search</code> - Szemantikus keresés</h4>
+        <p><strong>Automatikus query beágyazás</strong> + hybrid RRF keresés egyetlen hívásban!</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+          <tr>
+            <td>query</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Keresési szöveg (NEM vektor!)</td>
+          </tr>
+          <tr>
+            <td>limit</td>
+            <td>integer</td>
+            <td><span class="badge badge-optional">optional</span> Max találatok (default: 10)</td>
+          </tr>
+          <tr>
+            <td>vector_weight</td>
+            <td>number</td>
+            <td><span class="badge badge-optional">optional</span> Vektor súly 0.0-1.0 (default: 0.5)</td>
+          </tr>
+          <tr>
+            <td>fulltext_weight</td>
+            <td>number</td>
+            <td><span class="badge badge-optional">optional</span> Fulltext súly 0.0-1.0 (default: 0.5)</td>
+          </tr>
+          <tr>
+            <td>rerank</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Utólagos rangsorolás (default: true)</td>
+          </tr>
+          <tr>
+            <td>deduplicate</td>
+            <td>boolean</td>
+            <td><span class="badge badge-optional">optional</span> Duplikátum szűrés (default: true)</td>
+          </tr>
+          <tr>
+            <td>projection</td>
+            <td>object</td>
+            <td><span class="badge badge-optional">optional</span> Mező szűrés</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_search",
+  "arguments": {
+    "collection": "tudásbázis",
+    "query": "király története",
+    "limit": 5,
+    "vector_weight": 0.7,
+    "fulltext_weight": 0.3
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "results": [{
+    "_id": 1,
+    "content": "A király történetének folytatása...",
+    "title": "Mesék",
+    "doc_id": "abc-123",
+    "chunk_index": 2,
+    "chunk_total": 5,
+    "_rrf_score": 0.01639,
+    "_final_score": 0.02344,
+    "_rerank_boost": 1.43,
+    "_vector_rank": 1,
+    "_text_rank": 1,
+    "_vector_score": 0.75,
+    "_text_score": 4.2
+  }],
+  "count": 1,
+  "query": "király története",
+  "algorithm": "rag_hybrid_rrf",
+  "rrf_k": 60.0,
+  "weights": {"vector": 0.7, "fulltext": 0.3},
+  "provider": "fasttext",
+  "dedup_removed": 0
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <div class="info-box tip">
+          <div class="info-box-title">💡 Súlyok beállítása</div>
+          <p>Csak vektor keresés: <code>vector_weight: 1.0, fulltext_weight: 0.0</code><br>
+          Csak fulltext: <code>vector_weight: 0.0, fulltext_weight: 1.0</code></p>
+        </div>
+      </div>
+
+      <div class="tool-card">
+        <h4><code>rag_collection_stats</code> - Statisztikák</h4>
+        <p>RAG collection részletes statisztikái.</p>
+
+        <table class="param-table">
+          <tr><th>Paraméter</th><th>Típus</th><th>Leírás</th></tr>
+          <tr>
+            <td>collection</td>
+            <td>string</td>
+            <td><span class="badge badge-required">required</span> Collection neve</td>
+          </tr>
+        </table>
+
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "name": "rag_collection_stats",
+  "arguments": {
+    "collection": "tudásbázis"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+
+        <p><strong>Eredmény:</strong></p>
+        <div class="code-block">
+          <pre><code class="language-json">{
+  "collection": "tudásbázis",
+  "rag_enabled": true,
+  "config": {
+    "embedding_field": "embedding",
+    "text_field": "content",
+    "provider": "fasttext",
+    "language": "hungarian",
+    "dimension": 300,
+    "created_at": "2026-01-27T08:17:58.495Z"
+  },
+  "stats": {
+    "chunk_count": 150,
+    "source_document_count": 12,
+    "vector_indexes": [{
+      "name": "tudásbázis_vec_embedding",
+      "dim": 300,
+      "metric": "cosine",
+      "hnsw_params": {"m": 16, "ef_construction": 100, "ef_search": 50}
+    }],
+    "fulltext_indexes": [{
+      "name": "tudásbázis_content_fts",
+      "language": "hungarian",
+      "num_documents": 150,
+      "num_tokens": 12500
+    }]
+  },
+  "provider_info": {
+    "name": "fasttext",
+    "dimension": 300,
+    "model": "cc.hu.300.ironbase"
+  }
+}</code></pre>
+          <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+        </div>
+      </div>
 
       <!-- Footer -->
       <hr style="margin-top: 60px;">

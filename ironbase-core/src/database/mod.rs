@@ -335,7 +335,7 @@ impl DatabaseCore<StorageEngine> {
         let mut storage = StorageEngine::open(&path_str)?;
 
         // Recover from WAL (includes both data and index changes)
-        let (wal_entries, recovered_index_changes) = storage.recover_from_wal()?;
+        let (recovered_tx_count, recovered_index_changes) = storage.recover_from_wal()?;
 
         // CRITICAL FIX: Flush metadata after WAL recovery to persist updated data_end_offset
         //
@@ -350,7 +350,7 @@ impl DatabaseCore<StorageEngine> {
         //
         // The fix: flush_metadata() after WAL recovery ensures data_end_offset is persisted
         // before clearing the WAL. (Bug found 2024-12-26)
-        if !wal_entries.is_empty() {
+        if recovered_tx_count > 0 {
             storage.flush_metadata()?;
         }
 
