@@ -2124,11 +2124,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         cancel_flag: Option<&Arc<AtomicBool>>,
         deadline: Option<std::time::Instant>,
     ) -> Result<Vec<DocumentId>> {
-        let mut storage = self.storage.write();
+        // CRITICAL FIX: Only hold storage read lock briefly for catalog snapshot.
+        // Release BEFORE document iteration to allow concurrent inserts/checkpoints.
+        // parking_lot::RwLock: read lock blocks write lock acquisition, so holding
+        // it for the entire 130K-doc scan would starve insert_one for minutes.
 
         // MEMORY OPTIMIZATION: Don't clone entire catalog HashMap!
         // Only extract what we need: Vec<(DocumentId, u64)> for offsets
         let (catalog_entries, catalog_len, live_count) = {
+            let storage = self.storage.read();
             let meta = storage
                 .get_collection_meta(&self.name)
                 .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
@@ -2316,8 +2320,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
 
-            // Read document from storage
-            let doc_bytes = match storage.read_data(offset) {
+            // Read document from storage (brief read lock per document,
+            // released before parsing to allow concurrent inserts)
+            let read_result = {
+                let storage = self.storage.read();
+                storage.read_data_at(offset)
+            };
+            let doc_bytes = match read_result {
                 Ok(bytes) => bytes,
                 Err(_) => continue, // Skip corrupted entries
             };
