@@ -174,6 +174,9 @@ pub struct HealthCheck {
     pub version: &'static str,
     /// Memory statistics
     pub memory: MemoryStats,
+    /// Working set limits (Windows only, None on other platforms)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_set_limits: Option<crate::memory_lock::WorkingSetLimits>,
     /// Unix timestamp of check
     pub timestamp: i64,
 }
@@ -184,6 +187,7 @@ pub fn health_check() -> HealthCheck {
         status: "ok",
         version: crate::VERSION,
         memory: get_memory_stats(),
+        working_set_limits: crate::memory_lock::get_working_set_limits(),
         timestamp: chrono::Utc::now().timestamp(),
     }
 }

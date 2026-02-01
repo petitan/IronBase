@@ -18,6 +18,22 @@ pub struct WorkingSetLockResult {
     pub message: String,
 }
 
+/// Current working set limits as read back from the OS via GetProcessWorkingSetSizeEx.
+/// Used by /health endpoint to verify the lock is actually applied.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct WorkingSetLimits {
+    /// Minimum working set size in MB
+    pub min_mb: u64,
+    /// Maximum working set size in MB
+    pub max_mb: u64,
+    /// Whether hard minimum is enabled (QUOTA_LIMITS_HARDWS_MIN_ENABLE)
+    pub hard_min_enabled: bool,
+    /// Whether hard maximum is enabled (QUOTA_LIMITS_HARDWS_MAX_ENABLE)
+    pub hard_max_enabled: bool,
+    /// Raw flags value from GetProcessWorkingSetSizeEx
+    pub flags: u32,
+}
+
 // =============================================================================
 // Windows implementation
 // =============================================================================
@@ -28,6 +44,7 @@ mod platform {
 
     // SetProcessWorkingSetSizeEx flags
     const QUOTA_LIMITS_HARDWS_MIN_ENABLE: u32 = 0x00000001;
+    const QUOTA_LIMITS_HARDWS_MAX_ENABLE: u32 = 0x00000004;
     const QUOTA_LIMITS_HARDWS_MAX_DISABLE: u32 = 0x00000008;
 
     /// Lock the current process working set to prevent paging.
@@ -142,6 +159,40 @@ mod platform {
             None
         }
     }
+
+    /// Read back the current working set limits from the OS.
+    ///
+    /// Returns the min/max sizes and whether hard limits are enabled.
+    /// This verifies that `SetProcessWorkingSetSizeEx` actually applied the lock.
+    pub fn get_working_set_limits() -> Option<super::WorkingSetLimits> {
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        let process = unsafe { GetCurrentProcess() };
+        let mut min_ws: usize = 0;
+        let mut max_ws: usize = 0;
+        let mut flags: u32 = 0;
+
+        let ok = unsafe {
+            windows_sys::Win32::System::Memory::GetProcessWorkingSetSizeEx(
+                process,
+                &mut min_ws,
+                &mut max_ws,
+                &mut flags,
+            )
+        };
+
+        if ok != 0 {
+            Some(super::WorkingSetLimits {
+                min_mb: (min_ws as u64) / (1024 * 1024),
+                max_mb: (max_ws as u64) / (1024 * 1024),
+                hard_min_enabled: (flags & QUOTA_LIMITS_HARDWS_MIN_ENABLE) != 0,
+                hard_max_enabled: (flags & QUOTA_LIMITS_HARDWS_MAX_ENABLE) != 0,
+                flags,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 // =============================================================================
@@ -166,7 +217,12 @@ mod platform {
     pub fn get_working_set_bytes() -> Option<u64> {
         None
     }
+
+    /// No-op on non-Windows platforms.
+    pub fn get_working_set_limits() -> Option<super::WorkingSetLimits> {
+        None
+    }
 }
 
 // Re-export platform functions
-pub use platform::{get_working_set_bytes, lock_working_set};
+pub use platform::{get_working_set_bytes, get_working_set_limits, lock_working_set};
