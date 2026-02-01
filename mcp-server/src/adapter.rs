@@ -914,15 +914,17 @@ impl IronBaseAdapter {
                 .map_err(|e| crate::error::McpError::storage(e.to_string()))?
         }; // db.read() released here
 
-        // Phase 2: Flush metadata + clear WAL (fast: ~ms)
-        // Uses db.write() to ensure all in-flight inserts have completed
-        // their persist phase before WAL is cleared. This prevents data loss
-        // if the server crashes between WAL commit and storage persist.
+        // Phase 2: Flush metadata + clear WAL
+        // Uses db.read() — the internal storage.write() provides sufficient
+        // ordering (waits for in-flight insert_one_persist to release storage lock).
+        // Previously used db.write() which caused priority inversion: parking_lot's
+        // write-preferring behavior blocked ALL new db.read() callers (insert, find)
+        // while flush_metadata serialized 130K doc catalog (~6MB) under memory pressure.
         let result = {
-            let db = self.db.write();
+            let db = self.db.read();
             db.checkpoint_wal_only()
                 .map_err(|e| crate::error::McpError::storage(e.to_string()))?
-        }; // db.write() released here
+        }; // db.read() released here
 
         let duration_ms = start.elapsed().as_millis() as u64;
 

@@ -310,7 +310,8 @@ async fn run_http_server_internal(
 
     // Lock working set on Windows to prevent memory paging under pressure.
     // Called after warm-up + FastText load so the floor captures all resident data.
-    if config.lock_working_set {
+    // Always enabled on Windows — no config needed. Graceful fallback if it fails.
+    if cfg!(windows) {
         let ws_result = crate::memory_lock::lock_working_set();
         if ws_result.success {
             info!("{}", ws_result.message);

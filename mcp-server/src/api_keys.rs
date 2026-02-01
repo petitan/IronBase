@@ -7,6 +7,7 @@ use crate::{FindOptions, IronBaseAdapter};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,9 @@ pub struct ApiKeyCache {
     ttl: Duration,
     /// Whether API key is required
     required: bool,
+    /// Whether _system.api_keys collection and index have been initialized
+    /// After first successful refresh, skip create_system_collection + create_index
+    system_initialized: AtomicBool,
 }
 
 impl ApiKeyCache {
@@ -40,6 +44,7 @@ impl ApiKeyCache {
             last_refresh: RwLock::new(Instant::now() - Duration::from_secs(ttl_secs + 1)), // Force initial refresh
             ttl: Duration::from_secs(ttl_secs),
             required,
+            system_initialized: AtomicBool::new(false),
         }
     }
 
@@ -84,16 +89,14 @@ impl ApiKeyCache {
     /// Internal refresh implementation
     /// BUG #6 fix: Log warnings instead of silently ignoring initialization errors
     fn do_refresh(&self, adapter: &Arc<IronBaseAdapter>) {
-        // Ensure the _system.api_keys collection exists
-        if let Err(e) = adapter.create_system_collection("_system.api_keys") {
-            // Collection might already exist - log at debug level
-            tracing::debug!("API key collection init: {}", e);
-        }
-
-        // Create index on 'key' field for fast lookup (unique, non-sparse)
-        if let Err(e) = adapter.create_index("_system.api_keys", "key", true, false) {
-            // Index might already exist - log at debug level
-            tracing::debug!("API key index init: {}", e);
+        // Only create collection + index on first refresh (not every 60s TTL cycle)
+        if !self.system_initialized.load(Ordering::Relaxed) {
+            if let Err(e) = adapter.create_system_collection("_system.api_keys") {
+                tracing::debug!("API key collection init: {}", e);
+            }
+            if let Err(e) = adapter.create_index("_system.api_keys", "key", true, false) {
+                tracing::debug!("API key index init: {}", e);
+            }
         }
 
         // Load all enabled keys
@@ -111,6 +114,7 @@ impl ApiKeyCache {
                         keys.insert(key.to_string());
                     }
                 }
+                self.system_initialized.store(true, Ordering::Relaxed);
                 tracing::debug!("API key cache refreshed: {} keys loaded", keys.len());
             }
             Err(e) => {

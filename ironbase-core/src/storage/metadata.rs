@@ -400,10 +400,38 @@ impl StorageEngine {
     /// Serialize collection metadata to bytes
     ///
     /// Uses write_metadata_body() internally with a Cursor buffer.
+    /// Pre-allocates buffer based on estimated size to avoid repeated reallocation.
+    ///
+    /// OOM PROTECTION: Uses try_reserve() to return an error instead of panicking
+    /// when memory allocation fails (e.g., 130K+ docs → ~6-8MB metadata).
     fn serialize_metadata(collections: &HashMap<String, CollectionMeta>) -> Result<Vec<u8>> {
         use std::io::Cursor;
 
-        let mut buffer = Cursor::new(Vec::new());
+        // Estimate buffer size: 4 bytes (count) + per-collection overhead
+        // Each catalog entry is ~25-30 bytes in JSON ([type_tag, value, offset])
+        // Plus 4 bytes length prefix per collection + JSON structure overhead
+        let estimated_size: usize = 4 + collections
+            .values()
+            .map(|meta| {
+                // Per-doc: ~30 bytes for catalog entry in JSON
+                // Plus fixed overhead for collection fields (~200 bytes)
+                let catalog_size = meta.document_catalog.len() * 30;
+                let order_size = meta.document_order.len() * 10;
+                4 + catalog_size + order_size + 512 // 4=length prefix, 512=field overhead
+            })
+            .sum::<usize>();
+
+        let mut buf = Vec::new();
+        buf.try_reserve(estimated_size).map_err(|_| {
+            IronBaseError::OutOfMemory(format!(
+                "Failed to allocate {}MB for metadata serialization ({} collections, {} total docs)",
+                estimated_size / (1024 * 1024),
+                collections.len(),
+                collections.values().map(|m| m.document_catalog.len()).sum::<usize>()
+            ))
+        })?;
+
+        let mut buffer = Cursor::new(buf);
         Self::write_metadata_body(&mut buffer, collections)?;
         Ok(buffer.into_inner())
     }

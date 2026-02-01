@@ -445,7 +445,20 @@ pub struct StorageEngine {
     /// Separate lock file to allow other processes to read the DB during backup
     /// On Windows, file locks are mandatory and prevent ALL access including reads
     lock_file: File,
-    /// Counter for WAL operations since last clear (optimization to reduce fsync)
+    /// Counter for WAL operations since last clear.
+    ///
+    /// NOTE (2026-02-01): This counter is NO LONGER incremented per-commit.
+    /// Previously, commit_transaction_internal() incremented this and cleared
+    /// WAL every 100 commits. That was removed because per-commit metadata
+    /// flush was eliminated for performance (see Step 8 comment in
+    /// commit_transaction_internal).
+    ///
+    /// WAL is now cleared unconditionally by:
+    /// - `flush()` - after flush_metadata() persists all data
+    /// - `checkpoint()` - periodic durability barrier
+    /// - `recover_from_wal()` - after successful recovery
+    ///
+    /// The field is kept for CheckpointStats reporting (always 0 in practice).
     wal_ops_since_clear: u32,
     /// Indicates whether the database was cleanly shut down last time
     /// If true, indexes can be trusted from .idx files without rebuild
@@ -808,8 +821,12 @@ impl StorageEngine {
         self.ensure_metadata_snapshot()
     }
 
-    /// Flush changes to disk (including metadata)
-    /// Uses WAL to ensure crash-safe metadata persistence
+    /// Flush changes to disk (including metadata) and clear WAL
+    ///
+    /// After flush_metadata(), all data is persisted in the main file,
+    /// so WAL entries are no longer needed for crash recovery.
+    /// WAL is cleared unconditionally to prevent stale entries from
+    /// causing unnecessary replay on next startup (e.g., after Drop).
     pub fn flush(&mut self) -> Result<()> {
         if self.metadata_dirty {
             self.ensure_metadata_snapshot()?;
@@ -819,12 +836,11 @@ impl StorageEngine {
         self.flush_metadata()?;
         self.metadata_snapshot_pending = false;
 
-        // Clear WAL periodically after successful metadata flush
-        self.wal_ops_since_clear += 1;
-        if self.wal_ops_since_clear >= 100 {
-            self.wal.clear()?;
-            self.wal_ops_since_clear = 0;
-        }
+        // Clear WAL unconditionally after successful metadata flush
+        // All operations are now persisted in the main file, WAL is redundant.
+        // This prevents duplicate document writes on next startup's WAL replay.
+        self.wal.clear()?;
+        self.wal_ops_since_clear = 0;
 
         Ok(())
     }
@@ -844,6 +860,8 @@ impl StorageEngine {
     pub fn checkpoint(&mut self) -> Result<compaction::CheckpointStats> {
         // Get WAL size before checkpoint
         let wal_size_before = self.wal.file_size().unwrap_or(0);
+        // NOTE: wal_ops_since_clear is always 0 since per-commit increment was removed
+        // (2026-02-01 perf fix). WAL size is the meaningful metric now.
         let wal_ops_cleared = self.wal_ops_since_clear;
 
         // First flush metadata to ensure document_catalog is persisted
@@ -1149,7 +1167,7 @@ impl StorageEngine {
     fn commit_transaction_internal(
         &mut self,
         transaction: &mut Transaction,
-        sync_file: bool,
+        _sync_file: bool,
     ) -> Result<()> {
         use crate::transaction::Operation;
         use crate::wal::{WALEntry, WALEntryType};
@@ -1345,49 +1363,34 @@ impl StorageEngine {
             }
         }
 
-        // Step 8: Flush metadata to disk (CRITICAL FIX for crash safety)
+        // Step 8: Metadata persistence deferred to periodic checkpoint
         //
-        // BUG FIXED (2024-12-26): Previously, commit_transaction only synced document
-        // data but NOT the header (data_end_offset, metadata_offset). This caused:
-        // 1. New documents written past old metadata_offset
-        // 2. On crash: header still points to old metadata location
-        // 3. Old metadata area now contains document data (e.g., '{"_i...')
-        // 4. Recovery reads document bytes as metadata size → corruption
+        // PERF FIX (2026-02-01): Removed per-commit flush_metadata() and
+        // ensure_metadata_snapshot(). With 130K+ documents, these serialized
+        // the ENTIRE document_catalog (~6MB) TWICE per insert (WAL + file),
+        // plus 2 extra fsyncs. Total: ~12MB I/O + 3 fsyncs per 10KB insert.
         //
-        // FIX: flush_metadata() updates header with current data_end_offset,
-        // ensuring crash recovery always finds valid metadata.
+        // Now metadata is persisted ONLY during:
+        // - Periodic checkpoint (every 120s) via checkpoint()
+        // - Graceful shutdown via close() / Drop
         //
-        // Isolation note:
-        // - The current engine targets **read committed**: a transaction's writes
-        //   only become visible after WAL commit + metadata/catalog update.
-        // - No repeatable-read guarantees: long-running queries may see new commits
-        //   mid-scan, and lost updates are possible if clients overwrite each other.
-        if sync_file {
-            if self.metadata_dirty {
-                self.ensure_metadata_snapshot()?;
-            }
-            self.flush_metadata()?;
-            self.metadata_snapshot_pending = false;
-            // Note: flush_metadata() includes sync_all(), no extra sync needed
-        }
+        // Crash safety is maintained by WAL transaction entries (BEGIN + Operation
+        // with full document JSON + COMMIT). On recovery, recover_from_wal()
+        // replays committed transactions via apply_wal_operation() →
+        // write_document_full(), which reconstructs catalog + data_end_offset.
+        //
+        // WAL clear is also deferred to checkpoint (was every 100 commits).
+        // Without MetadataSnapshot entries (~6MB each), WAL grows only ~10KB
+        // per insert, so ~1MB per 100 inserts between checkpoints.
+        //
+        // Previous bug (2024-12-26) that motivated per-commit flush:
+        // header.data_end_offset was stale after crash → metadata corruption.
+        // This is now safe because recover_from_wal() replays all WAL
+        // transactions starting from the checkpointed data_end_offset,
+        // re-writing documents at their original positions.
 
         // Step 9: Mark transaction as committed
         transaction.mark_committed()?;
-
-        // Step 10: Periodically clear WAL to prevent unbounded growth
-        // BUG FIX (2026-01-11): WAL was never cleared in Safe mode because
-        // StorageEngine::flush() is only called on close/drop, not during normal operation.
-        // This caused WAL to grow to 29GB+ in long-running servers.
-        //
-        // FIX: Clear WAL every 100 commits after metadata has been flushed.
-        // Since metadata is already persisted (Step 8), WAL entries are no longer needed.
-        if sync_file {
-            self.wal_ops_since_clear += 1;
-            if self.wal_ops_since_clear >= 100 {
-                self.wal.clear()?;
-                self.wal_ops_since_clear = 0;
-            }
-        }
 
         Ok(())
     }
@@ -1556,15 +1559,22 @@ impl StorageEngine {
     /// Recover from WAL after crash
     ///
     /// Returns (committed_transactions, index_changes) for higher-level recovery
-    pub fn recover_from_wal(
-        &mut self,
-    ) -> Result<(Vec<Vec<crate::wal::WALEntry>>, Vec<RecoveredIndexChange>)> {
+    /// Recover from WAL: replay committed transactions and collect index changes
+    ///
+    /// Returns (recovered_tx_count, index_changes):
+    /// - recovered_tx_count: number of committed transactions replayed (0 = no recovery needed)
+    /// - index_changes: B+ tree index modifications to apply after storage recovery
+    ///
+    /// NOTE: Previously returned the full Vec<Vec<WALEntry>>, but the caller only
+    /// used .is_empty() on it. Returning count saves O(WAL_size) memory.
+    pub fn recover_from_wal(&mut self) -> Result<(usize, Vec<RecoveredIndexChange>)> {
         let recovered = self.wal.recover()?;
 
         if recovered.is_empty() {
-            return Ok((vec![], vec![]));
+            return Ok((0, vec![]));
         }
 
+        let recovered_count = recovered.len();
         let mut all_index_changes = Vec::new();
 
         // Replay each committed transaction
@@ -1637,12 +1647,15 @@ impl StorageEngine {
             }
         }
 
+        // Drop recovered entries to free memory before WAL clear I/O
+        drop(recovered);
+
         // Clear WAL after successful recovery
         self.wal.clear()?;
         self.metadata_snapshot_pending = false;
         self.wal_ops_since_clear = 0;
 
-        Ok((recovered, all_index_changes))
+        Ok((recovered_count, all_index_changes))
     }
 
     /// Rebuild document catalog from file after WAL recovery

@@ -443,7 +443,7 @@ fn test_recovery_ignores_aborted_transaction() {
     let (recovered, _) = storage.recover_from_wal().unwrap();
 
     // Aborted transaction should not be in recovered list
-    assert_eq!(recovered.len(), 0, "Aborted tx should not be recovered");
+    assert_eq!(recovered, 0, "Aborted tx should not be recovered");
 }
 
 /// Test: Empty WAL recovery
@@ -463,7 +463,7 @@ fn test_recovery_empty_wal() {
     let mut storage = StorageEngine::open(&db_path).unwrap();
     let (recovered, _) = storage.recover_from_wal().unwrap();
 
-    assert_eq!(recovered.len(), 0);
+    assert_eq!(recovered, 0);
 }
 
 /// Test: Multiple crash cycles
@@ -552,9 +552,13 @@ fn test_large_transaction_crash_recovery() {
     let mut storage = StorageEngine::open(&db_path).unwrap();
     let (recovered, _) = storage.recover_from_wal().unwrap();
 
-    assert_eq!(recovered.len(), 1);
-    // 102 entries: BEGIN + 100 OPERATIONs + COMMIT
-    assert_eq!(recovered[0].len(), 102);
+    assert_eq!(recovered, 1, "Should recover 1 committed transaction");
+    // Verify all 100 documents were recovered via storage state
+    let meta = storage.get_collection_meta("large_tx").unwrap();
+    assert_eq!(
+        meta.live_document_count, 100,
+        "Should have 100 live docs after recovery"
+    );
 }
 
 /// Test: WAL file doesn't exist (fresh start)
@@ -569,7 +573,7 @@ fn test_recovery_no_wal_file() {
 
     // Recovery on fresh WAL
     let (recovered, _) = storage.recover_from_wal().unwrap();
-    assert_eq!(recovered.len(), 0);
+    assert_eq!(recovered, 0);
 }
 
 /// Test: Checkpoint clears committed transactions
@@ -668,7 +672,7 @@ fn test_wal_recovery_metadata_convergence() {
         let (recovered, _) = storage.recover_from_wal().unwrap();
 
         // Should have recovered 1 transaction
-        assert_eq!(recovered.len(), 1, "Should recover 1 transaction");
+        assert_eq!(recovered, 1, "Should recover 1 transaction");
 
         // Verify metadata convergence
         let meta = storage.get_collection_meta("users").unwrap();
@@ -790,7 +794,7 @@ fn test_wal_recovery_mixed_operations_metadata() {
         let mut storage = StorageEngine::open(&db_path).unwrap();
         let (recovered, _) = storage.recover_from_wal().unwrap();
 
-        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered, 1);
 
         let meta = storage.get_collection_meta("mixed").unwrap();
 
