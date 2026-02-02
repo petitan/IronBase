@@ -827,26 +827,45 @@ impl IronBase {
             .collection(&collection_name)
             .map_err(ironbase_error_to_pyerr)?;
 
-        // Find all matching document IDs first
-        let options = ironbase_core::FindOptions::new().with_limit(100_000);
-        let docs = collection
-            .find_with_options(&query_json, options)
-            .map_err(ironbase_error_to_pyerr)?;
+        // Phase 1: Collect ALL matching _ids with skip pagination
+        let batch_size = 100_000;
+        let mut all_ids = Vec::new();
+        let mut skip = 0;
+        loop {
+            let mut options = ironbase_core::FindOptions::new()
+                .with_limit(batch_size)
+                .with_skip(skip);
+            let mut proj = HashMap::new();
+            proj.insert("_id".to_string(), 1);
+            options.projection = Some(proj);
 
+            let docs = collection
+                .find_with_options(&query_json, options)
+                .map_err(ironbase_error_to_pyerr)?;
+            let batch_len = docs.len();
+            for doc in docs {
+                if let Some(id) = doc.get("_id") {
+                    all_ids.push(id.clone());
+                }
+            }
+            if batch_len < batch_size {
+                break;
+            }
+            skip += batch_size;
+        }
+
+        // Phase 2: Update each by _id within the transaction
         let mut matched_count: u64 = 0;
         let mut modified_count: u64 = 0;
 
-        // Update each document within the transaction
-        for doc in docs {
-            if let Some(id) = doc.get("_id") {
-                let doc_query = serde_json::json!({"_id": id});
-                let (m, mod_c) = self
-                    .db
-                    .update_one_tx(&collection_name, &doc_query, update_json.clone(), tx_id)
-                    .map_err(ironbase_error_to_pyerr)?;
-                matched_count += m;
-                modified_count += mod_c;
-            }
+        for id in all_ids {
+            let doc_query = serde_json::json!({"_id": id});
+            let (m, mod_c) = self
+                .db
+                .update_one_tx(&collection_name, &doc_query, update_json.clone(), tx_id)
+                .map_err(ironbase_error_to_pyerr)?;
+            matched_count += m;
+            modified_count += mod_c;
         }
 
         let result = PyDict::new(py);
@@ -883,28 +902,43 @@ impl IronBase {
             .collection(&collection_name)
             .map_err(ironbase_error_to_pyerr)?;
 
-        // Find all matching document IDs first (only need _id)
-        let mut options = ironbase_core::FindOptions::new().with_limit(100_000);
-        let mut projection = HashMap::new();
-        projection.insert("_id".to_string(), 1);
-        options.projection = Some(projection);
+        // Phase 1: Collect ALL matching _ids with skip pagination
+        let batch_size = 100_000;
+        let mut all_ids = Vec::new();
+        let mut skip = 0;
+        loop {
+            let mut options = ironbase_core::FindOptions::new()
+                .with_limit(batch_size)
+                .with_skip(skip);
+            let mut proj = HashMap::new();
+            proj.insert("_id".to_string(), 1);
+            options.projection = Some(proj);
 
-        let docs = collection
-            .find_with_options(&query_json, options)
-            .map_err(ironbase_error_to_pyerr)?;
+            let docs = collection
+                .find_with_options(&query_json, options)
+                .map_err(ironbase_error_to_pyerr)?;
+            let batch_len = docs.len();
+            for doc in docs {
+                if let Some(id) = doc.get("_id") {
+                    all_ids.push(id.clone());
+                }
+            }
+            if batch_len < batch_size {
+                break;
+            }
+            skip += batch_size;
+        }
 
+        // Phase 2: Delete each by _id within the transaction
         let mut deleted_count: u64 = 0;
 
-        // Delete each document within the transaction
-        for doc in docs {
-            if let Some(id) = doc.get("_id") {
-                let doc_query = serde_json::json!({"_id": id});
-                let count = self
-                    .db
-                    .delete_one_tx(&collection_name, &doc_query, tx_id)
-                    .map_err(ironbase_error_to_pyerr)?;
-                deleted_count += count;
-            }
+        for id in all_ids {
+            let doc_query = serde_json::json!({"_id": id});
+            let count = self
+                .db
+                .delete_one_tx(&collection_name, &doc_query, tx_id)
+                .map_err(ironbase_error_to_pyerr)?;
+            deleted_count += count;
         }
 
         let result = PyDict::new(py);
@@ -2001,8 +2035,9 @@ impl Cursor {
 
     /// Skip N documents
     fn skip(&mut self, n: usize) {
-        // Advance position - next fetch will skip these
-        self.position += n;
+        // Calculate actually consumed docs (position = total fetched, batch remainder = unconsumed)
+        let consumed = self.position - self.current_batch.len() + self.batch_position;
+        self.position = consumed + n;
         self.current_batch.clear();
         self.batch_position = 0;
     }
