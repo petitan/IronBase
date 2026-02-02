@@ -64,6 +64,10 @@ struct Args {
     #[arg(short = 'k', long, env = "IRONBASE_API_KEY")]
     api_key: Option<String>,
 
+    /// Admin key for privileged operations (injected into tools/call arguments)
+    #[arg(long, env = "IRONBASE_ADMIN_KEY")]
+    admin_key: Option<String>,
+
     /// Accept invalid/self-signed certificates (env: 1/true/yes)
     #[arg(long, env = "MCP_INSECURE", value_parser = parse_bool_flexible, default_value = "false")]
     insecure: bool,
@@ -434,6 +438,25 @@ async fn wait_for_server(client: &reqwest::Client, url: &str, retries: u32) -> R
     Ok(())
 }
 
+/// Inject admin_key into tools/call arguments if configured.
+/// Only call this for tools/call requests — caller must check method first.
+fn inject_admin_key(request: &JsonRpcRequest, admin_key: &str) -> JsonRpcRequest {
+    let mut request = request.clone();
+    if let serde_json::Value::Object(ref mut params) = request.params {
+        if let Some(serde_json::Value::Object(ref mut arguments)) = params.get_mut("arguments") {
+            // Only inject if not already present (explicit value takes priority)
+            if !arguments.contains_key("admin_key") {
+                arguments.insert(
+                    "admin_key".to_string(),
+                    serde_json::Value::String(admin_key.to_string()),
+                );
+            }
+        }
+    }
+
+    request
+}
+
 /// Forward a single request to the server
 /// BUG #6 fix: Limit response body size to prevent memory exhaustion
 async fn forward_single(
@@ -441,10 +464,23 @@ async fn forward_single(
     args: &Args,
     request: &JsonRpcRequest,
 ) -> Result<Option<JsonRpcResponse>> {
+    // Inject admin_key into tools/call arguments if configured
+    let owned_request;
+    let request_ref = if let Some(ref admin_key) = args.admin_key {
+        if request.method == "tools/call" {
+            owned_request = inject_admin_key(request, admin_key);
+            &owned_request
+        } else {
+            request
+        }
+    } else {
+        request
+    };
+
     let mut req = client
         .post(&args.server)
         .header("Content-Type", "application/json")
-        .json(request);
+        .json(request_ref);
 
     // Add API key if configured
     if let Some(key) = &args.api_key {
@@ -706,6 +742,9 @@ async fn main() -> Result<()> {
     tracing::info!("Server: {}", args.server);
     if args.api_key.is_some() {
         tracing::info!("API key: configured");
+    }
+    if args.admin_key.is_some() {
+        tracing::info!("Admin key: configured (will inject into tools/call)");
     }
 
     // Build HTTP client with connection pooling

@@ -5,6 +5,7 @@
 #   .\build-and-install.ps1 -SourceDir "C:\Users\X\MongoLite"
 #   .\build-and-install.ps1 -GitRepo "https://github.com/petitan/IronBase.git"
 #   .\build-and-install.ps1 -SourceDir "C:\src\MongoLite" -Port 9090 -AdminKey "secret"
+#   .\build-and-install.ps1 -SourceDir "C:\src\MongoLite" -ApiKey "sk-mykey" -AdminKey "secret"
 #   .\build-and-install.ps1 -Uninstall
 #   .\build-and-install.ps1 -SourceDir "C:\src\MongoLite" -SkipService
 #   .\build-and-install.ps1 -SkipBuild -InstallDir "C:\Program Files\IronBase"
@@ -17,9 +18,11 @@ param(
     [string]$DataDir,
     [int]$Port = 8080,
     [string]$BindAddress = "0.0.0.0",
+    [string]$ApiKey,
     [string]$AdminKey,
     [string]$RustTarget = "x86_64-pc-windows-msvc",
     [switch]$SkipBuild,
+    [switch]$SkipBridge,
     [switch]$SkipService,
     [switch]$Uninstall
 )
@@ -31,6 +34,7 @@ $ErrorActionPreference = "Stop"
 # ---------------------------------------------------------------------------
 $ServiceName = "IronBaseService"
 $ExeName = "mcp-ironbase-server.exe"
+$BridgeExeName = "ironbase-bridge.exe"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -347,6 +351,76 @@ function Invoke-CargoBuild {
 }
 
 # ---------------------------------------------------------------------------
+# 4b. Build Bridge
+# ---------------------------------------------------------------------------
+
+function Invoke-BridgeBuild {
+    param([string]$SrcPath)
+
+    Write-Step "Building IronBase Bridge (release)"
+
+    $bridgeDir = Join-Path $SrcPath "ironbase-bridge"
+    if (-not (Test-Path $bridgeDir)) {
+        Write-Err "ironbase-bridge directory not found at: $bridgeDir"
+        exit 1
+    }
+
+    Write-Info "Building in: $bridgeDir"
+
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    Push-Location $bridgeDir
+    try {
+        $prevPref = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+
+        & cargo build --release 2>&1 | ForEach-Object {
+            $line = $_.ToString()
+            if ($line -match "error\[") {
+                Write-Host "  $line" -ForegroundColor Red
+            } elseif ($line -match "warning\[") {
+                Write-Host "  $line" -ForegroundColor Yellow
+            } else {
+                Write-Host "  $line" -ForegroundColor DarkGray
+            }
+        }
+
+        $ErrorActionPreference = $prevPref
+
+        if ($LASTEXITCODE -ne 0) {
+            Write-Err "Bridge build failed with exit code $LASTEXITCODE"
+            exit 1
+        }
+    } finally {
+        $ErrorActionPreference = $prevPref
+        Pop-Location
+    }
+
+    $sw.Stop()
+    $elapsed = $sw.Elapsed
+
+    # Verify binary exists
+    $builtExe = Join-Path $SrcPath "ironbase-bridge\target\release\$BridgeExeName"
+    if (-not (Test-Path $builtExe)) {
+        Write-Err "Bridge build succeeded but executable not found at: $builtExe"
+        exit 1
+    }
+
+    $exeSize = (Get-Item $builtExe).Length / 1MB
+    Write-Ok ("Bridge build complete in {0:mm\:ss} ({1:F1} MB)" -f $elapsed, $exeSize)
+
+    # Try to get version
+    try {
+        $version = & $builtExe --version 2>$null
+        if ($version) {
+            Write-Ok "Bridge version: $version"
+        }
+    } catch {}
+
+    return $builtExe
+}
+
+# ---------------------------------------------------------------------------
 # 5. Existing service handling
 # ---------------------------------------------------------------------------
 
@@ -398,6 +472,7 @@ function Remove-ExistingInstallation {
 function Install-IronBase {
     param(
         [string]$BuiltExePath,
+        [string]$BuiltBridgePath,
         [string]$TargetInstallDir,
         [string]$TargetDataDir
     )
@@ -426,6 +501,20 @@ function Install-IronBase {
         Write-Ok "Installed: $destExe"
     }
 
+    # Copy bridge executable
+    if ($BuiltBridgePath -and (Test-Path $BuiltBridgePath)) {
+        $destBridge = Join-Path $TargetInstallDir $BridgeExeName
+        $bridgeSrcResolved = (Resolve-Path $BuiltBridgePath).Path
+        $bridgeDestResolved = if (Test-Path $destBridge) { (Resolve-Path $destBridge).Path } else { "" }
+        if ($bridgeSrcResolved -eq $bridgeDestResolved) {
+            Write-Ok "Bridge already in place: $destBridge"
+        } else {
+            Write-Info "Copying bridge executable..."
+            Copy-Item -Path $BuiltBridgePath -Destination $destBridge -Force
+            Write-Ok "Bridge installed: $destBridge"
+        }
+    }
+
     # Copy embedding model if available in source
     $embeddingDest = Join-Path $TargetDataDir "cc.hu.300.ironbase.bin"
     if (-not (Test-Path $embeddingDest)) {
@@ -449,6 +538,16 @@ function Install-IronBase {
         }
     } else {
         Write-Info "Embedding model already present."
+    }
+
+    # Generate API key if not provided
+    $apiKeyValue = $script:ApiKey
+    if (-not $apiKeyValue) {
+        $bytes = New-Object byte[] 16
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+        $apiKeyValue = "sk-" + ([BitConverter]::ToString($bytes) -replace '-', '').ToLower()
+        Write-Ok "Generated API key: $apiKeyValue"
+        Write-Warn "Save this key! You will need it for API access."
     }
 
     # Generate admin key if not provided
@@ -553,11 +652,53 @@ fasttext_model = "$embeddingPathForward"
         Write-Warn "Config already exists, not overwriting: $configPath"
     }
 
-    # Store admin key in a separate file for reference
-    $keyFile = Join-Path $TargetDataDir "admin.key"
-    if (-not (Test-Path $keyFile)) {
-        $adminKeyValue | Set-Content -Path $keyFile -Encoding UTF8
-        Write-Ok "Admin key saved to: $keyFile"
+    # Store keys in separate files for reference
+    $adminKeyFile = Join-Path $TargetDataDir "admin.key"
+    if (-not (Test-Path $adminKeyFile)) {
+        $adminKeyValue | Set-Content -Path $adminKeyFile -Encoding UTF8
+        Write-Ok "Admin key saved to: $adminKeyFile"
+    }
+
+    $apiKeyFile = Join-Path $TargetDataDir "api.key"
+    if (-not (Test-Path $apiKeyFile)) {
+        $apiKeyValue | Set-Content -Path $apiKeyFile -Encoding UTF8
+        Write-Ok "API key saved to: $apiKeyFile"
+    }
+
+    # Generate Claude Desktop config JSON
+    $bridgeInstalled = Join-Path $TargetInstallDir $BridgeExeName
+    if (Test-Path $bridgeInstalled) {
+        $claudeConfigPath = Join-Path $TargetDataDir "claude_desktop_config.json"
+        Write-Info "Generating Claude Desktop config..."
+
+        # Escape backslashes for JSON
+        $bridgePathJson = $bridgeInstalled -replace '\\', '\\\\'
+        $serverUrl = "http://localhost:$($script:Port)/mcp"
+
+        $claudeConfig = @"
+{
+  "mcpServers": {
+    "ironbase": {
+      "command": "$bridgePathJson",
+      "args": [
+        "--server", "$serverUrl",
+        "--health-retries", "1"
+      ],
+      "env": {
+        "IRONBASE_API_KEY": "$apiKeyValue",
+        "IRONBASE_ADMIN_KEY": "$adminKeyValue"
+      }
+    }
+  }
+}
+"@
+
+        $claudeConfig | Set-Content -Path $claudeConfigPath -Encoding UTF8
+        Write-Ok "Claude Desktop config: $claudeConfigPath"
+        Write-Info "Copy/merge this into: %APPDATA%\Claude\claude_desktop_config.json"
+    } else {
+        Write-Warn "Bridge not installed, skipping Claude Desktop config generation."
+        Write-Info "Build with bridge: remove -SkipBridge flag"
     }
 
     # Install Windows Service
@@ -721,16 +862,42 @@ function Write-Summary {
 
     Write-Host "  Install dir:   $TargetInstallDir" -ForegroundColor White
     Write-Host "  Data dir:      $TargetDataDir" -ForegroundColor White
-    Write-Host "  Config:        $(Join-Path $TargetDataDir 'config.toml')" -ForegroundColor White
+    Write-Host "  Config:        $(Join-Path $TargetInstallDir 'config.toml')" -ForegroundColor White
     Write-Host "  DB:            $(Join-Path $TargetDataDir 'ironbase_data.mlite')" -ForegroundColor White
     Write-Host "  Logs:          $(Join-Path $TargetDataDir 'log')" -ForegroundColor White
     Write-Host "  Port:          $($script:Port)" -ForegroundColor White
 
+    # Bridge
+    $bridgePath = Join-Path $TargetInstallDir $BridgeExeName
+    if (Test-Path $bridgePath) {
+        try {
+            $bridgeVer = & $bridgePath --version 2>$null
+            if ($bridgeVer) {
+                Write-Host "  Bridge:        $bridgeVer" -ForegroundColor White
+            }
+        } catch {
+            Write-Host "  Bridge:        installed" -ForegroundColor White
+        }
+    }
+
+    # API key
+    $apiKeyFile = Join-Path $TargetDataDir "api.key"
+    if (Test-Path $apiKeyFile) {
+        $apiKey = (Get-Content $apiKeyFile -Raw).Trim()
+        Write-Host "  API key:       $apiKey" -ForegroundColor Yellow
+    }
+
     # Admin key
-    $keyFile = Join-Path $TargetDataDir "admin.key"
-    if (Test-Path $keyFile) {
-        $key = Get-Content $keyFile -Raw
-        Write-Host "  Admin key:     $($key.Trim())" -ForegroundColor Yellow
+    $adminKeyFile = Join-Path $TargetDataDir "admin.key"
+    if (Test-Path $adminKeyFile) {
+        $adminKey = (Get-Content $adminKeyFile -Raw).Trim()
+        Write-Host "  Admin key:     $adminKey" -ForegroundColor Yellow
+    }
+
+    # Claude Desktop config
+    $claudeConfig = Join-Path $TargetDataDir "claude_desktop_config.json"
+    if (Test-Path $claudeConfig) {
+        Write-Host "  Claude config: $claudeConfig" -ForegroundColor Cyan
     }
 
     # Service status
@@ -748,6 +915,15 @@ function Write-Summary {
     Write-Host "    Restart-Service $ServiceName       # Restart" -ForegroundColor DarkGray
     Write-Host "    Invoke-WebRequest http://localhost:$($script:Port)/health  # Health check" -ForegroundColor DarkGray
     Write-Host ""
+
+    # Claude Desktop integration hint
+    $claudeConfigFile = Join-Path $TargetDataDir "claude_desktop_config.json"
+    if (Test-Path $claudeConfigFile) {
+        Write-Host "  Claude Desktop integration:" -ForegroundColor Cyan
+        Write-Host "    Copy/merge $claudeConfigFile" -ForegroundColor DarkGray
+        Write-Host "    into: `$env:APPDATA\Claude\claude_desktop_config.json" -ForegroundColor DarkGray
+        Write-Host ""
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -785,11 +961,18 @@ function Uninstall-IronBase {
         Write-Ok "Service removed."
     }
 
-    # Remove executable
+    # Remove executables
     if (Test-Path $exePath) {
-        Write-Info "Removing executable..."
+        Write-Info "Removing server executable..."
         Remove-Item -Path $exePath -Force
-        Write-Ok "Executable removed."
+        Write-Ok "Server executable removed."
+    }
+
+    $bridgePath = Join-Path $TargetInstallDir $BridgeExeName
+    if (Test-Path $bridgePath) {
+        Write-Info "Removing bridge executable..."
+        Remove-Item -Path $bridgePath -Force
+        Write-Ok "Bridge executable removed."
     }
 
     # Remove backup if present
@@ -857,6 +1040,8 @@ if (-not $SkipService) {
 $builtExePath = $null
 $buildElapsed = $null
 
+$builtBridgePath = $null
+
 if (-not $SkipBuild) {
     Assert-RustToolchain
     Assert-VsBuildTools
@@ -864,15 +1049,22 @@ if (-not $SkipBuild) {
     # Get source
     $srcPath = Get-SourceDirectory
 
-    # Build
+    # Build MCP server
     $buildSw = [System.Diagnostics.Stopwatch]::StartNew()
     $builtExePath = Invoke-CargoBuild -SrcPath $srcPath
     $buildSw.Stop()
     $buildElapsed = $buildSw.Elapsed
+
+    # Build bridge (unless -SkipBridge)
+    if (-not $SkipBridge) {
+        $builtBridgePath = Invoke-BridgeBuild -SrcPath $srcPath
+    } else {
+        Write-Step "Skipping bridge build (-SkipBridge)"
+    }
 } else {
     Write-Step "Skipping build (-SkipBuild)"
 
-    # Look for pre-built binary
+    # Look for pre-built server binary
     $candidates = @(
         (Join-Path $InstallDir $ExeName)
     )
@@ -884,14 +1076,36 @@ if (-not $SkipBuild) {
     foreach ($c in $candidates) {
         if (Test-Path $c) {
             $builtExePath = (Resolve-Path $c).Path
-            Write-Ok "Found existing binary: $builtExePath"
+            Write-Ok "Found existing server binary: $builtExePath"
             break
         }
     }
 
     if (-not $builtExePath) {
-        Write-Err "No pre-built binary found. Remove -SkipBuild to build from source."
+        Write-Err "No pre-built server binary found. Remove -SkipBuild to build from source."
         exit 1
+    }
+
+    # Look for pre-built bridge binary
+    if (-not $SkipBridge) {
+        $bridgeCandidates = @(
+            (Join-Path $InstallDir $BridgeExeName)
+        )
+        if ($SourceDir) {
+            $bridgeCandidates += Join-Path $SourceDir "ironbase-bridge\target\release\$BridgeExeName"
+        }
+
+        foreach ($c in $bridgeCandidates) {
+            if (Test-Path $c) {
+                $builtBridgePath = (Resolve-Path $c).Path
+                Write-Ok "Found existing bridge binary: $builtBridgePath"
+                break
+            }
+        }
+
+        if (-not $builtBridgePath) {
+            Write-Warn "No pre-built bridge binary found. Claude Desktop config will not be generated."
+        }
     }
 }
 
@@ -899,7 +1113,7 @@ if (-not $SkipBuild) {
 Remove-ExistingInstallation -TargetInstallDir $InstallDir
 
 # --- Install ---
-$installedExe = Install-IronBase -BuiltExePath $builtExePath -TargetInstallDir $InstallDir -TargetDataDir $DataDir
+$installedExe = Install-IronBase -BuiltExePath $builtExePath -BuiltBridgePath $builtBridgePath -TargetInstallDir $InstallDir -TargetDataDir $DataDir
 
 # --- Start & verify ---
 Start-AndVerify -InstalledExe $installedExe -HttpPort $Port
