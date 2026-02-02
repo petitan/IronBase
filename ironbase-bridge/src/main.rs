@@ -350,7 +350,6 @@ fn build_client(args: &Args) -> Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(2)
         .pool_idle_timeout(Duration::from_secs(60))
-        .timeout(Duration::from_secs(30))
         .use_rustls_tls();
 
     // BUG #8 fix: Enhanced warning for insecure mode
