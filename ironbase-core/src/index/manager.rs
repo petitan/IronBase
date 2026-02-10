@@ -84,6 +84,18 @@ pub struct IndexManager {
 }
 
 impl IndexManager {
+    /// Check if an index with this name already exists in ANY index type
+    ///
+    /// This prevents cross-type name collisions (e.g., a fuzzy index with the
+    /// same name as a vector index).
+    fn index_exists(&self, name: &str) -> bool {
+        self.btree_indexes.contains_key(name)
+            || self.legacy_indexes.contains_key(name)
+            || self.fuzzy_indexes.contains_key(name)
+            || self.fulltext_indexes.contains_key(name)
+            || self.vector_indexes.contains_key(name)
+    }
+
     pub fn new() -> Self {
         IndexManager {
             btree_indexes: HashMap::new(),
@@ -149,7 +161,7 @@ impl IndexManager {
         unique: bool,
         sparse: bool,
     ) -> Result<()> {
-        if self.btree_indexes.contains_key(&name) {
+        if self.index_exists(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
@@ -178,7 +190,7 @@ impl IndexManager {
         field: String,
         unique: bool,
     ) -> Result<()> {
-        if self.btree_indexes.contains_key(&name) {
+        if self.index_exists(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
@@ -217,7 +229,7 @@ impl IndexManager {
         unique: bool,
         sparse: bool,
     ) -> Result<()> {
-        if self.btree_indexes.contains_key(&name) {
+        if self.index_exists(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
@@ -240,7 +252,7 @@ impl IndexManager {
     pub fn create_index(&mut self, definition: IndexDefinition) -> Result<()> {
         let name = definition.name.clone();
 
-        if self.legacy_indexes.contains_key(&name) {
+        if self.index_exists(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
@@ -478,12 +490,7 @@ impl IndexManager {
         threshold: f64,
         storage_path: Option<PathBuf>,
     ) -> Result<()> {
-        // Check if any index with this name already exists
-        if self.btree_indexes.contains_key(&name)
-            || self.legacy_indexes.contains_key(&name)
-            || self.fuzzy_indexes.contains_key(&name)
-            || self.fulltext_indexes.contains_key(&name)
-        {
+        if self.index_exists(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
@@ -582,12 +589,7 @@ impl IndexManager {
         accent_folding: Option<bool>,
         storage_path: Option<PathBuf>,
     ) -> Result<()> {
-        // Check if any index with this name already exists
-        if self.btree_indexes.contains_key(&name)
-            || self.legacy_indexes.contains_key(&name)
-            || self.fuzzy_indexes.contains_key(&name)
-            || self.fulltext_indexes.contains_key(&name)
-        {
+        if self.index_exists(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
@@ -764,13 +766,7 @@ impl IndexManager {
         config: VectorIndexConfig,
         storage_path: Option<PathBuf>,
     ) -> Result<()> {
-        // Check if any index with this name already exists
-        if self.btree_indexes.contains_key(&name)
-            || self.legacy_indexes.contains_key(&name)
-            || self.fuzzy_indexes.contains_key(&name)
-            || self.fulltext_indexes.contains_key(&name)
-            || self.vector_indexes.contains_key(&name)
-        {
+        if self.index_exists(&name) {
             return Err(IronBaseError::IndexError(format!(
                 "Index already exists: {}",
                 name
@@ -1587,5 +1583,125 @@ impl IndexManager {
 impl Default for IndexManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that index names must be unique across ALL index types.
+    /// Previously, fuzzy and fulltext creation did not check vector_indexes,
+    /// and btree/legacy only checked their own map.
+    #[test]
+    fn test_cross_type_index_name_collision() {
+        let mut mgr = IndexManager::new();
+
+        // Create a vector index first
+        let config = VectorIndexConfig::new(128).with_field("embedding");
+        mgr.create_vector_index(
+            "shared_name".to_string(),
+            "embedding".to_string(),
+            config,
+            None,
+        )
+        .unwrap();
+
+        // Fuzzy with same name should fail
+        let err = mgr
+            .create_fuzzy_index(
+                "shared_name".to_string(),
+                "name".to_string(),
+                FuzzyAlgorithm::JaroWinkler,
+                0.8,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+
+        // Fulltext with same name should fail
+        let err = mgr
+            .create_fulltext_index(
+                "shared_name".to_string(),
+                "content".to_string(),
+                crate::fulltext::FtsLanguage::English,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+
+        // Btree with same name should fail
+        let err = mgr
+            .create_btree_index("shared_name".to_string(), "age".to_string(), false, false)
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+
+        // Btree CI with same name should fail
+        let err = mgr
+            .create_btree_index_ci("shared_name".to_string(), "email".to_string(), false)
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+
+        // Compound with same name should fail
+        let err = mgr
+            .create_compound_index(
+                "shared_name".to_string(),
+                vec!["a".to_string(), "b".to_string()],
+                false,
+                false,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+
+        // Legacy with same name should fail
+        let err = mgr
+            .create_index(IndexDefinition {
+                name: "shared_name".to_string(),
+                field: "x".to_string(),
+                index_type: crate::index::legacy::IndexType::Regular,
+                unique: false,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+    }
+
+    /// Test the reverse: btree index blocks vector/fuzzy/fulltext creation
+    #[test]
+    fn test_btree_blocks_other_types() {
+        let mut mgr = IndexManager::new();
+
+        // Create btree first
+        mgr.create_btree_index("idx1".to_string(), "field".to_string(), false, false)
+            .unwrap();
+
+        // Vector with same name should fail
+        let config = VectorIndexConfig::new(64).with_field("vec");
+        let err = mgr
+            .create_vector_index("idx1".to_string(), "vec".to_string(), config, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+
+        // Fuzzy with same name should fail
+        let err = mgr
+            .create_fuzzy_index(
+                "idx1".to_string(),
+                "name".to_string(),
+                FuzzyAlgorithm::JaroWinkler,
+                0.8,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
+
+        // Fulltext with same name should fail
+        let err = mgr
+            .create_fulltext_index(
+                "idx1".to_string(),
+                "text".to_string(),
+                crate::fulltext::FtsLanguage::English,
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("Index already exists"));
     }
 }
