@@ -63,6 +63,46 @@ use super::fuzzy::{FuzzyAlgorithm, FuzzyIndex};
 use super::key::{IndexKey, IndexPrefixInfo};
 use super::legacy::{Index, IndexDefinition};
 
+/// Generate a `get_*_index_mut` method that auto-marks the index as dirty.
+///
+/// The btree, fuzzy, and fulltext index types all follow the same pattern:
+/// check if the key exists in the index map, insert into the dirty set, return mutable ref.
+/// Vector indexes are excluded because they track dirty state internally.
+macro_rules! impl_get_index_mut_dirty {
+    ($method_name:ident, $index_map:ident, $dirty_set:ident, $index_type:ty) => {
+        /// Get index (mutable), auto-marking it as dirty for checkpoint persistence.
+        pub fn $method_name(&mut self, name: &str) -> Option<&mut $index_type> {
+            if self.$index_map.contains_key(name) {
+                self.$dirty_set.insert(name.to_string());
+            }
+            self.$index_map.get_mut(name)
+        }
+    };
+}
+
+/// Generate a `dirty_*_index_names` method that collects dirty index names.
+///
+/// The btree, fulltext, and fuzzy types all use the same HashSet-based dirty tracking.
+/// Vector indexes are excluded because they use internal `is_dirty()` tracking.
+macro_rules! impl_dirty_index_names {
+    ($method_name:ident, $dirty_set:ident) => {
+        /// Get names of dirty indexes for per-index flush.
+        pub fn $method_name(&self) -> Vec<String> {
+            self.$dirty_set.iter().cloned().collect()
+        }
+    };
+}
+
+/// Generate a `mark_*_dirty` method that inserts a name into the dirty set.
+macro_rules! impl_mark_dirty {
+    ($method_name:ident, $dirty_set:ident) => {
+        /// Mark an index as dirty (modified since last flush).
+        pub fn $method_name(&mut self, name: &str) {
+            self.$dirty_set.insert(name.to_string());
+        }
+    };
+}
+
 /// Index Manager - manages all indexes for a collection
 pub struct IndexManager {
     btree_indexes: HashMap<String, BPlusTree>,
@@ -118,20 +158,9 @@ impl IndexManager {
             || self.vector_indexes.values().any(|idx| idx.is_dirty())
     }
 
-    /// Mark a B+ tree index as dirty (modified since last flush)
-    pub fn mark_btree_dirty(&mut self, name: &str) {
-        self.dirty_btree_indexes.insert(name.to_string());
-    }
-
-    /// Mark a fulltext index as dirty
-    pub fn mark_fulltext_dirty(&mut self, name: &str) {
-        self.dirty_fulltext_indexes.insert(name.to_string());
-    }
-
-    /// Mark a fuzzy index as dirty
-    pub fn mark_fuzzy_dirty(&mut self, name: &str) {
-        self.dirty_fuzzy_indexes.insert(name.to_string());
-    }
+    impl_mark_dirty!(mark_btree_dirty, dirty_btree_indexes);
+    impl_mark_dirty!(mark_fulltext_dirty, dirty_fulltext_indexes);
+    impl_mark_dirty!(mark_fuzzy_dirty, dirty_fuzzy_indexes);
 
     /// Set file path for an index (required for two-phase commit)
     pub fn set_index_path(&mut self, index_name: &str, path: PathBuf) {
@@ -287,16 +316,12 @@ impl IndexManager {
         self.btree_indexes.get(name)
     }
 
-    /// Get B+ tree index (mutable)
-    ///
-    /// Note: This automatically marks the index as dirty since mutable access
-    /// implies modification. The index will be flushed on next checkpoint.
-    pub fn get_btree_index_mut(&mut self, name: &str) -> Option<&mut BPlusTree> {
-        if self.btree_indexes.contains_key(name) {
-            self.dirty_btree_indexes.insert(name.to_string());
-        }
-        self.btree_indexes.get_mut(name)
-    }
+    impl_get_index_mut_dirty!(
+        get_btree_index_mut,
+        btree_indexes,
+        dirty_btree_indexes,
+        BPlusTree
+    );
 
     /// Add a pre-loaded BPlusTree index (from .idx file)
     pub fn add_loaded_index(&mut self, tree: BPlusTree) {
@@ -514,14 +539,12 @@ impl IndexManager {
         self.fuzzy_indexes.get(name)
     }
 
-    /// Get fuzzy index (mutable)
-    /// Auto-marks the index as dirty for checkpoint persistence
-    pub fn get_fuzzy_index_mut(&mut self, name: &str) -> Option<&mut FuzzyIndex> {
-        if self.fuzzy_indexes.contains_key(name) {
-            self.dirty_fuzzy_indexes.insert(name.to_string());
-        }
-        self.fuzzy_indexes.get_mut(name)
-    }
+    impl_get_index_mut_dirty!(
+        get_fuzzy_index_mut,
+        fuzzy_indexes,
+        dirty_fuzzy_indexes,
+        FuzzyIndex
+    );
 
     /// Get fuzzy index for a field (if one exists)
     pub fn get_fuzzy_index_for_field(&self, field: &str) -> Option<&FuzzyIndex> {
@@ -618,16 +641,12 @@ impl IndexManager {
         self.fulltext_indexes.get(name)
     }
 
-    /// Get fulltext index by name (mutable)
-    ///
-    /// Note: This automatically marks the index as dirty since mutable access
-    /// implies modification. The index will be flushed on next checkpoint.
-    pub fn get_fulltext_index_mut(&mut self, name: &str) -> Option<&mut FulltextIndex> {
-        if self.fulltext_indexes.contains_key(name) {
-            self.dirty_fulltext_indexes.insert(name.to_string());
-        }
-        self.fulltext_indexes.get_mut(name)
-    }
+    impl_get_index_mut_dirty!(
+        get_fulltext_index_mut,
+        fulltext_indexes,
+        dirty_fulltext_indexes,
+        FulltextIndex
+    );
 
     /// Get fulltext index for a field (if one exists)
     pub fn get_fulltext_index_for_field(&self, field: &str) -> Option<&FulltextIndex> {
@@ -881,22 +900,9 @@ impl IndexManager {
 
     // ========== PER-INDEX FLUSH (for checkpoint lock contention fix) ==========
 
-    /// Get names of dirty B+ tree indexes (for per-index flush)
-    ///
-    /// Call under brief read lock, then flush one-by-one with write lock.
-    pub fn dirty_btree_index_names(&self) -> Vec<String> {
-        self.dirty_btree_indexes.iter().cloned().collect()
-    }
-
-    /// Get names of dirty fulltext indexes (for per-index flush)
-    pub fn dirty_fulltext_index_names(&self) -> Vec<String> {
-        self.dirty_fulltext_indexes.iter().cloned().collect()
-    }
-
-    /// Get names of dirty fuzzy indexes (for per-index flush)
-    pub fn dirty_fuzzy_index_names(&self) -> Vec<String> {
-        self.dirty_fuzzy_indexes.iter().cloned().collect()
-    }
+    impl_dirty_index_names!(dirty_btree_index_names, dirty_btree_indexes);
+    impl_dirty_index_names!(dirty_fulltext_index_names, dirty_fulltext_indexes);
+    impl_dirty_index_names!(dirty_fuzzy_index_names, dirty_fuzzy_indexes);
 
     /// Get names of dirty vector indexes (for per-index flush)
     ///
