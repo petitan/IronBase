@@ -26,7 +26,14 @@ fn sanitize_component(name: &str) -> String {
     }
 }
 
-fn build_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf> {
+/// Build an index file path with a given extension.
+///
+/// All index types use the same naming scheme: `{db_stem}_{sanitized_name}_{hash}.{ext}`
+fn build_index_file_path_with_ext(
+    db_file_path: &str,
+    index_name: &str,
+    extension: &str,
+) -> Option<PathBuf> {
     if db_file_path.is_empty() {
         return None;
     }
@@ -44,12 +51,16 @@ fn build_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf
     let hash = hasher.finish();
 
     // Use full 64-bit hash to minimize collision risk with many indexes
-    let file_name = format!("{}_{}_{:016x}.idx", stem, safe_component, hash);
+    let file_name = format!("{}_{}_{:016x}.{}", stem, safe_component, hash, extension);
     let parent = base_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
     Some(parent.join(file_name))
+}
+
+fn build_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf> {
+    build_index_file_path_with_ext(db_file_path, index_name, "idx")
 }
 
 pub fn persist_index_to_disk<F, T>(db_file_path: &str, index_name: &str, save_fn: F) -> Result<()>
@@ -91,29 +102,7 @@ pub fn try_load_index_from_file(
 
 /// Build the .ftidx file path for a fulltext index
 pub fn build_fulltext_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf> {
-    if db_file_path.is_empty() {
-        return None;
-    }
-
-    let base_path = Path::new(db_file_path);
-    let stem = base_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("database");
-
-    let safe_component = sanitize_component(index_name);
-    let mut hasher = DefaultHasher::new();
-    index_name.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    // Use full 64-bit hash to minimize collision risk with many indexes
-    let file_name = format!("{}_{}_{:016x}.ftidx", stem, safe_component, hash);
-    let parent = base_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    Some(parent.join(file_name))
+    build_index_file_path_with_ext(db_file_path, index_name, "ftidx")
 }
 
 /// Try to load a fulltext index from .ftidx file (graceful degradation)
@@ -147,29 +136,7 @@ pub fn try_load_fulltext_index_from_file(
 
 /// Build the .fzidx file path for a fuzzy index
 pub fn build_fuzzy_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf> {
-    if db_file_path.is_empty() {
-        return None;
-    }
-
-    let base_path = Path::new(db_file_path);
-    let stem = base_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or("database");
-
-    let safe_component = sanitize_component(index_name);
-    let mut hasher = DefaultHasher::new();
-    index_name.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    // Use full 64-bit hash to minimize collision risk with many indexes
-    let file_name = format!("{}_{}_{:016x}.fzidx", stem, safe_component, hash);
-    let parent = base_path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    Some(parent.join(file_name))
+    build_index_file_path_with_ext(db_file_path, index_name, "fzidx")
 }
 
 /// Try to load a fuzzy index from .fzidx file (graceful degradation)
