@@ -327,28 +327,19 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         self.count_with_scan(query_json, ctx)
     }
 
-    /// Adjust index count for tombstones.
+    /// Return index-based count directly.
     ///
-    /// If no tombstones exist, returns the raw count directly.
-    /// Otherwise, applies an estimated adjustment ratio.
+    /// The index is always accurate because:
+    /// - Normal deletes remove entries via `remove_from_indexes()` (raw_operations.rs)
+    /// - Crash recovery rebuilds indexes from catalog, skipping tombstones (collections.rs)
+    /// - Clean shutdown persists indexes after delete operations
+    ///
+    /// BUG FIX #30: The previous ratio-based adjustment (`live_count / catalog_len`)
+    /// was wrong because it applied a GLOBAL tombstone ratio to LOCAL (filtered) counts.
+    /// Example: 20A + 20B docs, delete all B → ratio=0.5, but index count for A=20
+    /// was incorrectly reduced to 10.
     fn adjust_count_for_tombstones(&self, raw_count: usize) -> Result<u64> {
-        let storage = self.storage.read();
-        let live_count = storage.get_live_count(&self.name).unwrap_or(0) as usize;
-
-        let meta = storage
-            .get_collection_meta(&self.name)
-            .ok_or_else(|| IronBaseError::CollectionNotFound(self.name.clone()))?;
-        let catalog_len = meta.document_catalog.len();
-
-        if live_count == catalog_len || catalog_len == 0 {
-            // No tombstones - trust index count
-            Ok(raw_count as u64)
-        } else {
-            // Apply tombstone ratio estimation
-            // This is approximate but avoids loading all documents
-            let live_ratio = live_count as f64 / catalog_len as f64;
-            Ok((raw_count as f64 * live_ratio).round() as u64)
-        }
+        Ok(raw_count as u64)
     }
 
     /// Count by chunked parallel scan (fast AND memory-safe)
