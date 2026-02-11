@@ -689,6 +689,12 @@ cd mcp-server && cargo build --release
 | `IRONBASE_ADMIN_KEY` | Admin kulcs |
 | `IRONBASE_PORT` | Port (8080) |
 
+**FONTOS: Anthropic API schema korlátozás**
+- `inputSchema` top-level szintjén TILOS `oneOf`, `allOf`, `anyOf` használata
+- Nested (property-n belüli) használat megengedett
+- Ha egy tool-nak alternatív mezőkre van szüksége (pl. `field` VAGY `fields`), a description-ben jelezd és server-side validáld
+- Teszt: `test_no_top_level_oneof_allof_anyof` (`definitions/mod.rs`)
+
 <details>
 <summary>Struktúra</summary>
 

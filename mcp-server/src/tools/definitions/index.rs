@@ -22,11 +22,7 @@ pub fn tools() -> Vec<Value> {
                     "unique": fields::unique(),
                     "sparse": fields::sparse()
                 },
-                "required": ["collection"],
-                "anyOf": [
-                    { "required": ["field"] },
-                    { "required": ["fields"] }
-                ]
+                "required": ["collection"]
             }
         }),
         json!({

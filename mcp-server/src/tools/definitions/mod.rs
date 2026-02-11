@@ -181,4 +181,31 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn test_no_top_level_oneof_allof_anyof() {
+        // Anthropic API rejects oneOf/allOf/anyOf at the top level of inputSchema.
+        // Nested usage (inside properties) is allowed.
+        let tools_json = get_all_tools_json();
+        let tools = tools_json["tools"].as_array().unwrap();
+
+        for tool in tools {
+            let name = tool
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown");
+            let schema = tool.get("inputSchema").expect("Missing inputSchema");
+
+            for keyword in &["oneOf", "allOf", "anyOf"] {
+                assert!(
+                    schema.get(keyword).is_none(),
+                    "Tool '{}' has '{}' at top level of inputSchema. \
+                     Anthropic API does not support this. \
+                     Move the logic into the description or handle it server-side.",
+                    name,
+                    keyword
+                );
+            }
+        }
+    }
 }
