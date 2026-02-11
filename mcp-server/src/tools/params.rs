@@ -592,14 +592,15 @@ pub struct HybridSearchParams {
     #[serde(default = "default_rerank")]
     pub rerank: bool,
 
-    /// Enable deduplication (default: true)
-    /// Removes results with duplicate content prefixes
+    /// Enable MMR diversity reranking (default: true)
+    /// Uses embedding cosine similarity to select diverse results
     #[serde(default = "default_deduplicate")]
     pub deduplicate: bool,
 
-    /// Content prefix length for deduplication (default: 100)
-    #[serde(default = "default_dedup_threshold")]
-    pub dedup_threshold: usize,
+    /// MMR lambda parameter for diversity vs relevance trade-off (default: 0.5)
+    /// 1.0 = pure relevance, 0.0 = pure diversity
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f64,
 }
 
 fn default_hybrid_limit() -> usize {
@@ -617,8 +618,8 @@ fn default_rerank() -> bool {
 fn default_deduplicate() -> bool {
     true
 }
-fn default_dedup_threshold() -> usize {
-    100
+fn default_mmr_lambda() -> f64 {
+    0.5
 }
 
 // ============================================================================
@@ -677,8 +678,10 @@ pub struct RagSearchParams {
     pub rerank: bool,
     #[serde(default = "default_deduplicate")]
     pub deduplicate: bool,
-    #[serde(default = "default_dedup_threshold")]
-    pub dedup_threshold: usize,
+    /// MMR lambda parameter for diversity vs relevance trade-off (default: 0.5)
+    /// 1.0 = pure relevance, 0.0 = pure diversity
+    #[serde(default = "default_mmr_lambda")]
+    pub mmr_lambda: f64,
     pub projection: Option<Value>,
     pub provider: Option<String>,
 }

@@ -241,6 +241,55 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 }
 ```
 
+### Vector & Hybrid Search
+
+| Tool | Description |
+|------|-------------|
+| `vector_search` | Vector similarity search (requires HNSW index) |
+| `hybrid_search` | RRF fusion of vector + fulltext results with MMR diversity |
+| `rag_search` | Semantic search with auto-embedding and MMR diversity |
+
+Both `hybrid_search` and `rag_search` use **MMR (Maximal Marginal Relevance)** to remove near-duplicate results using embedding cosine similarity.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `mmr_lambda` | number | `0.5` | Balance between relevance (`1.0`) and diversity (`0.0`) |
+| `deduplicate` | boolean | `true` | Enable/disable MMR diversity reranking |
+| `rerank` | boolean | `true` | Enable reranking: phrase match (1.3x), keyword density (1.0–1.1x), short content penalty (0.8x) |
+
+**Example - Hybrid Search:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "hybrid_search",
+    "arguments": {
+      "collection": "articles",
+      "query": "keresett kifejezés",
+      "vector": [0.1, 0.2, 0.3],
+      "mmr_lambda": 0.3,
+      "limit": 10
+    }
+  }
+}
+```
+
+**Example - RAG Search (auto-embeds query):**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "rag_search",
+    "arguments": {
+      "collection": "articles",
+      "query": "keresett kifejezés",
+      "mmr_lambda": 0.5,
+      "limit": 10
+    }
+  }
+}
+```
+
 ### Schema Validation
 
 | Tool | Description |

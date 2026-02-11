@@ -5,7 +5,7 @@
 //! v2 Features (2026-01):
 //! - Query preprocessing via pluggable language preprocessors
 //! - Reranking: heading boost, phrase match, keyword density
-//! - Deduplication: content prefix and heading based
+//! - MMR diversity reranking: embedding cosine similarity based
 
 use super::common::fields;
 use serde_json::{json, Value};
@@ -14,7 +14,7 @@ pub fn tools() -> Vec<Value> {
     vec![json!({
         "name": "hybrid_search",
         "title": "Hybrid Search (RRF)",
-        "description": "Combines vector similarity and fulltext search using Reciprocal Rank Fusion (RRF). Includes query preprocessing, reranking, and deduplication. Returns documents sorted by final score.",
+        "description": "Combines vector similarity and fulltext search using Reciprocal Rank Fusion (RRF). Includes reranking and MMR diversity reranking (cosine similarity based deduplication). Use mmr_lambda to tune relevance vs diversity. Returns documents sorted by final score.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -72,15 +72,15 @@ pub fn tools() -> Vec<Value> {
                 },
                 "deduplicate": {
                     "type": "boolean",
-                    "description": "Enable deduplication (default: true). Removes results with duplicate content prefixes (based on text_field).",
+                    "description": "Enable MMR (Maximal Marginal Relevance) diversity reranking (default: true). Uses embedding cosine similarity to remove near-duplicate results while preserving diversity.",
                     "default": true
                 },
-                "dedup_threshold": {
-                    "type": "integer",
-                    "description": "Content prefix length for deduplication (default: 100). Results with matching first N characters are considered duplicates.",
-                    "default": 100,
-                    "minimum": 10,
-                    "maximum": 1000
+                "mmr_lambda": {
+                    "type": "number",
+                    "description": "MMR lambda: balance between relevance (1.0) and diversity (0.0). Default: 0.5 (balanced).",
+                    "default": 0.5,
+                    "minimum": 0.0,
+                    "maximum": 1.0
                 }
             },
             "required": ["collection", "vector", "query"]

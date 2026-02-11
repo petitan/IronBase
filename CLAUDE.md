@@ -831,6 +831,12 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 - Keyword density: 1.0-1.1x
 - Short content penalty: 0.8x
 
+**MMR diversity reranking (deduplication):**
+- Algoritmus: `mmr(c) = λ * relevance(c) - (1-λ) * max_sim(c, selected)`
+- `mmr_lambda`: 1.0 = pure relevance, 0.0 = pure diversity, 0.5 = balanced (default)
+- Cosine similarity: `ironbase_core::vector::simd::cosine_similarity()` (SIMD)
+- Embedding nélküli doc-ok: relevance order (nincs diversity penalty)
+
 **Eredmény metadata:**
 ```json
 {

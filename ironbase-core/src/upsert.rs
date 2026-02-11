@@ -487,7 +487,9 @@ mod tests {
         let filter = json!({"user.email": "test@example.com"});
         let doc = filter_to_document(&filter);
 
-        let user = doc.get("user").unwrap();
+        let user = doc
+            .get("user")
+            .expect("dot notation should create nested 'user' object");
         assert_eq!(user, &json!({"email": "test@example.com"}));
     }
 
@@ -565,7 +567,9 @@ mod tests {
         let doc = create_upsert_document(&filter, &update);
 
         assert_eq!(doc.get("userId"), Some(&json!(1)));
-        let profile = doc.get("profile").unwrap();
+        let profile = doc
+            .get("profile")
+            .expect("dot notation should create nested 'profile' object");
         assert_eq!(profile.get("name"), Some(&json!("John")));
         assert_eq!(profile.get("age"), Some(&json!(30)));
     }
@@ -741,7 +745,11 @@ mod tests {
         let doc = create_upsert_document(&filter, &update);
 
         // Should still have only one item (no duplicate added)
-        let items = doc.get("items").unwrap().as_array().unwrap();
+        let items = doc
+            .get("items")
+            .expect("'items' field should exist")
+            .as_array()
+            .expect("'items' should be an array");
         assert_eq!(items.len(), 1);
     }
 
@@ -753,7 +761,11 @@ mod tests {
 
         let doc = create_upsert_document(&filter, &update);
 
-        let items = doc.get("items").unwrap().as_array().unwrap();
+        let items = doc
+            .get("items")
+            .expect("'items' field should exist")
+            .as_array()
+            .expect("'items' should be an array");
         assert_eq!(items.len(), 2);
     }
 
@@ -765,7 +777,11 @@ mod tests {
 
         let doc = create_upsert_document(&filter, &update);
 
-        let items = doc.get("items").unwrap().as_array().unwrap();
+        let items = doc
+            .get("items")
+            .expect("'items' field should exist")
+            .as_array()
+            .expect("'items' should be an array");
         assert_eq!(
             items.len(),
             1,

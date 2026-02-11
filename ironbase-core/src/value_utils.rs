@@ -246,7 +246,7 @@ pub fn set_nested_value(doc: &mut Value, path: &str, value: Value) {
                         map.insert(part.to_string(), Value::Object(serde_json::Map::new()));
                     }
                 }
-                current = map.get_mut(*part).unwrap();
+                current = map.get_mut(*part).expect("key was just inserted above");
             }
             Value::Array(ref mut arr) => {
                 if let Ok(index) = part.parse::<usize>() {

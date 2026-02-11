@@ -227,9 +227,17 @@ results = db.find("data", {"$**.name": "Alice"})  # Matches name at any level
 ### RAG and Hybrid Search (via MCP Server)
 
 ```
-rag_search         → FastText embeddings + HNSW nearest neighbor
+rag_search         → FastText embeddings + HNSW nearest neighbor + RRF fusion
 hybrid_search      → RRF fusion of fulltext + vector results with reranking
 ```
+
+Both tools use **MMR (Maximal Marginal Relevance)** for result diversity — removes near-duplicate chunks using embedding cosine similarity instead of naive prefix matching.
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `mmr_lambda` | `0.5` | Relevance vs diversity: `1.0` = pure relevance, `0.0` = pure diversity |
+| `deduplicate` | `true` | Enable/disable MMR reranking |
+| `rerank` | `true` | Phrase match (1.3x), keyword density (1.0–1.1x), short content penalty (0.8x) |
 
 ## Aggregation
 
@@ -430,7 +438,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `index_drop_vector` | Drop vector index |
 | `vector_search` | Vector similarity search |
 | `vector_search_filter` | Vector search with document filters |
-| `hybrid_search` | RRF fusion of vector + text results |
+| `hybrid_search` | RRF fusion of vector + text results with MMR diversity |
 | `schema_set` | Define JSON Schema validation |
 | `schema_get` | Get collection schema |
 
@@ -526,7 +534,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `embed_job_cancel` | Cancel running job |
 | `rag_collection_create` | Create RAG-optimized collection |
 | `rag_document_import` | Import document with auto-chunking |
-| `rag_search` | Semantic search with auto-embedding |
+| `rag_search` | Semantic search with auto-embedding and MMR diversity |
 | `rag_collection_stats` | Get RAG collection statistics |
 
 </details>

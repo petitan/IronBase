@@ -100,7 +100,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "rag_search",
             "title": "RAG Semantic Search",
-            "description": "Semantic search with AUTOMATIC query embedding. Unlike hybrid_search, you only provide a text query - the embedding is generated internally. Combines vector similarity and fulltext search using RRF fusion with reranking and deduplication.",
+            "description": "Semantic search with AUTOMATIC query embedding. Unlike hybrid_search, you only provide a text query - the embedding is generated internally. Combines vector similarity and fulltext search using RRF fusion with reranking and MMR diversity reranking (cosine similarity based deduplication). Use mmr_lambda to tune relevance vs diversity.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -137,15 +137,15 @@ pub fn tools() -> Vec<Value> {
                     },
                     "deduplicate": {
                         "type": "boolean",
-                        "description": "Remove duplicate content (default: true)",
+                        "description": "Enable MMR (Maximal Marginal Relevance) diversity reranking (default: true). Uses embedding cosine similarity to remove near-duplicate results while preserving diversity.",
                         "default": true
                     },
-                    "dedup_threshold": {
-                        "type": "integer",
-                        "description": "Content prefix length for deduplication (default: 100)",
-                        "default": 100,
-                        "minimum": 10,
-                        "maximum": 1000
+                    "mmr_lambda": {
+                        "type": "number",
+                        "description": "MMR lambda: balance between relevance (1.0) and diversity (0.0). Default: 0.5 (balanced).",
+                        "default": 0.5,
+                        "minimum": 0.0,
+                        "maximum": 1.0
                     },
                     "projection": fields::projection_simple(),
                     "provider": {

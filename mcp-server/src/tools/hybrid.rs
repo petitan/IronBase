@@ -9,7 +9,7 @@
 //!   - Vector: client embeds original query → matches original-embedded docs
 //!   - Fulltext: Snowball stems query → matches Snowball-stemmed index
 //! - Reranking: heading boost, phrase match, keyword density
-//! - Deduplication: content prefix based
+//! - MMR diversity reranking: embedding cosine similarity based
 
 use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
 use crate::error::{McpError, Result};
@@ -54,8 +54,13 @@ struct FusedResult {
 }
 
 /// Handle hybrid_search - RRF fusion of vector and fulltext search
-/// With reranking and deduplication (NO query preprocessing for consistency)
+/// With reranking and MMR diversity reranking (NO query preprocessing for consistency)
 fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+    if params.get("dedup_threshold").is_some() {
+        return Err(McpError::invalid_params(
+            "Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead.",
+        ));
+    }
     let p: HybridSearchParams = HybridSearchParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
@@ -195,18 +200,18 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
 
     // ========================================================================
-    // 6. Deduplication (optional)
+    // 6. MMR diversity reranking (optional) — replaces prefix-based dedup
     // ========================================================================
     let dedup_removed = if p.deduplicate {
-        deduplicate_results(&mut fused, &p.text_field, p.dedup_threshold)
+        mmr_reorder(&mut fused, &p.vector_field, p.mmr_lambda, p.limit)
     } else {
+        fused.truncate(p.limit);
         0
     };
 
     // ========================================================================
     // 7. Apply projection and build response
     // ========================================================================
-    fused.truncate(p.limit);
     let projection = parse_projection_value(p.projection)?;
 
     let results: Vec<Value> = fused
@@ -346,40 +351,150 @@ fn rerank_results(
 }
 
 // ============================================================================
-// Deduplication
+// MMR (Maximal Marginal Relevance) Reordering
 // ============================================================================
 
-/// Deduplicate results by content prefix
+/// Extract embedding vector from a document's embedding field (JSON array → Vec<f32>)
+fn extract_embedding(doc: &Value, embedding_field: &str) -> Option<Vec<f32>> {
+    doc.get(embedding_field)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                .collect()
+        })
+}
+
+/// MMR reordering: selects `limit` results balancing relevance and diversity.
 ///
-/// Removes results where content prefix (first N chars) matches a previous result.
-/// Uses only text_field (no extra fields needed).
+/// Algorithm: greedily selects the candidate that maximizes:
+///   mmr(c) = λ * relevance(c) - (1-λ) * max_sim(c, selected)
 ///
-/// Returns the number of results removed
-fn deduplicate_results(
+/// where relevance is the normalized final_score and max_sim is the maximum
+/// cosine similarity between c's embedding and any already-selected result.
+///
+/// Results without embeddings are kept in relevance order (no diversity penalty).
+///
+/// Returns the number of candidates not selected (analogous to dedup_removed).
+fn mmr_reorder(
     results: &mut Vec<FusedResult>,
-    text_field: &str,
-    threshold: usize,
+    embedding_field: &str,
+    lambda: f64,
+    limit: usize,
 ) -> usize {
-    let mut seen_prefixes: HashSet<String> = HashSet::new();
     let original_len = results.len();
+    if results.is_empty() || limit == 0 {
+        results.clear();
+        return original_len;
+    }
 
-    results.retain(|item| {
-        let content = item
-            .doc
-            .get(text_field)
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let prefix: String = content.chars().take(threshold).collect();
+    let target = limit.min(original_len);
 
-        // Skip if content prefix already seen
-        if seen_prefixes.contains(&prefix) {
-            return false;
+    // Extract embeddings (None if missing from doc)
+    let embeddings: Vec<Option<Vec<f32>>> = results
+        .iter()
+        .map(|r| extract_embedding(&r.doc, embedding_field))
+        .collect();
+
+    // Normalize relevance scores to [0, 1] for MMR formula
+    let max_score = results
+        .iter()
+        .map(|r| r.final_score)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let min_score = results
+        .iter()
+        .map(|r| r.final_score)
+        .fold(f64::INFINITY, f64::min);
+    let score_range = max_score - min_score;
+
+    // Track which indices are selected and which are candidates
+    let mut selected_indices: Vec<usize> = Vec::with_capacity(target);
+    let mut candidate_mask: Vec<bool> = vec![true; original_len];
+
+    // Select first: highest relevance (results are pre-sorted by final_score)
+    selected_indices.push(0);
+    candidate_mask[0] = false;
+
+    // Greedy MMR selection
+    while selected_indices.len() < target {
+        let mut best_idx = None;
+        let mut best_mmr = f64::NEG_INFINITY;
+
+        for (i, is_candidate) in candidate_mask.iter().enumerate() {
+            if !is_candidate {
+                continue;
+            }
+
+            // Normalized relevance [0, 1]
+            let relevance = if score_range > 0.0 {
+                (results[i].final_score - min_score) / score_range
+            } else {
+                1.0
+            };
+
+            // Max similarity to any selected result
+            let max_sim = if let Some(ref emb_i) = embeddings[i] {
+                selected_indices
+                    .iter()
+                    .filter_map(|&si| {
+                        embeddings[si].as_ref().map(|emb_s| {
+                            if emb_i.len() == emb_s.len() && !emb_i.is_empty() {
+                                ironbase_core::vector::simd::cosine_similarity(emb_i, emb_s)
+                                    as f64
+                            } else {
+                                0.0 // Dimension mismatch → no penalty
+                            }
+                        })
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max)
+            } else {
+                0.0 // No embedding → no diversity penalty
+            };
+            let max_sim = if max_sim == f64::NEG_INFINITY {
+                0.0
+            } else {
+                max_sim
+            };
+
+            let mmr_score = lambda * relevance - (1.0 - lambda) * max_sim;
+
+            if mmr_score > best_mmr {
+                best_mmr = mmr_score;
+                best_idx = Some(i);
+            }
         }
 
-        seen_prefixes.insert(prefix);
-        true
-    });
+        match best_idx {
+            Some(idx) => {
+                selected_indices.push(idx);
+                candidate_mask[idx] = false;
+            }
+            None => break, // No more candidates
+        }
+    }
 
+    // Reorder results: keep only selected, in selection order
+    let reordered: Vec<FusedResult> = selected_indices
+        .into_iter()
+        .map(|i| {
+            // We need to take ownership; use a placeholder swap
+            let mut placeholder = FusedResult {
+                id: String::new(),
+                doc: Value::Null,
+                rrf_score: 0.0,
+                final_score: 0.0,
+                rerank_boost: 0.0,
+                v_rank: 0,
+                t_rank: 0,
+                v_score: None,
+                t_score: None,
+            };
+            std::mem::swap(&mut results[i], &mut placeholder);
+            placeholder
+        })
+        .collect();
+
+    *results = reordered;
     original_len - results.len()
 }
 
@@ -644,7 +759,7 @@ mod tests {
                                             // v2 defaults
         assert!(p.rerank); // default: true
         assert!(p.deduplicate); // default: true
-        assert_eq!(p.dedup_threshold, 100); // default
+        assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON); // default
         assert!(p.language.is_none());
     }
 
@@ -660,14 +775,14 @@ mod tests {
             "language": "hungarian",
             "rerank": true,
             "deduplicate": true,
-            "dedup_threshold": 150
+            "mmr_lambda": 0.7
         });
 
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.language, Some("hungarian".to_string()));
         assert!(p.rerank);
         assert!(p.deduplicate);
-        assert_eq!(p.dedup_threshold, 150);
+        assert!((p.mmr_lambda - 0.7).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -799,53 +914,96 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Deduplication Tests
+    // MMR Reordering Tests
     // -------------------------------------------------------------------------
 
-    #[test]
-    fn test_dedup_by_content_prefix() {
-        let mut results = vec![
-            make_fused_result("doc1", "Same content prefix here and more", "Title 1", 0.02),
-            make_fused_result(
-                "doc2",
-                "Same content prefix here but different",
-                "Title 2",
-                0.01,
-            ),
-            make_fused_result("doc3", "Different content entirely", "Title 3", 0.005),
-        ];
-
-        let removed = deduplicate_results(&mut results, "content", 20);
-
-        assert_eq!(removed, 1); // doc2 should be removed (same prefix as doc1)
-        assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|r| r.id == "doc1"));
-        assert!(results.iter().any(|r| r.id == "doc3"));
+    fn make_fused_with_embedding(
+        id: &str,
+        content: &str,
+        embedding: Vec<f32>,
+        score: f64,
+    ) -> FusedResult {
+        FusedResult {
+            id: id.to_string(),
+            doc: json!({
+                "_id": id,
+                "content": content,
+                "embedding": embedding
+            }),
+            rrf_score: score,
+            final_score: score,
+            rerank_boost: 1.0,
+            v_rank: 1,
+            t_rank: 1,
+            v_score: Some(0.9),
+            t_score: Some(10.0),
+        }
     }
 
     #[test]
-    fn test_dedup_different_content_allowed() {
+    fn test_mmr_selects_diverse_results() {
+        // doc1 and doc2 have identical embeddings, doc3 is different
         let mut results = vec![
-            make_fused_result("doc1", "Alpha content here for first document", "", 0.02),
-            make_fused_result("doc2", "Beta content here for second document", "", 0.01),
+            make_fused_with_embedding("doc1", "Content A", vec![1.0, 0.0, 0.0], 0.03),
+            make_fused_with_embedding("doc2", "Content A copy", vec![1.0, 0.0, 0.0], 0.02),
+            make_fused_with_embedding("doc3", "Content B", vec![0.0, 1.0, 0.0], 0.01),
         ];
 
-        let removed = deduplicate_results(&mut results, "content", 100);
+        let removed = mmr_reorder(&mut results, "embedding", 0.5, 2);
 
-        // Both should remain (different content prefixes)
+        assert_eq!(removed, 1);
+        assert_eq!(results.len(), 2);
+        // doc1 (highest score) should be first
+        assert_eq!(results[0].id, "doc1");
+        // doc3 (diverse) should be preferred over doc2 (duplicate of doc1)
+        assert_eq!(results[1].id, "doc3");
+    }
+
+    #[test]
+    fn test_mmr_pure_relevance() {
+        // λ=1.0 → pure relevance ordering
+        let mut results = vec![
+            make_fused_with_embedding("doc1", "Content A", vec![1.0, 0.0, 0.0], 0.03),
+            make_fused_with_embedding("doc2", "Content A copy", vec![1.0, 0.0, 0.0], 0.02),
+            make_fused_with_embedding("doc3", "Content B", vec![0.0, 1.0, 0.0], 0.01),
+        ];
+
+        mmr_reorder(&mut results, "embedding", 1.0, 3);
+
+        // Pure relevance → same order as input (sorted by score)
+        assert_eq!(results[0].id, "doc1");
+        assert_eq!(results[1].id, "doc2");
+        assert_eq!(results[2].id, "doc3");
+    }
+
+    #[test]
+    fn test_mmr_without_embeddings() {
+        // Docs without embedding field → pure relevance order (no diversity penalty)
+        let mut results = vec![
+            make_fused_result("doc1", "Content A", "Title", 0.03),
+            make_fused_result("doc2", "Content B", "Title", 0.02),
+            make_fused_result("doc3", "Content C", "Title", 0.01),
+        ];
+
+        let removed = mmr_reorder(&mut results, "embedding", 0.5, 2);
+
+        assert_eq!(removed, 1);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].id, "doc1");
+        assert_eq!(results[1].id, "doc2");
+    }
+
+    #[test]
+    fn test_mmr_limit_larger_than_results() {
+        let mut results = vec![
+            make_fused_with_embedding("doc1", "A", vec![1.0, 0.0], 0.02),
+            make_fused_with_embedding("doc2", "B", vec![0.0, 1.0], 0.01),
+        ];
+
+        let removed = mmr_reorder(&mut results, "embedding", 0.5, 10);
+
+        // All results kept (limit > available)
         assert_eq!(removed, 0);
         assert_eq!(results.len(), 2);
-    }
-
-    #[test]
-    fn test_dedup_threshold() {
-        let mut results = vec![
-            make_fused_result("doc1", "ABC123 rest of content", "T1", 0.02),
-            make_fused_result("doc2", "ABC456 different", "T2", 0.01),
-        ];
-
-        // Threshold 3: "ABC" matches
-        let removed = deduplicate_results(&mut results, "content", 3);
-        assert_eq!(removed, 1);
     }
 }

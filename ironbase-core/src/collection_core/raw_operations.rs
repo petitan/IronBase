@@ -222,8 +222,28 @@ fn try_direct_id_lookup<S: Storage + RawStorage>(
     // Helper to load document from catalog offset
     let mut load_doc = |actual_id: &DocumentId| -> Option<(DocumentId, Value)> {
         let &offset = catalog.get(actual_id)?;
-        let doc_bytes = storage.read_data(offset).ok()?;
-        let doc: Value = serde_json::from_slice(&doc_bytes).ok()?;
+        let doc_bytes = match storage.read_data(offset) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    "direct _id lookup: read_data failed at offset {}: {}",
+                    offset,
+                    e
+                );
+                return None;
+            }
+        };
+        let doc: Value = match serde_json::from_slice(&doc_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    "direct _id lookup: JSON parse failed at offset {}: {}",
+                    offset,
+                    e
+                );
+                return None;
+            }
+        };
         if is_tombstone(&doc) {
             return None;
         }

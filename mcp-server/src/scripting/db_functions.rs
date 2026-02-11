@@ -1285,7 +1285,15 @@ fn rag_search_impl(
     let fulltext_weight = get_float_option_or(&opts, "fulltext_weight", 0.5);
     let rerank = get_bool_option_or(&opts, "rerank", true);
     let deduplicate = get_bool_option_or(&opts, "deduplicate", true);
-    let dedup_threshold = get_int_option_or(&opts, "dedup_threshold", 100) as usize;
+    let mmr_lambda = get_float_option_or(&opts, "mmr_lambda", 0.5);
+
+    // Reject removed parameter with explicit error
+    if opts.contains_key("dedup_threshold") {
+        return Dynamic::from(
+            "Error: Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead."
+                .to_string(),
+        );
+    }
 
     // Get RAG config or use defaults
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
@@ -1475,26 +1483,115 @@ fn rag_search_impl(
         });
     }
 
-    // Deduplication using configurable prefix threshold
+    // MMR diversity reranking (replaces prefix-based dedup)
     if deduplicate {
-        let mut seen_prefixes: HashSet<String> = HashSet::new();
-        fused.retain(|item| {
-            let content = item
-                .doc
-                .get(&text_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let prefix: String = content.chars().take(dedup_threshold).collect();
-            if seen_prefixes.contains(&prefix) {
-                return false;
-            }
-            seen_prefixes.insert(prefix);
-            true
-        });
-    }
+        let original_len = fused.len();
+        let target = limit.min(original_len);
 
-    // Truncate and build result
-    fused.truncate(limit);
+        if !fused.is_empty() && target > 0 {
+            // Extract embeddings
+            let embeddings: Vec<Option<Vec<f32>>> = fused
+                .iter()
+                .map(|r| {
+                    r.doc
+                        .get(&embedding_field)
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                .collect()
+                        })
+                })
+                .collect();
+
+            // Normalize relevance scores
+            let max_score = fused
+                .iter()
+                .map(|r| r.final_score)
+                .fold(f64::NEG_INFINITY, f64::max);
+            let min_score = fused
+                .iter()
+                .map(|r| r.final_score)
+                .fold(f64::INFINITY, f64::min);
+            let score_range = max_score - min_score;
+
+            let mut selected_indices: Vec<usize> = Vec::with_capacity(target);
+            let mut candidate_mask: Vec<bool> = vec![true; original_len];
+
+            // First: highest relevance
+            selected_indices.push(0);
+            candidate_mask[0] = false;
+
+            while selected_indices.len() < target {
+                let mut best_idx = None;
+                let mut best_mmr = f64::NEG_INFINITY;
+
+                for (i, is_candidate) in candidate_mask.iter().enumerate() {
+                    if !is_candidate {
+                        continue;
+                    }
+                    let relevance = if score_range > 0.0 {
+                        (fused[i].final_score - min_score) / score_range
+                    } else {
+                        1.0
+                    };
+                    let max_sim = if let Some(ref emb_i) = embeddings[i] {
+                        let s = selected_indices
+                            .iter()
+                            .filter_map(|&si| {
+                                embeddings[si].as_ref().map(|emb_s| {
+                                    if emb_i.len() == emb_s.len() && !emb_i.is_empty() {
+                                        ironbase_core::vector::simd::cosine_similarity(emb_i, emb_s)
+                                            as f64
+                                    } else {
+                                        0.0
+                                    }
+                                })
+                            })
+                            .fold(f64::NEG_INFINITY, f64::max);
+                        if s == f64::NEG_INFINITY {
+                            0.0
+                        } else {
+                            s
+                        }
+                    } else {
+                        0.0
+                    };
+                    let mmr_score = mmr_lambda * relevance - (1.0 - mmr_lambda) * max_sim;
+                    if mmr_score > best_mmr {
+                        best_mmr = mmr_score;
+                        best_idx = Some(i);
+                    }
+                }
+
+                match best_idx {
+                    Some(idx) => {
+                        selected_indices.push(idx);
+                        candidate_mask[idx] = false;
+                    }
+                    None => break,
+                }
+            }
+
+            // Reorder: keep only selected
+            let reordered: Vec<_> = selected_indices.into_iter().map(|i| {
+                let placeholder = FusedResult {
+                    doc: serde_json::Value::Null,
+                    rrf_score: 0.0,
+                    final_score: 0.0,
+                    v_rank: 0,
+                    t_rank: 0,
+                    v_score: None,
+                    t_score: None,
+                };
+                std::mem::replace(&mut fused[i], placeholder)
+            }).collect();
+            fused = reordered;
+        }
+    } else {
+        // No MMR → simple truncate
+        fused.truncate(limit);
+    }
 
     let results: Vec<Dynamic> = fused
         .into_iter()
