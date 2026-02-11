@@ -2,13 +2,8 @@
 //!
 //! Splits text into chunks with overlap to preserve context across chunk boundaries.
 
-use super::{Chunk, ChunkError};
+use super::{byte_to_char_offset, safe_byte_offset, Chunk, ChunkError};
 use text_splitter::TextSplitter;
-
-/// Convert byte offset to character offset in a UTF-8 string
-fn byte_to_char_offset(content: &str, byte_offset: usize) -> usize {
-    content[..byte_offset.min(content.len())].chars().count()
-}
 
 /// Split plain text into chunks with overlap
 pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chunk>, ChunkError> {
@@ -48,11 +43,12 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
         // Move offset, accounting for overlap
         // In text-splitter, chunks can overlap, so we find where this chunk
         // actually starts in the original content
-        if let Some(pos) = content[byte_offset..].find(raw_chunk) {
-            byte_offset += pos + raw_chunk.len();
-            // Subtract overlap for next chunk (in bytes)
+        let safe_offset = safe_byte_offset(content, byte_offset);
+        if let Some(pos) = content[safe_offset..].find(raw_chunk) {
+            byte_offset = safe_offset + pos + raw_chunk.len();
+            // Subtract overlap for next chunk (in bytes), then snap to char boundary
             if overlap > 0 && index < total - 1 {
-                byte_offset = byte_offset.saturating_sub(overlap);
+                byte_offset = safe_byte_offset(content, byte_offset.saturating_sub(overlap));
             }
         }
     }

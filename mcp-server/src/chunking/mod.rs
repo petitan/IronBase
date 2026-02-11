@@ -146,6 +146,26 @@ impl ChunkOptions {
     }
 }
 
+/// Adjust byte offset to the nearest UTF-8 character boundary (backwards).
+///
+/// Prevents panics when slicing `&str` at positions that fall inside
+/// multi-byte characters (e.g., 'í' = 2 bytes: 0xC3 0xAD).
+pub(crate) fn safe_byte_offset(content: &str, mut offset: usize) -> usize {
+    offset = offset.min(content.len());
+    while offset > 0 && !content.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// Convert byte offset to character offset in a UTF-8 string.
+///
+/// Uses `safe_byte_offset` internally to handle non-boundary positions.
+pub(crate) fn byte_to_char_offset(content: &str, byte_offset: usize) -> usize {
+    let safe = safe_byte_offset(content, byte_offset);
+    content[..safe].chars().count()
+}
+
 /// Split content into chunks
 ///
 /// Uses the specified mode, or auto-detects if mode is Auto.
@@ -199,5 +219,66 @@ mod tests {
         let options = ChunkOptions::default();
         let chunks = chunk_content("", &options).unwrap();
         assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_safe_byte_offset_on_char_boundary() {
+        let content = "hello";
+        assert_eq!(safe_byte_offset(content, 0), 0);
+        assert_eq!(safe_byte_offset(content, 3), 3);
+        assert_eq!(safe_byte_offset(content, 5), 5);
+    }
+
+    #[test]
+    fn test_safe_byte_offset_inside_multibyte_char() {
+        // 'í' = 2 bytes (0xC3 0xAD), 'á' = 2 bytes (0xC3 0xA1)
+        let content = "szív"; // s(1) z(1) í(2) v(1) = 5 bytes
+        assert_eq!(content.len(), 5);
+        // byte 2 = start of 'í' (valid boundary)
+        assert_eq!(safe_byte_offset(content, 2), 2);
+        // byte 3 = inside 'í' → snap back to 2
+        assert_eq!(safe_byte_offset(content, 3), 2);
+        // byte 4 = start of 'v' (valid boundary)
+        assert_eq!(safe_byte_offset(content, 4), 4);
+    }
+
+    #[test]
+    fn test_safe_byte_offset_beyond_length() {
+        let content = "abc";
+        assert_eq!(safe_byte_offset(content, 100), 3);
+    }
+
+    #[test]
+    fn test_byte_to_char_offset_with_multibyte() {
+        let content = "szív"; // 4 chars, 5 bytes
+        assert_eq!(byte_to_char_offset(content, 0), 0); // before 's'
+        assert_eq!(byte_to_char_offset(content, 2), 2); // before 'í'
+        assert_eq!(byte_to_char_offset(content, 3), 2); // inside 'í' → snaps to before 'í'
+        assert_eq!(byte_to_char_offset(content, 4), 3); // before 'v'
+        assert_eq!(byte_to_char_offset(content, 5), 4); // end
+    }
+
+    #[test]
+    fn test_text_chunking_with_hungarian_text() {
+        // Regression test: overlap subtraction must not land inside multi-byte chars
+        let content = "Egyszer volt, hol nem volt, még az Óperenciás-tengeren is túl, \
+                        élt egy szegény öregasszony. Volt neki három fia, akik közül \
+                        a legkisebbik volt a legügyesebb. Elment világgá szerencsét próbálni.";
+        let result = text::split(content, 80, 20);
+        assert!(result.is_ok(), "Hungarian text chunking panicked: {:?}", result.err());
+        let chunks = result.unwrap();
+        assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_markdown_chunking_with_hungarian_text() {
+        let content = "# Népmese\n\nEgyszer volt, hol nem volt, élt egy szegény király. \
+                        A királynak volt három szép lánya, akik közül a legkisebbik \
+                        volt a legszebb.\n\n## Második fejezet\n\nElment a királyfi \
+                        az üveghegyen túlra, ahol az árvácskák nőttek.";
+        let result = markdown::split(content, 80);
+        assert!(result.is_ok(), "Hungarian markdown chunking panicked: {:?}", result.err());
+        let chunks = result.unwrap();
+        assert!(!chunks.is_empty());
     }
 }

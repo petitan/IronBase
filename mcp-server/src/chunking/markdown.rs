@@ -3,13 +3,8 @@
 //! Splits markdown content at structural boundaries (headings) while
 //! preserving heading hierarchy and section context.
 
-use super::{Chunk, ChunkError};
+use super::{byte_to_char_offset, safe_byte_offset, Chunk, ChunkError};
 use text_splitter::MarkdownSplitter;
-
-/// Convert byte offset to character offset in a UTF-8 string
-fn byte_to_char_offset(content: &str, byte_offset: usize) -> usize {
-    content[..byte_offset.min(content.len())].chars().count()
-}
 
 /// Split markdown content into chunks
 ///
@@ -45,10 +40,11 @@ pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError>
         }
 
         // Calculate byte offsets first, then convert to character offsets
-        let start_byte = if let Some(pos) = content[byte_offset..].find(trimmed) {
-            byte_offset + pos
+        let safe_offset = safe_byte_offset(content, byte_offset);
+        let start_byte = if let Some(pos) = content[safe_offset..].find(trimmed) {
+            safe_offset + pos
         } else {
-            byte_offset
+            safe_offset
         };
         let end_byte = start_byte + raw_chunk.len();
 
