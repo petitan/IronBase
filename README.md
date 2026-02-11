@@ -39,7 +39,7 @@ Written in Rust. Single-file storage, zero-configuration, serverless. Bindings f
 | **Durability** | ACID transactions, WAL, crash recovery, 3 durability modes |
 | **OOM Protection** | Dynamic RAM-based limits, streaming, `try_reserve()`, Top-K heap |
 | **Languages** | Rust, Python (PyO3), C# (.NET 8 FFI) |
-| **Tooling** | MCP server (HTTP/stdio), TUI, backup CLI, STDIO bridge |
+| **Tooling** | MCP server (HTTP/stdio, 94 tools), TUI, backup CLI, STDIO bridge |
 | **Testing** | 1,600+ tests (unit, integration, property-based, fuzz) |
 
 ## Quick Start
@@ -315,7 +315,7 @@ db = IronBase.open_memory()  # ~200K inserts/sec, ~500K indexed finds/sec
 
 ## MCP Server
 
-IronBase includes an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server with **98 tools** for AI assistant integration.
+IronBase includes an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server with **94 tools** for AI assistant integration.
 
 ### Install
 
@@ -362,6 +362,174 @@ mcp-ironbase-server install | uninstall | start | stop | status
 - Linux: `/var/lib/ironbase/ironbase_data.mlite`
 - macOS: `/usr/local/var/ironbase/ironbase_data.mlite`
 - Windows: `%LOCALAPPDATA%\IronBase\data\ironbase_data.mlite`
+
+### Available Tools (94)
+
+<details>
+<summary><strong>Database & Collections (7)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `db_open` | Open or create database file |
+| `db_stats` | Get database metrics and statistics |
+| `db_compact` | Reclaim disk space from tombstones |
+| `db_checkpoint` | Force flush pending writes |
+| `collection_list` | List all user collections |
+| `collection_create` | Create empty collection |
+| `collection_drop` | Delete collection and data |
+
+</details>
+
+<details>
+<summary><strong>Document CRUD (11)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `insert_one` | Insert single document |
+| `insert_many` | Bulk insert documents |
+| `find` | Query documents with filters |
+| `find_one` | Find single matching document |
+| `update_one` | Update single document |
+| `update_many` | Bulk update matching documents |
+| `delete_one` | Delete single document |
+| `delete_many` | Bulk delete matching documents |
+| `count_documents` | Count matching documents |
+| `distinct` | Get unique field values |
+| `aggregate` | Execute aggregation pipeline |
+
+</details>
+
+<details>
+<summary><strong>Indexes & Search (15)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `index_create` | Create B+ tree index |
+| `index_list` | List all indexes |
+| `index_drop` | Remove index |
+| `index_stats` | Get index statistics |
+| `index_stats_refresh` | Recompute index statistics |
+| `explain` | Analyze query execution plan |
+| `find_with_hint` | Query with forced index hint |
+| `index_create_fuzzy` | Create fuzzy search index |
+| `fuzzy_search` | Approximate string matching |
+| `index_create_fulltext` | Create TF-IDF fulltext index |
+| `index_list_fulltext` | List fulltext indexes |
+| `fulltext_search` | Search with TF-IDF scoring |
+| `fulltext_analyze` | Debug text tokenization |
+| `index_create_vector` | Create HNSW vector index |
+| `index_list_vector` | List vector indexes |
+
+</details>
+
+<details>
+<summary><strong>Vector & Hybrid Search (6)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `index_drop_vector` | Drop vector index |
+| `vector_search` | Vector similarity search |
+| `vector_search_filter` | Vector search with document filters |
+| `hybrid_search` | RRF fusion of vector + text results |
+| `schema_set` | Define JSON Schema validation |
+| `schema_get` | Get collection schema |
+
+</details>
+
+<details>
+<summary><strong>Script Engine (12)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `script_save` | Save Rhai script |
+| `script_list` | List saved scripts |
+| `script_get` | Get script source code |
+| `script_delete` | Delete script |
+| `script_run` | Execute saved script by name |
+| `script_exec` | Execute inline Rhai code |
+| `script_history` | View script version history |
+| `script_rollback` | Restore previous script version |
+| `script_version_get` | Get specific script version |
+| `script_tags_add` | Add tags to script |
+| `script_tags_remove` | Remove tags from script |
+| `script_stats` | Get script execution statistics |
+
+</details>
+
+<details>
+<summary><strong>Transactions (7)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `begin_transaction` | Start ACID transaction |
+| `commit_transaction` | Commit transaction atomically |
+| `rollback_transaction` | Discard transaction changes |
+| `insert_one_tx` | Transactional insert |
+| `update_one_tx` | Transactional update |
+| `delete_one_tx` | Transactional delete |
+| `transaction_status` | Check transaction state |
+
+</details>
+
+<details>
+<summary><strong>Admin & Security (13)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `admin_list_all_collections` | List all collections including system |
+| `admin_create_system_collection` | Create protected system collection |
+| `admin_set_collection_flags` | Modify collection protection flags |
+| `admin_drop_protected` | Force delete protected collection |
+| `admin_apikey_create` | Generate API key |
+| `admin_apikey_list` | List API keys (masked) |
+| `admin_apikey_revoke` | Disable API key |
+| `admin_apikey_delete` | Permanently delete API key |
+| `acl_list` | List all ACL rules |
+| `acl_get` | Get collection ACL |
+| `acl_set` | Define ACL rules |
+| `acl_delete` | Remove ACL rules |
+| `acl_cleanup` | Remove orphaned ACLs |
+
+</details>
+
+<details>
+<summary><strong>Listeners (6)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `listener_list` | List HTTP/HTTPS listeners |
+| `listener_get` | Get listener configuration |
+| `listener_add` | Add HTTP/HTTPS listener |
+| `listener_delete` | Remove listener |
+| `listener_enable` | Activate listener |
+| `listener_disable` | Deactivate listener |
+
+</details>
+
+<details>
+<summary><strong>Embeddings & RAG (17)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
+| `embed_text` | Generate single text embedding |
+| `embed_batch` | Batch text embedding |
+| `embed_document` | Chunk and embed document |
+| `embed_list_models` | List available embedding models |
+| `embed_cache_stats` | Get embedding cache statistics |
+| `embed_cache_clear` | Clear embedding cache |
+| `auto_embed_enable` | Enable auto-embedding on insert |
+| `auto_embed_disable` | Disable auto-embedding |
+| `auto_embed_status` | Get auto-embedding configuration |
+| `auto_embed_backfill` | Generate embeddings for existing docs |
+| `embed_job_status` | Get background job status |
+| `embed_job_list` | List background jobs |
+| `embed_job_cancel` | Cancel running job |
+| `rag_collection_create` | Create RAG-optimized collection |
+| `rag_document_import` | Import document with auto-chunking |
+| `rag_search` | Semantic search with auto-embedding |
+| `rag_collection_stats` | Get RAG collection statistics |
+
+</details>
 
 ### Downloads
 
