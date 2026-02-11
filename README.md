@@ -1,12 +1,9 @@
 # IronBase
 
-**High-performance embedded NoSQL document database** with MongoDB-compatible API.
+**High-performance embedded NoSQL document database** with MongoDB-compatible query API.
 
-Written in Rust with Python and C# bindings. Single-file, zero-configuration, serverless.
+Written in Rust. Single-file storage, zero-configuration, serverless. Bindings for Python and C#.
 
-[![Crates.io](https://img.shields.io/crates/v/ironbase-core)](https://crates.io/crates/ironbase-core)
-[![PyPI](https://img.shields.io/pypi/v/ironbase)](https://pypi.org/project/ironbase/)
-[![NuGet](https://img.shields.io/nuget/v/IronBase)](https://www.nuget.org/packages/IronBase/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust CI](https://github.com/petitan/IronBase/actions/workflows/rust.yml/badge.svg)](https://github.com/petitan/IronBase/actions/workflows/rust.yml)
 
@@ -14,32 +11,41 @@ Written in Rust with Python and C# bindings. Single-file, zero-configuration, se
 
 - [Features](#features)
 - [Quick Start](#quick-start)
-- [MCP Server](#quick-install-mcp-server)
-- [MCP Bridge](#mcp-bridge-for-claudechatgpt-desktop)
-- [Backup CLI](#backup-cli-usage)
-- [TUI](#tui-usage)
+- [Indexing](#indexing)
+- [Search](#search)
+- [Aggregation](#aggregation)
+- [Transactions](#transactions)
+- [Durability Modes](#durability-modes)
+- [MCP Server](#mcp-server)
+- [MCP Bridge](#mcp-bridge)
+- [Backup CLI](#backup-cli)
+- [TUI](#tui)
 - [API Key Authentication](#api-key-authentication)
 - [Environment Variables](#environment-variables)
-- [HTTPS/TLS Support](#httpstls-support)
-- [Manual Installation](#manual-installation)
+- [Architecture](#architecture)
+- [Building from Source](#building-from-source)
+- [License](#license)
 
 ## Features
 
-| Category | Features |
-|----------|----------|
-| **Core** | MongoDB-compatible API, Single-file storage, Zero-config, Embedded |
-| **Query** | 21 operators: comparison, logical, element, array, regex, fuzzy |
-| **Update** | 7 operators: `$set`, `$inc`, `$unset`, `$push`, `$pull`, `$addToSet`, `$pop` |
-| **Aggregation** | 6 stages + 6 accumulators with dot notation support |
-| **Indexing** | B+ tree indexes, compound indexes, fuzzy indexes, explain(), hint() |
-| **Durability** | ACD transactions, WAL, crash recovery, 3 durability modes |
-| **Performance** | ~1M+ inserts/sec, O(log n) index lookups |
-| **Languages** | Rust, Python (PyO3), C# (.NET 8) |
-| **Testing** | 744+ tests, property-based testing, fuzz testing |
+| Category | Details |
+|----------|---------|
+| **Storage** | Single `.mlite` file, append-only, zero-config |
+| **Query Operators (26)** | `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` `$in` `$nin` `$and` `$or` `$not` `$nor` `$exists` `$type` `$all` `$elemMatch` `$size` `$regex` `$fuzzy` `$text` `$startsWith` `$endsWith` `$contains` `$expr` `$**` |
+| **Update Operators (7)** | `$set` `$inc` `$unset` `$push` `$pull` `$addToSet` `$pop` |
+| **Aggregation** | 8 stages + 8 accumulators with Top-K optimization |
+| **Indexes** | B+ tree, compound, case-insensitive, fuzzy, fulltext (TF-IDF), HNSW vector |
+| **Search** | Fuzzy (Jaro-Winkler/Levenshtein/Damerau), fulltext (TF-IDF + stemming), RAG (FastText + HNSW), hybrid (RRF score fusion) |
+| **Durability** | ACID transactions, WAL, crash recovery, 3 durability modes |
+| **OOM Protection** | Dynamic RAM-based limits, streaming, `try_reserve()`, Top-K heap |
+| **Languages** | Rust, Python (PyO3), C# (.NET 8 FFI) |
+| **Tooling** | MCP server (HTTP/stdio), TUI, backup CLI, STDIO bridge |
+| **Testing** | 1,600+ tests (unit, integration, property-based, fuzz) |
 
 ## Quick Start
 
 ### Python
+
 ```bash
 pip install ironbase
 ```
@@ -47,7 +53,6 @@ pip install ironbase
 ```python
 from ironbase import IronBase
 
-# Open database (creates if not exists)
 db = IronBase("myapp.mlite")
 users = db.collection("users")
 
@@ -62,13 +67,20 @@ users.insert_many([
 adults = users.find({"age": {"$gte": 18}})
 nyc_users = users.find({"city": "NYC", "age": {"$lt": 40}})
 
-# Query with options
+# Projection, sort, limit
 results = users.find(
     {"city": "NYC"},
     projection={"name": 1, "age": 1, "_id": 0},
     sort=[("age", -1)],
     limit=10
 )
+
+# Update
+users.update_one({"name": "Alice"}, {"$set": {"age": 31}})
+users.update_many({"city": "NYC"}, {"$inc": {"visits": 1}})
+
+# Delete
+users.delete_one({"name": "Bob"})
 
 # Aggregation
 stats = users.aggregate([
@@ -77,19 +89,42 @@ stats = users.aggregate([
     {"$sort": {"count": -1}}
 ])
 
-# Indexing
-users.create_index("age")
-users.create_compound_index(["city", "age"])
-plan = users.explain({"age": 25})  # Shows IndexScan
-
 db.close()
 ```
 
-### C# (.NET)
+### Rust
+
+```rust
+use ironbase_core::database::DatabaseCore;
+use ironbase_core::storage::StorageEngine;
+use serde_json::json;
+
+fn main() -> ironbase_core::error::Result<()> {
+    let db = DatabaseCore::<StorageEngine>::open("myapp.mlite")?;
+
+    // Insert
+    db.insert_one("users", json!({"name": "Alice", "age": 30, "city": "NYC"}))?;
+
+    // Query
+    let results = db.find("users", &json!({"age": {"$gte": 18}}), None)?;
+
+    // Update
+    db.update_one("users", &json!({"name": "Alice"}), &json!({"$set": {"age": 31}}))?;
+
+    // Aggregate
+    let stats = db.aggregate("users", vec![
+        json!({"$group": {"_id": "$city", "count": {"$sum": 1}}}),
+    ])?;
+
+    Ok(())
+}
+```
+
+### C# (.NET 8)
+
 ```csharp
 using IronBase;
 
-// Open database
 using var db = new IronBaseClient("myapp.mlite");
 var users = db.GetCollection("users");
 
@@ -98,7 +133,6 @@ users.InsertOne(new { name = "Alice", age = 30, city = "NYC" });
 
 // Query
 var adults = users.Find(new { age = new { _gte = 18 } });
-var nyc = users.Find(new { city = "NYC" });
 
 // Update
 users.UpdateOne(
@@ -113,130 +147,269 @@ var stats = users.Aggregate(new[] {
 });
 ```
 
-## Quick Install MCP Server (release v1.0.55)
+## Indexing
 
-Note: these commands pin downloads to the v1.0.55 release assets so documentation always matches the release.
+IronBase supports 5 index types for different access patterns:
 
-### Windows (PowerShell)
+| Type | Use Case | Complexity | File Extension |
+|------|----------|------------|----------------|
+| **B+ Tree** | Equality, range queries | O(log n) lookup | `.idx` |
+| **Compound** | Multi-field queries (prefix matching) | O(log n) lookup | `.idx` |
+| **Fuzzy** | Similarity search (typo-tolerant) | O(n) scan | `.fzidx` |
+| **Fulltext** | TF-IDF text search with stemming | O(terms) lookup | `.ftidx` |
+| **HNSW Vector** | Nearest neighbor / semantic search | O(log n) approx | `.hnsw` |
+
+```python
+# B+ tree (single field)
+users.create_index("email", unique=True)
+
+# Compound index
+users.create_compound_index(["country", "city"])
+
+# Fuzzy index (Jaro-Winkler, Levenshtein, Damerau-Levenshtein)
+users.create_fuzzy_index("name", algorithm="jaro_winkler", threshold=0.8)
+
+# Fulltext index (Hungarian, English, German stemming)
+articles.create_fulltext_index("content", language="hungarian")
+
+# HNSW vector index
+docs.create_hnsw_index("embedding", dim=300, metric="cosine")
+
+# Query plan analysis
+plan = users.explain({"email": "alice@example.com"})  # Shows IndexScan vs CollectionScan
+```
+
+All indexes support **lazy loading** — large indexes are loaded on-demand to reduce startup time and memory usage. Thresholds scale with available RAM (50 MB on <2 GB systems up to 500 MB on 32 GB+).
+
+## Search
+
+### Fuzzy Search
+
+Three similarity algorithms with configurable threshold (0.0-1.0):
+
+```python
+# Via query operator (requires fuzzy index)
+results = users.find({"name": {"$fuzzy": "jonh"}})  # Finds "John"
+
+# Direct search with scoring
+results = users.fuzzy_search("name", "jonh", threshold=0.7, limit=10)
+```
+
+### Fulltext Search (TF-IDF)
+
+Tokenization + stemming + stop word removal. Languages: Hungarian, English, German.
+
+```python
+articles.create_fulltext_index("content", language="hungarian")
+results = articles.fulltext_search("content", "adatbazis", limit=10)
+```
+
+### Text Operators
+
+All support case-insensitive matching by default and work on array fields:
+
+```python
+users.find({"name": {"$startsWith": "Al"}})
+users.find({"email": {"$endsWith": ".hu"}})
+users.find({"bio": {"$contains": "Rust"}})
+users.find({"content": {"$text": "embedded database"}})  # AND logic, stemmed
+users.find({"content": {"$regex": "^iron.*db$"}})
+```
+
+### Wildcard Deep Match
+
+Search a field at any nesting depth (max 100 levels):
+
+```python
+results = db.find("data", {"$**.name": "Alice"})  # Matches name at any level
+```
+
+### RAG and Hybrid Search (via MCP Server)
+
+```
+rag_search         → FastText embeddings + HNSW nearest neighbor
+hybrid_search      → RRF fusion of fulltext + vector results with reranking
+```
+
+## Aggregation
+
+### Pipeline Stages
+
+| Stage | Description |
+|-------|-------------|
+| `$match` | Filter documents |
+| `$group` | Group by field with accumulators |
+| `$project` | Include/exclude/compute fields |
+| `$sort` | Sort results |
+| `$limit` | Limit output count |
+| `$skip` | Skip N documents |
+| `$unwind` | Deconstruct array field |
+| `$count` | Count documents |
+
+### Accumulators
+
+`$sum` `$avg` `$min` `$max` `$first` `$last` `$push` `$addToSet`
+
+### Example
+
+```python
+pipeline = [
+    {"$match": {"status": "active"}},
+    {"$unwind": "$tags"},
+    {"$group": {
+        "_id": "$tags",
+        "count": {"$sum": 1},
+        "avgScore": {"$avg": "$score"},
+        "topUser": {"$first": "$name"}
+    }},
+    {"$sort": {"count": -1}},
+    {"$limit": 10}
+]
+results = collection.aggregate(pipeline)
+```
+
+**Optimization:** `$sort` + `$limit` patterns use Top-K heap selection — O(k) memory instead of O(n).
+
+## Transactions
+
+ACID transactions with Read Committed isolation (SQLite-style exclusive write lock):
+
+```python
+db.begin_transaction()
+try:
+    db.insert_one_tx("accounts", {"_id": "A", "balance": 900})
+    db.update_one_tx("accounts", {"_id": "B"}, {"$inc": {"balance": 100}})
+    db.commit_transaction()
+except:
+    db.rollback_transaction()
+```
+
+All changes are journaled to WAL before commit. On crash, uncommitted transactions are rolled back on next startup.
+
+## Durability Modes
+
+| Mode | fsync | Throughput | Crash Loss |
+|------|-------|------------|------------|
+| **Safe** (default) | Every op | 1K-5K ops/sec | Zero |
+| **Batch** | Every N ops | 20K-50K ops/sec | Max N ops |
+| **Unsafe** | Manual | 50K-100K ops/sec | Since last checkpoint |
+
+```python
+# Python
+db = IronBase("app.mlite", durability="batch", batch_size=100)
+```
+
+```rust
+// Rust
+let db = DatabaseCore::<StorageEngine>::open_with_durability(
+    "app.mlite",
+    DurabilityMode::Batch { batch_size: 100 },
+)?;
+```
+
+**In-memory mode** (no disk I/O, ideal for tests):
+
+```python
+db = IronBase.open_memory()  # ~200K inserts/sec, ~500K indexed finds/sec
+```
+
+## MCP Server
+
+IronBase includes an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server with **98 tools** for AI assistant integration.
+
+### Install
+
+**Linux/macOS:**
+```bash
+curl -sSL https://github.com/petitan/IronBase/releases/latest/download/install.sh | sudo bash
+```
+
+**Windows (PowerShell as Admin):**
 ```powershell
-# Download installer and run (as Administrator)
-Invoke-WebRequest -Uri https://github.com/petitan/IronBase/releases/download/v1.0.55/install.ps1 -OutFile install.ps1
+Invoke-WebRequest -Uri https://github.com/petitan/IronBase/releases/latest/download/install.ps1 -OutFile install.ps1
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\install.ps1
 ```
 
-### Linux/macOS
-```bash
-# Download and run installer (pins to v1.0.55)
-curl -sSL https://github.com/petitan/IronBase/releases/download/v1.0.55/install.sh | sudo bash
-```
-
-## MCP Server Downloads (v1.0.55)
-
-| Platform | File |
-|----------|------|
-| Windows | `mcp-ironbase-server-windows.exe` |
-| Linux | `mcp-ironbase-server-linux` |
-| macOS | `mcp-ironbase-server-macos` |
-
-Full release assets list and checksums available on the release page: https://github.com/petitan/IronBase/releases/tag/v1.0.55
-
-## MCP Server Usage
+### Usage
 
 ```bash
-# HTTP mode (default)
+# HTTP mode (default, port 8080)
 mcp-ironbase-server
 
-# Custom port and host
-mcp-ironbase-server -p 9090 -H 0.0.0.0
+# Custom settings
+mcp-ironbase-server -p 9090 -H 0.0.0.0 -d /path/to/data.mlite
 
-# Custom database path
-mcp-ironbase-server -d /path/to/data.mlite
-
-# stdio mode (for Claude Desktop direct integration)
+# stdio mode (for Claude Desktop / ChatGPT Desktop)
 mcp-ironbase-server --stdio
 
-# Service commands (requires admin/root)
-mcp-ironbase-server install    # Install as system service
-mcp-ironbase-server uninstall  # Uninstall service
-mcp-ironbase-server start      # Start service
-mcp-ironbase-server stop       # Stop service
-mcp-ironbase-server status     # Check service status
+# System service management (requires admin/root)
+mcp-ironbase-server install | uninstall | start | stop | status
 ```
-
-### MCP Server CLI Options
-
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `-c, --config` | `MCP_CONFIG` | `config.toml` | Config file path |
-| `-p, --port` | `MCP_PORT` | 8080 | Server port |
-| `-H, --host` | `MCP_HOST` | `0.0.0.0` | Server host |
-| `-d, --db` | `IRONBASE_PATH` | platform default | Database file path |
-| `--admin-key` | `IRONBASE_ADMIN_KEY` | - | Admin key for protected operations |
-| `--stdio` | - | - | Run in stdio mode (for Claude Desktop) |
-
-**Platform Default Database Paths:**
-- Windows: `%LOCALAPPDATA%\IronBase\data\ironbase_data.mlite`
-- Linux: `/var/lib/ironbase/ironbase_data.mlite`
-- macOS: `/usr/local/var/ironbase/ironbase_data.mlite`
-
-## MCP Bridge (for Claude/ChatGPT Desktop)
-
-The `ironbase-bridge` binary provides a STDIO to HTTP/HTTPS bridge for MCP clients.
-
-**Compatible with:**
-- Claude Desktop (Anthropic)
-- ChatGPT Desktop (OpenAI)
-- VS Code Copilot
-- JetBrains AI Assistant
-- Cursor
-- Any MCP-compatible client
-
-**Features:**
-- Connection pooling with keep-alive
-- Self-signed certificate support (`--insecure`)
-- Graceful shutdown (SIGINT/SIGTERM)
-- Health check with retry logic
-- JSON-RPC 2.0 batch request support
-- Cross-platform (Windows, Linux, macOS)
 
 ### CLI Options
 
-| Option | Environment Variable | Default | Description |
-|--------|---------------------|---------|-------------|
-| `-s, --server` | `MCP_SERVER_URL` | `http://localhost:8080/mcp` | Server URL |
-| `-k, --api-key` | `IRONBASE_API_KEY` | - | API key for authentication |
-| `--insecure` | `MCP_INSECURE` | false | Accept self-signed certificates |
-| `-d, --debug` | `MCP_DEBUG` | false | Enable debug logging |
-| `--health-retries` | - | 3 | Health check retry count (0=skip) |
+| Option | Env Variable | Default | Description |
+|--------|-------------|---------|-------------|
+| `-p, --port` | `MCP_PORT` | `8080` | Server port |
+| `-H, --host` | `MCP_HOST` | `0.0.0.0` | Bind address |
+| `-d, --db` | `IRONBASE_PATH` | Platform default | Database file path |
+| `-c, --config` | `MCP_CONFIG` | `config.toml` | Config file |
+| `--admin-key` | `IRONBASE_ADMIN_KEY` | - | Admin key for protected ops |
+| `--stdio` | - | - | stdio transport mode |
 
-### Usage Examples
+**Default database paths:**
+- Linux: `/var/lib/ironbase/ironbase_data.mlite`
+- macOS: `/usr/local/var/ironbase/ironbase_data.mlite`
+- Windows: `%LOCALAPPDATA%\IronBase\data\ironbase_data.mlite`
+
+### Downloads
+
+Pre-built binaries for every release:
+
+| Platform | Server | Bridge | TUI | Backup |
+|----------|--------|--------|-----|--------|
+| Linux | `mcp-ironbase-server-linux` | `ironbase-bridge-linux` | `ironbase-tui-linux` | `ironbase-backup-linux` |
+| macOS | `mcp-ironbase-server-macos` | `ironbase-bridge-macos` | `ironbase-tui-macos` | `ironbase-backup-macos` |
+| Windows | `mcp-ironbase-server-windows.exe` | `ironbase-bridge-windows.exe` | `ironbase-tui-windows.exe` | `ironbase-backup-windows.exe` |
+
+Windows MSI installer also available: `IronBase-Setup-{version}.msi`
+
+Browse all releases: [github.com/petitan/IronBase/releases](https://github.com/petitan/IronBase/releases)
+
+## MCP Bridge
+
+The `ironbase-bridge` binary provides a STDIO-to-HTTP/HTTPS bridge for MCP clients that only support stdio transport.
+
+**Compatible with:** Claude Desktop, ChatGPT Desktop, VS Code Copilot, Cursor, JetBrains AI, any MCP client.
 
 ```bash
-# Basic usage (localhost)
+# Local server
 ironbase-bridge
 
-# Remote server with HTTPS
-ironbase-bridge --server https://192.168.0.136:8080/mcp --api-key sk-xxx
+# Remote HTTPS with API key
+ironbase-bridge --server https://myserver:8080/mcp --api-key sk-xxx
 
-# Self-signed certificate (WSL/dev environment)
+# Self-signed certificate (dev/WSL)
 ironbase-bridge --server https://localhost:8080/mcp --insecure
-
-# Using environment variables
-MCP_SERVER_URL=https://myserver:8080/mcp IRONBASE_API_KEY=sk-xxx ironbase-bridge
-
-# Debug mode
-ironbase-bridge --debug
 ```
+
+| Option | Env Variable | Default | Description |
+|--------|-------------|---------|-------------|
+| `-s, --server` | `MCP_SERVER_URL` | `http://localhost:8080/mcp` | Server URL |
+| `-k, --api-key` | `IRONBASE_API_KEY` | - | API key |
+| `--insecure` | `MCP_INSECURE` | `false` | Accept self-signed certs |
+| `-d, --debug` | `MCP_DEBUG` | `false` | Debug logging |
 
 ### Client Configuration
 
 **Claude Desktop** (`claude_desktop_config.json`):
+
 ```json
 {
   "mcpServers": {
     "ironbase": {
-      "command": "C:\\Program Files\\IronBase\\ironbase-bridge.exe",
+      "command": "/usr/local/bin/ironbase-bridge",
       "env": {
         "MCP_SERVER_URL": "http://localhost:8080/mcp",
         "IRONBASE_API_KEY": "sk-your-key"
@@ -246,289 +419,158 @@ ironbase-bridge --debug
 }
 ```
 
-**ChatGPT Desktop** - same configuration format (MCP standard).
+## Backup CLI
 
-**Linux/macOS:**
-```json
-{
-  "mcpServers": {
-    "ironbase": {
-      "command": "/usr/local/bin/ironbase-bridge",
-      "env": {
-        "MCP_SERVER_URL": "https://192.168.0.136:8080/mcp",
-        "IRONBASE_API_KEY": "sk-your-key",
-        "MCP_INSECURE": "1"
-      }
-    }
-  }
-}
-```
-
-## Backup CLI Usage
+Lock-free hot backup leveraging the append-only storage format:
 
 ```bash
-# Create full backup
+# Full backup
 ironbase-backup backup --db mydata.mlite --output ./backups --full
 
-# Create incremental backup
+# Incremental backup
 ironbase-backup backup --db mydata.mlite --output ./backups
 
-# Restore from backups
+# Restore
 ironbase-backup restore --dir ./backups --output restored.mlite
 
-# Verify backup integrity
+# Verify integrity
 ironbase-backup verify --dir ./backups
 ```
 
-## TUI Usage
+## TUI
+
+Terminal UI for interactive database management:
 
 ```bash
-# Connect to HTTP/HTTPS MCP server
+# Connect to MCP server (HTTP)
 ironbase-tui --url http://localhost:8080/mcp
 
-# With API key
-ironbase-tui --url https://192.168.0.136:8080/mcp -k sk-your-key
+# With API key and self-signed cert
+ironbase-tui --url https://myserver:8080/mcp -k sk-your-key --insecure
 
-# Self-signed certificate (WSL/dev)
-ironbase-tui --url https://localhost:8080/mcp --insecure
-
-# Connect via stdio (spawns MCP server)
+# Connect via stdio (spawns server process)
 ironbase-tui --server ./mcp-ironbase-server mydata.mlite
 ```
 
-### TUI CLI Options
-
-| Option | Environment Variable | Description |
-|--------|---------------------|-------------|
-| `--url` (alias: `--http`) | - | MCP server URL |
-| `-k, --api-key` | `IRONBASE_API_KEY` | API key for authentication |
-| `--insecure` | - | Accept self-signed certificates |
-| `--server` | - | MCP server executable (stdio transport) |
-
-**Note:** Command line arguments override `~/.config/ironbase-tui/config.toml` settings.
-
-### TUI with API Key Authentication
-
-```bash
-# Via CLI argument
-ironbase-tui --url http://localhost:8080/mcp -k sk-your-api-key
-
-# Via environment variable
-export IRONBASE_API_KEY="sk-your-api-key"
-ironbase-tui
-
-# Or configure in ~/.config/ironbase-tui/config.toml
-# mcp_api_key = "sk-your-api-key"
-```
-
-**Keyboard shortcuts:**
-- `Shift+K` - Open API Key management modal
-- `n` - Create new API key (requires `IRONBASE_ADMIN_KEY`)
-- `r` - Revoke key
-- `d` - Delete key
-- `c` - Copy new key to clipboard
+**Keyboard shortcuts:** `Shift+K` API key management, `j/k` navigate, `n` new key, `r` revoke, `d` delete.
 
 ## API Key Authentication
 
-The MCP server supports API key authentication for secure access.
-
-### Environment Variables
-
-| Variable | Description |
-|----------|-------------|
-| `IRONBASE_API_KEY` | API key for client authentication |
-| `IRONBASE_ADMIN_KEY` | Admin key for managing API keys (create/revoke/delete) |
-
-### Quick Start with API Keys
-
 ```bash
-# 1. Start the MCP server with admin key
-export IRONBASE_ADMIN_KEY="your-secret-admin-key"
-./mcp-ironbase-server
+# Start server with admin key
+IRONBASE_ADMIN_KEY="your-admin-key" mcp-ironbase-server
 
-# 2. Initialize session and create first API key
+# Create API key (via MCP tool call)
 curl -X POST http://localhost:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cli","version":"1.0"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+    "name":"admin_apikey_create",
+    "arguments":{"admin_key":"your-admin-key","name":"production"}
+  }}'
+# Response: {"key": "sk-abc123...", ...}
 
+# Use API key for authenticated requests
 curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"admin_apikey_create","arguments":{"admin_key":"your-secret-admin-key","name":"production"}}}'
-
-# Response: {"key": "sk-abc123...", "id": 1, "name": "production", ...}
-
-# 3. Use the API key for authentication
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk-abc123..." \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"collection_list","arguments":{}}}'
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+    "name":"collection_list","arguments":{}
+  }}'
 ```
 
-### Server Configuration (`config.toml`)
+**Management tools:** `admin_apikey_create`, `admin_apikey_list`, `admin_apikey_revoke`, `admin_apikey_delete`
 
+**Config** (`config.toml`):
 ```toml
 [security]
-require_api_key = true      # Enable API key requirement
-api_key_cache_ttl = 60      # Cache TTL in seconds
-```
+require_api_key = true
+api_key_cache_ttl = 60
 
-### Managing API Keys via MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `admin_apikey_create` | Create new API key (returns full key once) |
-| `admin_apikey_list` | List all keys (shows masked preview only) |
-| `admin_apikey_revoke` | Disable a key (can be re-enabled) |
-| `admin_apikey_delete` | Permanently delete a key |
-
-**Create API Key:**
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc":"2.0","id":1,"method":"tools/call",
-    "params":{"name":"admin_apikey_create","arguments":{"admin_key":"your-admin-key","name":"my-app"}}
-  }'
-# Response: {"key":"sk-cfc3e4633b6feb9056e382c2742d4170","id":1,"name":"my-app",...}
-```
-
-**List API Keys:**
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc":"2.0","id":1,"method":"tools/call",
-    "params":{"name":"admin_apikey_list","arguments":{"admin_key":"your-admin-key"}}
-  }'
-# Response: {"keys":[{"_id":1,"name":"my-app","key_preview":"sk-cfc...4170","enabled":true}],...}
-```
-
-**Revoke API Key:**
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc":"2.0","id":1,"method":"tools/call",
-    "params":{"name":"admin_apikey_revoke","arguments":{"admin_key":"your-admin-key","id":1}}
-  }'
-```
-
-**Delete API Key:**
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc":"2.0","id":1,"method":"tools/call",
-    "params":{"name":"admin_apikey_delete","arguments":{"admin_key":"your-admin-key","id":1}}
-  }'
-```
-
-### TUI API Key Management
-
-The TUI provides a graphical interface for managing API keys:
-
-```bash
-# Start TUI with admin access
-export IRONBASE_API_KEY="sk-your-api-key"
-export IRONBASE_ADMIN_KEY="your-admin-key"
-ironbase-tui --url http://localhost:8080/mcp
-```
-
-Press `Shift+K` to open the API Key modal:
-
-```
-┌─ API Keys ─────────────────────────────────────────┐
-│                                                     │
-│  ID   Name          Key              Enabled        │
-│  ─────────────────────────────────────────────────  │
-│ > 1   production    sk-cfc...4170    ✓             │
-│   2   development   sk-296...d3a8    ✓             │
-│   3   old-key       sk-abc...xyz     ✗             │
-│                                                     │
-│  [n]New [r]Revoke [d]Delete [Esc]Close             │
-└─────────────────────────────────────────────────────┘
-```
-
-| Key | Action |
-|-----|--------|
-| `n` | Create new API key |
-| `r` | Revoke selected key |
-| `d` | Delete selected key |
-| `j/k` | Navigate list |
-| `Esc` | Close modal |
-
-**Note:** When creating a new API key, it is automatically saved to `new_key.txt` for easy copying from another terminal:
-
-| Platform | Path | Permissions |
-|----------|------|-------------|
-| Linux | `~/.config/ironbase-tui/new_key.txt` | `chmod 600` |
-| macOS | `~/Library/Application Support/ironbase-tui/new_key.txt` | `chmod 600` |
-| Windows | `%APPDATA%\ironbase-tui\new_key.txt` | Owner-only ACL |
-
-## Environment Variables
-
-All IronBase components support configuration via environment variables. CLI arguments take precedence over environment variables.
-
-### Common Environment Variables
-
-| Variable | Used By | Description |
-|----------|---------|-------------|
-| `IRONBASE_API_KEY` | TUI, Bridge | API key for authentication |
-| `IRONBASE_ADMIN_KEY` | MCP Server | Admin key for protected operations |
-| `IRONBASE_PATH` | MCP Server | Database file path |
-| `MCP_SERVER_URL` | Bridge | MCP server URL |
-| `MCP_INSECURE` | TUI, Bridge | Accept self-signed certificates |
-| `MCP_DEBUG` | Bridge | Enable debug logging |
-| `MCP_CONFIG` | MCP Server | Config file path |
-| `MCP_PORT` | MCP Server | Server port |
-| `MCP_HOST` | MCP Server | Server host |
-
-### Boolean Environment Variables
-
-Boolean environment variables accept flexible values (case-insensitive):
-
-| True Values | False Values |
-|-------------|--------------|
-| `1`, `true`, `TRUE`, `True` | `0`, `false`, `FALSE`, `False` |
-| `yes`, `YES`, `Yes` | `no`, `NO`, `No` |
-| `on`, `ON`, `On` | `off`, `OFF`, `Off`, `""` (empty) |
-
-**Examples:**
-```bash
-# All equivalent - enable insecure mode
-MCP_INSECURE=1 ironbase-tui --url https://localhost:8080/mcp
-MCP_INSECURE=true ironbase-tui --url https://localhost:8080/mcp
-MCP_INSECURE=YES ironbase-tui --url https://localhost:8080/mcp
-
-# Windows PowerShell
-$env:MCP_INSECURE = "1"
-ironbase-tui --url https://localhost:8080/mcp
-
-# Windows CMD
-set MCP_INSECURE=true
-ironbase-tui --url https://localhost:8080/mcp
-```
-
-**Invalid values produce a clear error:**
-```
-error: invalid value 'maybe' for '--insecure': Invalid boolean value: 'maybe'. Use true/false/1/0/yes/no/on/off
-```
-
-## HTTPS/TLS Support
-
-```toml
-# config.toml
 [tls]
 enabled = true
 cert_file = "/path/to/cert.pem"
 key_file = "/path/to/key.pem"
 ```
 
-## Manual Installation
+## Environment Variables
 
-1. Download the appropriate binary for your platform from the release page
-2. Run `./mcp-ironbase-server install` (as admin/root) if available, or follow the platform-specific installer steps
-3. Start the service: `sc start IronBaseService` (Windows) or `systemctl start ironbase` (Linux)
+| Variable | Used By | Description |
+|----------|---------|-------------|
+| `IRONBASE_PATH` | Server | Database file path |
+| `IRONBASE_API_KEY` | TUI, Bridge | Client API key |
+| `IRONBASE_ADMIN_KEY` | Server | Admin key for key management |
+| `MCP_SERVER_URL` | Bridge | MCP server URL |
+| `MCP_PORT` | Server | Server port |
+| `MCP_HOST` | Server | Bind address |
+| `MCP_CONFIG` | Server | Config file path |
+| `MCP_INSECURE` | TUI, Bridge | Accept self-signed certs |
+| `MCP_DEBUG` | Bridge | Enable debug logging |
 
+Boolean env vars accept: `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`.
 
-**Full Changelog**: https://github.com/petitan/IronBase/compare/v1.0.54...v1.0.55
+## Architecture
+
+```
+ironbase-core/          Core database engine (Rust library)
+  src/
+  ├── database.rs         Lifecycle, open/close, durability
+  ├── collection_core/    CRUD, aggregation, constraints
+  ├── query/              Query parser + 26 operator matchers
+  ├── aggregation/        Pipeline stages + accumulators
+  ├── index/              B+ tree, fuzzy, HNSW, manager
+  ├── fulltext.rs         TF-IDF search with stemming
+  ├── storage/            Append-only engine (.mlite format)
+  ├── transaction.rs      ACID transactions
+  ├── wal.rs              Write-ahead log
+  └── upsert.rs           Upsert logic (filter → doc conversion)
+
+bindings/python/        PyO3 bindings (pip install ironbase)
+IronBase.NET/           C# / .NET 8 bindings (FFI)
+mcp-server/             MCP server (HTTP + stdio, 98 tools)
+ironbase-bridge/        STDIO ↔ HTTP bridge for MCP clients
+ironbase-tui/           Terminal UI
+ironbase-backup/        Hot backup CLI (lock-free)
+ironbase-cli/           Command-line interface
+```
+
+### Storage Format (`.mlite`)
+
+```
+Header (256 bytes)     magic: "MONGOLTE", data_end_offset, metadata_offset
+Document Region        [u32 len][JSON bytes]... (append-only, immutable once written)
+Collection Metadata    document_catalog, indexes, schemas (at end of file)
+```
+
+Metadata at end of file prevents race conditions and truncation issues.
+
+### Thread Safety
+
+- `Arc<RwLock<StorageEngine>>` per collection (parking_lot `RwLock`)
+- Write lock: insert, update, delete
+- Read lock: find, count, list_collections
+- Per-index flush for checkpoint (no collection-level blocking)
+
+## Building from Source
+
+**Prerequisites:** Rust 1.75+, Python 3.8+ (for bindings), .NET 8 SDK (for C# bindings)
+
+```bash
+# Core library tests
+cargo test -p ironbase-core
+
+# Python development build
+cd bindings/python && maturin develop
+
+# MCP server
+cd mcp-server && cargo build --release
+
+# C# tests
+cd IronBase.NET && dotnet test
+
+# Full CI checks
+just run-dev-checks
+```
+
+## License
+
+[MIT](LICENSE)
