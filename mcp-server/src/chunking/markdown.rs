@@ -1,4 +1,4 @@
-//! Markdown-aware text splitting
+//! Markdown-aware text splitting with configurable overlap
 //!
 //! Splits markdown content at structural boundaries (headings) while
 //! preserving heading hierarchy and section context.
@@ -6,14 +6,18 @@
 use super::{byte_to_char_offset, safe_byte_offset, Chunk, ChunkError};
 use text_splitter::MarkdownSplitter;
 
-/// Split markdown content into chunks
+/// Split markdown content into chunks with overlap
 ///
 /// Respects markdown structure and preserves heading hierarchy.
-pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError> {
+/// Overlap is applied by extending each chunk backwards to include text
+/// from the previous chunk. Heading detection uses the raw (non-overlapped)
+/// chunk text to maintain correct section path tracking.
+pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chunk>, ChunkError> {
     let splitter = MarkdownSplitter::new(chunk_size);
 
-    // First pass: count chunks for allocation
-    let total = splitter.chunks(content).count();
+    // Collect non-overlapping chunks (string slices into content, minimal memory)
+    let raw_chunks: Vec<&str> = splitter.chunks(content).collect();
+    let total = raw_chunks.len();
 
     if total == 0 {
         return Ok(vec![]);
@@ -25,34 +29,48 @@ pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError>
         .try_reserve(total)
         .map_err(|_| ChunkError::OutOfMemory { count: total })?;
 
-    let mut byte_offset = 0;
+    // Find actual byte positions of each chunk in the original content
+    let mut positions: Vec<(usize, usize)> = Vec::with_capacity(total);
+    let mut search_from: usize = 0;
+    for raw_chunk in &raw_chunks {
+        let trimmed = raw_chunk.trim();
+        let safe_from = safe_byte_offset(content, search_from);
+        let start = if let Some(pos) = content[safe_from..].find(trimmed) {
+            safe_from + pos
+        } else {
+            safe_from
+        };
+        let end = (start + raw_chunk.len()).min(content.len());
+        positions.push((start, end));
+        search_from = end;
+    }
+
     let mut section_path: Vec<String> = Vec::new();
     let mut current_heading: Option<(String, u8)> = None;
 
-    // Second pass: create chunks
-    for (index, raw_chunk) in splitter.chunks(content).enumerate() {
+    // Create chunks with overlap applied
+    for (index, raw_chunk) in raw_chunks.iter().enumerate() {
         let trimmed = raw_chunk.trim();
+        let (start_byte, end_byte) = positions[index];
 
-        // Detect heading at start of chunk
+        // Detect heading from raw (non-overlapped) chunk text
         if let Some((heading, level)) = extract_heading(trimmed) {
             update_section_path(&mut section_path, &heading, level);
             current_heading = Some((heading, level));
         }
 
-        // Calculate byte offsets first, then convert to character offsets
-        let safe_offset = safe_byte_offset(content, byte_offset);
-        let start_byte = if let Some(pos) = content[safe_offset..].find(trimmed) {
-            safe_offset + pos
+        // Apply overlap: extend backwards for chunks after the first
+        let overlap_start = if index > 0 && overlap > 0 {
+            super::overlap_start_byte(content, start_byte, overlap)
         } else {
-            safe_offset
+            start_byte
         };
-        let end_byte = start_byte + raw_chunk.len();
 
-        // Convert byte offsets to character offsets for proper UTF-8 handling
-        let start_char = byte_to_char_offset(content, start_byte);
+        let chunk_text = &content[overlap_start..end_byte];
+        let start_char = byte_to_char_offset(content, overlap_start);
         let end_char = byte_to_char_offset(content, end_byte);
 
-        let mut chunk = Chunk::new(index, total, raw_chunk.to_string(), start_char, end_char);
+        let mut chunk = Chunk::new(index, total, chunk_text.to_string(), start_char, end_char);
 
         // Add heading metadata
         if let Some((ref heading, level)) = current_heading {
@@ -64,7 +82,6 @@ pub fn split(content: &str, chunk_size: usize) -> Result<Vec<Chunk>, ChunkError>
         }
 
         chunks.push(chunk);
-        byte_offset = end_byte;
     }
 
     Ok(chunks)
@@ -140,7 +157,7 @@ mod tests {
     #[test]
     fn test_split_markdown() {
         let content = "# Title\n\nSome content here.\n\n## Section 1\n\nMore content.";
-        let chunks = split(content, 100).unwrap();
+        let chunks = split(content, 100, 0).unwrap();
 
         assert!(!chunks.is_empty());
         // Verify total count is set correctly

@@ -1,7 +1,7 @@
 //! Text chunking module for embedding long documents
 //!
 //! Supports markdown-aware chunking that preserves heading structure,
-//! and plain text chunking with configurable overlap.
+//! and plain text chunking. Both modes support configurable overlap.
 
 pub mod markdown;
 pub mod text;
@@ -72,7 +72,7 @@ pub enum ChunkMode {
     Auto,
     /// Markdown-aware chunking (respects headings)
     Markdown,
-    /// Plain text chunking with overlap
+    /// Plain text chunking
     Text,
 }
 
@@ -110,7 +110,7 @@ impl ChunkMode {
 pub struct ChunkOptions {
     /// Maximum chunk size in characters
     pub chunk_size: usize,
-    /// Overlap between chunks in characters (for text mode)
+    /// Overlap between chunks in characters
     pub overlap: usize,
     /// Chunking mode
     pub mode: ChunkMode,
@@ -166,6 +166,35 @@ pub(crate) fn byte_to_char_offset(content: &str, byte_offset: usize) -> usize {
     content[..safe].chars().count()
 }
 
+/// Convert character offset to byte offset in a UTF-8 string.
+///
+/// Returns the byte position of the `char_offset`-th character.
+/// If `char_offset` exceeds the number of characters, returns `content.len()`.
+pub(crate) fn char_to_byte_offset(content: &str, char_offset: usize) -> usize {
+    content
+        .char_indices()
+        .nth(char_offset)
+        .map(|(i, _)| i)
+        .unwrap_or(content.len())
+}
+
+/// Calculate byte offset for the overlap start position.
+///
+/// Goes back `overlap_chars` characters from `chunk_start_byte` in the
+/// original content. Always returns a valid UTF-8 boundary.
+pub(crate) fn overlap_start_byte(
+    content: &str,
+    chunk_start_byte: usize,
+    overlap_chars: usize,
+) -> usize {
+    if overlap_chars == 0 || chunk_start_byte == 0 {
+        return chunk_start_byte;
+    }
+    let current_char = byte_to_char_offset(content, chunk_start_byte);
+    let target_char = current_char.saturating_sub(overlap_chars);
+    char_to_byte_offset(content, target_char)
+}
+
 /// Split content into chunks
 ///
 /// Uses the specified mode, or auto-detects if mode is Auto.
@@ -180,7 +209,9 @@ pub fn chunk_content(content: &str, options: &ChunkOptions) -> Result<Vec<Chunk>
     };
 
     match mode {
-        ChunkMode::Markdown | ChunkMode::Auto => markdown::split(content, options.chunk_size),
+        ChunkMode::Markdown | ChunkMode::Auto => {
+            markdown::split(content, options.chunk_size, options.overlap)
+        }
         ChunkMode::Text => text::split(content, options.chunk_size, options.overlap),
     }
 }
@@ -276,9 +307,109 @@ mod tests {
                         A királynak volt három szép lánya, akik közül a legkisebbik \
                         volt a legszebb.\n\n## Második fejezet\n\nElment a királyfi \
                         az üveghegyen túlra, ahol az árvácskák nőttek.";
-        let result = markdown::split(content, 80);
-        assert!(result.is_ok(), "Hungarian markdown chunking panicked: {:?}", result.err());
+        let result = markdown::split(content, 80, 20);
+        assert!(
+            result.is_ok(),
+            "Hungarian markdown chunking panicked: {:?}",
+            result.err()
+        );
         let chunks = result.unwrap();
         assert!(!chunks.is_empty());
+    }
+
+    #[test]
+    fn test_char_to_byte_offset_ascii() {
+        let content = "hello";
+        assert_eq!(char_to_byte_offset(content, 0), 0);
+        assert_eq!(char_to_byte_offset(content, 3), 3);
+        assert_eq!(char_to_byte_offset(content, 5), 5);
+        assert_eq!(char_to_byte_offset(content, 100), 5); // beyond end
+    }
+
+    #[test]
+    fn test_char_to_byte_offset_with_multibyte() {
+        let content = "szív"; // s(1) z(1) í(2) v(1) = 5 bytes, 4 chars
+        assert_eq!(char_to_byte_offset(content, 0), 0); // before 's'
+        assert_eq!(char_to_byte_offset(content, 2), 2); // before 'í'
+        assert_eq!(char_to_byte_offset(content, 3), 4); // before 'v'
+        assert_eq!(char_to_byte_offset(content, 4), 5); // end
+    }
+
+    #[test]
+    fn test_overlap_start_byte_basic() {
+        let content = "abcdefghij"; // 10 ASCII chars
+        // Go back 3 chars from byte 7 ('h') → byte 4 ('e')
+        assert_eq!(overlap_start_byte(content, 7, 3), 4);
+        // Go back 0 chars → same position
+        assert_eq!(overlap_start_byte(content, 7, 0), 7);
+        // Go back from position 0 → stays at 0
+        assert_eq!(overlap_start_byte(content, 0, 5), 0);
+        // Go back more chars than available → 0
+        assert_eq!(overlap_start_byte(content, 3, 100), 0);
+    }
+
+    #[test]
+    fn test_overlap_start_byte_multibyte() {
+        // "Helló világ" - H(1) e(1) l(1) l(1) ó(2) ' '(1) v(1) i(1) l(1) á(2) g(1)
+        // = 12 bytes, 11 chars
+        let content = "Helló világ";
+        assert_eq!(content.len(), 13); // actual byte len
+        // Go back 3 chars from byte 7 (which is 'v', char index 6) → char 3 = 'l' = byte 3
+        assert_eq!(overlap_start_byte(content, 7, 3), 3);
+    }
+
+    #[test]
+    fn test_text_overlap_produces_overlapping_content() {
+        let content = "Alpha bravo charlie. Delta echo foxtrot. \
+                        Golf hotel india. Juliet kilo lima.";
+        let chunks = text::split(content, 40, 10).unwrap();
+        if chunks.len() >= 2 {
+            // Verify chunk 1 starts before chunk 0 ends (overlap)
+            assert!(
+                chunks[1].start_char < chunks[0].end_char,
+                "Expected overlap: chunk[1].start_char={} should be < chunk[0].end_char={}",
+                chunks[1].start_char,
+                chunks[0].end_char
+            );
+            // Verify the overlapping text is shared
+            let overlap_len = chunks[0].end_char - chunks[1].start_char;
+            assert!(
+                overlap_len > 0,
+                "Overlap should be positive, got {}",
+                overlap_len
+            );
+        }
+    }
+
+    #[test]
+    fn test_text_no_overlap_produces_no_overlapping_content() {
+        let content = "Alpha bravo charlie. Delta echo foxtrot. \
+                        Golf hotel india. Juliet kilo lima.";
+        let chunks = text::split(content, 40, 0).unwrap();
+        if chunks.len() >= 2 {
+            // With overlap=0, chunk 1 should not start before chunk 0 ends
+            assert!(
+                chunks[1].start_char >= chunks[0].end_char,
+                "No overlap expected: chunk[1].start_char={} should be >= chunk[0].end_char={}",
+                chunks[1].start_char,
+                chunks[0].end_char
+            );
+        }
+    }
+
+    #[test]
+    fn test_markdown_overlap_produces_overlapping_content() {
+        let content = "# Title\n\nFirst paragraph with some content here. \
+                        More text to fill the chunk.\n\n## Section\n\n\
+                        Second paragraph with different content. Even more text here.";
+        let chunks = markdown::split(content, 60, 15).unwrap();
+        if chunks.len() >= 2 {
+            assert!(
+                chunks[1].start_char < chunks[0].end_char,
+                "Expected markdown overlap: chunk[1].start_char={} < chunk[0].end_char={}",
+                chunks[1].start_char,
+                chunks[0].end_char
+            );
+        }
     }
 }

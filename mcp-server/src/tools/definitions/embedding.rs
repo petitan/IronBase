@@ -46,7 +46,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "overlap": {
                         "type": "integer",
-                        "description": "Overlap between chunks (text mode only)",
+                        "description": "Overlap between chunks in characters (default: 100)",
                         "default": 100
                     },
                     "provider": {
