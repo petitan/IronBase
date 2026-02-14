@@ -164,6 +164,7 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 | `aggregate` | Run aggregation pipeline |
 | `fuzzy_search` | Fuzzy text search with configurable algorithm |
 | `fulltext_search` | Full-text search with TF-IDF scoring |
+| `fulltext_analyze` | Analyze text tokenization (debug stemming) |
 
 **Example - Aggregation:**
 ```json
@@ -190,7 +191,10 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 | `index_create_fuzzy` | Create fuzzy text index |
 | `index_create_fulltext` | Create full-text search index with language support |
 | `index_list` | List indexes for a collection |
+| `index_list_fulltext` | List fulltext indexes on a collection |
 | `index_drop` | Drop an index |
+| `index_stats` | Get index statistics (keys, distinct count, histogram) |
+| `index_stats_refresh` | Recompute index statistics for query planner |
 | `explain` | Explain query execution plan |
 | `find_with_hint` | Find with index hint |
 
@@ -245,11 +249,14 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 
 | Tool | Description |
 |------|-------------|
+| `index_create_vector` | Create HNSW vector index (Cosine/Euclidean/DotProduct) |
+| `index_list_vector` | List vector indexes on a collection |
+| `index_drop_vector` | Drop a vector index |
 | `vector_search` | Vector similarity search (requires HNSW index) |
+| `vector_search_filter` | Vector similarity search with document filter |
 | `hybrid_search` | RRF fusion of vector + fulltext results with MMR diversity |
-| `rag_search` | Semantic search with auto-embedding and MMR diversity |
 
-Both `hybrid_search` and `rag_search` use **MMR (Maximal Marginal Relevance)** to remove near-duplicate results using embedding cosine similarity.
+Both `hybrid_search` and `rag_search` (see [RAG section](#rag-retrieval-augmented-generation)) use **MMR (Maximal Marginal Relevance)** to remove near-duplicate results using embedding cosine similarity.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -350,6 +357,64 @@ See [ACL Documentation](docs/ACL.md) for details.
   }
 }
 ```
+
+### Admin Operations
+
+| Tool | Description |
+|------|-------------|
+| `admin_list_all_collections` | List all collections including system/hidden |
+| `admin_create_system_collection` | Create protected system collection |
+| `admin_set_collection_flags` | Modify collection protection/visibility flags |
+| `admin_drop_protected` | Force delete a protected collection |
+
+### Transactions
+
+| Tool | Description |
+|------|-------------|
+| `begin_transaction` | Start ACID transaction (exclusive write lock) |
+| `commit_transaction` | Commit all changes atomically |
+| `rollback_transaction` | Discard all changes |
+| `insert_one_tx` | Insert document within active transaction |
+| `update_one_tx` | Update document within active transaction |
+| `delete_one_tx` | Delete document within active transaction |
+| `transaction_status` | Check if an active transaction exists |
+
+### Embedding Generation
+
+| Tool | Description |
+|------|-------------|
+| `embed_text` | Generate single text embedding (FastText default) |
+| `embed_batch` | Batch text embedding (max 100 texts) |
+| `embed_document` | Chunk document, embed chunks, store with vector index |
+| `embed_list_models` | List available embedding models and providers |
+| `embed_cache_stats` | Get embedding cache hit rate and memory usage |
+| `embed_cache_clear` | Clear all embedding cache entries |
+
+### Auto-Embedding
+
+| Tool | Description |
+|------|-------------|
+| `auto_embed_enable` | Auto-generate embeddings on insert/update |
+| `auto_embed_disable` | Disable auto-embedding for collection |
+| `auto_embed_status` | Get auto-embedding configuration |
+| `auto_embed_backfill` | Generate embeddings for existing documents (async) |
+
+### Background Jobs
+
+| Tool | Description |
+|------|-------------|
+| `embed_job_status` | Get background job status by ID |
+| `embed_job_list` | List all background jobs (active + recent) |
+| `embed_job_cancel` | Cancel a running background job |
+
+### RAG (Retrieval-Augmented Generation)
+
+| Tool | Description |
+|------|-------------|
+| `rag_collection_create` | Create RAG-optimized collection (auto: vector + fulltext indexes) |
+| `rag_document_import` | Import document with auto-chunking and embedding |
+| `rag_search` | Semantic search with auto-embedding, RRF fusion, and MMR diversity |
+| `rag_collection_stats` | Get RAG collection statistics (chunks, sources, indexes) |
 
 ---
 
@@ -533,7 +598,8 @@ Scripts have access to these database functions:
 | `script_get` | Get a script by name |
 | `script_list` | List scripts (with optional tag filter) |
 | `script_delete` | Delete a script |
-| `script_run` | Run a script |
+| `script_run` | Run a saved script by name |
+| `script_exec` | Execute inline Rhai code (no save) |
 | `script_history` | Get version history |
 | `script_rollback` | Rollback to previous version |
 | `script_version_get` | Get specific version |
@@ -616,7 +682,7 @@ let tax = calculate_tax(total, 0.08);
 |----------|-------------|---------|
 | `IRONBASE_PATH` | Path to database file | `./ironbase.mlite` |
 | `IRONBASE_ADMIN_KEY` | Admin key for protected operations | (none) |
-| `IRONBASE_PORT` | HTTP server port | `8080` |
+| `MCP_PORT` | HTTP server port | `8080` |
 
 ## Concurrent Access
 

@@ -31,7 +31,7 @@ Written in Rust. Single-file storage, zero-configuration, serverless. Bindings f
 | Category | Details |
 |----------|---------|
 | **Storage** | Single `.mlite` file, append-only, zero-config |
-| **Query Operators (26)** | `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` `$in` `$nin` `$and` `$or` `$not` `$nor` `$exists` `$type` `$all` `$elemMatch` `$size` `$regex` `$fuzzy` `$text` `$startsWith` `$endsWith` `$contains` `$expr` `$**` |
+| **Query Operators (25)** | `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` `$in` `$nin` `$and` `$or` `$not` `$nor` `$exists` `$type` `$all` `$elemMatch` `$size` `$regex` `$fuzzy` `$text` `$startsWith` `$endsWith` `$contains` `$expr` `$**` |
 | **Update Operators (7)** | `$set` `$inc` `$unset` `$push` `$pull` `$addToSet` `$pop` |
 | **Aggregation** | 8 stages + 8 accumulators with Top-K optimization |
 | **Indexes** | B+ tree, compound, case-insensitive, fuzzy, fulltext (TF-IDF), HNSW vector |
@@ -40,7 +40,7 @@ Written in Rust. Single-file storage, zero-configuration, serverless. Bindings f
 | **OOM Protection** | Dynamic RAM-based limits, streaming, `try_reserve()`, Top-K heap |
 | **Languages** | Rust, Python (PyO3), C# (.NET 8 FFI) |
 | **Tooling** | MCP server (HTTP/stdio, 94 tools), TUI, backup CLI, STDIO bridge |
-| **Testing** | 1,600+ tests (unit, integration, property-based, fuzz) |
+| **Testing** | 2,000+ tests (unit, integration, property-based, fuzz) |
 
 ## Quick Start
 
@@ -691,7 +691,7 @@ ironbase-core/          Core database engine (Rust library)
   src/
   ├── database.rs         Lifecycle, open/close, durability
   ├── collection_core/    CRUD, aggregation, constraints
-  ├── query/              Query parser + 26 operator matchers
+  ├── query/              Query parser + 25 operator matchers
   ├── aggregation/        Pipeline stages + accumulators
   ├── index/              B+ tree, fuzzy, HNSW, manager
   ├── fulltext.rs         TF-IDF search with stemming
@@ -702,7 +702,7 @@ ironbase-core/          Core database engine (Rust library)
 
 bindings/python/        PyO3 bindings (pip install ironbase)
 IronBase.NET/           C# / .NET 8 bindings (FFI)
-mcp-server/             MCP server (HTTP + stdio, 98 tools)
+mcp-server/             MCP server (HTTP + stdio, 94 tools)
 ironbase-bridge/        STDIO ↔ HTTP bridge for MCP clients
 ironbase-tui/           Terminal UI
 ironbase-backup/        Hot backup CLI (lock-free)

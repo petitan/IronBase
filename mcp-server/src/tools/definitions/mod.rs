@@ -127,11 +127,13 @@ mod tests {
         let tools = tools_json["tools"].as_array().unwrap();
 
         // Verify we have the expected number of tools
-        // Database: 4, Collection: 3, Document: 11, Index: 10, Schema: 2,
-        // Script: 12, Transaction: 7, Admin: 8, ACL: 5, Listener: 6 = 68 total
-        assert!(
-            tools.len() >= 60,
-            "Expected at least 60 tools, got {}",
+        // Database: 4, Collection: 3, Document: 11, Index: 13, Schema: 2,
+        // Script: 12, Transaction: 7, Admin: 8, ACL: 5, Listener: 6,
+        // Vector: 5, Hybrid: 1, Embedding: 6, AutoEmbed: 4, Jobs: 3, RAG: 4 = 94 total
+        assert_eq!(
+            tools.len(),
+            94,
+            "Expected 94 tools, got {}",
             tools.len()
         );
     }
