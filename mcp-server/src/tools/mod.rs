@@ -387,10 +387,7 @@ fn dispatch_tool_inner(
         }
 
         // Auto-embedding configuration
-        "auto_embed_enable"
-        | "auto_embed_disable"
-        | "auto_embed_status"
-        | "auto_embed_backfill" => {
+        "auto_embed_enable" | "auto_embed_disable" | "auto_embed_status" => {
             auto_embed::dispatch(name, params, adapter, embedding_manager, job_manager)
         }
 

@@ -392,6 +392,13 @@ fn run_stdio_server(cli: &Cli) {
     let job_manager: Option<Arc<mcp_ironbase::JobManager>> = Some(job_manager_instance);
     eprintln!("Job manager initialized");
 
+    // Check for embedding model changes and start re-embedding if needed
+    mcp_ironbase::tools::auto_embed::check_model_changes_and_reembed(
+        &adapter,
+        &embedding_manager,
+        &job_manager,
+    );
+
     eprintln!("Ready for requests...");
 
     // Read from stdin line by line

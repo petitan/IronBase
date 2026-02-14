@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::defaults::{
-    default_async, default_batch_size, default_chunk_mode, default_chunk_overlap,
-    default_chunk_size, is_allowed_system_collection, MAX_EMPTY_BATCHES,
+    default_chunk_mode, default_chunk_overlap, default_chunk_size, is_allowed_system_collection,
+    DEFAULT_BATCH_SIZE, MAX_EMPTY_BATCHES,
 };
 use super::params::ParseParams;
 
@@ -124,18 +124,6 @@ pub struct AutoEmbedStatusParams {
     pub collection: String,
 }
 
-/// Parameters for `auto_embed_backfill` tool
-#[derive(Debug, Deserialize)]
-pub struct AutoEmbedBackfillParams {
-    pub collection: String,
-    #[serde(default)]
-    pub filter: Option<Value>,
-    #[serde(default = "default_batch_size")]
-    pub batch_size: usize,
-    #[serde(default = "default_async")]
-    pub r#async: bool,
-}
-
 // ============================================================================
 // Dispatch
 // ============================================================================
@@ -149,12 +137,11 @@ pub fn dispatch(
     job_manager: &Option<Arc<JobManager>>,
 ) -> Result<Value> {
     match name {
-        "auto_embed_enable" => handle_auto_embed_enable(params, adapter, embedding_manager),
+        "auto_embed_enable" => {
+            handle_auto_embed_enable(params, adapter, embedding_manager, job_manager)
+        }
         "auto_embed_disable" => handle_auto_embed_disable(params, adapter),
         "auto_embed_status" => handle_auto_embed_status(params, adapter),
-        "auto_embed_backfill" => {
-            handle_auto_embed_backfill(params, adapter, embedding_manager, job_manager)
-        }
         _ => Err(McpError::invalid_params(format!(
             "Unknown auto-embed tool: {}",
             name
@@ -170,6 +157,7 @@ fn handle_auto_embed_enable(
     params: Value,
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
+    job_manager: &Option<Arc<JobManager>>,
 ) -> Result<Value> {
     let p: AutoEmbedEnableParams = AutoEmbedEnableParams::parse(params)?;
 
@@ -184,26 +172,27 @@ fn handle_auto_embed_enable(
     })?;
 
     // Check if provider is available
-    if manager.get_provider(&p.provider).is_none() {
+    let provider = manager.get_provider(&p.provider).ok_or_else(|| {
         let available: Vec<_> = manager
             .list_models()
             .iter()
             .map(|m| m.provider.clone())
             .collect();
-        return Err(McpError::invalid_params(format!(
+        McpError::invalid_params(format!(
             "Provider '{}' not found. Available: {:?}",
             p.provider, available
-        )));
-    }
+        ))
+    })?;
 
     // Get dimension from provider if not specified
-    let dimension = p.dimension.or_else(|| {
-        manager
-            .get_provider(&p.provider)
-            .map(|prov| prov.dimension())
-    });
+    let dimension = p.dimension.unwrap_or_else(|| provider.dimension());
 
-    // Build config
+    // Build config — auto-save model name from provider
+    let model_name = p
+        .model
+        .clone()
+        .unwrap_or_else(|| provider.model_name().to_string());
+
     let chunking = p.chunking.map(|c| ChunkingConfig {
         mode: c.mode,
         chunk_size: c.chunk_size,
@@ -215,8 +204,8 @@ fn handle_auto_embed_enable(
         source_field: p.source_field.clone(),
         target_field: p.target_field.clone(),
         provider: p.provider.clone(),
-        model: p.model.clone(),
-        dimension,
+        model: Some(model_name),
+        dimension: Some(dimension),
         skip_if_exists: p.skip_if_exists,
         chunking,
     };
@@ -224,7 +213,27 @@ fn handle_auto_embed_enable(
     // Save to collection metadata
     adapter.set_auto_embedding_config(&p.collection, Some(config.clone()))?;
 
-    Ok(json!({
+    // Count existing documents that need embedding (missing target_field)
+    let backfill_query = json!({ &config.target_field: { "$exists": false } });
+    let existing_count = adapter
+        .count_documents(&p.collection, backfill_query)
+        .unwrap_or(0);
+
+    // Auto-start backfill if there are existing documents without embeddings
+    let backfill_job_id = if existing_count > 0 {
+        start_backfill_job(
+            adapter,
+            manager,
+            &config,
+            &p.collection,
+            job_manager,
+            false, // force=false: only docs missing target_field
+        )
+    } else {
+        None
+    };
+
+    let mut response = json!({
         "success": true,
         "collection": p.collection,
         "config": {
@@ -240,8 +249,17 @@ fn handle_auto_embed_enable(
                 "chunk_size": c.chunk_size,
                 "overlap": c.overlap
             }))
-        }
-    }))
+        },
+        "existing_documents": existing_count
+    });
+
+    if let Some(ref job_id) = backfill_job_id {
+        response["backfill_job_id"] = json!(job_id);
+        response["message"] =
+            json!("Auto-embedding enabled. Backfill job started for existing documents.");
+    }
+
+    Ok(response)
 }
 
 fn handle_auto_embed_disable(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
@@ -288,207 +306,76 @@ fn handle_auto_embed_status(params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
     }
 }
 
-fn handle_auto_embed_backfill(
-    params: Value,
+/// Helper: start an async backfill job for a collection.
+/// Returns Some(job_id) if job was started, None if job_manager unavailable or at capacity.
+fn start_backfill_job(
     adapter: &Arc<IronBaseAdapter>,
-    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    embedding_manager: &Arc<EmbeddingManager>,
+    config: &AutoEmbeddingConfig,
+    collection: &str,
     job_manager: &Option<Arc<JobManager>>,
-) -> Result<Value> {
-    let p: AutoEmbedBackfillParams = AutoEmbedBackfillParams::parse(params)?;
+    force: bool,
+) -> Option<String> {
+    let job_mgr = job_manager.as_ref()?;
 
-    // Get auto-embedding config
-    let config = adapter
-        .get_auto_embedding_config(&p.collection)?
-        .ok_or_else(|| {
-            McpError::invalid_params(format!(
-                "Auto-embedding not configured for collection '{}'. Use auto_embed_enable first.",
-                p.collection
-            ))
-        })?;
-
-    if !config.enabled {
-        return Err(McpError::invalid_params(format!(
-            "Auto-embedding is disabled for collection '{}'. Use auto_embed_enable first.",
-            p.collection
-        )));
+    if job_mgr.is_shutting_down() {
+        tracing::warn!("Cannot start backfill: server is shutting down");
+        return None;
     }
 
-    // Validate embedding manager
-    let manager = embedding_manager.as_ref().ok_or_else(|| {
-        McpError::internal(
-            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
-        )
-    })?;
-
-    // Check if provider is available
-    let _provider = manager.get_provider(&config.provider).ok_or_else(|| {
-        McpError::internal(format!("Provider '{}' not available", config.provider))
-    })?;
-
-    // Build filter: documents without target field (or where target is null)
-    let mut query = p.filter.clone().unwrap_or(json!({}));
-    if let Some(obj) = query.as_object_mut() {
-        // Only process documents that don't have the embedding field
-        obj.insert(config.target_field.clone(), json!({ "$exists": false }));
+    if !job_mgr.can_start_job() {
+        tracing::warn!(
+            "Cannot start backfill for '{}': max concurrent jobs reached",
+            collection
+        );
+        return None;
     }
 
-    // For async backfill, use JobManager to run in background thread
-    if p.r#async {
-        let job_mgr = job_manager
-            .as_ref()
-            .ok_or_else(|| McpError::internal("Job manager not available for async operations"))?;
-
-        // Check if shutdown is in progress
-        if job_mgr.is_shutting_down() {
-            return Err(McpError::internal(
-                "Server is shutting down, cannot start new async jobs",
-            ));
-        }
-
-        // Check job concurrency limit (prevents memory exhaustion from too many parallel jobs)
-        if !job_mgr.can_start_job() {
-            return Err(McpError::internal(format!(
-                "Maximum concurrent jobs limit ({}) reached. Wait for existing jobs to complete or cancel them.",
-                job_mgr.max_concurrent_jobs()
-            )));
-        }
-
-        // Create job
-        let job_type = JobType::EmbedBackfill {
-            collection: p.collection.clone(),
-            provider: config.provider.clone(),
-        };
-        let (job_id, _job) = job_mgr.create_job(job_type);
-
-        // Clone necessary data for background thread
-        let adapter_clone = adapter.clone();
-        let manager_clone = manager.clone();
-        let config_clone = config.clone();
-        let collection = p.collection.clone();
-        let batch_size = p.batch_size;
-        let filter = p.filter.clone();
-        let job_mgr_clone = job_mgr.clone();
-        let job_id_clone = job_id.clone();
-        let shutdown_flag = job_mgr.shutdown_flag();
-
-        // Spawn background thread for processing
-        let handle = std::thread::spawn(move || {
-            run_backfill_job(
-                &job_id_clone,
-                &job_mgr_clone,
-                &adapter_clone,
-                &manager_clone,
-                &config_clone,
-                &collection,
-                filter,
-                batch_size,
-                &shutdown_flag,
-            );
-        });
-
-        // Register thread handle for graceful shutdown
-        job_mgr.register_thread(job_id.clone(), handle);
-
-        return Ok(json!({
-            "success": true,
-            "async": true,
-            "job_id": job_id,
-            "collection": p.collection,
-            "message": "Backfill job started. Use embed_job_status to check progress."
-        }));
-    }
-
-    // Get provider again for synchronous processing (after potential async branch)
-    let provider = manager.get_provider(&config.provider).ok_or_else(|| {
-        McpError::internal(format!("Provider '{}' not available", config.provider))
-    })?;
-
-    // Synchronous processing
-    let filter = crate::adapter::FindOptions {
-        limit: Some(p.batch_size * 10), // Process up to 10 batches
-        ..Default::default()
+    let job_type = JobType::EmbedBackfill {
+        collection: collection.to_string(),
+        provider: config.provider.clone(),
     };
+    let (job_id, _job) = job_mgr.create_job(job_type);
 
-    let result = adapter.find(&p.collection, query.clone(), filter)?;
-    let total_docs = result.documents.len();
+    let adapter_clone = adapter.clone();
+    let manager_clone = embedding_manager.clone();
+    let config_clone = config.clone();
+    let collection_owned = collection.to_string();
+    let batch_size = DEFAULT_BATCH_SIZE;
+    let job_mgr_clone = job_mgr.clone();
+    let job_id_clone = job_id.clone();
+    let shutdown_flag = job_mgr.shutdown_flag();
 
-    if total_docs == 0 {
-        return Ok(json!({
-            "success": true,
-            "collection": p.collection,
-            "processed": 0,
-            "message": "No documents found that need embedding"
-        }));
-    }
+    let handle = std::thread::spawn(move || {
+        run_backfill_job(
+            &job_id_clone,
+            &job_mgr_clone,
+            &adapter_clone,
+            &manager_clone,
+            &config_clone,
+            &collection_owned,
+            batch_size,
+            force,
+            &shutdown_flag,
+        );
+    });
 
-    let mut processed = 0;
-    let mut errors = 0;
+    job_mgr.register_thread(job_id.clone(), handle);
 
-    // Process in batches
-    for batch in result.documents.chunks(p.batch_size) {
-        // Filter documents that have the source field with string value
-        // This ensures correct pairing between docs and embeddings
-        let docs_with_source: Vec<&Value> = batch
-            .iter()
-            .filter(|doc| {
-                doc.get(&config.source_field)
-                    .and_then(|v| v.as_str())
-                    .is_some()
-            })
-            .collect();
+    tracing::info!(
+        "Backfill job {} started for '{}' (force={})",
+        job_id,
+        collection,
+        force
+    );
 
-        if docs_with_source.is_empty() {
-            continue;
-        }
-
-        // Extract texts from filtered documents
-        // Note: filter_map is defensive - docs_with_source already filtered, but this is safer
-        let texts: Vec<&str> = docs_with_source
-            .iter()
-            .filter_map(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()))
-            .collect();
-
-        // Generate embeddings
-        let embeddings = match provider.embed_batch(&texts) {
-            Ok(embs) => embs,
-            Err(e) => {
-                tracing::warn!("Batch embedding failed: {}", e);
-                errors += texts.len();
-                continue;
-            }
-        };
-
-        // Update documents with embeddings - now correctly paired
-        for (doc, embedding) in docs_with_source.iter().zip(embeddings.iter()) {
-            if let Some(id) = doc.get("_id") {
-                let filter = json!({ "_id": id });
-                let update = json!({
-                    "$set": { &config.target_field: embedding }
-                });
-
-                match adapter.update_one(&p.collection, filter, update) {
-                    Ok(_) => processed += 1,
-                    Err(e) => {
-                        tracing::warn!("Failed to update document: {}", e);
-                        errors += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(json!({
-        "success": true,
-        "collection": p.collection,
-        "total_found": total_docs,
-        "processed": processed,
-        "errors": errors,
-        "provider": config.provider,
-        "dimension": provider.dimension()
-    }))
+    Some(job_id)
 }
 
-/// Background job execution for async backfill
+/// Background job execution for async backfill.
+///
+/// If `force` is true, re-embeds ALL documents (used for model change re-embedding).
+/// If `force` is false, only embeds documents missing the target_field.
 #[allow(clippy::too_many_arguments)]
 fn run_backfill_job(
     job_id: &str,
@@ -497,14 +384,16 @@ fn run_backfill_job(
     embedding_manager: &EmbeddingManager,
     config: &AutoEmbeddingConfig,
     collection: &str,
-    filter: Option<Value>,
     batch_size: usize,
+    force: bool,
     shutdown_flag: &std::sync::atomic::AtomicBool,
 ) {
-    // Build filter: documents without target field
-    let mut query = filter.unwrap_or(json!({}));
-    if let Some(obj) = query.as_object_mut() {
-        obj.insert(config.target_field.clone(), json!({ "$exists": false }));
+    // Build filter: if not force, only documents without target field
+    let mut query = json!({});
+    if !force {
+        if let Some(obj) = query.as_object_mut() {
+            obj.insert(config.target_field.clone(), json!({ "$exists": false }));
+        }
     }
 
     // Count total documents to process
@@ -545,6 +434,9 @@ fn run_backfill_job(
     let mut processed = 0;
     let mut errors = 0;
     let mut consecutive_empty_batches = 0;
+    // For force mode: use skip-based pagination since all docs match the empty filter.
+    // For non-force mode: no skip needed since processed docs gain target_field and are excluded.
+    let mut skip_offset: usize = 0;
 
     loop {
         // Check if shutdown was requested
@@ -560,12 +452,9 @@ fn run_backfill_job(
             return;
         }
 
-        // Fetch next batch - NO SKIP needed because the filter excludes already-processed docs
-        // The query filter includes: target_field: {$exists: false}
-        // So documents that have been processed (and now have target_field) are automatically excluded
         let find_options = crate::adapter::FindOptions {
             limit: Some(batch_size),
-            skip: None, // Don't use skip - filter handles exclusion
+            skip: if force { Some(skip_offset) } else { None },
             ..Default::default()
         };
 
@@ -665,6 +554,11 @@ fn run_backfill_job(
             &format!("Processed {}/{}", processed, total_count),
         );
 
+        // Advance skip offset for force mode
+        if force {
+            skip_offset += result.documents.len();
+        }
+
         // If we got fewer documents than batch_size, we're done
         if result.documents.len() < batch_size {
             break;
@@ -681,4 +575,106 @@ fn run_backfill_job(
             "provider": config.provider
         }),
     );
+}
+
+// ============================================================================
+// Startup Hook: Model Change Detection
+// ============================================================================
+
+/// Check all collections for embedding model changes and start re-embedding if needed.
+///
+/// Called at server startup. For each collection with auto-embedding enabled:
+/// - If `config.model` is empty (legacy config): saves current model name, no re-embed
+/// - If `config.model` differs from current provider model: starts force re-embed
+/// - If `config.model` matches: no action
+pub fn check_model_changes_and_reembed(
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+    job_manager: &Option<Arc<JobManager>>,
+) {
+    let manager = match embedding_manager.as_ref() {
+        Some(m) => m,
+        None => return, // No embedding manager → nothing to check
+    };
+
+    let collections = adapter.list_collections();
+
+    for collection in &collections {
+        // Skip system collections
+        if collection.starts_with('_') {
+            continue;
+        }
+
+        let config = match adapter.get_auto_embedding_config(collection) {
+            Ok(Some(c)) if c.enabled => c,
+            _ => continue,
+        };
+
+        let provider = match manager.get_provider(&config.provider) {
+            Some(p) => p,
+            None => {
+                tracing::warn!(
+                    "Collection '{}': auto-embed provider '{}' not available, skipping model check",
+                    collection,
+                    config.provider
+                );
+                continue;
+            }
+        };
+
+        let current_model = provider.model_name().to_string();
+        let saved_model = config.model.as_deref().unwrap_or("");
+
+        if saved_model.is_empty() {
+            // Legacy config without model name — save current, don't re-embed
+            tracing::info!(
+                "Collection '{}': saving model name '{}' to config (first time)",
+                collection,
+                current_model
+            );
+            let mut updated_config = config.clone();
+            updated_config.model = Some(current_model);
+            if let Err(e) =
+                adapter.set_auto_embedding_config(collection, Some(updated_config))
+            {
+                tracing::warn!(
+                    "Failed to update config for '{}': {}",
+                    collection,
+                    e
+                );
+            }
+        } else if saved_model != current_model {
+            // Model changed — start force re-embed
+            tracing::info!(
+                "Model changed for '{}': '{}' → '{}', starting re-embed",
+                collection,
+                saved_model,
+                current_model
+            );
+
+            // Update config with new model name first
+            let mut updated_config = config.clone();
+            updated_config.model = Some(current_model);
+            if let Err(e) =
+                adapter.set_auto_embedding_config(collection, Some(updated_config.clone()))
+            {
+                tracing::warn!(
+                    "Failed to update config for '{}': {}",
+                    collection,
+                    e
+                );
+                continue;
+            }
+
+            // Start force backfill (re-embed ALL documents)
+            start_backfill_job(
+                adapter,
+                manager,
+                &updated_config,
+                collection,
+                job_manager,
+                true,
+            );
+        }
+    }
 }

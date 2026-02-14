@@ -309,6 +309,13 @@ async fn run_http_server_internal(
     let job_manager: Option<Arc<crate::JobManager>> = Some(job_manager);
     info!("Job manager initialized");
 
+    // Check for embedding model changes and start re-embedding if needed
+    crate::tools::auto_embed::check_model_changes_and_reembed(
+        &adapter,
+        &embedding_manager,
+        &job_manager,
+    );
+
     // Lock working set on Windows to prevent memory paging under pressure.
     // Called after warm-up + FastText load so the floor captures all resident data.
     // Always enabled on Windows — no config needed. Graceful fallback if it fails.

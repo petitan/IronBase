@@ -892,7 +892,7 @@ Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pen
 - Streaming architektúra: O(vocab_strings + dim) memória
 - Runtime: ~10 perc
 
-**Migráció:** `IRONBASE_FASTTEXT_MODEL=...v2.bin` + `auto_embed_backfill` minden RAG collection-re.
+**Migráció:** `IRONBASE_FASTTEXT_MODEL=...v2.bin` + szerver újraindítás (automatikusan detektálja a modellváltást és újra-embed-eli az érintett collection-öket).
 
 **Key files:**
 - `models/convert_bin_to_ironbase_v2.py` — Python konverter (streaming)

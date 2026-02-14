@@ -103,28 +103,18 @@ Loading FastText v2 model: vocab_size=2000000, dim=300, buckets=2000000, minn=5,
 
 ## Step 4: Re-embed Existing RAG Collections
 
-**This is required** for existing RAG collections. Without re-embedding, stored document vectors (v1) won't match query vectors (v2) for OOV words.
+**Automatic:** When the server starts with a different model than what was used previously, it automatically detects the change and starts re-embedding all affected collections in the background. Check the server log for:
 
-### Option A: Backfill via MCP tool (recommended)
-
-For each RAG collection that has auto-embedding enabled:
-
-```json
-{
-  "name": "auto_embed_backfill",
-  "arguments": {
-    "collection": "your_collection_name"
-  }
-}
+```
+Model changed for 'your_collection': 'old_model' → 'new_model', starting re-embed
 ```
 
-This re-generates embeddings for all documents using the new v2 model. It runs as a background job — check progress with:
-
+Monitor progress with:
 ```json
 {"name": "embed_job_list"}
 ```
 
-### Option B: Re-import documents
+### Manual re-import (alternative)
 
 If you prefer a clean re-index:
 
@@ -143,9 +133,9 @@ If you prefer a clean re-index:
 
 | Collection type | Needs re-embedding? | How to check |
 |---|---|---|
-| RAG collections (with HNSW) | **Yes** | `rag_collection_stats` shows vector index |
-| Auto-embed enabled | **Yes** | `auto_embed_status` returns config |
-| Manual vector fields | **Yes** | Documents have `*_embedding` fields |
+| RAG collections (with HNSW) | **Yes** (auto-detected) | `rag_collection_stats` shows vector index |
+| Auto-embed enabled | **Yes** (auto-detected) | `auto_embed_status` returns config |
+| Manual vector fields | **Yes** (manual) | Documents have `*_embedding` fields |
 | No vector indexes | **No** | Fulltext/B+tree only |
 
 ### Verification
@@ -246,6 +236,6 @@ Note: if you already re-embedded collections with v2, the stored vectors are val
 |---|---|---|
 | `Loading FastText v1 model` in logs | Wrong model path | Check `IRONBASE_FASTTEXT_MODEL` |
 | OOV words still zero vector | Using v1 model | Verify v2 magic in log: `Loading FastText v2 model` |
-| `rag_search` returns no vector results | Stale embeddings | Run `auto_embed_backfill` |
+| `rag_search` returns no vector results | Stale embeddings | Restart server (auto re-embeds) or re-enable auto_embed |
 | Converter OOM | Old converter version | Use streaming converter (v1.0.329+) |
 | Server startup slow | First mmap page faults | Normal for first access (~30s for 4.5 GB) |

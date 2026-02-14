@@ -403,10 +403,9 @@ The v2 format is recommended for Hungarian and other agglutinative languages whe
 
 | Tool | Description |
 |------|-------------|
-| `auto_embed_enable` | Auto-generate embeddings on insert/update |
+| `auto_embed_enable` | Auto-generate embeddings on insert/update (auto-backfills existing docs) |
 | `auto_embed_disable` | Disable auto-embedding for collection |
 | `auto_embed_status` | Get auto-embedding configuration |
-| `auto_embed_backfill` | Generate embeddings for existing documents (async) |
 
 ### Background Jobs
 

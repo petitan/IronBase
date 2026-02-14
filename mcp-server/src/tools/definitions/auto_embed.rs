@@ -1,6 +1,6 @@
 //! Auto-embedding tool definitions
 //!
-//! Tools: auto_embed_enable, auto_embed_disable, auto_embed_status, auto_embed_backfill
+//! Tools: auto_embed_enable, auto_embed_disable, auto_embed_status
 
 use serde_json::{json, Value};
 
@@ -95,36 +95,6 @@ pub fn tools() -> Vec<Value> {
                     "collection": {
                         "type": "string",
                         "description": "Collection name"
-                    }
-                },
-                "required": ["collection"]
-            }
-        }),
-        json!({
-            "name": "auto_embed_backfill",
-            "title": "Backfill Embeddings",
-            "description": "Generate embeddings for existing documents that don't have them. Returns a job ID for async tracking.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "collection": {
-                        "type": "string",
-                        "description": "Collection name"
-                    },
-                    "filter": {
-                        "type": "object",
-                        "description": "Optional MongoDB-style filter to select documents",
-                        "default": {}
-                    },
-                    "batch_size": {
-                        "type": "integer",
-                        "description": "Number of documents to process per batch",
-                        "default": 100
-                    },
-                    "async": {
-                        "type": "boolean",
-                        "description": "Run in background (default: true for large collections)",
-                        "default": true
                     }
                 },
                 "required": ["collection"]
