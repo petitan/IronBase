@@ -710,26 +710,6 @@ impl Stage {
         }
     }
 
-    /// Execute this stage
-    ///
-    /// # DEPRECATED for $group
-    ///
-    /// For $group stages, this calls the deprecated `GroupStage::execute()` which
-    /// has NO LIMIT CHECKING. Use `execute_with_context()` for OOM protection.
-    #[allow(deprecated)] // GroupStage::execute() is deprecated but we need backward compat
-    pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
-        match self {
-            Stage::Match(stage) => stage.execute(docs),
-            Stage::Project(stage) => stage.execute(docs),
-            Stage::Group(stage) => stage.execute(docs),
-            Stage::Count(stage) => stage.execute(docs),
-            Stage::Sort(stage) => stage.execute(docs),
-            Stage::Limit(stage) => stage.execute(docs),
-            Stage::Skip(stage) => stage.execute(docs),
-            Stage::Unwind(stage) => stage.execute(docs),
-        }
-    }
-
-    // NOTE: execute_with_limits() removed in 2026-01 cumulative unwind fix.
-    // Use execute_with_context() instead for proper cumulative limit tracking.
+    // NOTE: Stage::execute() removed — it was dead code that bypassed OOM limits
+    // for $group/$unwind. Use execute_with_context() for proper limit tracking.
 }

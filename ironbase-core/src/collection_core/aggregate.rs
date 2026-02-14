@@ -182,7 +182,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     let remaining = stages.get(group_idx + 1..).unwrap_or(&[]);
                     if !remaining.is_empty() {
                         for stage in remaining {
-                            docs = stage.execute(docs)?;
+                            docs = stage.execute_with_context(docs, ctx)?;
                         }
                     }
 

@@ -249,6 +249,7 @@ impl AccumulatorState {
     ///
     /// **WARNING:** This method has NO LIMITS on $push/$addToSet!
     /// Use `update_with_limits()` for OOM protection.
+    #[allow(dead_code)]
     pub(crate) fn update(&mut self, doc: &Value, accumulator: &Accumulator) -> Result<()> {
         // Delegate to unlimited version (backwards compatibility)
         // Propagate errors (e.g. try_reserve OOM) instead of silently ignoring them
@@ -261,6 +262,7 @@ impl AccumulatorState {
     /// - Returns Err if $push exceeds max_push_elements
     /// - Returns Err if $addToSet exceeds max_addtoset_elements
     /// - Other accumulators are O(1) memory and don't need limits
+    #[allow(dead_code)]
     pub(crate) fn update_with_limits(
         &mut self,
         doc: &Value,

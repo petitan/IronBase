@@ -110,6 +110,7 @@ impl GroupStage {
         since = "0.3.90",
         note = "Use execute_streaming_with_context() or execute_streaming_with_limits() for OOM protection"
     )]
+    #[allow(dead_code)]
     pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
         // HashMap<hash, GroupEntry> - hash-based lookup avoids JSON serialization
         let mut groups: HashMap<u64, GroupEntry> = HashMap::new();

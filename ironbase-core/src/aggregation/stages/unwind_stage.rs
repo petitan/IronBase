@@ -59,8 +59,10 @@ impl UnwindStage {
 
     /// Default max output documents for $unwind to prevent OOM
     /// 1000 docs × 10000 array elements = 10M output → ezt limitáljuk
+    #[allow(dead_code)]
     const DEFAULT_MAX_UNWIND_OUTPUT: usize = 1_000_000;
 
+    #[allow(dead_code)]
     pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
         self.execute_with_limit(docs, Self::DEFAULT_MAX_UNWIND_OUTPUT)
     }
@@ -71,6 +73,7 @@ impl UnwindStage {
     /// - Checks output count BEFORE each push
     /// - Uses try_reserve() for memory safety
     /// - Default limit: 1,000,000 output documents
+    #[allow(dead_code)]
     pub(crate) fn execute_with_limit(
         &self,
         docs: Vec<Value>,
