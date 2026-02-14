@@ -238,12 +238,14 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
     let projection = parse_projection_value(p.projection)?;
 
+    let and_mode = p.mode.as_deref() == Some("and");
     let options = FulltextSearchOptions {
         limit: p.limit,
         skip: p.skip,
         min_score: p.min_score,
         projection,
-        filter: p.filter, // NEW: MongoDB-style post-filter
+        filter: p.filter,
+        and_mode,
         highlight: p.highlight,
         highlight_context: p.highlight_context,
         highlight_max_snippets: p.highlight_max_snippets,

@@ -85,6 +85,12 @@ pub fn tools() -> Vec<Value> {
                         "default": "content"
                     },
                     "query": fields::search_query(),
+                    "mode": {
+                        "type": "string",
+                        "description": "Search mode: 'or' (default) = any word matches, 'and' = ALL words must match in document",
+                        "enum": ["or", "and"],
+                        "default": "or"
+                    },
                     "limit": fields::limit_results(10),
                     "skip": fields::skip_results(),
                     "min_score": fields::min_score(),

@@ -797,6 +797,7 @@ fn register_search_functions(
                 min_score,
                 projection,
                 filter: None, // Scripting doesn't support filter yet
+                and_mode: false,
                 highlight,
                 highlight_context,
                 highlight_max_snippets,
@@ -1339,6 +1340,7 @@ fn rag_search_impl(
         min_score: None,
         projection: None,
         filter: None,
+        and_mode: false,
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,

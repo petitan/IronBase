@@ -539,6 +539,7 @@ fn handle_rag_search(
         min_score: None,
         projection: None,
         filter: p.filter.clone(),
+        and_mode: false, // RAG uses RRF fusion, not AND mode
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,

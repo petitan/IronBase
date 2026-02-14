@@ -839,6 +839,9 @@ pub struct FulltextSearchOptions {
     pub highlight: bool,
     /// Highlight configuration (context chars, max snippets)
     pub highlight_options: Option<HighlightOptions>,
+    /// AND mode: ALL query tokens must match (default: false = OR mode)
+    /// When true, only documents containing every query token are returned.
+    pub and_mode: bool,
     /// Cancellation flag for cooperative cancellation
     pub cancel_flag: Option<Arc<AtomicBool>>,
     /// Deadline for timeout support

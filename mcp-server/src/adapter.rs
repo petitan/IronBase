@@ -140,6 +140,8 @@ pub struct FulltextSearchOptions {
     pub projection: Option<HashMap<String, i32>>,
     /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering)
     pub filter: Option<Value>,
+    /// AND mode: ALL query tokens must match (default: false = OR mode)
+    pub and_mode: bool,
     /// Enable highlight/snippet generation
     pub highlight: bool,
     /// Characters of context around each match (default: 100)
@@ -1559,7 +1561,8 @@ impl IronBaseAdapter {
             skip: options.skip,
             min_score: options.min_score,
             projection: options.projection,
-            filter: options.filter, // NEW: MongoDB-style post-filter
+            filter: options.filter,
+            and_mode: options.and_mode,
             highlight: options.highlight,
             highlight_options: if options.highlight {
                 Some(HighlightOptions {

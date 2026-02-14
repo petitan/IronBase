@@ -821,10 +821,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let highlight_opts = options.highlight_options.clone().unwrap_or_default();
 
+        // AND mode: tokenize query to know required token count
+        let and_mode = options.and_mode;
+        let required_token_count = if and_mode {
+            tokenize(query, &fts_options).len()
+        } else {
+            0
+        };
+
         // Determine candidate limit - if we have a filter, request more candidates
-        let has_filter_or_phrase = parsed_filter.is_some() || parsed.has_phrases();
-        let candidate_limit =
-            FulltextSearchOptions::calculate_candidate_limit(effective_limit, has_filter_or_phrase);
+        let has_filter_or_phrase_or_and =
+            parsed_filter.is_some() || parsed.has_phrases() || and_mode;
+        let candidate_limit = FulltextSearchOptions::calculate_candidate_limit(
+            effective_limit,
+            has_filter_or_phrase_or_and,
+        );
 
         // Perform TF-IDF search
         let search_results = if !parsed.has_phrases() {
@@ -832,11 +843,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             fulltext_index.search_with_ctx(
                 query,
                 candidate_limit,
-                if parsed_filter.is_none() {
+                if parsed_filter.is_none() && !and_mode {
                     effective_skip
                 } else {
                     0
-                }, // Skip in TF-IDF only if no filter
+                }, // Skip in TF-IDF only if no filter/and
                 options.min_score,
                 ctx.as_ref(),
             )?
@@ -881,6 +892,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 None => continue, // Deleted doc, skip
             };
 
+            // AND mode: all query tokens must match
+            if and_mode
+                && required_token_count > 0
+                && fts_result.matched_tokens.len() < required_token_count
+            {
+                continue;
+            }
+
             // Phrase check (if applicable)
             if !phrase_regexes.is_empty() {
                 let text = doc.get(field).and_then(|v| v.as_str()).unwrap_or("");
@@ -902,8 +921,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
 
-            // Handle skip (manual skip when filter/phrase was used)
-            if (parsed_filter.is_some() || parsed.has_phrases()) && skipped < effective_skip {
+            // Handle skip (manual skip when filter/phrase/and was used)
+            if has_filter_or_phrase_or_and && skipped < effective_skip {
                 skipped += 1;
                 continue;
             }
