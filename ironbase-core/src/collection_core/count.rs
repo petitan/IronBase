@@ -26,12 +26,40 @@ fn max_string_key() -> IndexKey {
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use crate::execution::ExecutionContext;
-use crate::index::{IndexKey, RangeQueryMode};
+use crate::index::{IndexKey, RangeQueryMode, ScanOrder};
 use crate::query::Query;
 use crate::query_planner::{QueryPlan, QueryPlanner};
 use crate::storage::{RawStorage, Storage};
 
 use super::CollectionCore;
+
+/// Check if the query is fully covered by the index plan's field.
+///
+/// Returns true when the query only has conditions on the field that the
+/// index covers — meaning the index count alone is accurate.
+/// Returns false when additional conditions exist (e.g., $regex on another
+/// field) that require post-filtering the index results.
+///
+/// This prevents the bug where `count_documents({"doc_type": "X", "content": {"$regex": "..."}})}`
+/// would return the index count for doc_type without applying the $regex filter.
+fn query_fully_covered_by_plan(query_json: &Value, plan: &QueryPlan) -> bool {
+    let map = match query_json.as_object() {
+        Some(m) => m,
+        None => return false,
+    };
+
+    let plan_field = match plan {
+        QueryPlan::IndexScan { ref field, .. } => field,
+        QueryPlan::IndexRangeScan { ref field, .. } => field,
+        QueryPlan::RegexPrefixScan { ref field, .. } => field,
+        QueryPlan::MultiRegexPrefixScan { ref field, .. } => field,
+        QueryPlan::MultiValueScan { ref field, .. } => field,
+        QueryPlan::SparseIndexScan { ref field, .. } => field,
+    };
+
+    // Query is fully covered when it only has conditions on the indexed field
+    map.len() == 1 && map.contains_key(plan_field)
+}
 
 impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Count documents matching query
@@ -143,10 +171,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// Count using QueryPlanner for index optimization
     ///
     /// Tries to use available indexes for faster counting.
-    /// For simple equality queries, trusts the index count directly.
+    /// When the query is fully covered by the index (single field match),
+    /// trusts the index count directly for O(1) memory.
+    /// When the query has additional conditions beyond the indexed field,
+    /// uses index-narrowed post-filter: fetches doc_ids from index, then
+    /// streams through them applying the full query match.
     /// Falls back to streaming scan if no suitable index exists.
     ///
-    /// 🔧 REFACTORED: Uses unified range_query(Count) for O(1) memory index counting.
+    /// FIX #36: Previously returned unfiltered index counts when query had
+    /// conditions on multiple fields (e.g., $regex on a non-indexed field).
     fn count_with_plan(&self, query_json: &Value, ctx: Option<&ExecutionContext>) -> Result<u64> {
         use crate::index::RangeQueryResult;
 
@@ -178,6 +211,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         if let Some((_, plan)) = QueryPlanner::analyze_query_with_fields(query_json, &index_fields)
         {
+            let fully_covered = query_fully_covered_by_plan(query_json, &plan);
+
             match &plan {
                 QueryPlan::IndexScan {
                     ref index_name,
@@ -186,24 +221,35 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     ..
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
-                        // Use range_query with Count mode - O(1) memory!
                         let (start, end) = if *is_compound {
                             index.build_prefix_range(key.clone())
                         } else {
                             (key.clone(), key.clone())
                         };
 
-                        let result =
-                            index.range_query(&start, &end, true, true, RangeQueryMode::Count);
-
-                        let raw_count = match result {
-                            RangeQueryResult::Count(c) => c,
-                            _ => unreachable!("Count mode always returns Count"),
-                        };
-                        drop(indexes);
-
-                        // Need to verify tombstones - use sampling or trust if no tombstones
-                        return self.adjust_count_for_tombstones(raw_count);
+                        if fully_covered {
+                            // Fast path: query only has the indexed field — O(1) memory
+                            let result =
+                                index.range_query(&start, &end, true, true, RangeQueryMode::Count);
+                            let raw_count = match result {
+                                RangeQueryResult::Count(c) => c,
+                                _ => unreachable!("Count mode always returns Count"),
+                            };
+                            drop(indexes);
+                            return self.adjust_count_for_tombstones(raw_count);
+                        } else {
+                            // FIX #36: query has extra conditions — narrow via index, then post-filter
+                            let mode = RangeQueryMode::Scan {
+                                skip: 0,
+                                limit: None,
+                                order: ScanOrder::Asc,
+                            };
+                            let doc_ids = index
+                                .range_query(&start, &end, true, true, mode)
+                                .unwrap_docs();
+                            drop(indexes);
+                            return self.count_index_narrowed(doc_ids, query_json, ctx);
+                        }
                     }
                 }
                 QueryPlan::IndexRangeScan {
@@ -220,22 +266,40 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         let start_key = start.as_ref().unwrap_or(&default_start);
                         let end_key = end.as_ref().unwrap_or(&default_end);
 
-                        // Use range_query with Count mode - O(1) memory!
-                        let result = index.range_query(
-                            start_key,
-                            end_key,
-                            *inclusive_start,
-                            *inclusive_end,
-                            RangeQueryMode::Count,
-                        );
-
-                        let raw_count = match result {
-                            RangeQueryResult::Count(c) => c,
-                            _ => unreachable!("Count mode always returns Count"),
-                        };
-                        drop(indexes);
-
-                        return self.adjust_count_for_tombstones(raw_count);
+                        if fully_covered {
+                            // Fast path: O(1) memory
+                            let result = index.range_query(
+                                start_key,
+                                end_key,
+                                *inclusive_start,
+                                *inclusive_end,
+                                RangeQueryMode::Count,
+                            );
+                            let raw_count = match result {
+                                RangeQueryResult::Count(c) => c,
+                                _ => unreachable!("Count mode always returns Count"),
+                            };
+                            drop(indexes);
+                            return self.adjust_count_for_tombstones(raw_count);
+                        } else {
+                            // FIX #36: narrow via index, then post-filter
+                            let mode = RangeQueryMode::Scan {
+                                skip: 0,
+                                limit: None,
+                                order: ScanOrder::Asc,
+                            };
+                            let doc_ids = index
+                                .range_query(
+                                    start_key,
+                                    end_key,
+                                    *inclusive_start,
+                                    *inclusive_end,
+                                    mode,
+                                )
+                                .unwrap_docs();
+                            drop(indexes);
+                            return self.count_index_narrowed(doc_ids, query_json, ctx);
+                        }
                     }
                 }
                 QueryPlan::RegexPrefixScan {
@@ -244,23 +308,39 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     exact,
                     ..
                 } => {
-                    // Only use index count when exact=true (pure prefix, no regex verification needed)
                     if *exact {
                         if let Some(index) = indexes.get_btree_index(index_name) {
                             let start = IndexKey::String(prefix.clone());
                             let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
 
-                            // Use range_query with Count mode - O(1) memory!
-                            let result =
-                                index.range_query(&start, &end, true, true, RangeQueryMode::Count);
-
-                            let raw_count = match result {
-                                RangeQueryResult::Count(c) => c,
-                                _ => unreachable!("Count mode always returns Count"),
-                            };
-                            drop(indexes);
-
-                            return self.adjust_count_for_tombstones(raw_count);
+                            if fully_covered {
+                                // Fast path: single-field regex, prefix is exact — O(1) memory
+                                let result = index.range_query(
+                                    &start,
+                                    &end,
+                                    true,
+                                    true,
+                                    RangeQueryMode::Count,
+                                );
+                                let raw_count = match result {
+                                    RangeQueryResult::Count(c) => c,
+                                    _ => unreachable!("Count mode always returns Count"),
+                                };
+                                drop(indexes);
+                                return self.adjust_count_for_tombstones(raw_count);
+                            } else {
+                                // FIX #36: narrow via index, then post-filter
+                                let mode = RangeQueryMode::Scan {
+                                    skip: 0,
+                                    limit: None,
+                                    order: ScanOrder::Asc,
+                                };
+                                let doc_ids = index
+                                    .range_query(&start, &end, true, true, mode)
+                                    .unwrap_docs();
+                                drop(indexes);
+                                return self.count_index_narrowed(doc_ids, query_json, ctx);
+                            }
                         }
                     }
                 }
@@ -269,22 +349,47 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     ref prefixes,
                     ..
                 } => {
-                    // Count for multi-regex prefix: sum of all prefix counts
-                    // Note: This may over-count if prefixes overlap, but exact counting
-                    // would require deduplication which defeats the purpose
                     if let Some(index) = indexes.get_btree_index(index_name) {
-                        let mut total_count = 0usize;
-                        for prefix in prefixes {
-                            let start = IndexKey::String(prefix.clone());
-                            let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
-                            let result =
-                                index.range_query(&start, &end, true, true, RangeQueryMode::Count);
-                            if let RangeQueryResult::Count(c) = result {
-                                total_count += c;
+                        if fully_covered {
+                            // Fast path: sum of all prefix counts — O(1) memory per prefix
+                            let mut total_count = 0usize;
+                            for prefix in prefixes {
+                                let start = IndexKey::String(prefix.clone());
+                                let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                                let result = index.range_query(
+                                    &start,
+                                    &end,
+                                    true,
+                                    true,
+                                    RangeQueryMode::Count,
+                                );
+                                if let RangeQueryResult::Count(c) = result {
+                                    total_count += c;
+                                }
                             }
+                            drop(indexes);
+                            return self.adjust_count_for_tombstones(total_count);
+                        } else {
+                            // FIX #36: narrow via index, then post-filter
+                            let mut all_doc_ids = Vec::new();
+                            for prefix in prefixes {
+                                let start = IndexKey::String(prefix.clone());
+                                let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                                let mode = RangeQueryMode::Scan {
+                                    skip: 0,
+                                    limit: None,
+                                    order: ScanOrder::Asc,
+                                };
+                                let ids = index
+                                    .range_query(&start, &end, true, true, mode)
+                                    .unwrap_docs();
+                                all_doc_ids.extend(ids);
+                            }
+                            all_doc_ids.sort_unstable();
+                            all_doc_ids.dedup();
+                            drop(indexes);
+                            return self.count_index_narrowed(all_doc_ids, query_json, ctx);
                         }
-                        drop(indexes);
-                        return self.adjust_count_for_tombstones(total_count);
                     }
                 }
                 QueryPlan::MultiValueScan {
@@ -292,28 +397,59 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     ref keys,
                     ..
                 } => {
-                    // Count for $in with plain values: O(k) index lookups
-                    // Each key is a point lookup, sum the counts
                     if let Some(index) = indexes.get_btree_index(index_name) {
-                        let mut total_count = 0usize;
-                        for key in keys {
-                            let result =
-                                index.range_query(key, key, true, true, RangeQueryMode::Count);
-                            if let RangeQueryResult::Count(c) = result {
-                                total_count += c;
+                        if fully_covered {
+                            // Fast path: O(k) index lookups
+                            let mut total_count = 0usize;
+                            for key in keys {
+                                let result =
+                                    index.range_query(key, key, true, true, RangeQueryMode::Count);
+                                if let RangeQueryResult::Count(c) = result {
+                                    total_count += c;
+                                }
                             }
+                            drop(indexes);
+                            return self.adjust_count_for_tombstones(total_count);
+                        } else {
+                            // FIX #36: narrow via index, then post-filter
+                            let mut all_doc_ids = Vec::new();
+                            for key in keys {
+                                let mode = RangeQueryMode::Scan {
+                                    skip: 0,
+                                    limit: None,
+                                    order: ScanOrder::Asc,
+                                };
+                                let ids =
+                                    index.range_query(key, key, true, true, mode).unwrap_docs();
+                                all_doc_ids.extend(ids);
+                            }
+                            all_doc_ids.sort_unstable();
+                            all_doc_ids.dedup();
+                            drop(indexes);
+                            return self.count_index_narrowed(all_doc_ids, query_json, ctx);
                         }
-                        drop(indexes);
-                        return self.adjust_count_for_tombstones(total_count);
                     }
                 }
                 QueryPlan::SparseIndexScan { ref index_name, .. } => {
-                    // Sparse index: all entries represent docs where field exists
-                    // Simply count all entries in the index - O(1) operation
                     if let Some(index) = indexes.get_btree_index(index_name) {
-                        let raw_count = index.metadata.num_keys as usize;
-                        drop(indexes);
-                        return self.adjust_count_for_tombstones(raw_count);
+                        if fully_covered {
+                            // Fast path: all entries = docs where field exists — O(1)
+                            let raw_count = index.metadata.num_keys as usize;
+                            drop(indexes);
+                            return self.adjust_count_for_tombstones(raw_count);
+                        } else {
+                            // FIX #35/#36: query has extra conditions beyond $exists
+                            let mode = RangeQueryMode::Scan {
+                                skip: 0,
+                                limit: None,
+                                order: ScanOrder::Asc,
+                            };
+                            let doc_ids = index
+                                .range_query(&IndexKey::Null, &IndexKey::MaxKey, true, true, mode)
+                                .unwrap_docs();
+                            drop(indexes);
+                            return self.count_index_narrowed(doc_ids, query_json, ctx);
+                        }
                     }
                 }
             }
@@ -340,6 +476,91 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// was incorrectly reduced to 10.
     fn adjust_count_for_tombstones(&self, raw_count: usize) -> Result<u64> {
         Ok(raw_count as u64)
+    }
+
+    /// Count documents from an index-narrowed set of doc_ids by applying the full query filter.
+    ///
+    /// FIX #36: When a query has conditions beyond the indexed field (e.g.,
+    /// `{doc_type: "X", content: {$regex: "..."}}` with index on doc_type),
+    /// the index narrows candidates but the remaining conditions must be verified.
+    ///
+    /// Uses chunked processing identical to count_with_scan() for OOM safety.
+    /// Performance: Only loads index-matched documents instead of full collection.
+    fn count_index_narrowed(
+        &self,
+        doc_ids: Vec<DocumentId>,
+        query_json: &Value,
+        ctx: Option<&ExecutionContext>,
+    ) -> Result<u64> {
+        /// Max documents per chunk — matches count_with_scan() for consistency
+        const CHUNK_SIZE: usize = 1000;
+
+        let parsed_query = Query::from_json(query_json)?;
+        let mut total_count = 0u64;
+
+        for (chunks_processed, chunk) in doc_ids.chunks(CHUNK_SIZE).enumerate() {
+            // Check for cancellation at the start of each chunk
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(chunks_processed)?;
+            }
+
+            // Phase 1: Read documents by ID (sequential)
+            let raw_docs: Vec<Value> = chunk
+                .iter()
+                .filter_map(|doc_id| self.read_document_by_id(doc_id).ok().flatten())
+                .collect();
+
+            // Phase 2: Parallel parse + match (CPU bound)
+            #[cfg(feature = "parallel")]
+            {
+                use rayon::prelude::*;
+
+                total_count += raw_docs
+                    .par_iter()
+                    .filter(|doc| {
+                        // Skip tombstones
+                        if doc
+                            .get("_tombstone")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            return false;
+                        }
+
+                        // Apply full query filter
+                        match Document::from_value_owned((*doc).clone()) {
+                            Ok(document) => parsed_query.matches(&document).unwrap_or(false),
+                            Err(_) => false,
+                        }
+                    })
+                    .count() as u64;
+            }
+
+            #[cfg(not(feature = "parallel"))]
+            {
+                for doc in raw_docs {
+                    if doc
+                        .get("_tombstone")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
+
+                    let document = match Document::from_value_owned(doc) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+
+                    if parsed_query.matches(&document).unwrap_or(false) {
+                        total_count += 1;
+                    }
+                }
+            }
+            // raw_docs freed here — memory reclaimed before next chunk
+        }
+
+        Ok(total_count)
     }
 
     /// Count by chunked parallel scan (fast AND memory-safe)
