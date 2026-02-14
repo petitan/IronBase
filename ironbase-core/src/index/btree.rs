@@ -1453,9 +1453,34 @@ impl BPlusTree {
         inclusive_end: bool,
         mode: RangeQueryMode,
     ) -> RangeQueryResult {
+        // LAZY MODE: open file for on-demand child loading (same pattern as search_in_node)
+        let mut lazy_file = if self.lazy_mode {
+            self.source_path.as_ref().and_then(|path| {
+                File::open(path)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            index = %self.metadata.name,
+                            path = %path.display(),
+                            error = %e,
+                            "range_query: failed to open lazy index file"
+                        );
+                        e
+                    })
+                    .ok()
+            })
+        } else {
+            None
+        };
+
         match mode {
             RangeQueryMode::Count => {
-                let count = self.count_range_internal(start, end, inclusive_start, inclusive_end);
+                let count = self.count_range_internal(
+                    start,
+                    end,
+                    inclusive_start,
+                    inclusive_end,
+                    &mut lazy_file,
+                );
                 RangeQueryResult::Count(count)
             }
             RangeQueryMode::Scan { skip, limit, order } => {
@@ -1467,21 +1492,26 @@ impl BPlusTree {
                         inclusive_end,
                         skip,
                         limit,
+                        &mut lazy_file,
                     ),
-                    ScanOrder::Desc => self.scan_desc_internal(start, end, skip, limit),
+                    ScanOrder::Desc => {
+                        self.scan_desc_internal(start, end, skip, limit, &mut lazy_file)
+                    }
                 };
                 RangeQueryResult::Docs(docs)
             }
         }
     }
 
-    /// Internal: Count entries in range without materializing
+    /// Internal: Count entries in range without materializing.
+    /// Supports lazy mode via optional file handle for on-demand child loading.
     fn count_range_internal(
         &self,
         start: &IndexKey,
         end: &IndexKey,
         inclusive_start: bool,
         inclusive_end: bool,
+        lazy_file: &mut Option<File>,
     ) -> usize {
         fn count_range(
             node: &BTreeNode,
@@ -1489,6 +1519,7 @@ impl BPlusTree {
             end: &IndexKey,
             inclusive_start: bool,
             inclusive_end: bool,
+            lazy_file: &mut Option<File>,
         ) -> usize {
             match node {
                 BTreeNode::Leaf(leaf) => {
@@ -1506,22 +1537,69 @@ impl BPlusTree {
                 }
                 BTreeNode::Internal(internal) => {
                     let mut count = 0;
-                    for (i, child) in internal.children.iter().enumerate() {
+                    let child_count = if !internal.children.is_empty() {
+                        internal.children.len()
+                    } else {
+                        internal.children_offsets.len()
+                    };
+                    for i in 0..child_count {
                         let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
                         let child_max_might_match =
                             i >= internal.keys.len() || &internal.keys[i] >= start;
                         if child_min_might_match && child_max_might_match {
-                            count += count_range(child, start, end, inclusive_start, inclusive_end);
+                            if i < internal.children.len() {
+                                count += count_range(
+                                    &internal.children[i],
+                                    start,
+                                    end,
+                                    inclusive_start,
+                                    inclusive_end,
+                                    lazy_file,
+                                );
+                            } else if lazy_file.is_some() {
+                                // Lazy load: take file, load node, put file back
+                                let offset = internal.children_offsets[i];
+                                let mut f = lazy_file.take().unwrap();
+                                match BPlusTree::load_node(&mut f, offset) {
+                                    Ok(child_node) => {
+                                        *lazy_file = Some(f);
+                                        count += count_range(
+                                            &child_node,
+                                            start,
+                                            end,
+                                            inclusive_start,
+                                            inclusive_end,
+                                            lazy_file,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        *lazy_file = Some(f);
+                                        tracing::warn!(
+                                            offset,
+                                            error = %e,
+                                            "count_range: failed to load lazy child node"
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
                     count
                 }
             }
         }
-        count_range(&self.root, start, end, inclusive_start, inclusive_end)
+        count_range(
+            &self.root,
+            start,
+            end,
+            inclusive_start,
+            inclusive_end,
+            lazy_file,
+        )
     }
 
-    /// Internal: Scan ascending with skip/limit and early termination
+    /// Internal: Scan ascending with skip/limit and early termination.
+    /// Supports lazy mode via optional file handle for on-demand child loading.
     fn scan_asc_internal(
         &self,
         start: &IndexKey,
@@ -1530,6 +1608,7 @@ impl BPlusTree {
         inclusive_end: bool,
         skip: usize,
         limit: Option<usize>,
+        lazy_file: &mut Option<File>,
     ) -> Vec<DocumentId> {
         let mut results = Vec::new();
         let mut skipped = 0usize;
@@ -1545,6 +1624,7 @@ impl BPlusTree {
             skipped: &mut usize,
             skip: usize,
             limit_count: usize,
+            lazy_file: &mut Option<File>,
         ) -> bool {
             // returns true if limit reached
             match node {
@@ -1575,25 +1655,65 @@ impl BPlusTree {
                     false
                 }
                 BTreeNode::Internal(internal) => {
-                    for (i, child) in internal.children.iter().enumerate() {
+                    let child_count = if !internal.children.is_empty() {
+                        internal.children.len()
+                    } else {
+                        internal.children_offsets.len()
+                    };
+                    for i in 0..child_count {
                         let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
                         let child_max_might_match =
                             i >= internal.keys.len() || &internal.keys[i] >= start;
-                        if child_min_might_match
-                            && child_max_might_match
-                            && scan_asc(
-                                child,
-                                start,
-                                end,
-                                inclusive_start,
-                                inclusive_end,
-                                results,
-                                skipped,
-                                skip,
-                                limit_count,
-                            )
-                        {
-                            return true; // Propagate early termination
+                        if child_min_might_match && child_max_might_match {
+                            let reached_limit = if i < internal.children.len() {
+                                scan_asc(
+                                    &internal.children[i],
+                                    start,
+                                    end,
+                                    inclusive_start,
+                                    inclusive_end,
+                                    results,
+                                    skipped,
+                                    skip,
+                                    limit_count,
+                                    lazy_file,
+                                )
+                            } else if lazy_file.is_some() {
+                                let offset = internal.children_offsets[i];
+                                let mut f = lazy_file.take().unwrap();
+                                let result = match BPlusTree::load_node(&mut f, offset) {
+                                    Ok(child_node) => {
+                                        *lazy_file = Some(f);
+                                        scan_asc(
+                                            &child_node,
+                                            start,
+                                            end,
+                                            inclusive_start,
+                                            inclusive_end,
+                                            results,
+                                            skipped,
+                                            skip,
+                                            limit_count,
+                                            lazy_file,
+                                        )
+                                    }
+                                    Err(e) => {
+                                        *lazy_file = Some(f);
+                                        tracing::warn!(
+                                            offset,
+                                            error = %e,
+                                            "scan_asc: failed to load lazy child node"
+                                        );
+                                        false
+                                    }
+                                };
+                                result
+                            } else {
+                                false
+                            };
+                            if reached_limit {
+                                return true;
+                            }
                         }
                     }
                     false
@@ -1611,6 +1731,7 @@ impl BPlusTree {
             &mut skipped,
             skip,
             limit_count,
+            lazy_file,
         );
         results
     }
@@ -1624,6 +1745,7 @@ impl BPlusTree {
         inclusive_end: bool,
         skip: usize,
         limit: Option<usize>,
+        lazy_file: &mut Option<File>,
     ) -> Vec<(IndexKey, DocumentId)> {
         let mut results = Vec::new();
         let mut skipped = 0usize;
@@ -1639,6 +1761,7 @@ impl BPlusTree {
             skipped: &mut usize,
             skip: usize,
             limit_count: usize,
+            lazy_file: &mut Option<File>,
         ) -> bool {
             match node {
                 BTreeNode::Leaf(leaf) => {
@@ -1668,25 +1791,65 @@ impl BPlusTree {
                     false
                 }
                 BTreeNode::Internal(internal) => {
-                    for (i, child) in internal.children.iter().enumerate() {
+                    let child_count = if !internal.children.is_empty() {
+                        internal.children.len()
+                    } else {
+                        internal.children_offsets.len()
+                    };
+                    for i in 0..child_count {
                         let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
                         let child_max_might_match =
                             i >= internal.keys.len() || &internal.keys[i] >= start;
-                        if child_min_might_match
-                            && child_max_might_match
-                            && scan_asc_pairs(
-                                child,
-                                start,
-                                end,
-                                inclusive_start,
-                                inclusive_end,
-                                results,
-                                skipped,
-                                skip,
-                                limit_count,
-                            )
-                        {
-                            return true;
+                        if child_min_might_match && child_max_might_match {
+                            let reached_limit = if i < internal.children.len() {
+                                scan_asc_pairs(
+                                    &internal.children[i],
+                                    start,
+                                    end,
+                                    inclusive_start,
+                                    inclusive_end,
+                                    results,
+                                    skipped,
+                                    skip,
+                                    limit_count,
+                                    lazy_file,
+                                )
+                            } else if lazy_file.is_some() {
+                                let offset = internal.children_offsets[i];
+                                let mut f = lazy_file.take().unwrap();
+                                let result = match BPlusTree::load_node(&mut f, offset) {
+                                    Ok(child_node) => {
+                                        *lazy_file = Some(f);
+                                        scan_asc_pairs(
+                                            &child_node,
+                                            start,
+                                            end,
+                                            inclusive_start,
+                                            inclusive_end,
+                                            results,
+                                            skipped,
+                                            skip,
+                                            limit_count,
+                                            lazy_file,
+                                        )
+                                    }
+                                    Err(e) => {
+                                        *lazy_file = Some(f);
+                                        tracing::warn!(
+                                            offset,
+                                            error = %e,
+                                            "scan_asc_pairs: failed to load lazy child node"
+                                        );
+                                        false
+                                    }
+                                };
+                                result
+                            } else {
+                                false
+                            };
+                            if reached_limit {
+                                return true;
+                            }
                         }
                     }
                     false
@@ -1704,6 +1867,7 @@ impl BPlusTree {
             &mut skipped,
             skip,
             limit_count,
+            lazy_file,
         );
         results
     }
@@ -1711,24 +1875,51 @@ impl BPlusTree {
     /// Walk all leaf nodes in DESCENDING order (right-to-left traversal).
     /// Callback returns `true` to continue, `false` to stop early.
     /// This avoids collecting all leaves into a Vec for LIMIT queries.
-    fn walk_leaves_desc<F>(&self, callback: &mut F) -> bool
+    fn walk_leaves_desc<F>(&self, callback: &mut F, lazy_file: &mut Option<File>) -> bool
     where
         F: FnMut(&LeafNode) -> bool,
     {
-        Self::walk_leaves_desc_node(&self.root, callback)
+        Self::walk_leaves_desc_node(&self.root, callback, lazy_file)
     }
 
-    fn walk_leaves_desc_node<F>(node: &BTreeNode, callback: &mut F) -> bool
+    fn walk_leaves_desc_node<F>(
+        node: &BTreeNode,
+        callback: &mut F,
+        lazy_file: &mut Option<File>,
+    ) -> bool
     where
         F: FnMut(&LeafNode) -> bool,
     {
         match node {
             BTreeNode::Leaf(leaf) => callback(leaf),
             BTreeNode::Internal(internal) => {
-                // Traverse children RIGHT to LEFT for descending order
-                for child in internal.children.iter().rev() {
-                    if !Self::walk_leaves_desc_node(child, callback) {
-                        return false; // Early termination
+                if !internal.children.is_empty() {
+                    // In-memory children: traverse RIGHT to LEFT
+                    for child in internal.children.iter().rev() {
+                        if !Self::walk_leaves_desc_node(child, callback, lazy_file) {
+                            return false; // Early termination
+                        }
+                    }
+                } else if lazy_file.is_some() {
+                    // Lazy load children from file: traverse RIGHT to LEFT
+                    for &offset in internal.children_offsets.iter().rev() {
+                        let mut f = lazy_file.take().unwrap();
+                        match BPlusTree::load_node(&mut f, offset) {
+                            Ok(child_node) => {
+                                *lazy_file = Some(f);
+                                if !Self::walk_leaves_desc_node(&child_node, callback, lazy_file) {
+                                    return false;
+                                }
+                            }
+                            Err(e) => {
+                                *lazy_file = Some(f);
+                                tracing::warn!(
+                                    offset,
+                                    error = %e,
+                                    "walk_leaves_desc: failed to load lazy child node"
+                                );
+                            }
+                        }
                     }
                 }
                 true
@@ -1744,6 +1935,7 @@ impl BPlusTree {
         end: &IndexKey,
         skip: usize,
         limit: Option<usize>,
+        lazy_file: &mut Option<File>,
     ) -> Vec<DocumentId> {
         let mut results = Vec::new();
         let mut skipped = 0usize;
@@ -1754,33 +1946,36 @@ impl BPlusTree {
             let _ = results.try_reserve(limit_count);
         }
 
-        self.walk_leaves_desc(&mut |leaf| {
-            for idx in (0..leaf.keys.len()).rev() {
-                let key = &leaf.keys[idx];
+        self.walk_leaves_desc(
+            &mut |leaf| {
+                for idx in (0..leaf.keys.len()).rev() {
+                    let key = &leaf.keys[idx];
 
-                // Check if key is in range [start, end]
-                if key < start || key > end {
-                    continue;
-                }
+                    // Check if key is in range [start, end]
+                    if key < start || key > end {
+                        continue;
+                    }
 
-                // Apply skip
-                if skipped < skip {
-                    skipped += 1;
-                    continue;
-                }
+                    // Apply skip
+                    if skipped < skip {
+                        skipped += 1;
+                        continue;
+                    }
 
-                // Collect result
-                if idx < leaf.document_ids.len() {
-                    results.push(leaf.document_ids[idx].clone());
-                }
+                    // Collect result
+                    if idx < leaf.document_ids.len() {
+                        results.push(leaf.document_ids[idx].clone());
+                    }
 
-                // Check limit (early termination!)
-                if results.len() >= limit_count {
-                    return false; // Stop walking
+                    // Check limit (early termination!)
+                    if results.len() >= limit_count {
+                        return false; // Stop walking
+                    }
                 }
-            }
-            true // Continue to next leaf
-        });
+                true // Continue to next leaf
+            },
+            lazy_file,
+        );
 
         results
     }
@@ -1793,6 +1988,7 @@ impl BPlusTree {
         end: &IndexKey,
         skip: usize,
         limit: Option<usize>,
+        lazy_file: &mut Option<File>,
     ) -> Vec<(IndexKey, DocumentId)> {
         let mut results = Vec::new();
         let mut skipped = 0usize;
@@ -1803,25 +1999,28 @@ impl BPlusTree {
             let _ = results.try_reserve(limit_count);
         }
 
-        self.walk_leaves_desc(&mut |leaf| {
-            for idx in (0..leaf.keys.len()).rev() {
-                let key = &leaf.keys[idx];
-                if key < start || key > end {
-                    continue;
+        self.walk_leaves_desc(
+            &mut |leaf| {
+                for idx in (0..leaf.keys.len()).rev() {
+                    let key = &leaf.keys[idx];
+                    if key < start || key > end {
+                        continue;
+                    }
+                    if skipped < skip {
+                        skipped += 1;
+                        continue;
+                    }
+                    if idx < leaf.document_ids.len() {
+                        results.push((key.clone(), leaf.document_ids[idx].clone()));
+                    }
+                    if results.len() >= limit_count {
+                        return false; // Stop walking
+                    }
                 }
-                if skipped < skip {
-                    skipped += 1;
-                    continue;
-                }
-                if idx < leaf.document_ids.len() {
-                    results.push((key.clone(), leaf.document_ids[idx].clone()));
-                }
-                if results.len() >= limit_count {
-                    return false; // Stop walking
-                }
-            }
-            true // Continue to next leaf
-        });
+                true // Continue to next leaf
+            },
+            lazy_file,
+        );
 
         results
     }
@@ -1837,6 +2036,25 @@ impl BPlusTree {
         limit: Option<usize>,
         order: ScanOrder,
     ) -> Vec<(IndexKey, DocumentId)> {
+        // LAZY MODE: open file for on-demand child loading
+        let mut file = if self.lazy_mode {
+            self.source_path.as_ref().and_then(|path| {
+                File::open(path)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            index = %self.metadata.name,
+                            path = %path.display(),
+                            error = %e,
+                            "range_query_pairs: failed to open lazy index file"
+                        );
+                        e
+                    })
+                    .ok()
+            })
+        } else {
+            None
+        };
+
         match order {
             ScanOrder::Asc => self.scan_asc_pairs_internal(
                 start,
@@ -1845,8 +2063,9 @@ impl BPlusTree {
                 inclusive_end,
                 skip,
                 limit,
+                &mut file,
             ),
-            ScanOrder::Desc => self.scan_desc_pairs_internal(start, end, skip, limit),
+            ScanOrder::Desc => self.scan_desc_pairs_internal(start, end, skip, limit, &mut file),
         }
     }
 
