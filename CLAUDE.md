@@ -4,9 +4,9 @@
 
 | Jellemző | Érték |
 |----------|-------|
-| Tesztek | 939+ (unit + integration + doctest) |
+| Tesztek | 2,000+ (unit + integration + doctest) |
 | API-k | Rust, Python (PyO3), C# (.NET 8) |
-| Operátorok | 21 query, 7 update |
+| Operátorok | 25 query, 7 update |
 | Indexek | B+ tree, compound, fuzzy, fulltext, HNSW |
 | Keresés | Fuzzy (Jaro-Winkler/Levenshtein), TF-IDF, RAG |
 
@@ -101,7 +101,7 @@ Metadata at END → no race conditions, no truncation.
 
 | Típus | Operátorok |
 |-------|-----------|
-| **Query (26)** | $eq $ne $gt $gte $lt $lte $in $nin · $and $or $not $nor · $exists $type · $all $elemMatch $size · $regex $fuzzy $text · $startsWith $endsWith $contains · $expr · $** |
+| **Query (25)** | $eq $ne $gt $gte $lt $lte $in $nin · $and $or $not $nor · $exists $type · $all $elemMatch $size · $regex $fuzzy $text · $startsWith $endsWith $contains · $expr · $** |
 | **Update (7)** | $set $inc $unset $push $pull $addToSet $pop (+ dot notation + upsert) |
 | **Aggregation** | $match $group $project $count $sort $limit $skip $unwind · Accumulators: $sum $avg $min $max $first $last $push $addToSet |
 
@@ -687,7 +687,7 @@ cd mcp-server && cargo build --release
 |-----|--------|
 | `IRONBASE_PATH` | DB fájl |
 | `IRONBASE_ADMIN_KEY` | Admin kulcs |
-| `IRONBASE_PORT` | Port (8080) |
+| `MCP_PORT` | Port (8080) |
 
 **FONTOS: Anthropic API schema korlátozás**
 - `inputSchema` top-level szintjén TILOS `oneOf`, `allOf`, `anyOf` használata

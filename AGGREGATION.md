@@ -152,6 +152,8 @@ Used within `$group` to compute values across documents.
 | `$max` | Maximum | `{"$max": "$salary"}` |
 | `$first` | First in group | `{"$first": "$name"}` |
 | `$last` | Last in group | `{"$last": "$timestamp"}` |
+| `$push` | Collect all values into array | `{"$push": "$tag"}` |
+| `$addToSet` | Collect unique values into array | `{"$addToSet": "$category"}` |
 
 **All accumulators support dot notation:**
 
@@ -389,7 +391,7 @@ If you need top N after sort:
 
 - Field references only (`"$field"`) - no computed expressions
 - Nested dot notation works everywhere
-- All 6 stages and 6 accumulators fully implemented
+- All 8 stages and 8 accumulators fully implemented
 - Pipeline processes all documents in memory
 
 ## MongoDB Compatibility
