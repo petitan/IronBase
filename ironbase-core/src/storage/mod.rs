@@ -149,7 +149,10 @@ pub struct Header {
     pub data_end_offset: u64,
 
     // Clean shutdown flag (version 4+)
-    // If true, indexes can be trusted from .idx files without rebuild
+    // Semantics: "was the PREVIOUS shutdown clean?"
+    // Set to true by mark_clean_shutdown() during graceful close,
+    // cleared immediately on next open(). If true at open time,
+    // indexes can be trusted from .idx files without rebuild.
     #[serde(default)]
     pub clean_shutdown: bool,
 }
@@ -260,7 +263,8 @@ pub struct CollectionMeta {
     pub document_count: u64,
     #[serde(default)]
     pub live_document_count: u64,
-    pub data_offset: u64,  // Data start position
+    #[serde(default)]
+    pub data_offset: u64, // Legacy: always HEADER_SIZE (256). Kept for file format compat.
     pub index_offset: u64, // Index start position
     pub last_id: u64,      // Last _id
 

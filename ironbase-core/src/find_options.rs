@@ -322,6 +322,39 @@ fn set_nested_value_recursive(doc: &mut Value, parts: &[&str], index: usize, val
 /// Supports array element projection (e.g., "to.email" where "to" is an array)
 ///
 /// # Errors
+/// Validate a projection map without applying it to a document.
+///
+/// Checks:
+/// - All values are 0 or 1
+/// - No mixing of inclusion (1) and exclusion (0) fields (except `_id: 0` in include mode)
+///
+/// Call this early (before query execution) to fail fast on invalid projections.
+pub fn validate_projection(projection: &HashMap<String, i32>) -> Result<()> {
+    if projection.is_empty() {
+        return Ok(());
+    }
+
+    if let Some((field, value)) = projection.iter().find(|(_, &v)| v != 0 && v != 1) {
+        return Err(IronBaseError::InvalidQuery(format!(
+            "Invalid projection value for '{}': expected 0 or 1, got {}",
+            field, value
+        )));
+    }
+
+    let has_inclusions = projection.values().any(|&v| v == 1);
+    let has_non_id_exclusions = projection
+        .iter()
+        .any(|(field, &action)| action == 0 && field != "_id");
+
+    if has_inclusions && has_non_id_exclusions {
+        return Err(IronBaseError::InvalidQuery(
+            "Cannot mix inclusion and exclusion in projection (except _id: 0)".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Returns `InvalidQuery` if projection mixes inclusion (1) and exclusion (0) fields.
 /// Exception: `_id: 0` is allowed in include mode (MongoDB compatible).
 pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Result<Value> {

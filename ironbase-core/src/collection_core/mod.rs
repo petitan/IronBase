@@ -901,6 +901,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     ) -> Result<Vec<Value>> {
         self.check_not_closed()?;
 
+        // Validate projection early — fail fast before query execution
+        if let Some(ref proj) = options.projection {
+            crate::find_options::validate_projection(proj)?;
+        }
+
         // ====================================================================
         // FAST PATH: Direct _id lookup O(1)
         // FIX #5-6: When query is {"_id": value}, skip catalog scanning entirely.
