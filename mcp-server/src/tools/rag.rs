@@ -496,12 +496,22 @@ fn handle_rag_search(
     // ========================================================================
     // STEP 2: Vector search
     // ========================================================================
-    let vector_results = adapter.vector_search(
-        &p.collection,
-        &embedding_field,
-        &query_vector,
-        internal_limit,
-    )?;
+    let vector_results = if let Some(ref filter) = p.filter {
+        adapter.vector_search_with_filter(
+            &p.collection,
+            &embedding_field,
+            &query_vector,
+            filter,
+            internal_limit,
+        )?
+    } else {
+        adapter.vector_search(
+            &p.collection,
+            &embedding_field,
+            &query_vector,
+            internal_limit,
+        )?
+    };
 
     // Build vector rank map (1-indexed)
     let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
@@ -528,7 +538,7 @@ fn handle_rag_search(
         skip: None,
         min_score: None,
         projection: None,
-        filter: None,
+        filter: p.filter.clone(),
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
@@ -1067,5 +1077,51 @@ mod tests {
     fn test_id_to_string() {
         assert_eq!(id_to_string(&json!("abc")), Some("abc".to_string()));
         assert_eq!(id_to_string(&json!(123)), Some("123".to_string()));
+    }
+
+    #[test]
+    fn test_rag_search_params_defaults() {
+        let params = json!({
+            "collection": "docs",
+            "query": "semantic search test"
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        assert_eq!(p.collection, "docs");
+        assert_eq!(p.query, "semantic search test");
+        assert_eq!(p.limit, 10);
+        assert_eq!(p.vector_weight, 0.5);
+        assert_eq!(p.fulltext_weight, 0.5);
+        assert!(p.rerank);
+        assert!(p.deduplicate);
+        assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON);
+        assert!(p.projection.is_none());
+        assert!(p.provider.is_none());
+        assert!(p.filter.is_none()); // default: no filter
+    }
+
+    #[test]
+    fn test_rag_search_params_with_filter() {
+        let params = json!({
+            "collection": "docs",
+            "query": "keresés",
+            "filter": {"doc_type": "ajanlat", "year": 2026}
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        assert!(p.filter.is_some());
+        let filter = p.filter.unwrap();
+        assert_eq!(filter["doc_type"], "ajanlat");
+        assert_eq!(filter["year"], 2026);
+    }
+
+    #[test]
+    fn test_rag_search_params_with_empty_filter() {
+        let params = json!({
+            "collection": "docs",
+            "query": "test",
+            "filter": {}
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        assert!(p.filter.is_some());
+        assert!(p.filter.unwrap().as_object().unwrap().is_empty());
     }
 }

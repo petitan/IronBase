@@ -81,6 +81,10 @@ pub fn tools() -> Vec<Value> {
                     "default": 0.5,
                     "minimum": 0.0,
                     "maximum": 1.0
+                },
+                "filter": {
+                    "type": "object",
+                    "description": "MongoDB-style filter applied BEFORE both vector and fulltext search. Example: {\"doc_type\": \"ajanlat\", \"status\": \"active\"}"
                 }
             },
             "required": ["collection", "vector", "query"]

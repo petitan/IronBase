@@ -601,6 +601,8 @@ pub struct HybridSearchParams {
     /// 1.0 = pure relevance, 0.0 = pure diversity
     #[serde(default = "default_mmr_lambda")]
     pub mmr_lambda: f64,
+    /// MongoDB-style filter applied BEFORE both vector and fulltext search
+    pub filter: Option<Value>,
 }
 
 fn default_hybrid_limit() -> usize {
@@ -684,6 +686,8 @@ pub struct RagSearchParams {
     pub mmr_lambda: f64,
     pub projection: Option<Value>,
     pub provider: Option<String>,
+    /// MongoDB-style filter applied BEFORE both vector and fulltext search
+    pub filter: Option<Value>,
 }
 
 /// Parameters for `rag_collection_stats` tool

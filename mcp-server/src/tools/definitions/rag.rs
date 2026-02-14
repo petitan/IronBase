@@ -151,6 +151,10 @@ pub fn tools() -> Vec<Value> {
                     "provider": {
                         "type": "string",
                         "description": "Override embedding provider for query (uses collection config if not specified)"
+                    },
+                    "filter": {
+                        "type": "object",
+                        "description": "MongoDB-style filter applied BEFORE both vector and fulltext search. Example: {\"doc_type\": \"ajanlat\", \"status\": \"active\"}"
                     }
                 },
                 "required": ["collection", "query"]

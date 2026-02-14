@@ -79,12 +79,22 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     // 2. Vector search → get ranks
     // ========================================================================
     let query_vector: Vec<f32> = p.vector.iter().map(|&v| v as f32).collect();
-    let vector_results = adapter.vector_search(
-        &p.collection,
-        &p.vector_field,
-        &query_vector,
-        internal_limit,
-    )?;
+    let vector_results = if let Some(ref filter) = p.filter {
+        adapter.vector_search_with_filter(
+            &p.collection,
+            &p.vector_field,
+            &query_vector,
+            filter,
+            internal_limit,
+        )?
+    } else {
+        adapter.vector_search(
+            &p.collection,
+            &p.vector_field,
+            &query_vector,
+            internal_limit,
+        )?
+    };
 
     // Build vector rank map (1-indexed) with pre-allocated capacity (OOM protection)
     let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
@@ -111,7 +121,7 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         skip: None,
         min_score: None,
         projection: None, // Get full docs for merging
-        filter: None,
+        filter: p.filter.clone(),
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
@@ -761,6 +771,7 @@ mod tests {
         assert!(p.deduplicate); // default: true
         assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON); // default
         assert!(p.language.is_none());
+        assert!(p.filter.is_none()); // default: no filter
     }
 
     #[test]
@@ -800,6 +811,40 @@ mod tests {
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert!(!p.rerank);
         assert!(!p.deduplicate);
+    }
+
+    #[test]
+    fn test_params_with_filter() {
+        let params = json!({
+            "collection": "test",
+            "vector_field": "embedding",
+            "text_field": "content",
+            "vector": [0.1, 0.2, 0.3],
+            "query": "test query",
+            "filter": {"doc_type": "ajanlat", "status": "active"}
+        });
+
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert!(p.filter.is_some());
+        let filter = p.filter.unwrap();
+        assert_eq!(filter["doc_type"], "ajanlat");
+        assert_eq!(filter["status"], "active");
+    }
+
+    #[test]
+    fn test_params_with_empty_filter() {
+        let params = json!({
+            "collection": "test",
+            "vector_field": "embedding",
+            "text_field": "content",
+            "vector": [0.1, 0.2],
+            "query": "test",
+            "filter": {}
+        });
+
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert!(p.filter.is_some());
+        assert!(p.filter.unwrap().as_object().unwrap().is_empty());
     }
 
     #[test]
