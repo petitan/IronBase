@@ -2,7 +2,7 @@
 // Fuzzy text search and full-text search with TF-IDF
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
@@ -970,6 +970,283 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             });
 
             // Early exit when limit reached
+            if results.len() >= effective_limit {
+                break;
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Multi-field fulltext search with score merging
+    ///
+    /// Searches across multiple fulltext-indexed fields and merges results by document.
+    /// Each document's final score is the **maximum** score across all matching fields
+    /// (similar to Elasticsearch `best_fields` strategy).
+    ///
+    /// # Arguments
+    /// * `fields` - Fields to search (each must have a fulltext index)
+    /// * `query` - Search query (supports phrases, AND mode, etc.)
+    /// * `options` - Search options (limit, skip, filter, highlight, etc.)
+    ///
+    /// # Returns
+    /// Merged results sorted by best score. `matched_tokens` is the union across all fields.
+    /// Highlights include snippets from all matching fields.
+    ///
+    /// # Errors
+    /// Returns error if any field has no fulltext index.
+    pub fn fulltext_search_multi_ext(
+        &self,
+        fields: &[&str],
+        query: &str,
+        options: FulltextSearchOptions,
+    ) -> Result<Vec<FulltextSearchResultExt>> {
+        self.check_not_closed()?;
+
+        // Single field → delegate to existing method
+        if fields.len() == 1 {
+            return self.fulltext_search_ext(fields[0], query, options);
+        }
+
+        if fields.is_empty() {
+            return Err(IronBaseError::IndexError(
+                "No fields specified for multi-field fulltext search".to_string(),
+            ));
+        }
+
+        // Build execution context from options
+        let ctx = if options.cancel_flag.is_some() || options.deadline.is_some() {
+            Some(
+                ExecutionContext::new()
+                    .with_deadline_opt(options.deadline)
+                    .with_cancel_flag_opt(options.cancel_flag.clone()),
+            )
+        } else {
+            None
+        };
+
+        let parsed = parse_query(query);
+        let effective_limit = options.limit.unwrap_or(10);
+        let effective_skip = options.skip.unwrap_or(0);
+        let and_mode = options.and_mode;
+
+        // Parse filter once
+        let parsed_filter = if let Some(ref filter) = options.filter {
+            Some(Query::from_json(filter)?)
+        } else {
+            None
+        };
+
+        let highlight_opts = options.highlight_options.clone().unwrap_or_default();
+
+        // Determine candidate limit with overallocation
+        let has_filter_or_phrase_or_and =
+            parsed_filter.is_some() || parsed.has_phrases() || and_mode;
+        let candidate_limit = FulltextSearchOptions::calculate_candidate_limit(
+            effective_limit,
+            has_filter_or_phrase_or_and,
+        );
+
+        // Build phrase regexes once (shared across fields)
+        let phrase_regexes: Vec<_> = if parsed.has_phrases() {
+            parsed
+                .phrases
+                .iter()
+                .map(|p| build_phrase_regex_cached(p))
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            Vec::new()
+        };
+
+        // ---- Per-field TF-IDF search, collecting (doc_id → best score + tokens + field) ----
+        // Key: doc_id, Value: (best_score, merged_matched_tokens, set of matching fields)
+        let mut doc_scores: HashMap<crate::DocumentId, (f64, HashSet<String>, Vec<String>)> =
+            HashMap::new();
+
+        // Collect per-field FTS options for highlight/tokenize
+        let mut field_fts_options: HashMap<String, crate::fulltext::FtsOptions> = HashMap::new();
+
+        {
+            let indexes = self.indexes.read();
+
+            for &field in fields {
+                let fulltext_index =
+                    indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+                        IronBaseError::IndexError(format!(
+                            "No fulltext index found for field '{}'",
+                            field
+                        ))
+                    })?;
+
+                field_fts_options.insert(field.to_string(), fulltext_index.options.clone());
+
+                let required_token_count = if and_mode {
+                    tokenize(query, &fulltext_index.options).len()
+                } else {
+                    0
+                };
+
+                // Search this field's index
+                let search_results = if !parsed.has_phrases() {
+                    fulltext_index.search_with_ctx(
+                        query,
+                        candidate_limit,
+                        0, // Skip handled manually after merge
+                        options.min_score,
+                        ctx.as_ref(),
+                    )?
+                } else {
+                    let fts_opts = &fulltext_index.options;
+                    let all_terms = parsed.all_search_terms(fts_opts);
+                    fulltext_index.search_with_ctx(
+                        &all_terms.join(" "),
+                        candidate_limit,
+                        0,
+                        options.min_score,
+                        ctx.as_ref(),
+                    )?
+                };
+
+                for fts_result in search_results {
+                    // AND mode: skip docs that don't match all tokens for this field
+                    if and_mode
+                        && required_token_count > 0
+                        && fts_result.matched_tokens.len() < required_token_count
+                    {
+                        continue;
+                    }
+
+                    let entry = doc_scores
+                        .entry(fts_result.doc_id.clone())
+                        .or_insert_with(|| (0.0, HashSet::new(), Vec::new()));
+
+                    // Best score across fields (max)
+                    if fts_result.score > entry.0 {
+                        entry.0 = fts_result.score;
+                    }
+
+                    // Union matched tokens
+                    for token in &fts_result.matched_tokens {
+                        entry.1.insert(token.clone());
+                    }
+
+                    // Track which fields matched
+                    entry.2.push(field.to_string());
+                }
+            }
+        } // drop indexes read lock
+
+        // Sort by score descending
+        let mut sorted_docs: Vec<_> = doc_scores.into_iter().collect();
+        sorted_docs.sort_by(|a, b| {
+            b.1 .0
+                .partial_cmp(&a.1 .0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Prepare query tokens for highlights (use first field's options)
+        let query_tokens = if options.highlight {
+            let first_fts_opts = field_fts_options.values().next().unwrap();
+            tokenize(query, first_fts_opts)
+        } else {
+            Vec::new()
+        };
+
+        // Process results: load doc, filter, project, highlight
+        let mut results = Vec::new();
+        let mut skipped = 0;
+
+        for (iteration, (doc_id, (score, matched_token_set, matched_fields))) in
+            sorted_docs.into_iter().enumerate()
+        {
+            // Cancellation check
+            if let Some(ref exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+
+            // Load document
+            let doc = match self.read_document_by_id(&doc_id)? {
+                Some(d) => d,
+                None => continue,
+            };
+
+            // Phrase check on ANY matching field
+            if !phrase_regexes.is_empty() {
+                let any_field_matches = matched_fields.iter().any(|f| {
+                    let text = doc.get(f.as_str()).and_then(|v| v.as_str()).unwrap_or("");
+                    phrase_regexes.iter().all(|re| re.is_match(text))
+                });
+                if !any_field_matches {
+                    continue;
+                }
+            }
+
+            // Apply MongoDB filter
+            if let Some(ref filter) = parsed_filter {
+                match Document::from_value(&doc) {
+                    Ok(document) => {
+                        if !filter.matches(&document)? {
+                            continue;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+
+            // Handle skip
+            if skipped < effective_skip {
+                skipped += 1;
+                continue;
+            }
+
+            // Apply projection
+            let projected_doc = if let Some(ref proj) = options.projection {
+                crate::find_options::apply_projection(&doc, proj)?
+            } else {
+                doc.clone()
+            };
+
+            // Generate highlights from all matching fields
+            let highlights = if options.highlight && !query_tokens.is_empty() {
+                let mut all_highlights = Vec::new();
+                for field in &matched_fields {
+                    if let Some(fts_opts) = field_fts_options.get(field.as_str()) {
+                        let field_value = get_nested_value(&doc, field)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if !field_value.is_empty() {
+                            let tokens = tokenize(query, fts_opts);
+                            let result = generate_highlights(
+                                field_value,
+                                &tokens,
+                                field,
+                                fts_opts,
+                                &highlight_opts,
+                            );
+                            if !result.snippets.is_empty() {
+                                all_highlights.push(result);
+                            }
+                        }
+                    }
+                }
+                if all_highlights.is_empty() {
+                    None
+                } else {
+                    Some(all_highlights)
+                }
+            } else {
+                None
+            };
+
+            let matched_tokens: Vec<String> = matched_token_set.into_iter().collect();
+
+            results.push(FulltextSearchResultExt {
+                document: projected_doc,
+                score,
+                matched_tokens,
+                highlights,
+            });
+
             if results.len() >= effective_limit {
                 break;
             }

@@ -1601,6 +1601,66 @@ impl IronBaseAdapter {
         Ok(results)
     }
 
+    /// Multi-field fulltext search
+    ///
+    /// Searches across multiple fulltext-indexed fields and merges results by document.
+    /// Each document's final score is the maximum score across all matching fields.
+    pub fn fulltext_search_multi(
+        &self,
+        collection: &str,
+        fields: &[&str],
+        query_str: &str,
+        options: FulltextSearchOptions,
+    ) -> Result<Vec<FulltextSearchResult>> {
+        use ironbase_core::fulltext::{FulltextSearchOptions as CoreOptions, HighlightOptions};
+
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ctx = self.create_execution_context();
+
+        let core_options = CoreOptions {
+            limit: options.limit,
+            skip: options.skip,
+            min_score: options.min_score,
+            projection: options.projection,
+            filter: options.filter,
+            and_mode: options.and_mode,
+            highlight: options.highlight,
+            highlight_options: if options.highlight {
+                Some(HighlightOptions {
+                    context_chars: options.highlight_context.unwrap_or(100),
+                    max_snippets: options.highlight_max_snippets.unwrap_or(3),
+                    ..Default::default()
+                })
+            } else {
+                None
+            },
+            cancel_flag: ctx.cancel_flag().cloned(),
+            deadline: ctx.deadline(),
+        };
+
+        let results = coll.fulltext_search_multi_ext(fields, query_str, core_options)?;
+
+        let results = results
+            .into_iter()
+            .map(|r| FulltextSearchResult {
+                document: r.document,
+                score: r.score,
+                matched_tokens: r.matched_tokens,
+                highlights: r.highlights.map(|hs| {
+                    hs.into_iter()
+                        .map(|h| HighlightResultJson {
+                            field: h.field,
+                            snippets: h.snippets,
+                        })
+                        .collect()
+                }),
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     /// List all fulltext indexes for a collection
     /// Uses get_collection - no implicit creation
     pub fn list_fulltext_indexes(&self, collection: &str) -> Result<Vec<Value>> {

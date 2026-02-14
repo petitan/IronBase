@@ -250,7 +250,13 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         highlight_context: p.highlight_context,
         highlight_max_snippets: p.highlight_max_snippets,
     };
-    let results = adapter.fulltext_search(&p.collection, &p.field, &p.query, options)?;
+    // Multi-field search if `fields` is provided, otherwise single-field
+    let results = if let Some(ref fields) = p.fields {
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, options)?
+    } else {
+        adapter.fulltext_search(&p.collection, &p.field, &p.query, options)?
+    };
 
     // Format results with scores, matched tokens, and optional highlights
     let documents: Vec<Value> = results

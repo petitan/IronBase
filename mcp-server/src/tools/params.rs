@@ -222,6 +222,8 @@ pub struct FulltextSearchParams {
     /// Field with fulltext index (default: "content" - gaploader compatible)
     #[serde(default = "default_content_field")]
     pub field: String,
+    /// Multiple fields to search across (overrides `field` if provided)
+    pub fields: Option<Vec<String>>,
     pub query: String,
     pub limit: Option<usize>,
     pub skip: Option<usize>,
@@ -863,5 +865,101 @@ mod tests {
         assert_eq!(p.code, "return 42;");
         assert_eq!(p.params.as_ref().and_then(|v| v.get("x")), Some(&json!(10)));
         assert_eq!(p.max_operations, Some(5000));
+    }
+
+    #[test]
+    fn test_fulltext_search_params_defaults() {
+        let params = json!({
+            "collection": "articles",
+            "query": "rust programming"
+        });
+        let p: FulltextSearchParams = FulltextSearchParams::parse(params).unwrap();
+        assert_eq!(p.collection, "articles");
+        assert_eq!(p.field, "content"); // default
+        assert!(p.fields.is_none());
+        assert_eq!(p.query, "rust programming");
+        assert!(p.limit.is_none());
+        assert!(p.skip.is_none());
+        assert!(p.min_score.is_none());
+        assert!(p.mode.is_none());
+        assert!(p.filter.is_none());
+        assert!(!p.highlight);
+    }
+
+    #[test]
+    fn test_fulltext_search_params_single_field() {
+        let params = json!({
+            "collection": "articles",
+            "field": "title",
+            "query": "rust"
+        });
+        let p: FulltextSearchParams = FulltextSearchParams::parse(params).unwrap();
+        assert_eq!(p.field, "title");
+        assert!(p.fields.is_none());
+    }
+
+    #[test]
+    fn test_fulltext_search_params_multi_fields() {
+        let params = json!({
+            "collection": "articles",
+            "fields": ["title", "body"],
+            "query": "rust"
+        });
+        let p: FulltextSearchParams = FulltextSearchParams::parse(params).unwrap();
+        let fields = p.fields.unwrap();
+        assert_eq!(fields, vec!["title", "body"]);
+    }
+
+    #[test]
+    fn test_fulltext_search_params_fields_overrides_field() {
+        // When both field and fields are provided, fields should be present
+        let params = json!({
+            "collection": "articles",
+            "field": "content",
+            "fields": ["title", "body"],
+            "query": "rust"
+        });
+        let p: FulltextSearchParams = FulltextSearchParams::parse(params).unwrap();
+        assert!(p.fields.is_some());
+        assert_eq!(p.fields.unwrap(), vec!["title", "body"]);
+    }
+
+    #[test]
+    fn test_fulltext_search_params_with_all_options() {
+        let params = json!({
+            "collection": "articles",
+            "fields": ["title", "content"],
+            "query": "rust python",
+            "mode": "and",
+            "limit": 5,
+            "skip": 2,
+            "min_score": 0.5,
+            "filter": {"status": "published"},
+            "highlight": true,
+            "highlight_context": 200,
+            "highlight_max_snippets": 5
+        });
+        let p: FulltextSearchParams = FulltextSearchParams::parse(params).unwrap();
+        assert_eq!(p.fields.unwrap(), vec!["title", "content"]);
+        assert_eq!(p.mode.as_deref(), Some("and"));
+        assert_eq!(p.limit, Some(5));
+        assert_eq!(p.skip, Some(2));
+        assert_eq!(p.min_score, Some(0.5));
+        assert!(p.filter.is_some());
+        assert!(p.highlight);
+        assert_eq!(p.highlight_context, Some(200));
+        assert_eq!(p.highlight_max_snippets, Some(5));
+    }
+
+    #[test]
+    fn test_fulltext_search_params_empty_fields_array() {
+        let params = json!({
+            "collection": "articles",
+            "fields": [],
+            "query": "rust"
+        });
+        let p: FulltextSearchParams = FulltextSearchParams::parse(params).unwrap();
+        let fields = p.fields.unwrap();
+        assert!(fields.is_empty());
     }
 }

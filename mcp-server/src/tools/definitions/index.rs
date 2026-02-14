@@ -71,7 +71,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "fulltext_search",
             "title": "Full-Text Search",
-            "description": "Search documents using TF-IDF relevance scoring. Requires index_create_fulltext first. Use 'filter' to apply MongoDB-style filtering on results (fast, applies AFTER TF-IDF scoring). Set highlight=true for <mark>...</mark> snippets. Searched field must be in projection for highlights.",
+            "description": "Search documents using TF-IDF relevance scoring. Requires index_create_fulltext first. Use 'filter' to apply MongoDB-style filtering on results (fast, applies AFTER TF-IDF scoring). Set highlight=true for <mark>...</mark> snippets. Searched field must be in projection for highlights. Use 'fields' (array) for multi-field search, or 'field' (string) for single-field. If both are provided, 'fields' takes precedence.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -81,8 +81,13 @@ pub fn tools() -> Vec<Value> {
                     },
                     "field": {
                         "type": "string",
-                        "description": "Indexed field to search (default: 'content' - gaploader compatible)",
+                        "description": "Single indexed field to search (default: 'content'). Use 'fields' for multi-field search.",
                         "default": "content"
+                    },
+                    "fields": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Multiple fields to search across (overrides 'field'). Scores merged per document using best-field strategy (max score)."
                     },
                     "query": fields::search_query(),
                     "mode": {
