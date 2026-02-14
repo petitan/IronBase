@@ -86,22 +86,10 @@
                               Source='target\release\mcp-ironbase-server.exe'
                               KeyPath='yes'/>
                     </Component>
-                    <Component Id='TuiExecutable' Guid='E5F6A7B8-C9D0-1234-EFAB-567890123456' Win64='yes'>
-                        <File Id='exe1'
-                              Name='ironbase-tui.exe'
-                              Source='target\release\ironbase-tui.exe'
-                              KeyPath='yes'/>
-                    </Component>
                     <Component Id='BackupExecutable' Guid='F6A7B8C9-D0E1-2345-FABC-678901234567' Win64='yes'>
                         <File Id='exe2'
                               Name='ironbase-backup.exe'
                               Source='target\release\ironbase-backup.exe'
-                              KeyPath='yes'/>
-                    </Component>
-                    <Component Id='BridgeExecutable' Guid='A7B8C9D0-E1F2-3456-ABCD-789012345678' Win64='yes'>
-                        <File Id='exe3'
-                              Name='ironbase-bridge.exe'
-                              Source='target\release\ironbase-bridge.exe'
                               KeyPath='yes'/>
                     </Component>
                     <Component Id='ConfigExample' Guid='B2C3D4E5-F6A7-8901-BCDE-F12345678901' Win64='yes'>
@@ -148,22 +136,10 @@
                     Target='[APPLICATIONFOLDER]mcp-ironbase-server.exe'
                     Arguments='--stdio'
                     WorkingDirectory='APPLICATIONFOLDER'/>
-                <Shortcut Id='TuiShortcut'
-                    Name='IronBase TUI'
-                    Description='Terminal UI for IronBase (connects to local server)'
-                    Target='[APPLICATIONFOLDER]ironbase-tui.exe'
-                    Arguments='--http http://127.0.0.1:8080'
-                    WorkingDirectory='APPLICATIONFOLDER'/>
                 <Shortcut Id='BackupShortcut'
                     Name='IronBase Backup'
                     Description='Backup and restore IronBase databases'
                     Target='[APPLICATIONFOLDER]ironbase-backup.exe'
-                    Arguments='--help'
-                    WorkingDirectory='APPLICATIONFOLDER'/>
-                <Shortcut Id='BridgeShortcut'
-                    Name='IronBase Bridge'
-                    Description='STDIO to HTTP proxy for Claude Desktop'
-                    Target='[APPLICATIONFOLDER]ironbase-bridge.exe'
                     Arguments='--help'
                     WorkingDirectory='APPLICATIONFOLDER'/>
                 <Shortcut Id='UninstallShortcut'
@@ -179,9 +155,7 @@
         <!-- Features -->
         <Feature Id='MainProgram' Title='IronBase MCP Server' Description='The main executable and configuration files.' Level='1' ConfigurableDirectory='APPLICATIONFOLDER' AllowAdvertise='no' Display='expand' Absent='disallow'>
             <ComponentRef Id='MainExecutable'/>
-            <ComponentRef Id='TuiExecutable'/>
             <ComponentRef Id='BackupExecutable'/>
-            <ComponentRef Id='BridgeExecutable'/>
             <ComponentRef Id='ConfigExample'/>
             <ComponentRef Id='DataFolder'/>
             <ComponentRef Id='DefaultConfig'/>
