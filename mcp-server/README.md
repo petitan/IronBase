@@ -390,6 +390,15 @@ See [ACL Documentation](docs/ACL.md) for details.
 | `embed_cache_stats` | Get embedding cache hit rate and memory usage |
 | `embed_cache_clear` | Clear all embedding cache entries |
 
+**FastText Model Formats:**
+
+| Format | File | Subword/OOV | Size (hu 300d) |
+|--------|------|-------------|----------------|
+| v1 | `.ironbase.bin` | No — OOV words get zero vectors | ~2.3 GB |
+| **v2** | `.ironbase.v2.bin` | **Yes** — subword n-gram hashing | ~4.5 GB |
+
+The v2 format is recommended for Hungarian and other agglutinative languages where compound words and abbreviations are common. See [FastText v2 Migration Guide](docs/FASTTEXT_V2_MIGRATION.md) for upgrade instructions.
+
 ### Auto-Embedding
 
 | Tool | Description |

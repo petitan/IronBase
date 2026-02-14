@@ -108,3 +108,81 @@ fn test_display_name_in_list_models() {
 
     println!("\n✅ display_name test passed!");
 }
+
+#[test]
+#[ignore] // Run with: cargo test --test embedding_integration -- --ignored --nocapture
+fn test_v2_model_oov_nonzero_vector() {
+    let model_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
+        .unwrap_or_else(|_| "/home/petitan/MongoLite/models/cc.hu.300.ironbase.v2.bin".to_string());
+
+    if !Path::new(&model_path).exists() {
+        println!("Skipping test: v2 model not found at {}", model_path);
+        return;
+    }
+
+    let provider = FastTextProvider::load(Path::new(&model_path)).expect("Failed to load v2 model");
+
+    println!("Model: {}, dim={}", provider.model_name(), provider.dimension());
+    assert!(provider.has_subword_support(), "v2 model should have subword support");
+
+    // OOV compound words that don't exist in the vocabulary
+    let oov_words = ["fékerőmérő", "lengéscsillapító", "PEF", "SICE"];
+
+    for word in &oov_words {
+        let vec = provider.embed(word).expect("Embedding failed");
+        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        println!("{}: norm={:.4}", word, norm);
+        assert!(
+            norm > 0.01,
+            "OOV word '{}' should produce non-zero vector with v2 model, got norm={}",
+            word,
+            norm
+        );
+    }
+
+    println!("\n✅ v2 OOV test passed!");
+}
+
+#[test]
+#[ignore]
+fn test_v2_known_word_same_result() {
+    let v1_path = "/home/petitan/MongoLite/models/cc.hu.300.ironbase.bin";
+    let v2_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
+        .unwrap_or_else(|_| "/home/petitan/MongoLite/models/cc.hu.300.ironbase.v2.bin".to_string());
+
+    if !Path::new(v1_path).exists() || !Path::new(&v2_path).exists() {
+        println!("Skipping test: need both v1 and v2 models");
+        return;
+    }
+
+    let v1 = FastTextProvider::load(Path::new(v1_path)).expect("Failed to load v1");
+    let v2 = FastTextProvider::load(Path::new(&v2_path)).expect("Failed to load v2");
+
+    // Known words should produce similar vectors (not identical because v2 uses
+    // FastText formula: mean(raw_word_vec, subword_vecs...) while v1 only has
+    // pre-computed .vec vectors)
+    let words = ["kutya", "macska", "autó"];
+    for word in &words {
+        let vec1 = v1.embed(word).expect("v1 embed failed");
+        let vec2 = v2.embed(word).expect("v2 embed failed");
+
+        // Cosine similarity should be high (> 0.5) for same known words
+        let dot: f32 = vec1.iter().zip(vec2.iter()).map(|(a, b)| a * b).sum();
+        let norm1: f32 = vec1.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let norm2: f32 = vec2.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let cosine = if norm1 > 0.0 && norm2 > 0.0 {
+            dot / (norm1 * norm2)
+        } else {
+            0.0
+        };
+        println!("{}: cosine_sim(v1, v2) = {:.4}", word, cosine);
+        assert!(
+            cosine > 0.5,
+            "Known word '{}' should have high similarity between v1 and v2, got {}",
+            word,
+            cosine
+        );
+    }
+
+    println!("\n✅ v1/v2 consistency test passed!");
+}

@@ -873,6 +873,32 @@ MCP tools (hybrid_search, rag_search)       → score fusion, ranked retrieval
 
 Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pending→Running→Done
 
+### FastText v2 Format (2026-02-14)
+
+**Probléma:** v1 (.ironbase.bin) a `.vec` formátumból konvertált — csak előre számított szóvektorok, subword infó nélkül. Magyar összetett szavak (fékerőmérő, lengéscsillapító) és rövidítések (PEF, SICE) zero vektort kaptak → ~30-40% query érintett.
+
+**Megoldás:** `.ironbase.v2` formátum 2M subword bucket vektorral.
+
+| Format | Fájl | OOV kezelés | Méret |
+|--------|------|-------------|-------|
+| v1 | `.ironbase.bin` | Zero vektor | ~2.3 GB |
+| **v2** | `.ironbase.v2.bin` | Subword n-gram átlag | ~4.5 GB |
+
+**Auto-detection:** Első 4 byte `b"IBv2"` → v2 path, egyébként v1 (backward compatible).
+
+**OOV algoritmus:** `<word>` → 5-gram-ok → FNV-1a hash → bucket_id → mmap lookup → átlag
+
+**Konverter:** `python3 models/convert_bin_to_ironbase_v2.py cc.hu.300.bin output.v2.bin`
+- Streaming architektúra: O(vocab_strings + dim) memória
+- Runtime: ~10 perc
+
+**Migráció:** `IRONBASE_FASTTEXT_MODEL=...v2.bin` + `auto_embed_backfill` minden RAG collection-re.
+
+**Key files:**
+- `models/convert_bin_to_ironbase_v2.py` — Python konverter (streaming)
+- `mcp-server/src/embedding/fasttext.rs` — v1/v2 loader, subword computation
+- `mcp-server/docs/FASTTEXT_V2_MIGRATION.md` — teljes migrációs útmutató
+
 ### $** Wildcard
 
 `{"$**.name": "Alice"}` - mező keresése BÁRMILYEN mélységben (collection scan, MAX_DEPTH=100)
