@@ -22,6 +22,7 @@
 //! ```
 
 use super::{EmbeddingError, EmbeddingProvider, EmbeddingResult};
+use ironbase_core::fulltext::{tokenize as fulltext_tokenize, FtsLanguage, FtsOptions};
 use memmap2::Mmap;
 use std::collections::HashMap;
 use std::fs::File;
@@ -396,15 +397,6 @@ impl FastTextProvider {
         Some(result)
     }
 
-    /// Simple tokenizer: lowercase + split on whitespace and punctuation
-    fn tokenize(text: &str) -> Vec<String> {
-        text.to_lowercase()
-            .split(|c: char| c.is_whitespace() || c.is_ascii_punctuation())
-            .filter(|s| !s.is_empty() && s.len() > 1)
-            .map(|s| s.to_string())
-            .collect()
-    }
-
     /// Normalize a vector to unit length
     fn normalize(vec: &mut [f32]) {
         let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -424,7 +416,8 @@ impl FastTextProvider {
 
 impl EmbeddingProvider for FastTextProvider {
     fn embed(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
-        let tokens = Self::tokenize(text);
+        let opts = FtsOptions::with_settings(FtsLanguage::Hungarian, 2, false);
+        let tokens = fulltext_tokenize(text, &opts);
 
         if tokens.is_empty() {
             return Ok(vec![0.0; self.dim]);
@@ -490,13 +483,24 @@ mod tests {
 
     #[test]
     fn test_tokenize() {
-        let tokens = FastTextProvider::tokenize("Hello, World! This is a test.");
-        assert!(tokens.contains(&"hello".to_string()));
-        assert!(tokens.contains(&"world".to_string()));
-        assert!(tokens.contains(&"this".to_string()));
-        assert!(tokens.contains(&"test".to_string()));
-        // Single char 'a' should be filtered out
+        use ironbase_core::fulltext::{tokenize as fulltext_tokenize, FtsLanguage, FtsOptions};
+        let opts = FtsOptions::with_settings(FtsLanguage::Hungarian, 2, false);
+
+        // Hungarian stop words ("van", "egy", "és") should be filtered out
+        let tokens = fulltext_tokenize("A király és egy vitéz van itt.", &opts);
+        assert!(!tokens.contains(&"van".to_string()), "stop word 'van' should be filtered");
+        assert!(!tokens.contains(&"egy".to_string()), "stop word 'egy' should be filtered");
+        assert!(!tokens.contains(&"és".to_string()), "stop word 'és' should be filtered");
+
+        // Single char 'a' should be filtered out (min_word_length=2 + stop word)
         assert!(!tokens.contains(&"a".to_string()));
+
+        // Content words should survive (possibly stemmed)
+        assert!(!tokens.is_empty(), "content words should remain after filtering");
+
+        // Stemming test: "királyok" → "király" (plural suffix removed)
+        let tokens2 = fulltext_tokenize("királyok vitézek", &opts);
+        assert!(tokens2.iter().any(|t| t.starts_with("király")), "stemmer should stem 'királyok'");
     }
 
     #[test]
