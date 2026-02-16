@@ -824,12 +824,13 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 | `hybrid_search` | `mcp-server/src/tools/hybrid.rs` | RRF fusion |
 | `rag_search` | `mcp-server/src/tools/rag.rs` | RRF fusion + auto-embed |
 
-**RRF formula:** `score = Σ(weight_i / (60 + rank_i))`
+**RRF formula:** `score = Σ(weight_i / (K + rank_i))` ahol K=20 (default, konfigurálható `rrf_k` paraméterrel)
 
 **Reranking pipeline (multiplicatív boost):**
-- Exact phrase match: 1.3x
-- Keyword density: 1.0-1.1x
-- Short content penalty: 0.8x
+- Exact phrase match: 1.5x
+- Keyword density: 1.0-1.3x
+- Title match: 1.0-1.5x (ha `title_field` megadva)
+- Short content penalty: 0.8x (<50 char)
 
 **MMR diversity reranking (deduplication):**
 - Algoritmus: `mmr(c) = λ * relevance(c) - (1-λ) * max_sim(c, selected)`
