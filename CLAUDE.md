@@ -483,6 +483,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Index building flag** | 9273a19b | explain() 0 availableIndexes | `set_index_ready()` hiányzik rebuild után | `set_index_ready()` hívás rebuild végén |
 | **$eq operator ignored** | 6f537dd5 | `{"field":{"$eq":"x"}}` CollectionScan | `collect_equality_candidates()` skip-elte | `$eq` érték kinyerése |
 | **Checkpoint lock contention** | 9e4499b4 | insert_one 14+ perc blokk | `flush_all_indexes_counted()` 1 lock / 22 index | Per-index flush: 22 lock / 1 index |
+| **Btree delete not dirty** | 265f0c2e | count_documents ~3x túlszámolás | `remove_document_from_indexes` + `batch_update_indexes` nem jelölte dirty-nek a btree indexet → checkpoint nem mentette a törléseket → stale .idx | `dirty_btree_indexes.insert()` 5 helyen |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
@@ -604,6 +605,38 @@ pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
 - `database/collections.rs` - `load_persisted_indexes(..., was_clean: bool)`
 - `storage/mod.rs` - `mark_clean_shutdown()` a Drop-ban
 - Érintett: `.idx`, `.fzidx`, `.ftidx`, `.hnsw`
+</details>
+
+<details>
+<summary>Btree Delete Not Dirty Bug (265f0c2e) - Részletes elemzés</summary>
+
+**Probléma:** `count_documents` szűrt query-kre ~3x-os eredményt adott. A `year` index 87287 bejegyzést tartalmazott 28298 élő doc helyett.
+
+**Root Cause:**
+- `remove_document_from_indexes()` (manager.rs) és `batch_update_indexes()` (mod.rs) módosították a btree indexet memóriában, de **NEM jelölték dirty-nek**
+- A checkpoint CSAK dirty indexeket ment ki → törlések elvesztek
+- Server restart → stale `.idx` fájl betöltve (clean shutdown esetén)
+- Minden import ciklus halmozta a stale bejegyzéseket
+
+**Bizonyíték:**
+- `_id` index: 28298 (helyes) — soha nem dirty → soha nem persistálva → minden startup rebuild-ből
+- `year` index: 87287 (~3x) — INSERT dirty → persistálva, DELETE nem dirty → nem persistálva
+- `add_document_to_indexes` (manager.rs:1281): `dirty_btree_indexes.insert()` ✅
+- `remove_document_from_indexes` (manager.rs:1437): hiányzott ❌
+- `batch_update_indexes` (mod.rs:1832,1843): hiányzott ❌
+
+**Javított helyek (5 db):**
+
+| Hely | Művelet |
+|------|---------|
+| `manager.rs:1437` | `remove_document_from_indexes` btree delete |
+| `mod.rs:1695` | `remove_from_indexes` _id delete |
+| `mod.rs:1808` | `batch_update_indexes` _id apply_batch_updates |
+| `mod.rs:1848` | `batch_update_indexes` other index delete+insert |
+| `database/mod.rs:411` | WAL recovery index replay |
+
+**Szabály:** MINDEN `index.delete()`, `index.insert()`, `apply_batch_updates()` hívás után KÖTELEZŐ `mark_btree_dirty()` / `dirty_btree_indexes.insert()`!
+
 </details>
 
 ### Checkpoint Per-Index Flush (2026-02-01)
