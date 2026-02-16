@@ -208,6 +208,7 @@ fn handle_auto_embed_enable(
         dimension: Some(dimension),
         skip_if_exists: p.skip_if_exists,
         chunking,
+        preprocessing_version: Some(provider.preprocessing_version().to_string()),
     };
 
     // Save to collection metadata
@@ -581,16 +582,19 @@ fn run_backfill_job(
 // Startup Hook: Model Change Detection
 // ============================================================================
 
-/// Check all collections for embedding model changes and start re-embedding if needed.
+/// Check all collections for embedding model/preprocessing changes and start re-embedding if needed.
 ///
 /// Called at server startup. For each collection with auto-embedding enabled:
-/// - If `config.model` is empty (legacy config): saves current model name, no re-embed
-/// - If `config.model` differs from current provider model: starts force re-embed
-/// - If `config.model` matches: no action
+/// - If both `config.model` and `config.preprocessing_version` are empty (legacy config):
+///   saves current values, no re-embed
+/// - If model or preprocessing version differs: starts force re-embed
+/// - If `force_reembed` is true: starts force re-embed regardless
+/// - If everything matches: no action
 pub fn check_model_changes_and_reembed(
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
     job_manager: &Option<Arc<JobManager>>,
+    force_reembed: bool,
 ) {
     let manager = match embedding_manager.as_ref() {
         Some(m) => m,
@@ -624,16 +628,20 @@ pub fn check_model_changes_and_reembed(
 
         let current_model = provider.model_name().to_string();
         let saved_model = config.model.as_deref().unwrap_or("");
+        let current_preproc = provider.preprocessing_version().to_string();
+        let saved_preproc = config.preprocessing_version.as_deref().unwrap_or("");
 
-        if saved_model.is_empty() {
-            // Legacy config without model name — save current, don't re-embed
+        if saved_model.is_empty() && saved_preproc.is_empty() && !force_reembed {
+            // Legacy config without model/preprocessing info — save current, don't re-embed
             tracing::info!(
-                "Collection '{}': saving model name '{}' to config (first time)",
+                "Collection '{}': saving model '{}' and preprocessing '{}' to config (first time)",
                 collection,
-                current_model
+                current_model,
+                current_preproc
             );
             let mut updated_config = config.clone();
             updated_config.model = Some(current_model);
+            updated_config.preprocessing_version = Some(current_preproc);
             if let Err(e) =
                 adapter.set_auto_embedding_config(collection, Some(updated_config))
             {
@@ -643,18 +651,37 @@ pub fn check_model_changes_and_reembed(
                     e
                 );
             }
-        } else if saved_model != current_model {
-            // Model changed — start force re-embed
+        } else if saved_model != current_model
+            || saved_preproc != current_preproc
+            || force_reembed
+        {
+            // Something changed or force requested — start re-embed
+            let reason = if force_reembed {
+                "force flag".to_string()
+            } else if saved_model != current_model && saved_preproc != current_preproc {
+                format!(
+                    "model '{}' → '{}' and preprocessing '{}' → '{}'",
+                    saved_model, current_model, saved_preproc, current_preproc
+                )
+            } else if saved_model != current_model {
+                format!("model '{}' → '{}'", saved_model, current_model)
+            } else {
+                format!(
+                    "preprocessing '{}' → '{}'",
+                    saved_preproc, current_preproc
+                )
+            };
+
             tracing::info!(
-                "Model changed for '{}': '{}' → '{}', starting re-embed",
+                "Re-embed triggered for '{}': {}, starting re-embed",
                 collection,
-                saved_model,
-                current_model
+                reason
             );
 
-            // Update config with new model name first
+            // Update config with current values
             let mut updated_config = config.clone();
             updated_config.model = Some(current_model);
+            updated_config.preprocessing_version = Some(current_preproc);
             if let Err(e) =
                 adapter.set_auto_embedding_config(collection, Some(updated_config.clone()))
             {

@@ -475,6 +475,10 @@ impl EmbeddingProvider for FastTextProvider {
     fn provider_name(&self) -> &str {
         "fasttext"
     }
+
+    fn preprocessing_version(&self) -> &str {
+        "nlp_hu_v1" // Hungarian stop words + Snowball stemming, no accent folding
+    }
 }
 
 #[cfg(test)]

@@ -81,6 +81,12 @@ pub trait EmbeddingProvider: Send + Sync {
     fn display_name(&self) -> &str {
         self.provider_name()
     }
+
+    /// Preprocessing pipeline version string.
+    /// Changes trigger automatic re-embedding on server restart.
+    fn preprocessing_version(&self) -> &str {
+        "default"
+    }
 }
 
 /// Information about an available model

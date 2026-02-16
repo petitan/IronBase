@@ -218,6 +218,10 @@ pub struct AutoEmbeddingConfig {
     /// Chunking configuration (if source is long text)
     #[serde(default)]
     pub chunking: Option<ChunkingConfig>,
+    /// Preprocessing pipeline version (e.g., "nlp_hu_v1")
+    /// Used by startup detection to trigger re-embed when preprocessing changes
+    #[serde(default)]
+    pub preprocessing_version: Option<String>,
 }
 
 /// Configuration for text chunking before embedding

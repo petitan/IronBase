@@ -309,11 +309,13 @@ async fn run_http_server_internal(
     let job_manager: Option<Arc<crate::JobManager>> = Some(job_manager);
     info!("Job manager initialized");
 
-    // Check for embedding model changes and start re-embedding if needed
+    // Check for embedding model/preprocessing changes and start re-embedding if needed
+    let force_reembed = std::env::var("IRONBASE_FORCE_REEMBED").is_ok_and(|v| v == "1");
     crate::tools::auto_embed::check_model_changes_and_reembed(
         &adapter,
         &embedding_manager,
         &job_manager,
+        force_reembed,
     );
 
     // Lock working set on Windows to prevent memory paging under pressure.
