@@ -921,8 +921,14 @@ impl FulltextSearchOptions {
     /// The number of candidates to request from TF-IDF search
     pub fn calculate_candidate_limit(effective_limit: usize, has_filter_or_phrase: bool) -> usize {
         if has_filter_or_phrase {
-            // Request 10x more candidates to account for filtering, minimum 100
-            effective_limit.saturating_mul(10).max(100)
+            // Request 50x more candidates to account for selective filters, minimum 2000.
+            // For a 28K corpus with 0.7% filter selectivity (e.g. year=2026),
+            // 10x/100 was far too low — top TF-IDF candidates for common terms
+            // rarely overlap with rare filter values. 2000 candidates at 0.7%
+            // selectivity yields ~14 expected matches.
+            // Memory: TF-IDF results are lightweight (~100 bytes each), so
+            // 2000 candidates ≈ 200KB. Document loading has early termination.
+            effective_limit.saturating_mul(50).max(2000)
         } else {
             effective_limit
         }
