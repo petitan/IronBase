@@ -1693,6 +1693,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             };
             id_index.delete(&id_key, &doc.id)?;
         }
+        // Mark _id index dirty for checkpoint persistence
+        indexes.mark_btree_dirty(&id_index_name);
 
         // Remove from all other indexes - delegate to IndexManager
         let doc_value =
@@ -1806,6 +1808,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if let Some(id_index) = indexes.get_btree_index_mut(&id_index_name) {
                 id_index.apply_batch_updates(id_updates)?;
             }
+            // Mark _id index dirty for checkpoint persistence
+            indexes.mark_btree_dirty(&id_index_name);
         }
 
         // --- OTHER INDEXES: multi-key aware updates ---
@@ -1844,6 +1848,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     }
                 }
             }
+            // Mark dirty for checkpoint persistence
+            indexes.mark_btree_dirty(index_name);
         }
 
         // --- FULLTEXT INDEXES: Update for each document ---

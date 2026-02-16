@@ -408,6 +408,8 @@ impl DatabaseCore<StorageEngine> {
                             }
                         }
                     }
+                    // Mark dirty so WAL-replayed changes are persisted at next checkpoint
+                    indexes.mark_btree_dirty(&change.index_name);
                 }
             }
         }

@@ -1435,6 +1435,8 @@ impl IndexManager {
                     let was_indexed = !is_null || (index.metadata.unique && !index.metadata.sparse);
                     if was_indexed {
                         index.delete(&index_key, doc_id)?;
+                        // Mark dirty for checkpoint persistence (mirrors add_document_to_indexes:1281)
+                        self.dirty_btree_indexes.insert(index_name.clone());
                     }
                 }
             }
