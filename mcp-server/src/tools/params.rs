@@ -607,6 +607,13 @@ pub struct HybridSearchParams {
     pub mmr_lambda: f64,
     /// MongoDB-style filter applied BEFORE both vector and fulltext search
     pub filter: Option<Value>,
+
+    /// RRF K constant — lower = wider score spread (default: 60)
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f64,
+
+    /// Optional title field for title match boost in reranking (up to 1.5x)
+    pub title_field: Option<String>,
 }
 
 fn default_hybrid_limit() -> usize {
@@ -626,6 +633,9 @@ fn default_deduplicate() -> bool {
 }
 fn default_mmr_lambda() -> f64 {
     0.5
+}
+fn default_rrf_k() -> f64 {
+    60.0
 }
 
 // ============================================================================
@@ -692,6 +702,13 @@ pub struct RagSearchParams {
     pub provider: Option<String>,
     /// MongoDB-style filter applied BEFORE both vector and fulltext search
     pub filter: Option<Value>,
+
+    /// RRF K constant — lower = wider score spread (default: 60)
+    #[serde(default = "default_rrf_k")]
+    pub rrf_k: f64,
+
+    /// Optional title field for title match boost in reranking (up to 1.5x)
+    pub title_field: Option<String>,
 }
 
 /// Parameters for `rag_collection_stats` tool

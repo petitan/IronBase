@@ -20,7 +20,9 @@ use std::sync::Arc;
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{HybridSearchParams, ParseParams};
 
-/// RRF constant - empirically optimal value (Cormack et al., 2009)
+/// RRF default constant - empirically optimal value (Cormack et al., 2009)
+/// Used by test helper; runtime value comes from HybridSearchParams.rrf_k
+#[cfg(test)]
 const RRF_K: f64 = 60.0;
 
 /// Maximum internal limit to prevent OOM (CLAUDE.md compliance)
@@ -166,8 +168,8 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
 
         // RRF score formula: weight * 1/(k + rank)
-        let rrf_score = p.vector_weight * (1.0 / (RRF_K + v_rank as f64))
-            + p.fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
+        let rrf_score = p.vector_weight * (1.0 / (p.rrf_k + v_rank as f64))
+            + p.fulltext_weight * (1.0 / (p.rrf_k + t_rank as f64));
 
         let v_score = vector_docs.get(id).map(|(_, s)| *s);
         let t_score = text_docs.get(id).map(|(_, s)| *s);
@@ -207,7 +209,13 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     // ========================================================================
     if p.rerank {
         // Use original query for both phrase match and keyword density
-        rerank_results(&mut fused, &p.query, &p.query, &p.text_field);
+        rerank_results(
+            &mut fused,
+            &p.query,
+            &p.query,
+            &p.text_field,
+            p.title_field.as_deref(),
+        );
     }
 
     // ========================================================================
@@ -259,7 +267,7 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         "results": results,
         "count": results.len(),
         "algorithm": "rrf",
-        "rrf_k": RRF_K,
+        "rrf_k": p.rrf_k,
         "weights": {
             "vector": p.vector_weight,
             "fulltext": p.fulltext_weight
@@ -284,12 +292,13 @@ fn strip_punctuation(s: &str) -> String {
         .join(" ")
 }
 
-/// Rerank results by phrase match, keyword density, and content length
+/// Rerank results by phrase match, keyword density, content length, and title match
 ///
-/// Simplified reranking using only text_field (no extra fields needed):
-/// - Exact phrase boost: 1.3x if query found in content (punctuation ignored)
-/// - Keyword density: 1.0-1.1x based on query word occurrence ratio
-/// - Content length penalty: 0.8x for content < 100 chars
+/// Reranking boosts:
+/// - Exact phrase boost: 1.5x if query found in content (punctuation ignored)
+/// - Keyword density: 1.0-1.3x based on query word occurrence ratio
+/// - Content length penalty: 0.8x for content < 50 chars
+/// - Title match boost: up to 1.5x if query words appear in title field
 ///
 /// Uses original_query for phrase matching (what user typed)
 /// and processed_query for keyword density (matches fulltext search behavior)
@@ -298,6 +307,7 @@ fn rerank_results(
     original_query: &str,
     processed_query: &str,
     text_field: &str,
+    title_field: Option<&str>,
 ) {
     // Build query word sets from PROCESSED query (consistent with fulltext search)
     let query_words: HashSet<String> = processed_query
@@ -322,13 +332,13 @@ fn rerank_results(
         let content_lower = content.to_lowercase();
         let content_normalized = strip_punctuation(&content_lower);
 
-        // 1. Exact phrase boost (1.3x) - query found in content (punctuation ignored)
+        // 1. Exact phrase boost (1.5x) - query found in content (punctuation ignored)
         // Use chars().count() for UTF-8 correctness
         if query_normalized.chars().count() > 10 && content_normalized.contains(&query_normalized) {
-            boost *= 1.3;
+            boost *= 1.5;
         }
 
-        // 2. Keyword density (1.0-1.1x)
+        // 2. Keyword density (1.0-1.3x)
         let content_words: Vec<&str> = content_lower
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -341,12 +351,27 @@ fn rerank_results(
                 .filter(|w| query_words.contains(&w.to_string()))
                 .count();
             let density = matches as f64 / content_words.len() as f64;
-            boost *= 1.0 + density.min(0.1); // Cap at 1.1x
+            boost *= 1.0 + density.min(0.3); // Cap at 1.3x
         }
 
         // 3. Content length penalty (0.8x for short content)
-        if content.len() < 100 {
+        if content.len() < 50 {
             boost *= 0.8;
+        }
+
+        // 4. Title match boost (up to 1.5x) — query words in title
+        if let Some(tf) = title_field {
+            if let Some(title) = item.doc.get(tf).and_then(|v| v.as_str()) {
+                let title_lower = title.to_lowercase();
+                let title_matches = query_words
+                    .iter()
+                    .filter(|w| title_lower.contains(w.as_str()))
+                    .count();
+                if title_matches > 0 && !query_words.is_empty() {
+                    let title_ratio = title_matches as f64 / query_words.len() as f64;
+                    boost *= 1.0 + 0.5 * title_ratio; // 1.0–1.5x scale
+                }
+            }
         }
 
         item.rerank_boost = boost;
@@ -899,6 +924,7 @@ mod tests {
             "the exact phrase test query",
             "the exact phrase test query",
             "content",
+            None,
         );
 
         // doc2 should be boosted (contains exact phrase)
@@ -932,11 +958,12 @@ mod tests {
             "milyen lépései vannak a kalibrálásnak?",
             "milyen lépései vannak a kalibrálásnak?",
             "content",
+            None,
         );
 
         // doc2 should be boosted (phrase matches ignoring punctuation)
         assert!(results[0].id == "doc2");
-        assert!(results[0].rerank_boost >= 1.3); // exact phrase boost (no short penalty)
+        assert!(results[0].rerank_boost >= 1.5); // exact phrase boost (no short penalty)
     }
 
     #[test]
@@ -951,7 +978,7 @@ mod tests {
             ),
         ];
 
-        rerank_results(&mut results, "test", "test", "content");
+        rerank_results(&mut results, "test", "test", "content", None);
 
         // doc1 should be penalized (content < 100 chars)
         let doc1 = results.iter().find(|r| r.id == "doc1").unwrap();
@@ -1051,5 +1078,146 @@ mod tests {
         // All results kept (limit > available)
         assert_eq!(removed, 0);
         assert_eq!(results.len(), 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Title Match Boost Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_rerank_title_match_boost() {
+        let mut results = vec![
+            FusedResult {
+                id: "doc1".to_string(),
+                doc: json!({
+                    "_id": "doc1",
+                    "content": "Ez egy hosszabb tartalom ami nem tartalmaz releváns szavakat de elég hosszú az ötven karakteres küszöbhöz",
+                    "title": "Nem kapcsolódó cím"
+                }),
+                rrf_score: 0.02,
+                final_score: 0.02,
+                rerank_boost: 1.0,
+                v_rank: 1,
+                t_rank: 1,
+                v_score: Some(0.9),
+                t_score: Some(10.0),
+            },
+            FusedResult {
+                id: "doc2".to_string(),
+                doc: json!({
+                    "_id": "doc2",
+                    "content": "Ez egy hosszabb tartalom ami nem tartalmaz releváns szavakat de elég hosszú az ötven karakteres küszöbhöz",
+                    "title": "Fékerőmérő kalibrálás és beállítás"
+                }),
+                rrf_score: 0.02,
+                final_score: 0.02,
+                rerank_boost: 1.0,
+                v_rank: 2,
+                t_rank: 2,
+                v_score: Some(0.8),
+                t_score: Some(8.0),
+            },
+        ];
+
+        rerank_results(
+            &mut results,
+            "fékerőmérő kalibrálás",
+            "fékerőmérő kalibrálás",
+            "content",
+            Some("title"),
+        );
+
+        // doc2 should be boosted because title contains both query words
+        assert_eq!(results[0].id, "doc2");
+        assert!(results[0].rerank_boost > 1.0);
+        // doc1 should not get title boost
+        let doc1 = results.iter().find(|r| r.id == "doc1").unwrap();
+        assert!(doc1.rerank_boost <= 1.0 || doc1.rerank_boost < results[0].rerank_boost);
+    }
+
+    #[test]
+    fn test_rerank_title_match_partial() {
+        // Test that partial title match gives proportional boost
+        let mut results = vec![
+            FusedResult {
+                id: "doc1".to_string(),
+                doc: json!({
+                    "_id": "doc1",
+                    "content": "Tartalom ami elég hosszú ahhoz hogy ne kapjon rövid tartalom büntetést a rerankertől",
+                    "title": "Fékerőmérő javítás"  // 1 of 2 query words
+                }),
+                rrf_score: 0.02,
+                final_score: 0.02,
+                rerank_boost: 1.0,
+                v_rank: 1,
+                t_rank: 1,
+                v_score: Some(0.9),
+                t_score: Some(10.0),
+            },
+        ];
+
+        rerank_results(
+            &mut results,
+            "fékerőmérő kalibrálás",
+            "fékerőmérő kalibrálás",
+            "content",
+            Some("title"),
+        );
+
+        // Partial match: 1/2 words → boost = 1.0 + 0.5 * 0.5 = 1.25x
+        assert!(results[0].rerank_boost >= 1.2);
+        assert!(results[0].rerank_boost < 1.5);
+    }
+
+    #[test]
+    fn test_rerank_no_title_field() {
+        // When title_field is None, no title boost is applied
+        let mut results = vec![
+            FusedResult {
+                id: "doc1".to_string(),
+                doc: json!({
+                    "_id": "doc1",
+                    "content": "Tartalom ami elég hosszú ahhoz hogy ne kapjon rövid tartalom büntetést a rerankertől",
+                    "title": "Fékerőmérő kalibrálás"
+                }),
+                rrf_score: 0.02,
+                final_score: 0.02,
+                rerank_boost: 1.0,
+                v_rank: 1,
+                t_rank: 1,
+                v_score: Some(0.9),
+                t_score: Some(10.0),
+            },
+        ];
+
+        rerank_results(
+            &mut results,
+            "fékerőmérő kalibrálás",
+            "fékerőmérő kalibrálás",
+            "content",
+            None, // no title_field
+        );
+
+        // Without title_field, boost should be close to 1.0 (only density boost applies)
+        assert!(results[0].rerank_boost < 1.4);
+    }
+
+    // -------------------------------------------------------------------------
+    // RRF K Configurable Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_rrf_k_score_spread() {
+        // K=20 should give wider spread than K=60
+        let k20_rank1 = 0.5 * (1.0 / (20.0 + 1.0)) + 0.5 * (1.0 / (20.0 + 1.0));
+        let k20_rank10 = 0.5 * (1.0 / (20.0 + 10.0)) + 0.5 * (1.0 / (20.0 + 10.0));
+        let k20_spread = k20_rank1 - k20_rank10;
+
+        let k60_rank1 = 0.5 * (1.0 / (60.0 + 1.0)) + 0.5 * (1.0 / (60.0 + 1.0));
+        let k60_rank10 = 0.5 * (1.0 / (60.0 + 10.0)) + 0.5 * (1.0 / (60.0 + 10.0));
+        let k60_spread = k60_rank1 - k60_rank10;
+
+        // K=20 spread should be significantly wider than K=60
+        assert!(k20_spread > k60_spread * 5.0);
     }
 }

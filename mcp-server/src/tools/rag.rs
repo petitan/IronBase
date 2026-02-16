@@ -27,9 +27,6 @@ use super::params::{
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
 
-/// RRF constant - empirically optimal value (Cormack et al., 2009)
-const RRF_K: f64 = 60.0;
-
 /// Maximum internal limit to prevent OOM
 const MAX_INTERNAL_LIMIT: usize = 1000;
 
@@ -593,8 +590,8 @@ fn handle_rag_search(
         let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
 
         // RRF score formula with normalized weights: weight * 1/(k + rank)
-        let rrf_score = norm_vector_weight * (1.0 / (RRF_K + v_rank as f64))
-            + norm_fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
+        let rrf_score = norm_vector_weight * (1.0 / (p.rrf_k + v_rank as f64))
+            + norm_fulltext_weight * (1.0 / (p.rrf_k + t_rank as f64));
 
         let v_score = vector_docs.get(id).map(|(_, s)| *s);
         let t_score = text_docs.get(id).map(|(_, s)| *s);
@@ -633,7 +630,7 @@ fn handle_rag_search(
     // STEP 5: Reranking (optional)
     // ========================================================================
     if p.rerank {
-        rerank_results(&mut fused, &p.query, &text_field);
+        rerank_results(&mut fused, &p.query, &text_field, p.title_field.as_deref());
     }
 
     // ========================================================================
@@ -691,7 +688,7 @@ fn handle_rag_search(
         "count": results.len(),
         "query": p.query,
         "algorithm": "rag_hybrid_rrf",
-        "rrf_k": RRF_K,
+        "rrf_k": p.rrf_k,
         "weights": {
             "vector": p.vector_weight,
             "fulltext": p.fulltext_weight
@@ -811,8 +808,19 @@ fn strip_punctuation(s: &str) -> String {
     result
 }
 
-/// Rerank results by phrase match, keyword density, and content length
-fn rerank_results(results: &mut [FusedResult], query: &str, text_field: &str) {
+/// Rerank results by phrase match, keyword density, content length, and title match
+///
+/// Reranking boosts:
+/// - Exact phrase boost: 1.5x if query found in content (punctuation ignored)
+/// - Keyword density: 1.0-1.3x based on query word occurrence ratio
+/// - Content length penalty: 0.8x for content < 50 chars
+/// - Title match boost: up to 1.5x if query words appear in title field
+fn rerank_results(
+    results: &mut [FusedResult],
+    query: &str,
+    text_field: &str,
+    title_field: Option<&str>,
+) {
     // Build query word sets (filter words with at least 3 bytes - fast approximation)
     // Note: 3 bytes = at least 1-3 UTF-8 chars, good enough for filtering short words
     let query_words: HashSet<String> = query
@@ -836,12 +844,12 @@ fn rerank_results(results: &mut [FusedResult], query: &str, text_field: &str) {
         let content_lower = content.to_lowercase();
         let content_normalized = strip_punctuation(&content_lower);
 
-        // 1. Exact phrase boost (1.3x)
+        // 1. Exact phrase boost (1.5x)
         if query_normalized.chars().count() > 10 && content_normalized.contains(&query_normalized) {
-            boost *= 1.3;
+            boost *= 1.5;
         }
 
-        // 2. Keyword density (1.0-1.1x)
+        // 2. Keyword density (1.0-1.3x)
         let content_words: Vec<&str> = content_lower
             .split(|c: char| !c.is_alphanumeric())
             .filter(|w| !w.is_empty())
@@ -854,12 +862,27 @@ fn rerank_results(results: &mut [FusedResult], query: &str, text_field: &str) {
                 .filter(|w| query_words.contains(&w.to_string()))
                 .count();
             let density = matches as f64 / content_words.len() as f64;
-            boost *= 1.0 + density.min(0.1);
+            boost *= 1.0 + density.min(0.3); // Cap at 1.3x
         }
 
         // 3. Content length penalty (0.8x for short content)
-        if content.len() < 100 {
+        if content.len() < 50 {
             boost *= 0.8;
+        }
+
+        // 4. Title match boost (up to 1.5x) — query words in title
+        if let Some(tf) = title_field {
+            if let Some(title) = item.doc.get(tf).and_then(|v| v.as_str()) {
+                let title_lower = title.to_lowercase();
+                let title_matches = query_words
+                    .iter()
+                    .filter(|w| title_lower.contains(w.as_str()))
+                    .count();
+                if title_matches > 0 && !query_words.is_empty() {
+                    let title_ratio = title_matches as f64 / query_words.len() as f64;
+                    boost *= 1.0 + 0.5 * title_ratio; // 1.0–1.5x scale
+                }
+            }
         }
 
         item.rerank_boost = boost;

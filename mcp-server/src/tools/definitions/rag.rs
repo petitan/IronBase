@@ -130,9 +130,19 @@ pub fn tools() -> Vec<Value> {
                         "minimum": 0.0,
                         "maximum": 1.0
                     },
+                    "rrf_k": {
+                        "type": "number",
+                        "description": "RRF K constant. Lower = wider score spread, more reranking impact. Default: 60. Try 20 for better differentiation.",
+                        "default": 60,
+                        "minimum": 1
+                    },
+                    "title_field": {
+                        "type": "string",
+                        "description": "Optional field containing document title. If set, title match gives up to 1.5x reranking boost."
+                    },
                     "rerank": {
                         "type": "boolean",
-                        "description": "Enable result reranking (default: true). Applies exact phrase match (1.3x), keyword density (1.0-1.1x), length penalty (0.8x).",
+                        "description": "Enable result reranking (default: true). Applies exact phrase match (1.5x), keyword density (1.0-1.3x), length penalty (0.8x), and title match boost (up to 1.5x if title_field set).",
                         "default": true
                     },
                     "deduplicate": {
