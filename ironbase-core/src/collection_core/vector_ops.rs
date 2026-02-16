@@ -15,6 +15,7 @@ use serde_json::Value;
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
+use crate::index::{IndexKey, RangeQueryMode, ScanOrder};
 use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
 use crate::vector::{HnswIndex, VectorIndexConfig, VectorIndexMetadata, VectorSearchResult};
@@ -459,32 +460,35 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         }
 
         // Pre-filter: get matching document IDs
-        // OOM PROTECTION: Use projection to only fetch _id field + limit based on system RAM
+        // Fast path: try B-tree index lookup (avoids loading documents from .mlite)
+        // Slow path fallback: find_with_options with projection
         let allowed_ids: std::collections::HashSet<String> = {
-            use crate::find_options::FindOptions;
-            use std::collections::HashMap;
+            if let Some(ids) = self.resolve_filter_to_ids(filter)? {
+                ids
+            } else {
+                // Fallback: load documents with projection (for complex filters without index)
+                use crate::find_options::FindOptions;
+                use std::collections::HashMap;
 
-            // Only fetch _id field to minimize memory usage
-            let mut projection = HashMap::new();
-            projection.insert("_id".to_string(), 1);
+                let mut projection = HashMap::new();
+                projection.insert("_id".to_string(), 1);
 
-            // Use safe defaults for RAM-based limits + reasonable pre-filter limit
-            // Even with projection, we cap at 100K documents for the pre-filter
-            let options = FindOptions::with_safe_defaults()
-                .with_projection(projection)
-                .with_limit(100_000);
+                let options = FindOptions::with_safe_defaults()
+                    .with_projection(projection)
+                    .with_limit(100_000);
 
-            let matching_docs = self.find_with_options(filter, options)?;
-            matching_docs
-                .iter()
-                .filter_map(|doc| {
-                    doc.get("_id").and_then(|id| match id {
-                        Value::String(s) => Some(s.clone()),
-                        Value::Number(n) => Some(n.to_string()),
-                        _ => None,
+                let matching_docs = self.find_with_options(filter, options)?;
+                matching_docs
+                    .iter()
+                    .filter_map(|doc| {
+                        doc.get("_id").and_then(|id| match id {
+                            Value::String(s) => Some(s.clone()),
+                            Value::Number(n) => Some(n.to_string()),
+                            _ => None,
+                        })
                     })
-                })
-                .collect()
+                    .collect()
+            }
         };
 
         if allowed_ids.is_empty() {
@@ -518,6 +522,110 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     // === Private helper methods ===
+
+    /// Try to resolve a simple equality filter directly from B-tree index.
+    ///
+    /// Returns `Some(HashSet<doc_id>)` if the filter is a simple equality on a B-tree indexed field.
+    /// Returns `None` for complex filters or fields without B-tree index → caller falls back to find_with_options.
+    ///
+    /// Supported filter forms:
+    /// - `{"field": value}` where value is not an operator object
+    /// - `{"field": {"$eq": value}}`
+    ///
+    /// Pattern: mod.rs:2557-2577 (QueryPlan::IndexScan equality execution via range_query)
+    /// Memory: O(k) where k = matching doc count, capped at 100K (same limit as find_with_options fallback)
+    fn resolve_filter_to_ids(
+        &self,
+        filter: &Value,
+    ) -> Result<Option<std::collections::HashSet<String>>> {
+        let map = match filter.as_object() {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        // Only handle single-field equality filters
+        // Multi-field or logical operators ($and, $or) → fallback
+        if map.len() != 1 {
+            return Ok(None);
+        }
+
+        let (field, value) = map.iter().next().unwrap();
+
+        // Skip logical operators
+        if field.starts_with('$') {
+            return Ok(None);
+        }
+
+        // Extract equality value (pattern: query_planner.rs:600-622)
+        let eq_value = if let Value::Object(ref val_map) = value {
+            if val_map.len() == 1 {
+                if let Some(eq_val) = val_map.get("$eq") {
+                    eq_val
+                } else if val_map.keys().any(|k| k.starts_with('$')) {
+                    // Other operators ($gt, $in, etc.) → fallback
+                    return Ok(None);
+                } else {
+                    value
+                }
+            } else if val_map.keys().any(|k| k.starts_with('$')) {
+                return Ok(None);
+            } else {
+                value
+            }
+        } else {
+            value
+        };
+
+        // Find B-tree index for this field (pattern: mod.rs:1218-1224)
+        let indexes = self.indexes.read();
+        let index_infos = indexes.list_indexes_with_compound_info();
+
+        let index_info = match index_infos
+            .iter()
+            .find(|info| info.prefix_field == *field && !info.is_compound)
+        {
+            Some(info) => info,
+            None => return Ok(None), // No index → fallback
+        };
+
+        let btree = match indexes.get_btree_index(&index_info.index_name) {
+            Some(idx) => idx,
+            None => return Ok(None),
+        };
+
+        // Convert value to IndexKey, respecting case_insensitive setting
+        let key = if btree.metadata.case_insensitive {
+            if let Value::String(s) = eq_value {
+                IndexKey::String(s.to_lowercase())
+            } else {
+                IndexKey::from(eq_value.clone())
+            }
+        } else {
+            IndexKey::from(eq_value.clone())
+        };
+
+        // Point lookup via range_query (pattern: mod.rs:2576-2577)
+        // Limit 100_000 — same cap as find_with_options fallback
+        let mode = RangeQueryMode::Scan {
+            skip: 0,
+            limit: Some(100_000),
+            order: ScanOrder::Asc,
+        };
+        let doc_ids = btree
+            .range_query(&key, &key, true, true, mode)
+            .unwrap_docs();
+
+        let id_set: std::collections::HashSet<String> = doc_ids
+            .into_iter()
+            .map(|did| match did {
+                DocumentId::String(s) => s,
+                DocumentId::Int(i) => i.to_string(),
+                DocumentId::ObjectId(oid) => oid,
+            })
+            .collect();
+
+        Ok(Some(id_set))
+    }
 
     /// Get vector index metadata for a field
     fn get_vector_index_meta(&self, field: &str) -> Result<VectorIndexMetadata> {
@@ -935,5 +1043,122 @@ mod tests {
             1,
             "Document inserted via db.insert_one() should be auto-indexed"
         );
+    }
+
+    #[test]
+    fn test_resolve_filter_to_ids_with_btree_index() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        // Insert documents with category field
+        for i in 0..20 {
+            let vector: Vec<f64> = (0..5).map(|j| ((i + j) % 5) as f64 / 5.0).collect();
+            db.insert_one(
+                "test",
+                json_to_hashmap(json!({
+                    "name": format!("doc{}", i),
+                    "category": if i % 2 == 0 { "even" } else { "odd" },
+                    "embedding": vector
+                })),
+            )
+            .unwrap();
+        }
+
+        // Create B-tree index on category
+        coll.create_index("category".to_string(), false, false)
+            .unwrap();
+
+        // Create vector index
+        let config = VectorIndexConfig::new(5);
+        coll.create_vector_index("embedding", config).unwrap();
+
+        // Test: filter with B-tree indexed field → fast path
+        let query_vec: Vec<f32> = vec![0.0, 0.2, 0.4, 0.6, 0.8];
+        let results = coll
+            .vector_search_with_filter("embedding", &query_vec, &json!({"category": "even"}), 10)
+            .unwrap();
+
+        // All results should be from "even" category
+        for (doc, _score) in &results {
+            assert_eq!(doc.get("category").unwrap(), "even");
+        }
+        // Should have results (10 even docs out of 20)
+        assert!(!results.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_filter_to_ids_fallback_for_complex_filter() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        for i in 0..10 {
+            let vector: Vec<f64> = (0..3).map(|j| ((i + j) % 3) as f64 / 3.0).collect();
+            db.insert_one(
+                "test",
+                json_to_hashmap(json!({
+                    "name": format!("doc{}", i),
+                    "score": i * 10,
+                    "embedding": vector
+                })),
+            )
+            .unwrap();
+        }
+
+        let config = VectorIndexConfig::new(3);
+        coll.create_vector_index("embedding", config).unwrap();
+
+        // $gt filter → no B-tree fast path, falls back to find_with_options
+        let query_vec: Vec<f32> = vec![0.1, 0.2, 0.3];
+        let results = coll
+            .vector_search_with_filter("embedding", &query_vec, &json!({"score": {"$gt": 50}}), 10)
+            .unwrap();
+
+        // All results should have score > 50
+        for (doc, _score) in &results {
+            let s = doc.get("score").unwrap().as_i64().unwrap();
+            assert!(s > 50);
+        }
+    }
+
+    #[test]
+    fn test_resolve_filter_to_ids_eq_operator() {
+        let db = create_test_db();
+        let coll = db.collection("test").unwrap();
+
+        for i in 0..10 {
+            let vector: Vec<f64> = (0..3).map(|j| ((i + j) % 3) as f64 / 3.0).collect();
+            db.insert_one(
+                "test",
+                json_to_hashmap(json!({
+                    "name": format!("doc{}", i),
+                    "category": if i % 3 == 0 { "a" } else if i % 3 == 1 { "b" } else { "c" },
+                    "embedding": vector
+                })),
+            )
+            .unwrap();
+        }
+
+        // Create B-tree index on category
+        coll.create_index("category".to_string(), false, false)
+            .unwrap();
+
+        let config = VectorIndexConfig::new(3);
+        coll.create_vector_index("embedding", config).unwrap();
+
+        // {"category": {"$eq": "a"}} should also use fast path
+        let query_vec: Vec<f32> = vec![0.1, 0.2, 0.3];
+        let results = coll
+            .vector_search_with_filter(
+                "embedding",
+                &query_vec,
+                &json!({"category": {"$eq": "a"}}),
+                10,
+            )
+            .unwrap();
+
+        for (doc, _score) in &results {
+            assert_eq!(doc.get("category").unwrap(), "a");
+        }
+        assert!(!results.is_empty());
     }
 }
