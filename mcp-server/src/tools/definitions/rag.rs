@@ -132,8 +132,8 @@ pub fn tools() -> Vec<Value> {
                     },
                     "rrf_k": {
                         "type": "number",
-                        "description": "RRF K constant. Lower = wider score spread, more reranking impact. Default: 60. Try 20 for better differentiation.",
-                        "default": 60,
+                        "description": "RRF K constant. Lower = wider score spread, more reranking impact. Default: 20. Use 60 for classic RRF behavior.",
+                        "default": 20,
                         "minimum": 1
                     },
                     "title_field": {
