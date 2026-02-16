@@ -1267,6 +1267,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             .collect())
     }
 
+    /// Get field names that have fulltext indexes (lightweight)
+    ///
+    /// Unlike `list_fulltext_indexes()`, this does NOT call `metadata()` on each index,
+    /// avoiding the expensive `unique_token_count()` computation in lazy mode.
+    /// Only accesses `pub name` and `pub field` String fields — O(1) per index.
+    pub fn fulltext_indexed_fields(&self) -> Result<Vec<String>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let prefix = format!("{}_", self.name);
+        Ok(indexes
+            .list_fulltext_indexes()
+            .into_iter()
+            .filter(|idx| idx.name.starts_with(&prefix))
+            .map(|idx| idx.field.clone())
+            .collect())
+    }
+
     /// Get fulltext index options for a field
     ///
     /// Returns the FtsOptions used by the fulltext index on the specified field.

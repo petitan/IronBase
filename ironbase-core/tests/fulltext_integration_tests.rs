@@ -1095,3 +1095,48 @@ fn test_issue_25_fulltext_index_without_flush() {
         );
     }
 }
+
+// ============================================================================
+// FULLTEXT INDEXED FIELDS (lightweight metadata query)
+// ============================================================================
+
+#[test]
+fn test_fulltext_indexed_fields_returns_field_names() {
+    use ironbase_core::storage::MemoryStorage;
+
+    let db = DatabaseCore::<MemoryStorage>::open_memory().unwrap();
+
+    // Create collection with a document
+    db.insert_one(
+        "products",
+        doc! {
+            "title" => "Fékerőmérő berendezés",
+            "content_text" => "Személygépkocsi fékerőmérő kalibrálás"
+        },
+    )
+    .unwrap();
+
+    let coll = db.collection("products").unwrap();
+
+    // No fulltext indexes yet → empty
+    let fields = coll.fulltext_indexed_fields().unwrap();
+    assert!(fields.is_empty(), "No fulltext indexes → empty vec");
+
+    // Create fulltext index on content_text
+    coll.create_fulltext_index("content_text".to_string(), "none", None, None)
+        .unwrap();
+
+    // Now should return ["content_text"]
+    let fields = coll.fulltext_indexed_fields().unwrap();
+    assert_eq!(fields, vec!["content_text".to_string()]);
+
+    // Create second fulltext index on title
+    coll.create_fulltext_index("title".to_string(), "none", None, None)
+        .unwrap();
+
+    // Should return both fields
+    let fields = coll.fulltext_indexed_fields().unwrap();
+    assert_eq!(fields.len(), 2);
+    assert!(fields.contains(&"content_text".to_string()));
+    assert!(fields.contains(&"title".to_string()));
+}

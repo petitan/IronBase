@@ -471,13 +471,30 @@ fn handle_rag_search(
             cfg.text_field.clone(),
             p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
         ),
-        None => (
-            DEFAULT_EMBEDDING_FIELD.to_string(),
-            DEFAULT_TEXT_FIELD.to_string(),
-            p.provider
-                .clone()
-                .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string()),
-        ),
+        None => {
+            // Auto-detect fulltext indexed field from collection metadata
+            // O(n_indexes) — only reads pub field names, no index data loaded
+            let detected_text_field = adapter
+                .get_fulltext_field_names(&p.collection)
+                .ok()
+                .and_then(|fields| fields.into_iter().next())
+                .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+
+            if detected_text_field != DEFAULT_TEXT_FIELD {
+                tracing::info!(
+                    "rag_search: auto-detected fulltext field '{}' for collection '{}' (no RAG config)",
+                    detected_text_field, p.collection
+                );
+            }
+
+            (
+                DEFAULT_EMBEDDING_FIELD.to_string(),
+                detected_text_field,
+                p.provider
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string()),
+            )
+        }
     };
 
     // ========================================================================

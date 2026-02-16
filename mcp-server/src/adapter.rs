@@ -1683,6 +1683,16 @@ impl IronBaseAdapter {
             .collect())
     }
 
+    /// Get field names that have fulltext indexes (lightweight, no metadata computation)
+    ///
+    /// Unlike `list_fulltext_indexes()`, avoids `unique_token_count()` in lazy mode.
+    /// Uses get_collection - no implicit creation
+    pub fn get_fulltext_field_names(&self, collection: &str) -> Result<Vec<String>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_indexed_fields()?)
+    }
+
     // ============================================================
     // Schema Management
     // ============================================================
