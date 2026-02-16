@@ -921,8 +921,14 @@ impl FulltextSearchOptions {
     /// The number of candidates to request from TF-IDF search
     pub fn calculate_candidate_limit(effective_limit: usize, has_filter_or_phrase: bool) -> usize {
         if has_filter_or_phrase {
-            // Request 10x more candidates to account for filtering, minimum 100
-            effective_limit.saturating_mul(10).max(100)
+            // When a filter is present, the relevant documents may appear at ANY
+            // position in the TF-IDF ranking. Example: "ajánlat" has 6766 matches,
+            // but year=2026 docs are ranked at positions 6735-6766 (lowest TF-IDF).
+            // The TF-IDF search is already O(N) internally (scores all matching docs),
+            // so a large candidate_limit only affects the output vector size (~100
+            // bytes/result). Cap at 100K to prevent pathological cases (~10MB).
+            // Document loading in the post-filter loop has early termination.
+            100_000
         } else {
             effective_limit
         }
