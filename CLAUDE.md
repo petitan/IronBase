@@ -899,6 +899,46 @@ Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pen
 - `mcp-server/src/embedding/fasttext.rs` — v1/v2 loader, subword computation
 - `mcp-server/docs/FASTTEXT_V2_MIGRATION.md` — teljes migrációs útmutató
 
+### Preprocessing Version Detection (2026-02-16)
+
+**Probléma:** A FastText tokenizer lecserélése (stop words + stemming) után a meglévő dokumentumok még régi preprocessinggel generált vektorokat tartalmaztak. A modellváltás-detekció nem érzékelte, mert a modell fájl neve nem változott.
+
+**Megoldás:** `preprocessing_version` mező az `AutoEmbeddingConfig`-ban + `EmbeddingProvider` trait-ben. Startup detekció modell ÉS preprocessing verziót is összehasonlít.
+
+**Verzió konvenció:** `nlp_{lang}_v{N}` (pl. `nlp_hu_v1`). Ha a preprocessing változik → verziószám növelés.
+
+| Provider | Verzió | Tartalom |
+|----------|--------|----------|
+| FastText | `nlp_hu_v1` | Hungarian stop words + Snowball stemming, no accent folding |
+| HTTP/egyéb | `default` | Trait default, nincs preprocessing |
+
+**Startup detekció logika (`check_model_changes_and_reembed()`):**
+
+| Helyzet | Mi történik |
+|---------|-------------|
+| Legacy config (mindkettő üres) | Mentés, nincs re-embed |
+| Modell változott | Force re-embed |
+| Preprocessing változott | Force re-embed |
+| Mindkettő változott | Egy force re-embed |
+| Semmi sem változott | Nincs művelet |
+| `--force-reembed` flag | Force re-embed mindig |
+
+**CLI használat:**
+```bash
+./mcp-ironbase-server --force-reembed              # HTTP mód
+./mcp-ironbase-server --stdio --force-reembed      # stdio mód
+```
+
+**Új preprocessing verzió bevezetése:**
+1. `mcp-server/src/embedding/fasttext.rs` → `preprocessing_version()` visszatérési értékét módosítani (pl. `"nlp_hu_v2"`)
+2. Szerver újraindítás → automatikus re-embed indul minden enabled collection-re
+
+**Key files:**
+- `ironbase-core/src/storage/mod.rs` — `AutoEmbeddingConfig::preprocessing_version`
+- `mcp-server/src/embedding/mod.rs` — `EmbeddingProvider::preprocessing_version()` trait default
+- `mcp-server/src/embedding/fasttext.rs` — `preprocessing_version()` → `"nlp_hu_v1"`
+- `mcp-server/src/tools/auto_embed.rs` — `check_model_changes_and_reembed()`, `handle_auto_embed_enable()`
+
 ### $** Wildcard
 
 `{"$**.name": "Alice"}` - mező keresése BÁRMILYEN mélységben (collection scan, MAX_DEPTH=100)
