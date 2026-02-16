@@ -119,6 +119,7 @@ impl GroupShape {
             GroupId::Null => GroupIdKind::Null,
             GroupId::Field(f) => GroupIdKind::Field(f.clone()),
             GroupId::Substring { .. } => GroupIdKind::Expression,
+            GroupId::Object(_) => GroupIdKind::Expression, // Not optimizable
         };
 
         let accumulators: Vec<(String, AccumulatorKind)> = group

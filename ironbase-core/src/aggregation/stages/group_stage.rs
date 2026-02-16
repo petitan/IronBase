@@ -47,17 +47,50 @@ impl GroupStage {
                         ));
                     }
                 } else if let Some(id_obj) = id_value.as_object() {
-                    if let Some(substr_spec) = id_obj.get("$substr") {
-                        let (field, start, length) = Self::parse_substr_spec(substr_spec)?;
-                        GroupId::Substring {
-                            field,
-                            start,
-                            length,
+                    if id_obj.is_empty() {
+                        return Err(IronBaseError::AggregationError(
+                            "Group _id object cannot be empty".to_string(),
+                        ));
+                    }
+                    // Check if first key starts with $ → operator, otherwise → nested object
+                    let first_key = id_obj.keys().next().unwrap();
+                    if first_key.starts_with('$') {
+                        // Operator: currently only $substr
+                        if let Some(substr_spec) = id_obj.get("$substr") {
+                            let (field, start, length) = Self::parse_substr_spec(substr_spec)?;
+                            GroupId::Substring {
+                                field,
+                                start,
+                                length,
+                            }
+                        } else {
+                            return Err(IronBaseError::AggregationError(format!(
+                                "Group _id operator not supported: {}",
+                                first_key
+                            )));
                         }
                     } else {
-                        return Err(IronBaseError::AggregationError(
-                            "Group _id object must use a supported operator".to_string(),
-                        ));
+                        // Nested object: {year: "$year", type: "$doc_type"}
+                        let mut fields = Vec::with_capacity(id_obj.len());
+                        for (key, value) in id_obj {
+                            if let Some(s) = value.as_str() {
+                                if s.starts_with('$') {
+                                    fields
+                                        .push((key.clone(), s.trim_start_matches('$').to_string()));
+                                } else {
+                                    return Err(IronBaseError::AggregationError(format!(
+                                        "Group _id field '{}' value must start with $",
+                                        key
+                                    )));
+                                }
+                            } else {
+                                return Err(IronBaseError::AggregationError(format!(
+                                    "Group _id field '{}' must be a field reference string",
+                                    key
+                                )));
+                            }
+                        }
+                        GroupId::Object(fields)
                     }
                 } else {
                     return Err(IronBaseError::AggregationError(
@@ -194,6 +227,18 @@ impl GroupStage {
                 };
                 let hash = value_hash(&value);
                 Ok((hash, value))
+            }
+            GroupId::Object(fields) => {
+                let mut result_obj = serde_json::Map::with_capacity(fields.len());
+                for (key, field_name) in fields {
+                    let value = get_nested_value(doc, field_name)
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    result_obj.insert(key.clone(), value);
+                }
+                let result_value = Value::Object(result_obj);
+                let hash = value_hash(&result_value);
+                Ok((hash, result_value))
             }
         }
     }
@@ -528,6 +573,7 @@ impl GroupStage {
             GroupId::Field(f) => f.trim_start_matches('$'),
             GroupId::Null => return None, // Null means all docs in one group - no index benefit
             GroupId::Substring { .. } => return None,
+            GroupId::Object(_) => return None, // Nested object not indexable
         };
 
         // Check 2: All accumulators must be count-only ($sum: 1 or $sum: <constant>)
@@ -894,5 +940,193 @@ mod tests {
 
         assert_eq!(prefixes.get(&json!(1)), Some(&json!("A")));
         assert_eq!(prefixes.get(&json!(2)), Some(&json!("B")));
+    }
+
+    // ========== Nested Object _id Tests ==========
+
+    #[test]
+    fn test_group_nested_object_two_fields() {
+        let docs = vec![
+            json!({"year": 2024, "type": "A", "val": 1}),
+            json!({"year": 2024, "type": "A", "val": 2}),
+            json!({"year": 2024, "type": "B", "val": 3}),
+            json!({"year": 2025, "type": "A", "val": 4}),
+        ];
+
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": {"year": "$year", "type": "$type"},
+            "count": {"$sum": 1}
+        }))
+        .unwrap();
+
+        let results = group_stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 3);
+
+        // Helper: find count for a given (year, type) combo
+        let find_count = |year: i64, typ: &str| -> i64 {
+            results
+                .iter()
+                .find(|doc| {
+                    let id = doc.get("_id").unwrap();
+                    id.get("year") == Some(&json!(year)) && id.get("type") == Some(&json!(typ))
+                })
+                .and_then(|doc| doc.get("count").and_then(|v| v.as_i64()))
+                .unwrap_or(-1)
+        };
+
+        assert_eq!(find_count(2024, "A"), 2, "2024/A should have 2 docs");
+        assert_eq!(find_count(2024, "B"), 1, "2024/B should have 1 doc");
+        assert_eq!(find_count(2025, "A"), 1, "2025/A should have 1 doc");
+    }
+
+    #[test]
+    fn test_group_nested_object_single_field() {
+        let docs = vec![
+            json!({"city": "NYC"}),
+            json!({"city": "NYC"}),
+            json!({"city": "LA"}),
+        ];
+
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": {"city": "$city"},
+            "count": {"$sum": 1}
+        }))
+        .unwrap();
+
+        let results = group_stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Each result's _id should be an object like {"city": "NYC"}
+        for doc in &results {
+            let id = doc.get("_id").unwrap();
+            assert!(id.is_object(), "_id should be an object, got: {:?}", id);
+            assert!(
+                id.get("city").is_some(),
+                "_id should have 'city' key, got: {:?}",
+                id
+            );
+        }
+    }
+
+    #[test]
+    fn test_group_nested_object_missing_field() {
+        let docs = vec![
+            json!({"year": 2024, "type": "A"}),
+            json!({"year": 2024}), // missing "type"
+            json!({"type": "B"}),  // missing "year"
+        ];
+
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": {"year": "$year", "type": "$type"},
+            "count": {"$sum": 1}
+        }))
+        .unwrap();
+
+        let results = group_stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 3, "Each unique combo should be a group");
+
+        // Check that missing fields become null in the _id
+        let mut found_null_type = false;
+        let mut found_null_year = false;
+        for doc in &results {
+            let id = doc.get("_id").unwrap();
+            if id.get("year") == Some(&json!(2024)) && id.get("type") == Some(&Value::Null) {
+                found_null_type = true;
+            }
+            if id.get("year") == Some(&Value::Null) && id.get("type") == Some(&json!("B")) {
+                found_null_year = true;
+            }
+        }
+        assert!(found_null_type, "Should have group with null type");
+        assert!(found_null_year, "Should have group with null year");
+    }
+
+    #[test]
+    fn test_group_nested_push_object() {
+        let docs = vec![
+            json!({"group": 1, "title": "A", "year": 2024}),
+            json!({"group": 1, "title": "B", "year": 2025}),
+            json!({"group": 2, "title": "C", "year": 2024}),
+        ];
+
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": "$group",
+            "items": {"$push": {"title": "$title", "year": "$year"}}
+        }))
+        .unwrap();
+
+        let results = group_stage.execute(docs).unwrap();
+
+        // Find group 1
+        let group1 = results
+            .iter()
+            .find(|d| d.get("_id") == Some(&json!(1)))
+            .expect("Group 1 should exist");
+        let items = group1.get("items").unwrap().as_array().unwrap();
+        assert_eq!(items.len(), 2);
+
+        // Each item should be an object with title and year
+        assert_eq!(items[0].get("title"), Some(&json!("A")));
+        assert_eq!(items[0].get("year"), Some(&json!(2024)));
+        assert_eq!(items[1].get("title"), Some(&json!("B")));
+        assert_eq!(items[1].get("year"), Some(&json!(2025)));
+    }
+
+    #[test]
+    fn test_group_nested_addtoset_object() {
+        let docs = vec![
+            json!({"group": 1, "name": "Alice"}),
+            json!({"group": 1, "name": "Alice"}), // duplicate
+            json!({"group": 1, "name": "Bob"}),
+        ];
+
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": "$group",
+            "names": {"$addToSet": {"name": "$name"}}
+        }))
+        .unwrap();
+
+        let results = group_stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 1);
+
+        let names = results[0].get("names").unwrap().as_array().unwrap();
+        // $addToSet should deduplicate: {"name":"Alice"} appears only once
+        assert_eq!(
+            names.len(),
+            2,
+            "Should have 2 unique objects, got: {:?}",
+            names
+        );
+    }
+
+    #[test]
+    fn test_group_nested_object_backward_compat() {
+        // Verify that existing "$field" and null syntax still works
+        let docs = vec![
+            json!({"city": "NYC", "val": 1}),
+            json!({"city": "NYC", "val": 2}),
+        ];
+
+        // Test "$field" syntax
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": "$city",
+            "total": {"$sum": "$val"}
+        }))
+        .unwrap();
+        let results = group_stage.execute(docs.clone()).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].get("_id"), Some(&json!("NYC")));
+        assert_eq!(results[0].get("total"), Some(&json!(3)));
+
+        // Test null syntax
+        let group_stage = GroupStage::from_json(&json!({
+            "_id": null,
+            "count": {"$sum": 1}
+        }))
+        .unwrap();
+        let results = group_stage.execute(docs).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].get("_id"), Some(&Value::Null));
+        assert_eq!(results[0].get("count"), Some(&json!(2)));
     }
 }

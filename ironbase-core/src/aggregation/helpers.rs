@@ -41,28 +41,48 @@ pub(crate) fn parse_value_expression(value: &Value, op_name: &str) -> Result<Val
     }
 
     if let Some(obj) = value.as_object() {
-        if obj.len() != 1 {
+        if obj.is_empty() {
             return Err(IronBaseError::AggregationError(format!(
-                "{} expression must have exactly one operator",
+                "{} expression object cannot be empty",
                 op_name
             )));
         }
-        let (op, arg) = obj.iter().next().unwrap();
-        match op.as_str() {
-            "$substr" => {
-                let (field, start, length) = parse_substr_spec(arg, op_name)?;
-                return Ok(ValueExpression::Substr {
-                    field,
-                    start,
-                    length,
-                });
-            }
-            _ => {
+
+        // Check if first key is an operator ($)
+        let first_key = obj.keys().next().unwrap();
+        if first_key.starts_with('$') {
+            // Operator expression — must have exactly one key
+            if obj.len() != 1 {
                 return Err(IronBaseError::AggregationError(format!(
-                    "{} expression operator not supported: {}",
-                    op_name, op
-                )))
+                    "{} expression must have exactly one operator",
+                    op_name
+                )));
             }
+            let (op, arg) = obj.iter().next().unwrap();
+            match op.as_str() {
+                "$substr" => {
+                    let (field, start, length) = parse_substr_spec(arg, op_name)?;
+                    return Ok(ValueExpression::Substr {
+                        field,
+                        start,
+                        length,
+                    });
+                }
+                _ => {
+                    return Err(IronBaseError::AggregationError(format!(
+                        "{} expression operator not supported: {}",
+                        op_name, op
+                    )))
+                }
+            }
+        } else {
+            // Nested object: {title: "$title", year: "$year"}
+            let mut fields = Vec::with_capacity(obj.len());
+            for (key, val) in obj {
+                let field_expr = parse_value_expression(val, op_name)?; // Recursive
+                fields.push((key.clone(), Box::new(field_expr)));
+            }
+            return Ok(ValueExpression::Object(fields));
         }
     }
 

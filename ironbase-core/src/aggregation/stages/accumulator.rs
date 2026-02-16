@@ -26,6 +26,14 @@ fn evaluate_value_expr(doc: &Value, expr: &ValueExpression) -> Option<Value> {
             raw.as_str()
                 .map(|text| Value::String(substr_string(text, *start, *length)))
         }
+        ValueExpression::Object(fields) => {
+            let mut result_obj = serde_json::Map::with_capacity(fields.len());
+            for (key, field_expr) in fields {
+                let value = evaluate_value_expr(doc, field_expr).unwrap_or(Value::Null);
+                result_obj.insert(key.clone(), value);
+            }
+            Some(Value::Object(result_obj))
+        }
     }
 }
 
@@ -37,6 +45,10 @@ fn expr_debug_name(expr: &ValueExpression) -> String {
             start,
             length,
         } => format!("$substr(${},{},{})", field, start, length),
+        ValueExpression::Object(fields) => {
+            let names: Vec<&str> = fields.iter().map(|(k, _)| k.as_str()).collect();
+            format!("{{{}}}", names.join(", "))
+        }
     }
 }
 

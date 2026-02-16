@@ -488,6 +488,10 @@ pub enum GroupId {
         start: usize,
         length: usize,
     },
+    /// Nested object: {year: "$year", type: "$doc_type"}
+    /// Keys are output field names, values are field references ($ stripped)
+    /// Vec preserves key order (MongoDB keeps insertion order), typically 2-5 elements
+    Object(Vec<(String, String)>),
 }
 
 #[derive(Debug, Clone)]
@@ -498,6 +502,9 @@ pub enum ValueExpression {
         start: usize,
         length: usize,
     },
+    /// Nested object: {title: "$title", year: "$year"}
+    /// Recursive: values can be Field, Substr, or nested Object
+    Object(Vec<(String, Box<ValueExpression>)>),
 }
 
 #[derive(Debug, Clone)]
