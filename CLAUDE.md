@@ -484,6 +484,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **$eq operator ignored** | 6f537dd5 | `{"field":{"$eq":"x"}}` CollectionScan | `collect_equality_candidates()` skip-elte | `$eq` érték kinyerése |
 | **Checkpoint lock contention** | 9e4499b4 | insert_one 14+ perc blokk | `flush_all_indexes_counted()` 1 lock / 22 index | Per-index flush: 22 lock / 1 index |
 | **Btree delete not dirty** | 265f0c2e | count_documents ~3x túlszámolás | `remove_document_from_indexes` + `batch_update_indexes` nem jelölte dirty-nek a btree indexet → checkpoint nem mentette a törléseket → stale .idx | `dirty_btree_indexes.insert()` 5 helyen |
+| **Fulltext candidate limit** | aa3b8ed5 | Filtrált fulltext 0 eredmény gyakori szóra | `calculate_candidate_limit()` max 300 jelöltet kért, de pl. "ajánlat" 6766 match-ből a year=2026 dokuk a 6735+ pozíción voltak | Filter esetén 100K cap (TF-IDF amúgy is O(N), limit csak output-ot csonkít) |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
@@ -590,6 +591,40 @@ pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
 **Érintett fájlok:**
 - `storage/io.rs:57-119` - `read_data()` javítva
 - `storage/io.rs:141,199` - `read_data_at()` már korábban `data_end_offset`-et használt
+
+</details>
+
+<details>
+<summary>Fulltext Candidate Limit Bug (aa3b8ed5) - Részletes elemzés</summary>
+
+**Probléma:** `rag_search("ajánlat", filter={year:2026})` és `hybrid_search` 0 eredményt adott, holott 31 releváns dokumentum létezik.
+
+**Root Cause:**
+- `calculate_candidate_limit(30, true)` = `max(30*10, 100)` = **300** TF-IDF jelölt
+- "ajánlat" = 6766 dokumentumban szerepel
+- A 31 year=2026 dokumentum TF-IDF score-ja a legalacsonyabb (1.6447), pozíciójuk: **6735–6766**
+- 300 jelöltből 0 db year=2026 → post-filter mindent kiszűrt
+
+**Miért nem OOM kockázat a nagy candidate limit:**
+- A TF-IDF search (`search_with_ctx`) belül **AMÚGY IS O(N)**: score-olja az összes matching doc-ot, rendezi, és CSAK a `limit` paraméter csonkítja az outputot
+- A `candidate_limit` tehát NEM extra munkát jelent, hanem az output Vec méretét szabályozza
+- 100K jelölt ≈ 10MB memória (lightweight: doc_id + score + tokens)
+- A post-filter loopban early termination van (`results.len() >= effective_limit` → break)
+
+**Fix:**
+```rust
+// fulltext.rs:922
+pub fn calculate_candidate_limit(effective_limit: usize, has_filter_or_phrase: bool) -> usize {
+    if has_filter_or_phrase {
+        100_000  // TF-IDF is O(N) anyway, limit only truncates output
+    } else {
+        effective_limit
+    }
+}
+```
+
+**Érintett fájl:**
+- `ironbase-core/src/fulltext.rs:922` — `calculate_candidate_limit()`
 
 </details>
 
