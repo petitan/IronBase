@@ -103,7 +103,7 @@ Metadata at END → no race conditions, no truncation.
 |-------|-----------|
 | **Query (25)** | $eq $ne $gt $gte $lt $lte $in $nin · $and $or $not $nor · $exists $type · $all $elemMatch $size · $regex $fuzzy $text · $startsWith $endsWith $contains · $expr · $** |
 | **Update (7)** | $set $inc $unset $push $pull $addToSet $pop (+ dot notation + upsert) |
-| **Aggregation** | $match $group $project $count $sort $limit $skip $unwind · Accumulators: $sum $avg $min $max $first $last $push $addToSet |
+| **Aggregation** | $match $group $project $count $sort $limit $skip $unwind · Accumulators: $sum $avg $min $max $first $last $push $addToSet · $group nested object _id |
 
 ---
 
@@ -1011,6 +1011,42 @@ Jobs: `embed_job_list`, `embed_job_status`, `embed_job_cancel` · Lifecycle: Pen
 ### $** Wildcard
 
 `{"$**.name": "Alice"}` - mező keresése BÁRMILYEN mélységben (collection scan, MAX_DEPTH=100)
+
+### $group Nested Object _id (305e6c91)
+
+**MongoDB-kompatibilis multi-dimenzionális csoportosítás.**
+
+```rust
+// Nested object _id: több mező szerinti csoportosítás
+coll.aggregate(&json!([
+    {"$group": {"_id": {"year": "$year", "type": "$type"}, "count": {"$sum": 1}}}
+]))?;
+// Output: [{"_id": {"year": 2024, "type": "A"}, "count": 5}, ...]
+
+// Nested object $push/$addToSet értékek
+coll.aggregate(&json!([
+    {"$group": {"_id": "$category", "items": {"$push": {"title": "$title", "year": "$year"}}}}
+]))?;
+```
+
+| Syntax | GroupId | Index opt. |
+|--------|---------|-----------|
+| `{_id: null}` | Null | N/A |
+| `{_id: "$field"}` | Field | ✅ |
+| `{_id: {$substr: [...]}}` | Substring | ❌ |
+| `{_id: {year: "$year", type: "$type"}}` | **Object** | ❌ |
+
+**Megkülönböztetés:** `$`-ral kezdődő kulcs = operátor, egyébként = nested object field referencia.
+
+**ValueExpression::Object** rekurzív: `$push`/`$addToSet` értékei lehetnek Field, Substr, vagy nested Object.
+
+**Hiányzó mező → `null`** az output _id-ben (MongoDB-kompatibilis viselkedés).
+
+**Key files:**
+- `ironbase-core/src/aggregation/types.rs` — `GroupId::Object`, `ValueExpression::Object`
+- `ironbase-core/src/aggregation/stages/group_stage.rs` — parsing, hash extraction
+- `ironbase-core/src/aggregation/helpers.rs` — `parse_value_expression()` nested object
+- `ironbase-core/src/aggregation/stages/accumulator.rs` — `evaluate_value_expr()` Object
 
 ---
 
