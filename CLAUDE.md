@@ -919,6 +919,18 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 }
 ```
 
+**Fulltext mode paraméter (45f74bf7, #47):**
+- `mode`: `"or"` (default) = bármely szó elég, `"and"` = MINDEN szó kell a dokumentumban
+- Elérhető: `rag_search`, `hybrid_search`, `fulltext_search` — mindháromban azonos minta
+- AND mód szűkíti a fulltext komponenst; vektor keresés változatlan → RRF fusion vektor-only eredményeket is ad
+- Backward compatible: `mode` hiánya = `"or"` (régi viselkedés)
+
+| Fájl | Változás |
+|------|----------|
+| `params.rs` | `pub mode: Option<String>` mindkét struct-ban |
+| `definitions/hybrid.rs`, `definitions/rag.rs` | `"mode"` schema entry |
+| `hybrid.rs`, `rag.rs` | `and_mode: p.mode.as_deref() == Some("and")` |
+
 **Rétegek:**
 ```
 Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
