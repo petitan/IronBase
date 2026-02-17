@@ -803,6 +803,74 @@ mod tests {
         assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON); // default
         assert!(p.language.is_none());
         assert!(p.filter.is_none()); // default: no filter
+        assert!(p.mode.is_none()); // default: None (= "or")
+        assert!(p.text_fields.is_none()); // default: None (= single text_field)
+    }
+
+    #[test]
+    fn test_params_with_mode_and() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "ajánlat karbantartás",
+            "mode": "and"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("and"));
+    }
+
+    #[test]
+    fn test_params_with_mode_or() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "test",
+            "mode": "or"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("or"));
+    }
+
+    #[test]
+    fn test_params_with_text_fields() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "Juhai ajánlat",
+            "text_fields": ["content_text", "title", "customer"]
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        let fields = p.text_fields.unwrap();
+        assert_eq!(fields, vec!["content_text", "title", "customer"]);
+    }
+
+    #[test]
+    fn test_params_text_fields_overrides_text_field() {
+        let params = json!({
+            "collection": "test",
+            "text_field": "content",
+            "vector": [0.1, 0.2],
+            "query": "test",
+            "text_fields": ["title", "body"]
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.text_field, "content"); // still parsed
+        assert!(p.text_fields.is_some()); // but text_fields takes priority in handler
+        assert_eq!(p.text_fields.unwrap(), vec!["title", "body"]);
+    }
+
+    #[test]
+    fn test_params_with_mode_and_text_fields_combined() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "ajánlat karbantartás",
+            "mode": "and",
+            "text_fields": ["content_text", "title"]
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("and"));
+        assert_eq!(p.text_fields.unwrap(), vec!["content_text", "title"]);
     }
 
     #[test]

@@ -1143,6 +1143,55 @@ mod tests {
         assert!(p.projection.is_none());
         assert!(p.provider.is_none());
         assert!(p.filter.is_none()); // default: no filter
+        assert!(p.mode.is_none()); // default: None (= "or")
+        assert!(p.text_fields.is_none()); // default: None (= single text_field)
+    }
+
+    #[test]
+    fn test_rag_search_params_with_mode_and() {
+        let params = json!({
+            "collection": "docs",
+            "query": "ajánlat karbantartás",
+            "mode": "and"
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("and"));
+    }
+
+    #[test]
+    fn test_rag_search_params_with_mode_or() {
+        let params = json!({
+            "collection": "docs",
+            "query": "test",
+            "mode": "or"
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("or"));
+    }
+
+    #[test]
+    fn test_rag_search_params_with_text_fields() {
+        let params = json!({
+            "collection": "docs",
+            "query": "Juhai ajánlat",
+            "text_fields": ["content_text", "title", "customer"]
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        let fields = p.text_fields.unwrap();
+        assert_eq!(fields, vec!["content_text", "title", "customer"]);
+    }
+
+    #[test]
+    fn test_rag_search_params_text_fields_with_mode_and() {
+        let params = json!({
+            "collection": "docs",
+            "query": "ajánlat karbantartás",
+            "mode": "and",
+            "text_fields": ["content_text", "title"]
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("and"));
+        assert_eq!(p.text_fields.unwrap(), vec!["content_text", "title"]);
     }
 
     #[test]
