@@ -3,7 +3,7 @@
 //! Splits markdown content at structural boundaries (headings) while
 //! preserving heading hierarchy and section context.
 
-use super::{byte_to_char_offset, safe_byte_offset, Chunk, ChunkError};
+use super::{byte_to_char_offset, Chunk, ChunkError};
 use text_splitter::MarkdownSplitter;
 
 /// Split markdown content into chunks with overlap
@@ -29,20 +29,18 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
         .try_reserve(total)
         .map_err(|_| ChunkError::OutOfMemory { count: total })?;
 
-    // Find actual byte positions of each chunk in the original content
+    // Compute byte positions using pointer arithmetic.
+    // MarkdownSplitter::chunks() returns &str slices into the original content,
+    // so the pointer difference gives the exact byte offset — always a valid
+    // UTF-8 char boundary, no find() needed.
+    let content_start = content.as_ptr() as usize;
     let mut positions: Vec<(usize, usize)> = Vec::with_capacity(total);
-    let mut search_from: usize = 0;
     for raw_chunk in &raw_chunks {
-        let trimmed = raw_chunk.trim();
-        let safe_from = safe_byte_offset(content, search_from);
-        let start = if let Some(pos) = content[safe_from..].find(trimmed) {
-            safe_from + pos
-        } else {
-            safe_from
-        };
-        let end = (start + raw_chunk.len()).min(content.len());
+        let start = raw_chunk.as_ptr() as usize - content_start;
+        let end = start + raw_chunk.len();
+        debug_assert!(content.is_char_boundary(start), "start {} not a char boundary", start);
+        debug_assert!(content.is_char_boundary(end), "end {} not a char boundary", end);
         positions.push((start, end));
-        search_from = end;
     }
 
     let mut section_path: Vec<String> = Vec::new();
@@ -152,6 +150,43 @@ mod tests {
 
         update_section_path(&mut path, "Chapter 2", 1);
         assert_eq!(path, vec!["Chapter 2"]);
+    }
+
+    /// Regression test for issue #46: panic on UTF-8 multi-byte char boundary
+    /// when chunk split falls inside 'ö', 'ő', 'ü', etc.
+    #[test]
+    fn test_split_markdown_utf8_boundary_issue46() {
+        // Build content where chunk boundary is likely to fall inside multi-byte chars.
+        // Hungarian text with many 2-byte chars (á é í ó ö ő ú ü ű).
+        let section = "Összefüggő szöveg, amelyben rengeteg ékezetes karakter található: \
+                        árvíztűrő tükörfúrógép, bögrécske, gyönyörű, különféle, \
+                        süvöltöző szélvihar az óperenciás tengeren túl. ";
+        // Repeat to create ~5000 chars (well above chunk_size=1000)
+        let mut content = String::from("# Ékezetes fejezet\n\n");
+        for i in 0..50 {
+            if i % 10 == 0 && i > 0 {
+                content.push_str(&format!("\n\n## Alfejezet {}\n\n", i));
+            }
+            content.push_str(section);
+            content.push('\n');
+        }
+        // Add special chars from issue: ' (U+2019), ➢ (U+27A2), NBSP
+        content.push_str("\n\nSpeciális: \u{2019}idézet\u{2019}, \u{27A2} nyíl, szóköz\u{a0}itt.\n");
+
+        let result = split(&content, 1000, 100);
+        assert!(
+            result.is_ok(),
+            "UTF-8 markdown chunking panicked (issue #46): {:?}",
+            result.err()
+        );
+        let chunks = result.unwrap();
+        assert!(chunks.len() > 1, "Expected multiple chunks, got {}", chunks.len());
+
+        // Verify all chunks are valid UTF-8 (they are Strings, so this is guaranteed,
+        // but verify they contain actual content)
+        for chunk in &chunks {
+            assert!(!chunk.text.is_empty(), "Empty chunk at index {}", chunk.index);
+        }
     }
 
     #[test]
