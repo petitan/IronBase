@@ -931,6 +931,18 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 | `definitions/hybrid.rs`, `definitions/rag.rs` | `"mode"` schema entry |
 | `hybrid.rs`, `rag.rs` | `and_mode: p.mode.as_deref() == Some("and")` |
 
+**Multi-field fulltext (b938c487, #48):**
+- `text_fields`: string tömb — több mező párhuzamos fulltext keresése, best-field strategy (max score merge)
+- Elérhető: `rag_search`, `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven)
+- `text_fields` felülírja a `text_field` (string) paramétert ha mindkettő megadva
+- Előfeltétel: minden megadott mezőn fulltext index kell (`index_create_fulltext`)
+- Backward compatible: `text_fields` hiánya = single-field (régi viselkedés)
+
+```json
+{"collection": "docs", "query": "Juhai ajánlat",
+ "text_fields": ["content_text", "title", "customer"]}
+```
+
 **Rétegek:**
 ```
 Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
