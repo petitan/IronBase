@@ -101,6 +101,11 @@ pub fn tools() -> Vec<Value> {
                     "description": "Fulltext search mode: 'or' (default) = any word matches, 'and' = ALL words must match in document",
                     "enum": ["or", "and"],
                     "default": "or"
+                },
+                "text_fields": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Multiple fulltext fields to search across (overrides 'text_field'). Scores merged per document using best-field strategy (max score). Each field must have a fulltext index."
                 }
             },
             "required": ["collection", "vector", "query"]

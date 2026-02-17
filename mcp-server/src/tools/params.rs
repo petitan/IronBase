@@ -617,6 +617,9 @@ pub struct HybridSearchParams {
 
     /// Fulltext search mode: "or" (default) = any word matches, "and" = ALL words must match
     pub mode: Option<String>,
+
+    /// Multiple fulltext fields to search across (overrides text_field). Best-field strategy (max score).
+    pub text_fields: Option<Vec<String>>,
 }
 
 fn default_hybrid_limit() -> usize {
@@ -715,6 +718,9 @@ pub struct RagSearchParams {
 
     /// Fulltext search mode: "or" (default) = any word matches, "and" = ALL words must match
     pub mode: Option<String>,
+
+    /// Multiple fulltext fields to search across (overrides text_field from RAG config). Best-field strategy (max score).
+    pub text_fields: Option<Vec<String>>,
 }
 
 /// Parameters for `rag_collection_stats` tool

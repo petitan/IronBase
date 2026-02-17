@@ -131,8 +131,13 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     };
 
     // Use original query - Snowball stemmer in fulltext handles NLP consistently
-    let text_results =
-        adapter.fulltext_search(&p.collection, &p.text_field, &p.query, text_options)?;
+    // Multi-field search if `text_fields` is provided, otherwise single-field
+    let text_results = if let Some(ref fields) = p.text_fields {
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, text_options)?
+    } else {
+        adapter.fulltext_search(&p.collection, &p.text_field, &p.query, text_options)?
+    };
 
     // Build fulltext rank map (1-indexed) with pre-allocated capacity (OOM protection)
     let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());

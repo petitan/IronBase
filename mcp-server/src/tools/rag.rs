@@ -559,8 +559,13 @@ fn handle_rag_search(
         highlight_max_snippets: None,
     };
 
-    let text_results =
-        adapter.fulltext_search(&p.collection, &text_field, &p.query, text_options)?;
+    // Multi-field search if `text_fields` is provided, otherwise single-field
+    let text_results = if let Some(ref fields) = p.text_fields {
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, text_options)?
+    } else {
+        adapter.fulltext_search(&p.collection, &text_field, &p.query, text_options)?
+    };
 
     // Build fulltext rank map (1-indexed)
     let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
