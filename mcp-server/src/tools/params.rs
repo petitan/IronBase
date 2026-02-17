@@ -614,6 +614,9 @@ pub struct HybridSearchParams {
 
     /// Optional title field for title match boost in reranking (up to 1.5x)
     pub title_field: Option<String>,
+
+    /// Fulltext search mode: "or" (default) = any word matches, "and" = ALL words must match
+    pub mode: Option<String>,
 }
 
 fn default_hybrid_limit() -> usize {
@@ -709,6 +712,9 @@ pub struct RagSearchParams {
 
     /// Optional title field for title match boost in reranking (up to 1.5x)
     pub title_field: Option<String>,
+
+    /// Fulltext search mode: "or" (default) = any word matches, "and" = ALL words must match
+    pub mode: Option<String>,
 }
 
 /// Parameters for `rag_collection_stats` tool

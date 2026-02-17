@@ -95,6 +95,12 @@ pub fn tools() -> Vec<Value> {
                 "filter": {
                     "type": "object",
                     "description": "MongoDB-style filter applied BEFORE both vector and fulltext search. Example: {\"doc_type\": \"ajanlat\", \"status\": \"active\"}"
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Fulltext search mode: 'or' (default) = any word matches, 'and' = ALL words must match in document",
+                    "enum": ["or", "and"],
+                    "default": "or"
                 }
             },
             "required": ["collection", "vector", "query"]

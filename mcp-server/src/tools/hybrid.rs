@@ -124,7 +124,7 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         min_score: None,
         projection: None, // Get full docs for merging
         filter: p.filter.clone(),
-        and_mode: false, // Hybrid uses RRF fusion, not AND mode
+        and_mode: p.mode.as_deref() == Some("and"),
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
