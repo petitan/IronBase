@@ -1040,6 +1040,222 @@ impl McpClient {
             .unwrap_or_default();
         Ok(results)
     }
+    // === RAG operations ===
+
+    /// Create a RAG-optimized collection with vector + fulltext indexes
+    pub async fn rag_collection_create(
+        &self,
+        collection: &str,
+        embedding_field: &str,
+        text_field: &str,
+        provider: &str,
+        language: &str,
+    ) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "embedding_field": embedding_field,
+            "text_field": text_field,
+            "provider": provider,
+            "language": language
+        });
+        self.call_tool("rag_collection_create", args).await
+    }
+
+    /// Import a document with automatic chunking and embedding
+    pub async fn rag_document_import(
+        &self,
+        collection: &str,
+        content: &str,
+        title: Option<&str>,
+        chunk_size: usize,
+        overlap: usize,
+        mode: &str,
+    ) -> McpResult<Value> {
+        let mut args = serde_json::json!({
+            "collection": collection,
+            "content": content,
+            "chunk_size": chunk_size,
+            "overlap": overlap,
+            "mode": mode
+        });
+        if let Some(t) = title {
+            args["title"] = serde_json::json!(t);
+        }
+        self.call_tool("rag_document_import", args).await
+    }
+
+    /// RAG semantic search with automatic query embedding
+    pub async fn rag_search(
+        &self,
+        collection: &str,
+        query: &str,
+        limit: usize,
+        vector_weight: f64,
+        fulltext_weight: f64,
+        rrf_k: f64,
+    ) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "query": query,
+            "limit": limit,
+            "vector_weight": vector_weight,
+            "fulltext_weight": fulltext_weight,
+            "rrf_k": rrf_k,
+            "rerank": true,
+            "deduplicate": true
+        });
+        self.call_tool("rag_search", args).await
+    }
+
+    /// Get RAG collection statistics
+    pub async fn rag_collection_stats(&self, collection: &str) -> McpResult<Value> {
+        let args = serde_json::json!({"collection": collection});
+        self.call_tool("rag_collection_stats", args).await
+    }
+
+    // === Hybrid search ===
+
+    /// Hybrid search combining vector similarity and fulltext search
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hybrid_search(
+        &self,
+        collection: &str,
+        vector_field: &str,
+        text_field: &str,
+        vector: &[f64],
+        query: &str,
+        limit: usize,
+        vector_weight: f64,
+        fulltext_weight: f64,
+        rrf_k: f64,
+    ) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "vector_field": vector_field,
+            "text_field": text_field,
+            "vector": vector,
+            "query": query,
+            "limit": limit,
+            "vector_weight": vector_weight,
+            "fulltext_weight": fulltext_weight,
+            "rrf_k": rrf_k,
+            "rerank": true,
+            "deduplicate": true
+        });
+        self.call_tool("hybrid_search", args).await
+    }
+
+    // === Embedding operations ===
+
+    /// Generate embedding for a single text
+    pub async fn embed_text(&self, text: &str, provider: &str) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "text": text,
+            "provider": provider
+        });
+        self.call_tool("embed_text", args).await
+    }
+
+    /// Generate embeddings for multiple texts
+    pub async fn embed_batch(&self, texts: &[String], provider: &str) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "texts": texts,
+            "provider": provider
+        });
+        self.call_tool("embed_batch", args).await
+    }
+
+    /// Embed a document with chunking
+    #[allow(clippy::too_many_arguments)]
+    pub async fn embed_document(
+        &self,
+        collection: &str,
+        content: &str,
+        title: Option<&str>,
+        chunk_size: usize,
+        overlap: usize,
+        mode: &str,
+        provider: &str,
+    ) -> McpResult<Value> {
+        let mut args = serde_json::json!({
+            "collection": collection,
+            "content": content,
+            "chunk_size": chunk_size,
+            "overlap": overlap,
+            "mode": mode,
+            "provider": provider
+        });
+        if let Some(t) = title {
+            args["title"] = serde_json::json!(t);
+        }
+        self.call_tool("embed_document", args).await
+    }
+
+    /// List available embedding models
+    pub async fn embed_list_models(&self) -> McpResult<Value> {
+        self.call_tool("embed_list_models", serde_json::json!({})).await
+    }
+
+    /// Get embedding cache statistics
+    pub async fn embed_cache_stats(&self) -> McpResult<Value> {
+        self.call_tool("embed_cache_stats", serde_json::json!({})).await
+    }
+
+    /// Clear embedding cache
+    pub async fn embed_cache_clear(&self) -> McpResult<Value> {
+        self.call_tool("embed_cache_clear", serde_json::json!({})).await
+    }
+
+    // === Auto-embed operations ===
+
+    /// Enable auto-embedding for a collection
+    pub async fn auto_embed_enable(
+        &self,
+        collection: &str,
+        source_field: &str,
+        target_field: &str,
+        provider: &str,
+    ) -> McpResult<Value> {
+        let args = serde_json::json!({
+            "collection": collection,
+            "source_field": source_field,
+            "target_field": target_field,
+            "provider": provider
+        });
+        self.call_tool("auto_embed_enable", args).await
+    }
+
+    /// Disable auto-embedding for a collection
+    pub async fn auto_embed_disable(&self, collection: &str) -> McpResult<Value> {
+        let args = serde_json::json!({"collection": collection});
+        self.call_tool("auto_embed_disable", args).await
+    }
+
+    /// Get auto-embedding status for a collection
+    pub async fn auto_embed_status(&self, collection: &str) -> McpResult<Value> {
+        let args = serde_json::json!({"collection": collection});
+        self.call_tool("auto_embed_status", args).await
+    }
+
+    // === Job management ===
+
+    /// List embedding jobs
+    pub async fn embed_job_list(&self, active_only: bool) -> McpResult<Value> {
+        let args = serde_json::json!({"active_only": active_only});
+        self.call_tool("embed_job_list", args).await
+    }
+
+    /// Get job status
+    pub async fn embed_job_status(&self, job_id: &str) -> McpResult<Value> {
+        let args = serde_json::json!({"job_id": job_id});
+        self.call_tool("embed_job_status", args).await
+    }
+
+    /// Cancel a running job
+    pub async fn embed_job_cancel(&self, job_id: &str) -> McpResult<Value> {
+        let args = serde_json::json!({"job_id": job_id});
+        self.call_tool("embed_job_cancel", args).await
+    }
 }
 
 impl Drop for McpClient {

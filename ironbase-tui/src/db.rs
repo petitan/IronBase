@@ -616,6 +616,147 @@ impl DbWrapper {
         let results = self.client.vector_search_filter(collection, field, vector, filter, limit).await?;
         Ok(results)
     }
+
+    // === RAG operations ===
+
+    pub async fn rag_collection_create(
+        &self,
+        collection: &str,
+        embedding_field: &str,
+        text_field: &str,
+        provider: &str,
+        language: &str,
+    ) -> Result<Value> {
+        let result = self.client.rag_collection_create(collection, embedding_field, text_field, provider, language).await?;
+        Ok(result)
+    }
+
+    pub async fn rag_document_import(
+        &self,
+        collection: &str,
+        content: &str,
+        title: Option<&str>,
+        chunk_size: usize,
+        overlap: usize,
+        mode: &str,
+    ) -> Result<Value> {
+        let result = self.client.rag_document_import(collection, content, title, chunk_size, overlap, mode).await?;
+        Ok(result)
+    }
+
+    pub async fn rag_search(
+        &self,
+        collection: &str,
+        query: &str,
+        limit: usize,
+        vector_weight: f64,
+        fulltext_weight: f64,
+        rrf_k: f64,
+    ) -> Result<Value> {
+        let result = self.client.rag_search(collection, query, limit, vector_weight, fulltext_weight, rrf_k).await?;
+        Ok(result)
+    }
+
+    pub async fn rag_collection_stats(&self, collection: &str) -> Result<Value> {
+        let result = self.client.rag_collection_stats(collection).await?;
+        Ok(result)
+    }
+
+    // === Hybrid search ===
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hybrid_search(
+        &self,
+        collection: &str,
+        vector_field: &str,
+        text_field: &str,
+        vector: &[f64],
+        query: &str,
+        limit: usize,
+        vector_weight: f64,
+        fulltext_weight: f64,
+        rrf_k: f64,
+    ) -> Result<Value> {
+        let result = self.client.hybrid_search(collection, vector_field, text_field, vector, query, limit, vector_weight, fulltext_weight, rrf_k).await?;
+        Ok(result)
+    }
+
+    // === Embedding operations ===
+
+    pub async fn embed_text(&self, text: &str, provider: &str) -> Result<Value> {
+        let result = self.client.embed_text(text, provider).await?;
+        Ok(result)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn embed_document(
+        &self,
+        collection: &str,
+        content: &str,
+        title: Option<&str>,
+        chunk_size: usize,
+        overlap: usize,
+        mode: &str,
+        provider: &str,
+    ) -> Result<Value> {
+        let result = self.client.embed_document(collection, content, title, chunk_size, overlap, mode, provider).await?;
+        Ok(result)
+    }
+
+    pub async fn embed_list_models(&self) -> Result<Value> {
+        let result = self.client.embed_list_models().await?;
+        Ok(result)
+    }
+
+    pub async fn embed_cache_stats(&self) -> Result<Value> {
+        let result = self.client.embed_cache_stats().await?;
+        Ok(result)
+    }
+
+    pub async fn embed_cache_clear(&self) -> Result<Value> {
+        let result = self.client.embed_cache_clear().await?;
+        Ok(result)
+    }
+
+    // === Auto-embed operations ===
+
+    pub async fn auto_embed_enable(
+        &self,
+        collection: &str,
+        source_field: &str,
+        target_field: &str,
+        provider: &str,
+    ) -> Result<Value> {
+        let result = self.client.auto_embed_enable(collection, source_field, target_field, provider).await?;
+        Ok(result)
+    }
+
+    pub async fn auto_embed_disable(&self, collection: &str) -> Result<Value> {
+        let result = self.client.auto_embed_disable(collection).await?;
+        Ok(result)
+    }
+
+    pub async fn auto_embed_status(&self, collection: &str) -> Result<Value> {
+        let result = self.client.auto_embed_status(collection).await?;
+        Ok(result)
+    }
+
+    // === Job management ===
+
+    pub async fn embed_job_list(&self, active_only: bool) -> Result<Value> {
+        let result = self.client.embed_job_list(active_only).await?;
+        Ok(result)
+    }
+
+    pub async fn embed_job_status(&self, job_id: &str) -> Result<Value> {
+        let result = self.client.embed_job_status(job_id).await?;
+        Ok(result)
+    }
+
+    pub async fn embed_job_cancel(&self, job_id: &str) -> Result<Value> {
+        let result = self.client.embed_job_cancel(job_id).await?;
+        Ok(result)
+    }
 }
 
 /// Recursively collect field names and types

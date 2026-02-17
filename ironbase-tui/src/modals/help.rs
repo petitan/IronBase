@@ -77,6 +77,10 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
             Span::raw("Frissites ellenorzes"),
         ]),
         Line::from(vec![
+            Span::styled("Shift+E   ", Style::default().fg(theme.accent)),
+            Span::raw("RAG & Embedding"),
+        ]),
+        Line::from(vec![
             Span::styled("Shift+R   ", Style::default().fg(theme.accent)),
             Span::raw("Kollekcio lista frissites"),
         ]),

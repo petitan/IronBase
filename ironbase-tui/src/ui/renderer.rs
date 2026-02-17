@@ -110,6 +110,9 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
             Modal::VectorSearch => {
                 modals::vector::render(frame, frame.area(), &app.vector_state, &theme);
             }
+            Modal::Rag => {
+                modals::rag::render(frame, frame.area(), &app.rag_state, &theme);
+            }
         }
     }
 }

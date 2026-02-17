@@ -34,6 +34,8 @@ pub use crate::state::{
     ScriptConfirmAction, ScriptFocus, ScriptInfo, ScriptMode, ScriptResult, ScriptState, ScriptVersion,
     // Vector
     VectorSearchState,
+    // RAG & Embedding
+    RagState,
 };
 
 // === UI Layout Constants ===
@@ -134,6 +136,9 @@ pub struct App {
     // Vector search state
     pub vector_state: VectorSearchState,
 
+    // RAG & Embedding state
+    pub rag_state: RagState,
+
     // Connection type (for permission checks)
     pub connection_type: ConnectionType,
 
@@ -190,6 +195,7 @@ impl App {
             acl_state: crate::modals::acl::AclState::new(),
             listener_state: crate::modals::listener::ListenerState::new(),
             vector_state: VectorSearchState::default(),
+            rag_state: RagState::default(),
             connection_type: ConnectionType::Unknown,
             config,
             status_message: None,

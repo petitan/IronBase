@@ -52,6 +52,7 @@ pub enum Modal {
     Acl,
     Listener,
     VectorSearch,
+    Rag,
 }
 
 /// Connection type for permission checks
