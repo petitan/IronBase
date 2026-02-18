@@ -494,14 +494,26 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Step 5: Validate index has content before saving metadata
         // This prevents ghost indexes from being registered
+        // Exception: if the collection itself is empty, an empty index is valid
+        // (e.g., rag_collection_create on a new collection)
         if let Some(ref meta) = metadata {
             if meta.num_documents == 0 {
-                // Empty index - likely a failed creation, clean up
-                cleanup(&index_name, &storage_path);
-                return Err(crate::error::IronBaseError::IndexError(format!(
-                    "Fulltext index '{}' has no documents - field '{}' may not exist or contain text",
-                    index_name, field
-                )));
+                let collection_is_empty = {
+                    let storage = self.storage.read();
+                    storage
+                        .get_collection_meta(&self.name)
+                        .map(|m| m.live_document_count == 0)
+                        .unwrap_or(true)
+                };
+                if !collection_is_empty {
+                    // Non-empty collection but empty index - field likely doesn't exist
+                    cleanup(&index_name, &storage_path);
+                    return Err(crate::error::IronBaseError::IndexError(format!(
+                        "Fulltext index '{}' has no documents - field '{}' may not exist or contain text",
+                        index_name, field
+                    )));
+                }
+                // Empty collection → empty index is valid, proceed with registration
             }
         }
 

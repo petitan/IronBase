@@ -485,6 +485,8 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Checkpoint lock contention** | 9e4499b4 | insert_one 14+ perc blokk | `flush_all_indexes_counted()` 1 lock / 22 index | Per-index flush: 22 lock / 1 index |
 | **Btree delete not dirty** | 265f0c2e | count_documents ~3x túlszámolás | `remove_document_from_indexes` + `batch_update_indexes` nem jelölte dirty-nek a btree indexet → checkpoint nem mentette a törléseket → stale .idx | `dirty_btree_indexes.insert()` 5 helyen |
 | **Fulltext candidate limit** | aa3b8ed5 | Filtrált fulltext 0 eredmény gyakori szóra | `calculate_candidate_limit()` max 300 jelöltet kért, de pl. "ajánlat" 6766 match-ből a year=2026 dokuk a 6735+ pozíción voltak | Filter esetén 100K cap (TF-IDF amúgy is O(N), limit csak output-ot csonkít) |
+| **Fulltext empty collection reject** | #49 | `rag_collection_create` üres collection-re nem hoz létre fulltext indexet | `search.rs:498` validáció `num_documents == 0` → error + cleanup, üres collection is triggereli | `live_document_count == 0` check: üres collection → üres index valid |
+| **Vector count stale metadata** | #50 | `vector_count: 0` a stats-ban működő HNSW index mellett | `VectorIndexMetadata.vector_count` csak creation-kor íródik, auto-indexing nem frissíti | `list_vector_indexes()` az in-memory HNSW `len()`-ből frissíti a clone-t |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>

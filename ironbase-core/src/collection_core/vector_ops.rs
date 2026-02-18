@@ -296,12 +296,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     }
 
     /// List all vector indexes on this collection
+    ///
+    /// The returned `vector_count` reflects the actual in-memory HNSW index size
+    /// (if loaded), not the potentially stale metadata value.
     pub fn list_vector_indexes(&self) -> Result<Vec<VectorIndexMetadata>> {
         self.check_not_closed()?;
 
         let storage = self.storage.read();
         if let Some(meta) = storage.get_collection_meta(&self.name) {
-            Ok(meta.vector_indexes.clone())
+            let mut indexes = meta.vector_indexes.clone();
+            // Update vector_count from in-memory HNSW if loaded
+            let idx_manager = self.indexes.read();
+            for idx_meta in &mut indexes {
+                if let Some(hnsw) = idx_manager.get_vector_index(&idx_meta.name) {
+                    idx_meta.vector_count = hnsw.len();
+                }
+            }
+            Ok(indexes)
         } else {
             Ok(Vec::new())
         }
