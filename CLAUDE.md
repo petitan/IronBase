@@ -943,6 +943,23 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
  "text_fields": ["content_text", "title", "customer"]}
 ```
 
+**Search mode presets (220679f3):**
+- `search_mode`: `"balanced"` (default), `"semantic"`, `"keyword"` — LLM-barát nevesített preset a numerikus weight-ek helyett
+- Elérhető: `rag_search`, `hybrid_search`
+- Explicit `vector_weight`/`fulltext_weight` felülírja a preset-et ha megadva
+
+| Mode | vector_weight | fulltext_weight | Mikor |
+|------|--------------|-----------------|-------|
+| `balanced` | 0.5 | 0.5 | Default, általános keresés |
+| `semantic` | 0.8 | 0.2 | Fogalmi/konceptuális kérdések |
+| `keyword` | 0.2 | 0.8 | Specifikus szó/kifejezés keresés |
+
+Prioritás: explicit weights > search_mode preset > balanced default
+
+**Shared fusion modul (febba776):**
+- `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
+- hybrid.rs és rag.rs importálja, nincs duplikáció
+
 **Rétegek:**
 ```
 Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
