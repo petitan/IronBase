@@ -21,8 +21,8 @@ use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAU
 use super::fusion::{apply_projection, id_to_string, mmr_reorder, rerank_results, FusedResult};
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{
-    ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
-    RagSearchParams,
+    resolve_weights, ParseParams, RagCollectionCreateParams, RagCollectionStatsParams,
+    RagDocumentImportParams, RagSearchParams,
 };
 
 /// System collection for RAG configs
@@ -483,6 +483,10 @@ fn handle_rag_search(
         }
     };
 
+    // Resolve weights: explicit overrides > search_mode preset > balanced default
+    let (vector_weight, fulltext_weight) =
+        resolve_weights(p.search_mode.as_deref(), p.vector_weight, p.fulltext_weight)?;
+
     // ========================================================================
     // STEP 1: AUTO-EMBED THE QUERY (THE KEY DIFFERENCE FROM hybrid_search!)
     // ========================================================================
@@ -581,14 +585,14 @@ fn handle_rag_search(
     let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
 
     // Normalize weights to ensure they sum to 1.0 for consistent RRF scoring
-    let total_weight = p.vector_weight + p.fulltext_weight;
+    let total_weight = vector_weight + fulltext_weight;
     let norm_vector_weight = if total_weight > 0.0 {
-        p.vector_weight / total_weight
+        vector_weight / total_weight
     } else {
         0.5
     };
     let norm_fulltext_weight = if total_weight > 0.0 {
-        p.fulltext_weight / total_weight
+        fulltext_weight / total_weight
     } else {
         0.5
     };
@@ -698,9 +702,10 @@ fn handle_rag_search(
         "algorithm": "rag_hybrid_rrf",
         "rrf_k": p.rrf_k,
         "weights": {
-            "vector": p.vector_weight,
-            "fulltext": p.fulltext_weight
+            "vector": vector_weight,
+            "fulltext": fulltext_weight
         },
+        "search_mode": p.search_mode.as_deref().unwrap_or("balanced"),
         "provider": provider_name,
         "dedup_removed": dedup_removed
     }))
@@ -811,8 +816,9 @@ mod tests {
         assert_eq!(p.collection, "docs");
         assert_eq!(p.query, "semantic search test");
         assert_eq!(p.limit, 10);
-        assert_eq!(p.vector_weight, 0.5);
-        assert_eq!(p.fulltext_weight, 0.5);
+        assert!(p.vector_weight.is_none()); // no explicit weight
+        assert!(p.fulltext_weight.is_none()); // no explicit weight
+        assert!(p.search_mode.is_none()); // no mode → balanced default
         assert!(p.rerank);
         assert!(p.deduplicate);
         assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON);

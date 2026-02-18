@@ -578,12 +578,16 @@ pub struct HybridSearchParams {
     pub query: String,
     #[serde(default = "default_hybrid_limit")]
     pub limit: usize,
-    #[serde(default = "default_vector_weight")]
-    pub vector_weight: f64,
-    #[serde(default = "default_fulltext_weight")]
-    pub fulltext_weight: f64,
+    /// Explicit vector weight override (takes priority over search_mode)
+    pub vector_weight: Option<f64>,
+    /// Explicit fulltext weight override (takes priority over search_mode)
+    pub fulltext_weight: Option<f64>,
     /// MongoDB projection (optional)
     pub projection: Option<Value>,
+
+    /// Search mode preset: "balanced" (0.5/0.5), "semantic" (0.8/0.2), "keyword" (0.2/0.8)
+    /// Overridden by explicit vector_weight/fulltext_weight if provided
+    pub search_mode: Option<String>,
 
     // ========== v2 parameters (reranking, deduplication) ==========
     /// DEPRECATED: Language parameter is ignored for NLP consistency.
@@ -625,12 +629,6 @@ pub struct HybridSearchParams {
 fn default_hybrid_limit() -> usize {
     10
 }
-fn default_vector_weight() -> f64 {
-    0.5
-}
-fn default_fulltext_weight() -> f64 {
-    0.5
-}
 fn default_rerank() -> bool {
     true
 }
@@ -642,6 +640,76 @@ fn default_mmr_lambda() -> f64 {
 }
 fn default_rrf_k() -> f64 {
     20.0
+}
+
+// ============================================================================
+// Search Mode Presets
+// ============================================================================
+
+/// Named search mode presets for LLM-friendly weight configuration
+///
+/// Instead of tuning numerical weights (which LLMs are bad at),
+/// the LLM picks a semantic mode name and the server resolves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Equal weight for vector and fulltext (0.5 / 0.5)
+    Balanced,
+    /// Favor vector similarity (0.8 / 0.2) — conceptual queries
+    Semantic,
+    /// Favor fulltext matching (0.2 / 0.8) — specific term queries
+    Keyword,
+}
+
+impl SearchMode {
+    /// Parse search mode from string
+    pub fn parse_mode(s: &str) -> Option<Self> {
+        match s {
+            "balanced" => Some(Self::Balanced),
+            "semantic" => Some(Self::Semantic),
+            "keyword" => Some(Self::Keyword),
+            _ => None,
+        }
+    }
+
+    /// Get (vector_weight, fulltext_weight) for this mode
+    pub fn weights(&self) -> (f64, f64) {
+        match self {
+            Self::Balanced => (0.5, 0.5),
+            Self::Semantic => (0.8, 0.2),
+            Self::Keyword => (0.2, 0.8),
+        }
+    }
+}
+
+/// Resolve actual weights from search_mode + explicit overrides
+///
+/// Priority: explicit weights > search_mode preset > balanced default
+pub fn resolve_weights(
+    search_mode: Option<&str>,
+    explicit_vector_weight: Option<f64>,
+    explicit_fulltext_weight: Option<f64>,
+) -> Result<(f64, f64)> {
+    // Explicit weights take priority (either one triggers explicit mode)
+    if explicit_vector_weight.is_some() || explicit_fulltext_weight.is_some() {
+        return Ok((
+            explicit_vector_weight.unwrap_or(0.5),
+            explicit_fulltext_weight.unwrap_or(0.5),
+        ));
+    }
+
+    // Search mode presets
+    if let Some(mode_str) = search_mode {
+        let mode = SearchMode::parse_mode(mode_str).ok_or_else(|| {
+            McpError::invalid_params(format!(
+                "Invalid search_mode '{}'. Use: 'balanced', 'semantic', or 'keyword'",
+                mode_str
+            ))
+        })?;
+        return Ok(mode.weights());
+    }
+
+    // Default: balanced
+    Ok((0.5, 0.5))
 }
 
 // ============================================================================
@@ -692,10 +760,13 @@ pub struct RagSearchParams {
     pub query: String,
     #[serde(default = "default_hybrid_limit")]
     pub limit: usize,
-    #[serde(default = "default_vector_weight")]
-    pub vector_weight: f64,
-    #[serde(default = "default_fulltext_weight")]
-    pub fulltext_weight: f64,
+    /// Explicit vector weight override (takes priority over search_mode)
+    pub vector_weight: Option<f64>,
+    /// Explicit fulltext weight override (takes priority over search_mode)
+    pub fulltext_weight: Option<f64>,
+    /// Search mode preset: "balanced" (0.5/0.5), "semantic" (0.8/0.2), "keyword" (0.2/0.8)
+    /// Overridden by explicit vector_weight/fulltext_weight if provided
+    pub search_mode: Option<String>,
     #[serde(default = "default_rerank")]
     pub rerank: bool,
     #[serde(default = "default_deduplicate")]
@@ -990,5 +1061,121 @@ mod tests {
         let p: FulltextSearchParams = FulltextSearchParams::parse(params).unwrap();
         let fields = p.fields.unwrap();
         assert!(fields.is_empty());
+    }
+
+    // =========================================================================
+    // Search Mode Preset Tests
+    // =========================================================================
+
+    #[test]
+    fn test_search_mode_from_str() {
+        assert_eq!(SearchMode::parse_mode("balanced"), Some(SearchMode::Balanced));
+        assert_eq!(SearchMode::parse_mode("semantic"), Some(SearchMode::Semantic));
+        assert_eq!(SearchMode::parse_mode("keyword"), Some(SearchMode::Keyword));
+        assert_eq!(SearchMode::parse_mode("invalid"), None);
+        assert_eq!(SearchMode::parse_mode(""), None);
+    }
+
+    #[test]
+    fn test_search_mode_weights() {
+        assert_eq!(SearchMode::Balanced.weights(), (0.5, 0.5));
+        assert_eq!(SearchMode::Semantic.weights(), (0.8, 0.2));
+        assert_eq!(SearchMode::Keyword.weights(), (0.2, 0.8));
+    }
+
+    #[test]
+    fn test_resolve_weights_default() {
+        // No mode, no explicit weights → balanced
+        let (vw, fw) = resolve_weights(None, None, None).unwrap();
+        assert_eq!(vw, 0.5);
+        assert_eq!(fw, 0.5);
+    }
+
+    #[test]
+    fn test_resolve_weights_search_mode_semantic() {
+        let (vw, fw) = resolve_weights(Some("semantic"), None, None).unwrap();
+        assert_eq!(vw, 0.8);
+        assert_eq!(fw, 0.2);
+    }
+
+    #[test]
+    fn test_resolve_weights_search_mode_keyword() {
+        let (vw, fw) = resolve_weights(Some("keyword"), None, None).unwrap();
+        assert_eq!(vw, 0.2);
+        assert_eq!(fw, 0.8);
+    }
+
+    #[test]
+    fn test_resolve_weights_explicit_overrides_mode() {
+        // Explicit weights take priority over search_mode
+        let (vw, fw) = resolve_weights(Some("semantic"), Some(0.3), Some(0.7)).unwrap();
+        assert_eq!(vw, 0.3);
+        assert_eq!(fw, 0.7);
+    }
+
+    #[test]
+    fn test_resolve_weights_partial_explicit() {
+        // Only one explicit weight → other defaults to 0.5
+        let (vw, fw) = resolve_weights(None, Some(0.9), None).unwrap();
+        assert_eq!(vw, 0.9);
+        assert_eq!(fw, 0.5);
+    }
+
+    #[test]
+    fn test_resolve_weights_partial_explicit_overrides_mode() {
+        // One explicit weight triggers explicit mode (ignores search_mode)
+        let (vw, fw) = resolve_weights(Some("keyword"), None, Some(0.9)).unwrap();
+        assert_eq!(vw, 0.5);
+        assert_eq!(fw, 0.9);
+    }
+
+    #[test]
+    fn test_resolve_weights_invalid_mode() {
+        let result = resolve_weights(Some("turbo"), None, None);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hybrid_params_with_search_mode() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "test",
+            "search_mode": "semantic"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.search_mode.as_deref(), Some("semantic"));
+        assert!(p.vector_weight.is_none());
+        assert!(p.fulltext_weight.is_none());
+    }
+
+    #[test]
+    fn test_rag_params_with_search_mode() {
+        let params = json!({
+            "collection": "docs",
+            "query": "keresés",
+            "search_mode": "keyword"
+        });
+        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
+        assert_eq!(p.search_mode.as_deref(), Some("keyword"));
+        assert!(p.vector_weight.is_none());
+        assert!(p.fulltext_weight.is_none());
+    }
+
+    #[test]
+    fn test_hybrid_params_explicit_weights_with_mode() {
+        // Explicit weights should be parsed even alongside search_mode
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "test",
+            "search_mode": "semantic",
+            "vector_weight": 0.6,
+            "fulltext_weight": 0.4
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.search_mode.as_deref(), Some("semantic"));
+        assert_eq!(p.vector_weight, Some(0.6));
+        assert_eq!(p.fulltext_weight, Some(0.4));
     }
 }

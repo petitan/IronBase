@@ -116,17 +116,21 @@ pub fn tools() -> Vec<Value> {
                         "minimum": 1,
                         "maximum": 100
                     },
+                    "search_mode": {
+                        "type": "string",
+                        "description": "Search mode preset: 'balanced' (default, equal weights), 'semantic' (favor vector similarity for conceptual queries), 'keyword' (favor fulltext for specific term queries). Overridden by explicit vector_weight/fulltext_weight.",
+                        "enum": ["balanced", "semantic", "keyword"],
+                        "default": "balanced"
+                    },
                     "vector_weight": {
                         "type": "number",
-                        "description": "Weight for vector similarity (default: 0.5)",
-                        "default": 0.5,
+                        "description": "Explicit vector weight override (overrides search_mode). Default: 0.5",
                         "minimum": 0.0,
                         "maximum": 1.0
                     },
                     "fulltext_weight": {
                         "type": "number",
-                        "description": "Weight for fulltext search (default: 0.5)",
-                        "default": 0.5,
+                        "description": "Explicit fulltext weight override (overrides search_mode). Default: 0.5",
                         "minimum": 0.0,
                         "maximum": 1.0
                     },

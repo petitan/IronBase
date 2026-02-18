@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use super::fusion::{apply_projection, id_to_string, mmr_reorder, rerank_results, FusedResult};
 use super::helpers::{parse_projection_value, validate_collection_name};
-use super::params::{HybridSearchParams, ParseParams};
+use super::params::{resolve_weights, HybridSearchParams, ParseParams};
 
 /// RRF default constant - empirically optimal value (Cormack et al., 2009)
 /// Used by test helper; runtime value comes from HybridSearchParams.rrf_k
@@ -51,6 +51,10 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
     let p: HybridSearchParams = HybridSearchParams::parse(params)?;
     validate_collection_name(&p.collection)?;
+
+    // Resolve weights: explicit overrides > search_mode preset > balanced default
+    let (vector_weight, fulltext_weight) =
+        resolve_weights(p.search_mode.as_deref(), p.vector_weight, p.fulltext_weight)?;
 
     // ========================================================================
     // NO preprocessing - consistent NLP design:
@@ -159,8 +163,8 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
 
         // RRF score formula: weight * 1/(k + rank)
-        let rrf_score = p.vector_weight * (1.0 / (p.rrf_k + v_rank as f64))
-            + p.fulltext_weight * (1.0 / (p.rrf_k + t_rank as f64));
+        let rrf_score = vector_weight * (1.0 / (p.rrf_k + v_rank as f64))
+            + fulltext_weight * (1.0 / (p.rrf_k + t_rank as f64));
 
         let v_score = vector_docs.get(id).map(|(_, s)| *s);
         let t_score = text_docs.get(id).map(|(_, s)| *s);
@@ -258,9 +262,10 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         "algorithm": "rrf",
         "rrf_k": p.rrf_k,
         "weights": {
-            "vector": p.vector_weight,
-            "fulltext": p.fulltext_weight
+            "vector": vector_weight,
+            "fulltext": fulltext_weight
         },
+        "search_mode": p.search_mode.as_deref().unwrap_or("balanced"),
         "query": p.query,
         "dedup_removed": dedup_removed,
         "nlp_design": "consistent: vector=original, fulltext=snowball"
@@ -365,8 +370,8 @@ mod tests {
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.collection, "test");
         assert_eq!(p.limit, 20);
-        assert_eq!(p.vector_weight, 0.7);
-        assert_eq!(p.fulltext_weight, 0.3);
+        assert_eq!(p.vector_weight, Some(0.7));
+        assert_eq!(p.fulltext_weight, Some(0.3));
     }
 
     #[test]
@@ -381,9 +386,10 @@ mod tests {
 
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.limit, 10); // default
-        assert_eq!(p.vector_weight, 0.5); // default
-        assert_eq!(p.fulltext_weight, 0.5); // default
-                                            // v2 defaults
+        assert!(p.vector_weight.is_none()); // no explicit weight
+        assert!(p.fulltext_weight.is_none()); // no explicit weight
+        assert!(p.search_mode.is_none()); // no mode → balanced default
+        // v2 defaults
         assert!(p.rerank); // default: true
         assert!(p.deduplicate); // default: true
         assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON); // default
