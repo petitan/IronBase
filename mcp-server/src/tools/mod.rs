@@ -19,6 +19,7 @@ pub mod crud;
 pub mod defaults;
 mod definitions;
 pub mod embedding;
+pub mod fusion;
 pub mod helpers;
 pub mod hybrid;
 pub mod index;
