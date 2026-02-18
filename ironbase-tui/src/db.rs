@@ -649,11 +649,10 @@ impl DbWrapper {
         collection: &str,
         query: &str,
         limit: usize,
-        vector_weight: f64,
-        fulltext_weight: f64,
+        search_mode: &str,
         rrf_k: f64,
     ) -> Result<Value> {
-        let result = self.client.rag_search(collection, query, limit, vector_weight, fulltext_weight, rrf_k).await?;
+        let result = self.client.rag_search(collection, query, limit, search_mode, rrf_k).await?;
         Ok(result)
     }
 
@@ -673,11 +672,10 @@ impl DbWrapper {
         vector: &[f64],
         query: &str,
         limit: usize,
-        vector_weight: f64,
-        fulltext_weight: f64,
+        search_mode: &str,
         rrf_k: f64,
     ) -> Result<Value> {
-        let result = self.client.hybrid_search(collection, vector_field, text_field, vector, query, limit, vector_weight, fulltext_weight, rrf_k).await?;
+        let result = self.client.hybrid_search(collection, vector_field, text_field, vector, query, limit, search_mode, rrf_k).await?;
         Ok(result)
     }
 

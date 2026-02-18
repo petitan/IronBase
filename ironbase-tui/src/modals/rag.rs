@@ -98,19 +98,17 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         });
     frame.render_widget(query_text, chunks[1]);
 
-    // Options row: limit | vector_weight | fulltext_weight | rrf_k
+    // Options row: limit | mode | rrf_k
     let opts = Layout::horizontal([
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
-        Constraint::Percentage(25),
+        Constraint::Percentage(33),
+        Constraint::Percentage(34),
+        Constraint::Percentage(33),
     ])
     .split(chunks[2]);
 
     let opt_labels = [
         ("Limit", state.search_limit.to_string()),
-        ("Vec Weight", format!("{:.1}", state.search_vector_weight)),
-        ("FT Weight", format!("{:.1}", state.search_fulltext_weight)),
+        ("Mode", state.search_mode.clone()),
         ("RRF K", format!("{:.0}", state.search_rrf_k)),
     ];
 

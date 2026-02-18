@@ -1090,16 +1090,14 @@ impl McpClient {
         collection: &str,
         query: &str,
         limit: usize,
-        vector_weight: f64,
-        fulltext_weight: f64,
+        search_mode: &str,
         rrf_k: f64,
     ) -> McpResult<Value> {
         let args = serde_json::json!({
             "collection": collection,
             "query": query,
             "limit": limit,
-            "vector_weight": vector_weight,
-            "fulltext_weight": fulltext_weight,
+            "search_mode": search_mode,
             "rrf_k": rrf_k,
             "rerank": true,
             "deduplicate": true
@@ -1125,8 +1123,7 @@ impl McpClient {
         vector: &[f64],
         query: &str,
         limit: usize,
-        vector_weight: f64,
-        fulltext_weight: f64,
+        search_mode: &str,
         rrf_k: f64,
     ) -> McpResult<Value> {
         let args = serde_json::json!({
@@ -1136,8 +1133,7 @@ impl McpClient {
             "vector": vector,
             "query": query,
             "limit": limit,
-            "vector_weight": vector_weight,
-            "fulltext_weight": fulltext_weight,
+            "search_mode": search_mode,
             "rrf_k": rrf_k,
             "rerank": true,
             "deduplicate": true

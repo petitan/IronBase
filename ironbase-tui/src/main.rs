@@ -2714,15 +2714,14 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
             let collection = app.rag_state.collection.clone();
             let query = app.rag_state.search_query.clone();
             let limit = app.rag_state.search_limit;
-            let vw = app.rag_state.search_vector_weight;
-            let fw = app.rag_state.search_fulltext_weight;
+            let mode = app.rag_state.search_mode.clone();
             let rrf_k = app.rag_state.search_rrf_k;
 
             app.rag_state.is_loading = true;
             app.rag_state.error = None;
 
             if let Some(ref db) = app.db {
-                match db.rag_search(&collection, &query, limit, vw, fw, rrf_k).await {
+                match db.rag_search(&collection, &query, limit, &mode, rrf_k).await {
                     Ok(result) => {
                         let results: Vec<serde_json::Value> = result
                             .get("results")
@@ -2749,7 +2748,7 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
                 app.rag_state.search_option_idx = 0;
             } else {
                 // Cycle through options, then back to query
-                if app.rag_state.search_option_idx < 3 {
+                if app.rag_state.search_option_idx < 2 {
                     app.rag_state.search_option_idx += 1;
                 } else {
                     app.rag_state.search_focus = 0;
@@ -2769,18 +2768,16 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
         (KeyCode::Up, _) if app.rag_state.search_focus == 1 => {
             match app.rag_state.search_option_idx {
                 0 => { if app.rag_state.search_limit < 100 { app.rag_state.search_limit += 1; } }
-                1 => { app.rag_state.search_vector_weight = (app.rag_state.search_vector_weight + 0.1).min(1.0); }
-                2 => { app.rag_state.search_fulltext_weight = (app.rag_state.search_fulltext_weight + 0.1).min(1.0); }
-                3 => { app.rag_state.search_rrf_k += 5.0; }
+                1 => { app.rag_state.toggle_search_mode(); }
+                2 => { app.rag_state.search_rrf_k += 5.0; }
                 _ => {}
             }
         }
         (KeyCode::Down, _) if app.rag_state.search_focus == 1 => {
             match app.rag_state.search_option_idx {
                 0 => { if app.rag_state.search_limit > 1 { app.rag_state.search_limit -= 1; } }
-                1 => { app.rag_state.search_vector_weight = (app.rag_state.search_vector_weight - 0.1).max(0.0); }
-                2 => { app.rag_state.search_fulltext_weight = (app.rag_state.search_fulltext_weight - 0.1).max(0.0); }
-                3 => { if app.rag_state.search_rrf_k > 5.0 { app.rag_state.search_rrf_k -= 5.0; } }
+                1 => { app.rag_state.toggle_search_mode(); }
+                2 => { if app.rag_state.search_rrf_k > 5.0 { app.rag_state.search_rrf_k -= 5.0; } }
                 _ => {}
             }
         }

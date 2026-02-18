@@ -46,14 +46,14 @@ pub struct RagState {
     // === Search tab ===
     pub search_query: String,
     pub search_limit: usize,
-    pub search_vector_weight: f64,
-    pub search_fulltext_weight: f64,
+    /// Search mode preset: "balanced", "semantic", "keyword"
+    pub search_mode: String,
     pub search_rrf_k: f64,
     pub search_results: Vec<Value>,
     pub selected_result: usize,
-    /// Focus: 0=query, 1=options (limit/weights/rrf_k cycle)
+    /// Focus: 0=query, 1=options (limit/mode/rrf_k cycle)
     pub search_focus: usize,
-    /// Which option is focused (0=limit, 1=vec_w, 2=ft_w, 3=rrf_k)
+    /// Which option is focused (0=limit, 1=mode, 2=rrf_k)
     pub search_option_idx: usize,
 
     // === Import tab ===
@@ -104,8 +104,7 @@ impl RagState {
             collection,
             active_tab: RagTab::Search,
             search_limit: 10,
-            search_vector_weight: 0.5,
-            search_fulltext_weight: 0.5,
+            search_mode: "balanced".to_string(),
             search_rrf_k: 20.0,
             import_chunk_size: 1000,
             import_overlap: 100,
@@ -196,6 +195,16 @@ impl RagState {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
         })
+    }
+
+    /// Cycle search mode: balanced → semantic → keyword → balanced
+    pub fn toggle_search_mode(&mut self) {
+        self.search_mode = match self.search_mode.as_str() {
+            "balanced" => "semantic".to_string(),
+            "semantic" => "keyword".to_string(),
+            "keyword" => "balanced".to_string(),
+            _ => "balanced".to_string(),
+        };
     }
 
     // === Import tab ===
