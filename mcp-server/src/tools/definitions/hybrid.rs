@@ -2,9 +2,12 @@
 //!
 //! Tools: hybrid_search
 //!
-//! v2 Features (2026-01):
-//! - Query preprocessing via pluggable language preprocessors
-//! - Reranking: heading boost, phrase match, keyword density
+//! Unified tool for both explicit vector and auto-embed modes.
+//! If 'vector' is omitted, the query text is automatically embedded
+//! using the collection's RAG config or the specified 'provider'.
+//!
+//! Features:
+//! - Reranking: phrase match, keyword density, title boost
 //! - MMR diversity reranking: embedding cosine similarity based
 
 use super::common::fields;
@@ -14,7 +17,7 @@ pub fn tools() -> Vec<Value> {
     vec![json!({
         "name": "hybrid_search",
         "title": "Hybrid Search (RRF)",
-        "description": "Combines vector similarity and fulltext search using Reciprocal Rank Fusion (RRF). Includes reranking and MMR diversity reranking (cosine similarity based deduplication). Use mmr_lambda to tune relevance vs diversity. Returns documents sorted by final score.",
+        "description": "Combines vector similarity and fulltext search using Reciprocal Rank Fusion (RRF). If 'vector' is omitted, the query text is automatically embedded using the collection's configured provider (auto-embed mode). Includes reranking and MMR diversity reranking. Use mmr_lambda to tune relevance vs diversity.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -32,11 +35,11 @@ pub fn tools() -> Vec<Value> {
                 "vector": {
                     "type": "array",
                     "items": { "type": "number" },
-                    "description": "Query embedding vector. Dimension must match index."
+                    "description": "Query embedding vector. If omitted, the query text is auto-embedded using the collection's configured provider or the 'provider' parameter."
                 },
                 "query": {
                     "type": "string",
-                    "description": "Text query for fulltext search"
+                    "description": "Text query for fulltext search (and auto-embedding if vector is omitted)"
                 },
                 "limit": {
                     "type": "integer",
@@ -62,12 +65,9 @@ pub fn tools() -> Vec<Value> {
                     "maximum": 1.0
                 },
                 "projection": fields::projection_simple(),
-
-                // ========== v2 parameters ==========
-                "language": {
+                "provider": {
                     "type": "string",
-                    "description": "Query preprocessing language. Removes stop words, question words, and strips suffixes. Available: 'hungarian'. If not specified, no preprocessing is applied.",
-                    "enum": ["hungarian"]
+                    "description": "Embedding provider for auto-embed mode (uses collection RAG config if not specified). Example: 'fasttext'"
                 },
                 "rrf_k": {
                     "type": "number",
@@ -112,7 +112,7 @@ pub fn tools() -> Vec<Value> {
                     "description": "Multiple fulltext fields to search across (overrides 'text_field'). Scores merged per document using best-field strategy (max score). Each field must have a fulltext index."
                 }
             },
-            "required": ["collection", "vector", "query"]
+            "required": ["collection", "query"]
         }
     })]
 }

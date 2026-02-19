@@ -19,8 +19,8 @@ Version 1.0.329 introduces the `.ironbase.v2` model format with **subword (n-gra
 | `embed_text("fékpad")` | Valid vector (known word) | Same vector |
 | `embed_text("fékerőmérő")` | **Zero vector** (OOV) | Valid vector from subwords |
 | `embed_text("PEF")` | **Zero vector** (OOV) | Valid vector from subwords |
-| `rag_search("lengéscsillapító")` | **No vector match** | Semantic match works |
-| `hybrid_search(...)` | Fulltext only for OOV | Fulltext + vector |
+| `hybrid_search("lengéscsillapító")` | **No vector match** | Semantic match works |
+| `hybrid_search(vector=[...])` | Fulltext only for OOV | Fulltext + vector |
 
 Estimated **30-40% of Hungarian domain queries** were affected by the OOV zero-vector problem.
 
@@ -144,7 +144,7 @@ After re-embedding, test OOV queries:
 
 ```json
 {
-  "name": "rag_search",
+  "name": "hybrid_search",
   "arguments": {
     "collection": "your_collection",
     "query": "fékerőmérő"
@@ -236,6 +236,6 @@ Note: if you already re-embedded collections with v2, the stored vectors are val
 |---|---|---|
 | `Loading FastText v1 model` in logs | Wrong model path | Check `IRONBASE_FASTTEXT_MODEL` |
 | OOV words still zero vector | Using v1 model | Verify v2 magic in log: `Loading FastText v2 model` |
-| `rag_search` returns no vector results | Stale embeddings | Restart server (auto re-embeds) or re-enable auto_embed |
+| `hybrid_search` returns no vector results | Stale embeddings | Restart server (auto re-embeds) or re-enable auto_embed |
 | Converter OOM | Old converter version | Use streaming converter (v1.0.329+) |
 | Server startup slow | First mmap page faults | Normal for first access (~30s for 4.5 GB) |

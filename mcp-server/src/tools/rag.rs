@@ -1,35 +1,30 @@
 //! RAG (Retrieval-Augmented Generation) tool handlers
 //!
-//! Provides simplified MCP tools for semantic search:
+//! Provides MCP tools for RAG collection management:
 //! - rag_collection_create: Set up collection with indexes
 //! - rag_document_import: Chunk + embed + insert
-//! - rag_search: Auto-embed query + hybrid search (THE KEY TOOL!)
+//! - rag_search: DEPRECATED alias for hybrid_search (auto-embed mode)
 //! - rag_collection_stats: RAG-specific statistics
 //!
-//! Key difference from hybrid_search: rag_search auto-embeds the query!
+//! Search logic has been unified into hybrid_search (see hybrid.rs).
 
-use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
+use crate::adapter::IronBaseAdapter;
 use crate::chunking::{chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD};
-use super::fusion::{apply_projection, id_to_string, mmr_reorder, rerank_results, FusedResult};
-use super::helpers::{parse_projection_value, validate_collection_name};
+use super::helpers::validate_collection_name;
 use super::params::{
-    resolve_weights, ParseParams, RagCollectionCreateParams, RagCollectionStatsParams,
-    RagDocumentImportParams, RagSearchParams,
+    ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
+    RagSearchParams,
 };
 
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
-
-/// Maximum internal limit to prevent OOM
-const MAX_INTERNAL_LIMIT: usize = 1000;
 
 /// Reserved metadata keys that cannot be overwritten by user input (security)
 const RESERVED_METADATA_KEYS: &[&str] = &[
@@ -58,7 +53,7 @@ pub struct RagConfig {
 }
 
 /// Get RAG config for a collection from _system.rag
-fn get_rag_config(adapter: &IronBaseAdapter, collection: &str) -> Result<Option<RagConfig>> {
+pub(crate) fn get_rag_config(adapter: &IronBaseAdapter, collection: &str) -> Result<Option<RagConfig>> {
     // Try to find config
     let result = adapter.find_one(RAG_CONFIG_COLLECTION, json!({"collection": collection}));
 
@@ -422,7 +417,7 @@ fn handle_rag_document_import(
 }
 
 // ============================================================================
-// rag_search Handler - THE KEY TOOL!
+// rag_search Handler - DEPRECATED ALIAS for hybrid_search (auto-embed mode)
 // ============================================================================
 
 fn handle_rag_search(
@@ -430,285 +425,51 @@ fn handle_rag_search(
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
 ) -> Result<Value> {
-    if params.get("dedup_threshold").is_some() {
-        return Err(McpError::invalid_params(
-            "Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead.",
-        ));
-    }
+    // Parse as RagSearchParams for backward compatibility validation
     let p: RagSearchParams = RagSearchParams::parse(params)?;
-    validate_collection_name(&p.collection)?;
 
-    if p.query.is_empty() {
-        return Err(McpError::invalid_params("Query cannot be empty"));
-    }
-
-    // Get embedding manager
-    let manager = embedding_manager.as_ref().ok_or_else(|| {
-        McpError::internal(
-            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
-        )
-    })?;
-
-    // Get RAG config or use defaults
-    let rag_config = get_rag_config(adapter, &p.collection)?;
-    let (embedding_field, text_field, provider_name) = match &rag_config {
-        Some(cfg) => (
-            cfg.embedding_field.clone(),
-            cfg.text_field.clone(),
-            p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
-        ),
-        None => {
-            // Auto-detect fulltext indexed field from collection metadata
-            // O(n_indexes) — only reads pub field names, no index data loaded
-            let detected_text_field = adapter
-                .get_fulltext_field_names(&p.collection)
-                .ok()
-                .and_then(|fields| fields.into_iter().next())
-                .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
-
-            if detected_text_field != DEFAULT_TEXT_FIELD {
-                tracing::info!(
-                    "rag_search: auto-detected fulltext field '{}' for collection '{}' (no RAG config)",
-                    detected_text_field, p.collection
-                );
-            }
-
-            (
-                DEFAULT_EMBEDDING_FIELD.to_string(),
-                detected_text_field,
-                p.provider
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string()),
-            )
-        }
-    };
-
-    // Resolve weights: explicit overrides > search_mode preset > balanced default
-    let (vector_weight, fulltext_weight) =
-        resolve_weights(p.search_mode.as_deref(), p.vector_weight, p.fulltext_weight)?;
-
-    // ========================================================================
-    // STEP 1: AUTO-EMBED THE QUERY (THE KEY DIFFERENCE FROM hybrid_search!)
-    // ========================================================================
-    let query_vector = manager
-        .embed(&p.query, Some(&provider_name))
-        .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
-
-    // Internal limit multiplier for better fusion coverage
-    let internal_limit = (p.limit * 3).min(MAX_INTERNAL_LIMIT);
-
-    // ========================================================================
-    // STEP 2: Vector search
-    // ========================================================================
-    let vector_results = if let Some(ref filter) = p.filter {
-        adapter.vector_search_with_filter(
-            &p.collection,
-            &embedding_field,
-            &query_vector,
-            filter,
-            internal_limit,
-        )?
-    } else {
-        adapter.vector_search(
-            &p.collection,
-            &embedding_field,
-            &query_vector,
-            internal_limit,
-        )?
-    };
-
-    // Build vector rank map (1-indexed)
-    let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
-    for (rank, (doc, _score)) in vector_results.iter().enumerate() {
-        if let Some(id) = doc.get("_id").and_then(id_to_string) {
-            vector_ranks.insert(id, rank + 1);
-        }
-    }
-
-    // Store vector docs for later retrieval
-    let mut vector_docs: HashMap<String, (Value, f32)> =
-        HashMap::with_capacity(vector_results.len());
-    for (doc, score) in vector_results.into_iter() {
-        if let Some(id) = doc.get("_id").and_then(id_to_string) {
-            vector_docs.insert(id, (doc, score));
-        }
-    }
-
-    // ========================================================================
-    // STEP 3: Fulltext search
-    // ========================================================================
-    let text_options = FulltextSearchOptions {
-        limit: Some(internal_limit),
-        skip: None,
-        min_score: None,
-        projection: None,
-        filter: p.filter.clone(),
-        and_mode: p.mode.as_deref() == Some("and"),
-        highlight: false,
-        highlight_context: None,
-        highlight_max_snippets: None,
-    };
-
-    // Multi-field search if `text_fields` is provided, otherwise single-field
-    let text_results = if let Some(ref fields) = p.text_fields {
-        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-        adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, text_options)?
-    } else {
-        adapter.fulltext_search(&p.collection, &text_field, &p.query, text_options)?
-    };
-
-    // Build fulltext rank map (1-indexed)
-    let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
-    for (rank, res) in text_results.iter().enumerate() {
-        if let Some(id) = res.document.get("_id").and_then(id_to_string) {
-            text_ranks.insert(id, rank + 1);
-        }
-    }
-
-    // Store fulltext docs for later retrieval
-    let mut text_docs: HashMap<String, (Value, f64)> = HashMap::with_capacity(text_results.len());
-    for res in text_results.into_iter() {
-        if let Some(id) = res.document.get("_id").and_then(id_to_string) {
-            text_docs.insert(id, (res.document, res.score));
-        }
-    }
-
-    // ========================================================================
-    // STEP 4: RRF Fusion
-    // ========================================================================
-    let max_ids = vector_ranks.len() + text_ranks.len();
-    let mut all_ids: HashSet<String> = HashSet::with_capacity(max_ids);
-    all_ids.extend(vector_ranks.keys().cloned());
-    all_ids.extend(text_ranks.keys().cloned());
-
-    let default_rank = internal_limit + 1;
-    let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
-
-    // Normalize weights to ensure they sum to 1.0 for consistent RRF scoring
-    let total_weight = vector_weight + fulltext_weight;
-    let norm_vector_weight = if total_weight > 0.0 {
-        vector_weight / total_weight
-    } else {
-        0.5
-    };
-    let norm_fulltext_weight = if total_weight > 0.0 {
-        fulltext_weight / total_weight
-    } else {
-        0.5
-    };
-
-    for id in all_ids.iter() {
-        let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
-        let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
-
-        // RRF score formula with normalized weights: weight * 1/(k + rank)
-        let rrf_score = norm_vector_weight * (1.0 / (p.rrf_k + v_rank as f64))
-            + norm_fulltext_weight * (1.0 / (p.rrf_k + t_rank as f64));
-
-        let v_score = vector_docs.get(id).map(|(_, s)| *s);
-        let t_score = text_docs.get(id).map(|(_, s)| *s);
-
-        // Get document from either source (prefer vector for consistency)
-        let doc = match vector_docs
-            .get(id)
-            .map(|(d, _)| d.clone())
-            .or_else(|| text_docs.get(id).map(|(d, _)| d.clone()))
-        {
-            Some(d) => d,
-            None => continue,
-        };
-
-        fused.push(FusedResult {
-            id: id.clone(),
-            doc,
-            rrf_score,
-            final_score: rrf_score,
-            rerank_boost: 1.0,
-            v_rank,
-            t_rank,
-            v_score,
-            t_score,
-        });
-    }
-
-    // Sort by RRF score initially
-    fused.sort_by(|a, b| {
-        b.rrf_score
-            .partial_cmp(&a.rrf_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+    // Convert to hybrid_search JSON params (auto-embed mode: no vector)
+    let mut hybrid_params = json!({
+        "collection": p.collection,
+        "query": p.query,
+        "limit": p.limit,
+        "rerank": p.rerank,
+        "deduplicate": p.deduplicate,
+        "mmr_lambda": p.mmr_lambda,
+        "rrf_k": p.rrf_k
     });
 
-    // ========================================================================
-    // STEP 5: Reranking (optional)
-    // ========================================================================
-    if p.rerank {
-        rerank_results(&mut fused, &p.query, &text_field, p.title_field.as_deref());
+    // Forward optional params
+    if let Some(ref vw) = p.vector_weight {
+        hybrid_params["vector_weight"] = json!(vw);
+    }
+    if let Some(ref fw) = p.fulltext_weight {
+        hybrid_params["fulltext_weight"] = json!(fw);
+    }
+    if let Some(ref sm) = p.search_mode {
+        hybrid_params["search_mode"] = json!(sm);
+    }
+    if let Some(ref provider) = p.provider {
+        hybrid_params["provider"] = json!(provider);
+    }
+    if let Some(ref projection) = p.projection {
+        hybrid_params["projection"] = projection.clone();
+    }
+    if let Some(ref filter) = p.filter {
+        hybrid_params["filter"] = filter.clone();
+    }
+    if let Some(ref title_field) = p.title_field {
+        hybrid_params["title_field"] = json!(title_field);
+    }
+    if let Some(ref mode) = p.mode {
+        hybrid_params["mode"] = json!(mode);
+    }
+    if let Some(ref text_fields) = p.text_fields {
+        hybrid_params["text_fields"] = json!(text_fields);
     }
 
-    // ========================================================================
-    // STEP 6: MMR diversity reranking (optional) — replaces prefix-based dedup
-    // ========================================================================
-    let dedup_removed = if p.deduplicate {
-        mmr_reorder(&mut fused, &embedding_field, p.mmr_lambda, p.limit)
-    } else {
-        fused.truncate(p.limit);
-        0
-    };
-
-    // ========================================================================
-    // STEP 7: Apply projection and build response
-    // ========================================================================
-    let projection = parse_projection_value(p.projection)?;
-
-    // Pre-allocate with try_reserve for OOM protection
-    let mut results: Vec<Value> = Vec::new();
-    results.try_reserve(fused.len()).map_err(|e| {
-        McpError::internal(format!(
-            "OOM: cannot allocate {} results: {}",
-            fused.len(),
-            e
-        ))
-    })?;
-
-    for item in fused {
-        let doc_projected = if let Some(ref proj) = projection {
-            apply_projection(&item.doc, proj)
-        } else {
-            item.doc
-        };
-
-        let mut result = doc_projected;
-        if let Value::Object(ref mut obj) = result {
-            obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
-            obj.insert("_final_score".to_string(), json!(item.final_score));
-            obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
-            obj.insert("_vector_rank".to_string(), json!(item.v_rank));
-            obj.insert("_text_rank".to_string(), json!(item.t_rank));
-            if let Some(vs) = item.v_score {
-                obj.insert("_vector_score".to_string(), json!(vs));
-            }
-            if let Some(ts) = item.t_score {
-                obj.insert("_text_score".to_string(), json!(ts));
-            }
-        }
-
-        results.push(result);
-    }
-
-    Ok(json!({
-        "results": results,
-        "count": results.len(),
-        "query": p.query,
-        "algorithm": "rag_hybrid_rrf",
-        "rrf_k": p.rrf_k,
-        "weights": {
-            "vector": vector_weight,
-            "fulltext": fulltext_weight
-        },
-        "search_mode": p.search_mode.as_deref().unwrap_or("balanced"),
-        "provider": provider_name,
-        "dedup_removed": dedup_removed
-    }))
+    // Delegate to hybrid_search (auto-embed mode since no vector is provided)
+    super::hybrid::dispatch("hybrid_search", hybrid_params, adapter, embedding_manager)
 }
 
 // ============================================================================

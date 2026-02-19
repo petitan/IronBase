@@ -224,14 +224,15 @@ Search a field at any nesting depth (max 100 levels):
 results = db.find("data", {"$**.name": "Alice"})  # Matches name at any level
 ```
 
-### RAG and Hybrid Search (via MCP Server)
+### Hybrid Search (via MCP Server)
 
 ```
-rag_search         → FastText embeddings + HNSW nearest neighbor + RRF fusion
-hybrid_search      → RRF fusion of fulltext + vector results with reranking
+hybrid_search      → RRF fusion of fulltext + vector results with reranking + MMR diversity
+                     If 'vector' omitted → auto-embeds query (FastText/Ollama/OpenAI)
+rag_search         → DEPRECATED alias for hybrid_search (auto-embed mode)
 ```
 
-Both tools use **MMR (Maximal Marginal Relevance)** for result diversity — removes near-duplicate chunks using embedding cosine similarity instead of naive prefix matching.
+Uses **MMR (Maximal Marginal Relevance)** for result diversity — removes near-duplicate chunks using embedding cosine similarity instead of naive prefix matching.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -438,7 +439,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `index_drop_vector` | Drop vector index |
 | `vector_search` | Vector similarity search |
 | `vector_search_filter` | Vector search with document filters |
-| `hybrid_search` | RRF fusion of vector + text results with MMR diversity |
+| `hybrid_search` | RRF fusion of vector + text results with MMR diversity (auto-embeds if vector omitted) |
 | `schema_set` | Define JSON Schema validation |
 | `schema_get` | Get collection schema |
 
@@ -534,7 +535,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `embed_job_cancel` | Cancel running job |
 | `rag_collection_create` | Create RAG-optimized collection |
 | `rag_document_import` | Import document with auto-chunking |
-| `rag_search` | Semantic search with auto-embedding and MMR diversity |
+| `rag_search` | **DEPRECATED** — use `hybrid_search` (omit `vector`). Compatibility alias |
 | `rag_collection_stats` | Get RAG collection statistics |
 
 </details>

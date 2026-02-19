@@ -378,8 +378,8 @@ fn dispatch_tool_inner(
         | "vector_search"
         | "vector_search_filter" => vector::dispatch(name, params, adapter),
 
-        // Hybrid search (RRF fusion of vector + fulltext)
-        "hybrid_search" => hybrid::dispatch(name, params, adapter),
+        // Hybrid search (RRF fusion of vector + fulltext, with optional auto-embedding)
+        "hybrid_search" => hybrid::dispatch(name, params, adapter, embedding_manager),
 
         // Embedding operations
         "embed_text" | "embed_batch" | "embed_list_models" | "embed_document"

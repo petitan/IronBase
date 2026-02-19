@@ -254,17 +254,19 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 | `index_drop_vector` | Drop a vector index |
 | `vector_search` | Vector similarity search (requires HNSW index) |
 | `vector_search_filter` | Vector similarity search with document filter |
-| `hybrid_search` | RRF fusion of vector + fulltext results with MMR diversity |
+| `hybrid_search` | RRF fusion of vector + fulltext results with MMR diversity. Auto-embeds query if `vector` is omitted. |
 
-Both `hybrid_search` and `rag_search` (see [RAG section](#rag-retrieval-augmented-generation)) use **MMR (Maximal Marginal Relevance)** to remove near-duplicate results using embedding cosine similarity.
+`hybrid_search` uses **MMR (Maximal Marginal Relevance)** to remove near-duplicate results using embedding cosine similarity.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `vector` | array | *(optional)* | Query embedding vector. If omitted, query is auto-embedded using collection's provider. |
+| `provider` | string | *(auto)* | Embedding provider for auto-embed mode (uses collection RAG config if not specified). |
 | `mmr_lambda` | number | `0.5` | Balance between relevance (`1.0`) and diversity (`0.0`) |
 | `deduplicate` | boolean | `true` | Enable/disable MMR diversity reranking |
-| `rerank` | boolean | `true` | Enable reranking: phrase match (1.3x), keyword density (1.0–1.1x), short content penalty (0.8x) |
+| `rerank` | boolean | `true` | Enable reranking: phrase match (1.5x), keyword density (1.0–1.3x), short content penalty (0.8x) |
 
-**Example - Hybrid Search:**
+**Example - Explicit vector mode:**
 ```json
 {
   "method": "tools/call",
@@ -281,12 +283,12 @@ Both `hybrid_search` and `rag_search` (see [RAG section](#rag-retrieval-augmente
 }
 ```
 
-**Example - RAG Search (auto-embeds query):**
+**Example - Auto-embed mode (no vector needed):**
 ```json
 {
   "method": "tools/call",
   "params": {
-    "name": "rag_search",
+    "name": "hybrid_search",
     "arguments": {
       "collection": "articles",
       "query": "keresett kifejezés",
@@ -421,7 +423,7 @@ The v2 format is recommended for Hungarian and other agglutinative languages whe
 |------|-------------|
 | `rag_collection_create` | Create RAG-optimized collection (auto: vector + fulltext indexes) |
 | `rag_document_import` | Import document with auto-chunking and embedding |
-| `rag_search` | Semantic search with auto-embedding, RRF fusion, and MMR diversity |
+| `rag_search` | **DEPRECATED** — use `hybrid_search` (omit `vector` for auto-embedding). Compatibility alias. |
 | `rag_collection_stats` | Get RAG collection statistics (chunks, sources, indexes) |
 
 ---

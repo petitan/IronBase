@@ -96,11 +96,11 @@ pub fn tools() -> Vec<Value> {
                 "required": ["collection", "content"]
             }
         }),
-        // rag_search - THE KEY TOOL
+        // rag_search - DEPRECATED ALIAS for hybrid_search (auto-embed mode)
         json!({
             "name": "rag_search",
-            "title": "RAG Semantic Search",
-            "description": "Semantic search with AUTOMATIC query embedding. Unlike hybrid_search, you only provide a text query - the embedding is generated internally. Combines vector similarity and fulltext search using RRF fusion with reranking and MMR diversity reranking (cosine similarity based deduplication). Use mmr_lambda to tune relevance vs diversity.",
+            "title": "RAG Semantic Search (DEPRECATED)",
+            "description": "DEPRECATED: Use hybrid_search instead (omit 'vector' for auto-embedding). This tool is a compatibility alias that delegates to hybrid_search. Combines vector similarity and fulltext search using RRF fusion with reranking and MMR diversity.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

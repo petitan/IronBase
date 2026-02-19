@@ -847,8 +847,8 @@ coll.update_one_with_options(&filter, &update, opts)?;
 | **EndsWith** | `{"$endsWith": ".hu"}` | Suffix match, case-insensitive default |
 | **Contains** | `{"$contains": "Rust"}` | Substring match, case-insensitive default |
 | **Fulltext** | `fulltext_search(field, query, limit)` | TF-IDF, stemming, HU/EN/DE |
-| **RAG** | `rag_search(collection, query)` | FastText + HNSW |
-| **Hybrid** | `hybrid_search(collection, query)` | RRF score fusion (MCP tool) |
+| **Hybrid** | `hybrid_search(collection, query)` | RRF score fusion, auto-embed ha nincs vector |
+| **RAG (deprecated)** | `rag_search(collection, query)` | Alias: delegál hybrid_search-nek |
 
 `$text`, `$startsWith`, `$endsWith`, `$contains` mindegyik támogatja:
 - Egyszerű forma: `{"field": {"$op": "value"}}` (case-insensitive)
@@ -871,8 +871,9 @@ let results = coll.fulltext_search("content", "király", Some(10), None, None, N
 |------|--------|
 | `rag_collection_create` | Collection + FastText model |
 | `rag_document_import` | Auto-chunked import |
-| `rag_search` | Semantic search |
+| `rag_search` | **DEPRECATED** — delegál hybrid_search-nek |
 | `rag_collection_stats` | Statisztikák |
+| `hybrid_search` | Unified keresés: explicit vector VAGY auto-embed |
 
 Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 </details>
@@ -887,12 +888,12 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 - Score fusion = ranked retrieval: score-okat ad vissza, nem igaz/hamis
 - Index hozzáférés szükséges (fulltext + HNSW), de operátorok stateless-ek
 
-**Meglévő implementáció:**
+**Implementáció (2026-02-18 — unified):**
 
 | Tool | Fájl | Algoritmus |
 |------|------|-----------|
-| `hybrid_search` | `mcp-server/src/tools/hybrid.rs` | RRF fusion |
-| `rag_search` | `mcp-server/src/tools/rag.rs` | RRF fusion + auto-embed |
+| `hybrid_search` | `mcp-server/src/tools/hybrid.rs` | RRF fusion (explicit vector VAGY auto-embed) |
+| `rag_search` | `mcp-server/src/tools/rag.rs` | DEPRECATED alias → delegál hybrid_search-nek |
 
 **RRF formula:** `score = Σ(weight_i / (K + rank_i))` ahol K=20 (default, konfigurálható `rrf_k` paraméterrel)
 
@@ -923,7 +924,7 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 
 **Fulltext mode paraméter (45f74bf7, #47):**
 - `mode`: `"or"` (default) = bármely szó elég, `"and"` = MINDEN szó kell a dokumentumban
-- Elérhető: `rag_search`, `hybrid_search`, `fulltext_search` — mindháromban azonos minta
+- Elérhető: `hybrid_search`, `fulltext_search` (`rag_search` deprecated alias)
 - AND mód szűkíti a fulltext komponenst; vektor keresés változatlan → RRF fusion vektor-only eredményeket is ad
 - Backward compatible: `mode` hiánya = `"or"` (régi viselkedés)
 
@@ -935,7 +936,7 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 
 **Multi-field fulltext (b938c487, #48):**
 - `text_fields`: string tömb — több mező párhuzamos fulltext keresése, best-field strategy (max score merge)
-- Elérhető: `rag_search`, `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven)
+- Elérhető: `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven, `rag_search` deprecated alias)
 - `text_fields` felülírja a `text_field` (string) paramétert ha mindkettő megadva
 - Előfeltétel: minden megadott mezőn fulltext index kell (`index_create_fulltext`)
 - Backward compatible: `text_fields` hiánya = single-field (régi viselkedés)
@@ -947,7 +948,7 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 
 **Search mode presets (220679f3):**
 - `search_mode`: `"balanced"` (default), `"semantic"`, `"keyword"` — LLM-barát nevesített preset a numerikus weight-ek helyett
-- Elérhető: `rag_search`, `hybrid_search`
+- Elérhető: `hybrid_search` (`rag_search` deprecated alias)
 - Explicit `vector_weight`/`fulltext_weight` felülírja a preset-et ha megadva
 
 | Mode | vector_weight | fulltext_weight | Mikor |
@@ -960,13 +961,13 @@ Prioritás: explicit weights > search_mode preset > balanced default
 
 **Shared fusion modul (febba776):**
 - `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
-- hybrid.rs és rag.rs importálja, nincs duplikáció
+- hybrid.rs importálja (rag.rs már csak thin wrapper, nem használ fusion kódot)
 
 **Rétegek:**
 ```
 Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
 Collection metódusok (fulltext_search...)    → scored results, index-alapú
-MCP tools (hybrid_search, rag_search)       → score fusion, ranked retrieval
+MCP tools (hybrid_search)                    → score fusion, ranked retrieval (rag_search = deprecated alias)
 ```
 </details>
 

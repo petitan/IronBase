@@ -4,22 +4,26 @@
 //! RRF is collection-size independent, solving the score normalization problem between
 //! TF-IDF (unbounded) and vector similarity (0-1).
 //!
-//! ## Design (2026-01)
-//! - NO query preprocessing - consistent NLP for both paths:
-//!   - Vector: client embeds original query → matches original-embedded docs
-//!   - Fulltext: Snowball stems query → matches Snowball-stemmed index
-//! - Reranking: heading boost, phrase match, keyword density
+//! ## Design (2026-02)
+//! - Unified tool: `hybrid_search` handles both explicit vector and auto-embed modes
+//! - If `vector` is provided → explicit mode (client embeds query)
+//! - If `vector` is omitted → auto-embed mode (server embeds query via RAG config/provider)
+//! - `rag_search` is a deprecated alias that delegates here
+//! - Reranking: phrase match, keyword density, title boost
 //! - MMR diversity reranking: embedding cosine similarity based
 
 use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
+use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD};
 use super::fusion::{apply_projection, id_to_string, mmr_reorder, rerank_results, FusedResult};
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{resolve_weights, HybridSearchParams, ParseParams};
+use super::rag::get_rag_config;
 
 /// RRF default constant - empirically optimal value (Cormack et al., 2009)
 /// Used by test helper; runtime value comes from HybridSearchParams.rrf_k
@@ -31,9 +35,14 @@ const RRF_K: f64 = 60.0;
 const MAX_INTERNAL_LIMIT: usize = 1000;
 
 /// Dispatch hybrid tool calls
-pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+pub fn dispatch(
+    name: &str,
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     match name {
-        "hybrid_search" => handle_hybrid_search(params, adapter),
+        "hybrid_search" => handle_hybrid_search(params, adapter, embedding_manager),
         _ => Err(McpError::invalid_params(format!(
             "Unknown hybrid tool: {}",
             name
@@ -42,8 +51,15 @@ pub fn dispatch(name: &str, params: Value, adapter: &Arc<IronBaseAdapter>) -> Re
 }
 
 /// Handle hybrid_search - RRF fusion of vector and fulltext search
-/// With reranking and MMR diversity reranking (NO query preprocessing for consistency)
-fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
+///
+/// Two modes:
+/// - **Explicit mode**: `vector` is provided → use it directly (client-embedded)
+/// - **Auto-embed mode**: `vector` is omitted → embed query using RAG config or provider param
+fn handle_hybrid_search(
+    params: Value,
+    adapter: &Arc<IronBaseAdapter>,
+    embedding_manager: &Option<Arc<EmbeddingManager>>,
+) -> Result<Value> {
     if params.get("dedup_threshold").is_some() {
         return Err(McpError::invalid_params(
             "Parameter 'dedup_threshold' has been removed. Use 'mmr_lambda' (0.0-1.0) instead.",
@@ -57,10 +73,82 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         resolve_weights(p.search_mode.as_deref(), p.vector_weight, p.fulltext_weight)?;
 
     // ========================================================================
-    // NO preprocessing - consistent NLP design:
-    // - Vector: client embeds original query → matches original-embedded docs
-    // - Fulltext: Snowball internally stems query → matches Snowball-stemmed index
+    // STEP 1: Resolve vector + field names (explicit vs auto-embed mode)
     // ========================================================================
+    let (query_vector, effective_vector_field, effective_text_field, auto_embedded, provider_name) =
+        match p.vector {
+            Some(ref v) => {
+                // Explicit mode: client provided the vector
+                let qv: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+                (qv, p.vector_field.clone(), p.text_field.clone(), false, None)
+            }
+            None => {
+                // Auto-embed mode: server embeds the query
+                if p.query.is_empty() {
+                    return Err(McpError::invalid_params("Query cannot be empty"));
+                }
+
+                let manager = embedding_manager.as_ref().ok_or_else(|| {
+                    McpError::internal(
+                        "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+                    )
+                })?;
+
+                // Get RAG config or use defaults
+                let rag_config = get_rag_config(adapter, &p.collection)?;
+                let (emb_field, txt_field, prov_name) = match &rag_config {
+                    Some(cfg) => (
+                        cfg.embedding_field.clone(),
+                        cfg.text_field.clone(),
+                        p.provider
+                            .clone()
+                            .unwrap_or_else(|| cfg.provider.clone()),
+                    ),
+                    None => {
+                        // Auto-detect fulltext indexed field from collection metadata
+                        let detected_text_field = adapter
+                            .get_fulltext_field_names(&p.collection)
+                            .ok()
+                            .and_then(|fields| fields.into_iter().next())
+                            .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+
+                        if detected_text_field != DEFAULT_TEXT_FIELD {
+                            tracing::info!(
+                                "hybrid_search: auto-detected fulltext field '{}' for collection '{}' (no RAG config)",
+                                detected_text_field, p.collection
+                            );
+                        }
+
+                        (
+                            DEFAULT_EMBEDDING_FIELD.to_string(),
+                            detected_text_field,
+                            p.provider
+                                .clone()
+                                .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string()),
+                        )
+                    }
+                };
+
+                // Embed the query
+                let qv = manager
+                    .embed(&p.query, Some(&prov_name))
+                    .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
+
+                // Use user-specified fields if provided, otherwise use resolved defaults
+                let eff_vf = if p.vector_field != "embedding" {
+                    p.vector_field.clone() // User explicitly set vector_field
+                } else {
+                    emb_field
+                };
+                let eff_tf = if p.text_field != "content" {
+                    p.text_field.clone() // User explicitly set text_field
+                } else {
+                    txt_field
+                };
+
+                (qv, eff_vf, eff_tf, true, Some(prov_name))
+            }
+        };
 
     // Internal limit multiplier for better fusion coverage
     // Need more results when reranking/deduplication will filter some out
@@ -68,13 +156,12 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     let internal_limit = (p.limit * 3).min(MAX_INTERNAL_LIMIT);
 
     // ========================================================================
-    // 2. Vector search → get ranks
+    // STEP 2: Vector search → get ranks
     // ========================================================================
-    let query_vector: Vec<f32> = p.vector.iter().map(|&v| v as f32).collect();
     let vector_results = if let Some(ref filter) = p.filter {
         adapter.vector_search_with_filter(
             &p.collection,
-            &p.vector_field,
+            &effective_vector_field,
             &query_vector,
             filter,
             internal_limit,
@@ -82,7 +169,7 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     } else {
         adapter.vector_search(
             &p.collection,
-            &p.vector_field,
+            &effective_vector_field,
             &query_vector,
             internal_limit,
         )?
@@ -106,7 +193,7 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
 
     // ========================================================================
-    // 3. Fulltext search → get ranks (original query - Snowball handles stemming)
+    // STEP 3: Fulltext search → get ranks (original query - Snowball handles stemming)
     // ========================================================================
     let text_options = FulltextSearchOptions {
         limit: Some(internal_limit),
@@ -120,13 +207,12 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         highlight_max_snippets: None,
     };
 
-    // Use original query - Snowball stemmer in fulltext handles NLP consistently
     // Multi-field search if `text_fields` is provided, otherwise single-field
     let text_results = if let Some(ref fields) = p.text_fields {
         let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
         adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, text_options)?
     } else {
-        adapter.fulltext_search(&p.collection, &p.text_field, &p.query, text_options)?
+        adapter.fulltext_search(&p.collection, &effective_text_field, &p.query, text_options)?
     };
 
     // Build fulltext rank map (1-indexed) with pre-allocated capacity (OOM protection)
@@ -146,9 +232,8 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     }
 
     // ========================================================================
-    // 4. RRF Fusion (with pre-allocated capacity for OOM protection)
+    // STEP 4: RRF Fusion (with pre-allocated capacity for OOM protection)
     // ========================================================================
-    // Max unique IDs = vector_ranks + text_ranks (worst case: no overlap)
     let max_ids = vector_ranks.len() + text_ranks.len();
     let mut all_ids: HashSet<String> = HashSet::with_capacity(max_ids);
     all_ids.extend(vector_ranks.keys().cloned());
@@ -200,61 +285,71 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
     });
 
     // ========================================================================
-    // 5. Reranking (optional)
+    // STEP 5: Reranking (optional)
     // ========================================================================
     if p.rerank {
         rerank_results(
             &mut fused,
             &p.query,
-            &p.text_field,
+            &effective_text_field,
             p.title_field.as_deref(),
         );
     }
 
     // ========================================================================
-    // 6. MMR diversity reranking (optional) — replaces prefix-based dedup
+    // STEP 6: MMR diversity reranking (optional)
     // ========================================================================
     let dedup_removed = if p.deduplicate {
-        mmr_reorder(&mut fused, &p.vector_field, p.mmr_lambda, p.limit)
+        mmr_reorder(
+            &mut fused,
+            &effective_vector_field,
+            p.mmr_lambda,
+            p.limit,
+        )
     } else {
         fused.truncate(p.limit);
         0
     };
 
     // ========================================================================
-    // 7. Apply projection and build response
+    // STEP 7: Apply projection and build response
     // ========================================================================
     let projection = parse_projection_value(p.projection)?;
 
-    let results: Vec<Value> = fused
-        .into_iter()
-        .map(|item| {
-            // Apply projection if specified
-            let doc_projected = if let Some(ref proj) = projection {
-                apply_projection(&item.doc, proj)
-            } else {
-                item.doc
-            };
+    // Pre-allocate with try_reserve for OOM protection
+    let mut results: Vec<Value> = Vec::new();
+    results.try_reserve(fused.len()).map_err(|e| {
+        McpError::internal(format!(
+            "OOM: cannot allocate {} results: {}",
+            fused.len(),
+            e
+        ))
+    })?;
 
-            // Build result with metadata
-            let mut result = doc_projected;
-            if let Value::Object(ref mut obj) = result {
-                obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
-                obj.insert("_final_score".to_string(), json!(item.final_score));
-                obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
-                obj.insert("_vector_rank".to_string(), json!(item.v_rank));
-                obj.insert("_text_rank".to_string(), json!(item.t_rank));
-                if let Some(vs) = item.v_score {
-                    obj.insert("_vector_score".to_string(), json!(vs));
-                }
-                if let Some(ts) = item.t_score {
-                    obj.insert("_text_score".to_string(), json!(ts));
-                }
+    for item in fused {
+        let doc_projected = if let Some(ref proj) = projection {
+            apply_projection(&item.doc, proj)
+        } else {
+            item.doc
+        };
+
+        let mut result = doc_projected;
+        if let Value::Object(ref mut obj) = result {
+            obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
+            obj.insert("_final_score".to_string(), json!(item.final_score));
+            obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
+            obj.insert("_vector_rank".to_string(), json!(item.v_rank));
+            obj.insert("_text_rank".to_string(), json!(item.t_rank));
+            if let Some(vs) = item.v_score {
+                obj.insert("_vector_score".to_string(), json!(vs));
             }
+            if let Some(ts) = item.t_score {
+                obj.insert("_text_score".to_string(), json!(ts));
+            }
+        }
 
-            result
-        })
-        .collect();
+        results.push(result);
+    }
 
     Ok(json!({
         "results": results,
@@ -267,8 +362,9 @@ fn handle_hybrid_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Result
         },
         "search_mode": p.search_mode.as_deref().unwrap_or("balanced"),
         "query": p.query,
-        "dedup_removed": dedup_removed,
-        "nlp_design": "consistent: vector=original, fulltext=snowball"
+        "auto_embedded": auto_embedded,
+        "provider": provider_name,
+        "dedup_removed": dedup_removed
     }))
 }
 
@@ -346,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_rrf_k_constant() {
-        // Verify RRF_K is 60 (empirically optimal)
+        // Verify RRF_K is 60 (empirically optimal for test scoring)
         assert_eq!(RRF_K, 60.0);
     }
 
@@ -393,10 +489,24 @@ mod tests {
         assert!(p.rerank); // default: true
         assert!(p.deduplicate); // default: true
         assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON); // default
-        assert!(p.language.is_none());
+        assert!(p.provider.is_none()); // no provider → use collection config
         assert!(p.filter.is_none()); // default: no filter
         assert!(p.mode.is_none()); // default: None (= "or")
         assert!(p.text_fields.is_none()); // default: None (= single text_field)
+        assert!(p.vector.is_some()); // explicit vector provided
+    }
+
+    #[test]
+    fn test_params_auto_embed_mode() {
+        // No vector → auto-embed mode (only collection + query required)
+        let params = json!({
+            "collection": "docs",
+            "query": "semantic search test"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.collection, "docs");
+        assert!(p.vector.is_none());
+        assert!(p.provider.is_none());
     }
 
     #[test]
@@ -474,14 +584,14 @@ mod tests {
             "vector": [0.1, 0.2, 0.3],
             "query": "Milyen jellemzői vannak?",
             "limit": 10,
-            "language": "hungarian",
             "rerank": true,
             "deduplicate": true,
-            "mmr_lambda": 0.7
+            "mmr_lambda": 0.7,
+            "provider": "fasttext"
         });
 
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
-        assert_eq!(p.language, Some("hungarian".to_string()));
+        assert_eq!(p.provider.as_deref(), Some("fasttext"));
         assert!(p.rerank);
         assert!(p.deduplicate);
         assert!((p.mmr_lambda - 0.7).abs() < f64::EPSILON);
@@ -539,11 +649,11 @@ mod tests {
     }
 
     #[test]
-    fn test_params_missing_required() {
+    fn test_params_missing_required_query() {
+        // query is required
         let params = json!({
             "collection": "test",
             "vector_field": "embedding"
-            // missing: text_field, vector, query
         });
 
         let result = HybridSearchParams::parse(params);

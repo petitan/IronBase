@@ -558,11 +558,14 @@ fn default_text_field() -> String {
     "content".to_string()
 }
 
-/// Parameters for `hybrid_search` tool (RRF-based fusion with preprocessing, reranking, dedup)
+/// Parameters for `hybrid_search` tool (RRF-based fusion with reranking, dedup, auto-embed)
 ///
 /// Field defaults match gaploader schema for seamless integration:
 /// - vector_field: "embedding" (gaploader stores embeddings here)
 /// - text_field: "content" (gaploader stores chunk text here)
+///
+/// If `vector` is omitted, the query text is automatically embedded using the
+/// collection's RAG config or the specified `provider` (auto-embed mode).
 #[derive(Debug, Deserialize)]
 pub struct HybridSearchParams {
     pub collection: String,
@@ -572,9 +575,10 @@ pub struct HybridSearchParams {
     /// Field with fulltext index (default: "content" - gaploader compatible)
     #[serde(default = "default_text_field")]
     pub text_field: String,
-    /// Query embedding vector
-    pub vector: Vec<f64>,
-    /// Text query for fulltext search
+    /// Query embedding vector. If omitted, the query is auto-embedded using the
+    /// collection's configured provider (or the `provider` parameter).
+    pub vector: Option<Vec<f64>>,
+    /// Text query for fulltext search (and auto-embedding if vector is omitted)
     pub query: String,
     #[serde(default = "default_hybrid_limit")]
     pub limit: usize,
@@ -589,14 +593,11 @@ pub struct HybridSearchParams {
     /// Overridden by explicit vector_weight/fulltext_weight if provided
     pub search_mode: Option<String>,
 
-    // ========== v2 parameters (reranking, deduplication) ==========
-    /// DEPRECATED: Language parameter is ignored for NLP consistency.
-    /// Vector search uses original query (client-embedded), fulltext uses Snowball stemmer.
-    #[serde(default)]
-    pub language: Option<String>,
+    /// Embedding provider for auto-embed mode (uses collection RAG config if not specified)
+    pub provider: Option<String>,
 
     /// Enable reranking after RRF fusion (default: true)
-    /// Applies exact phrase match (1.3x), keyword density (1.0-1.1x), length penalty (0.8x)
+    /// Applies exact phrase match (1.5x), keyword density (1.0-1.3x), length penalty (0.8x)
     #[serde(default = "default_rerank")]
     pub rerank: bool,
 
@@ -612,7 +613,7 @@ pub struct HybridSearchParams {
     /// MongoDB-style filter applied BEFORE both vector and fulltext search
     pub filter: Option<Value>,
 
-    /// RRF K constant — lower = wider score spread (default: 60)
+    /// RRF K constant — lower = wider score spread (default: 20)
     #[serde(default = "default_rrf_k")]
     pub rrf_k: f64,
 
@@ -1147,6 +1148,32 @@ mod tests {
         assert_eq!(p.search_mode.as_deref(), Some("semantic"));
         assert!(p.vector_weight.is_none());
         assert!(p.fulltext_weight.is_none());
+    }
+
+    #[test]
+    fn test_hybrid_params_auto_embed_mode() {
+        // No vector → auto-embed mode
+        let params = json!({
+            "collection": "docs",
+            "query": "semantic search test"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.collection, "docs");
+        assert_eq!(p.query, "semantic search test");
+        assert!(p.vector.is_none()); // auto-embed mode
+        assert!(p.provider.is_none()); // use collection config
+    }
+
+    #[test]
+    fn test_hybrid_params_auto_embed_with_provider() {
+        let params = json!({
+            "collection": "docs",
+            "query": "keresés",
+            "provider": "fasttext"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert!(p.vector.is_none());
+        assert_eq!(p.provider.as_deref(), Some("fasttext"));
     }
 
     #[test]
