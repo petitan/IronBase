@@ -71,3 +71,24 @@ mcp-server/config.toml
 *.ftidx
 *.hnsw
 *.mlite.compact
+
+# Large binary models
+models/
+
+# Test corpus data
+corpus/
+
+# In-memory database artifacts
+:memory:
+
+# Python lock files
+uv.lock
+
+# One-off scripts (root level)
+parse_tales.py
+parsed_tales.json
+import_all_tales.py
+reimport_tales.py
+recover_ironbase.py
+scripts/benchmark_preprocessing.py
+scripts/mesek_embeddings.py
