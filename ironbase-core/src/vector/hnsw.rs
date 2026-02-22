@@ -186,14 +186,58 @@ impl HnswIndex {
         Self::new(VectorIndexConfig::new(dim).with_max_vectors(max_vectors))
     }
 
-    /// Get the number of vectors in the index
+    /// Get the number of active (non-orphan) vectors in the index
     pub fn len(&self) -> usize {
-        self.nodes.len()
+        self.id_to_index.len()
     }
 
     /// Check if the index is empty
     pub fn is_empty(&self) -> bool {
-        self.nodes.is_empty()
+        self.id_to_index.is_empty()
+    }
+
+    /// Get the total number of nodes including orphans from lazy removal
+    pub fn total_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Get the number of orphan nodes (removed but still in memory)
+    pub fn orphan_count(&self) -> usize {
+        self.nodes.len().saturating_sub(self.id_to_index.len())
+    }
+
+    /// Check if the index needs rebuilding due to excessive orphan nodes
+    ///
+    /// Returns true if orphan ratio exceeds 30% and there are at least 100 orphans.
+    /// Small absolute counts are ignored to avoid unnecessary rebuilds.
+    pub fn needs_rebuild(&self) -> bool {
+        let orphans = self.orphan_count();
+        if orphans < 100 {
+            return false;
+        }
+        let total = self.nodes.len();
+        if total == 0 {
+            return false;
+        }
+        (orphans as f64 / total as f64) > 0.3
+    }
+
+    /// Rebuild the index only if orphan ratio exceeds threshold.
+    /// Returns Ok(true) if rebuilt, Ok(false) if not needed.
+    pub fn rebuild_if_needed(&mut self) -> Result<bool> {
+        if self.needs_rebuild() {
+            let orphans = self.orphan_count();
+            let active = self.id_to_index.len();
+            self.rebuild()?;
+            crate::log_info!(
+                "HNSW index rebuilt: removed {} orphan nodes, {} active vectors remain",
+                orphans,
+                active
+            );
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Get the vector dimension
@@ -810,7 +854,7 @@ impl IndexTrait for HnswIndex {
     }
 
     fn entry_count(&self) -> usize {
-        self.nodes.len()
+        self.id_to_index.len()
     }
 
     fn memory_usage_bytes(&self) -> usize {

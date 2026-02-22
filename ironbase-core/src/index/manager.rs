@@ -915,6 +915,49 @@ impl IndexManager {
             .collect()
     }
 
+    /// Rebuild vector indexes that have excessive orphan nodes.
+    ///
+    /// Returns the number of indexes rebuilt.
+    /// Called during checkpoint to compact HNSW indexes with >30% orphan ratio.
+    pub fn rebuild_vector_indexes_if_needed(&mut self) -> Result<usize> {
+        let mut rebuilt = 0;
+        let names: Vec<String> = self.vector_indexes.keys().cloned().collect();
+        for name in names {
+            if let Some(index) = self.vector_indexes.get_mut(&name) {
+                if index.rebuild_if_needed()? {
+                    rebuilt += 1;
+                }
+            }
+        }
+        Ok(rebuilt)
+    }
+
+    /// Rebuild ALL vector indexes unconditionally.
+    ///
+    /// Used during db_compact to ensure clean HNSW state.
+    /// Returns the number of indexes rebuilt.
+    pub fn rebuild_all_vector_indexes(&mut self) -> Result<usize> {
+        let mut rebuilt = 0;
+        let names: Vec<String> = self.vector_indexes.keys().cloned().collect();
+        for name in names {
+            if let Some(index) = self.vector_indexes.get_mut(&name) {
+                let orphans = index.orphan_count();
+                if orphans > 0 {
+                    let active = index.len();
+                    index.rebuild()?;
+                    crate::log_info!(
+                        "HNSW index '{}' compacted: removed {} orphan nodes, {} active vectors remain",
+                        name,
+                        orphans,
+                        active
+                    );
+                    rebuilt += 1;
+                }
+            }
+        }
+        Ok(rebuilt)
+    }
+
     /// Flush a single fulltext index to disk
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.

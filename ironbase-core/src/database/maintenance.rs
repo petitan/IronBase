@@ -76,7 +76,22 @@ impl DatabaseCore<StorageEngine> {
     ///
     /// Also flushes all indexes to disk (B+ tree and fulltext).
     pub fn compact(&self) -> Result<crate::storage::CompactionStats> {
-        // Flush all indexes first
+        // Rebuild HNSW indexes to remove orphan nodes before flush
+        {
+            let index_managers = self.index_managers.read();
+            for (collection_name, index_manager) in index_managers.iter() {
+                let mut mgr = index_manager.write();
+                let rebuilt = mgr.rebuild_all_vector_indexes()?;
+                if rebuilt > 0 {
+                    tracing::info!(
+                        collection = %collection_name, rebuilt,
+                        "Compact: HNSW indexes rebuilt"
+                    );
+                }
+            }
+        }
+
+        // Flush all indexes
         self.flush_all_indexes()?;
 
         let mut storage = self.storage.write();
@@ -377,6 +392,21 @@ impl DatabaseCore<StorageEngine> {
                         "Index flushed"
                     );
                     total_flushed += 1;
+                }
+            }
+            // HNSW orphan compaction: rebuild indexes with >30% orphan ratio before flush
+            {
+                let t = std::time::Instant::now();
+                let mut mgr = index_manager.write();
+                let lock_wait_ms = t.elapsed().as_millis() as u64;
+                let rebuilt = mgr.rebuild_vector_indexes_if_needed()?;
+                if rebuilt > 0 {
+                    let rebuild_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                    tracing::info!(
+                        collection = %collection_name,
+                        rebuilt, lock_wait_ms, rebuild_ms,
+                        "HNSW orphan compaction"
+                    );
                 }
             }
             for name in &dirty_vec {

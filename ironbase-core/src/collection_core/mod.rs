@@ -1928,6 +1928,60 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         }
 
+        // --- VECTOR (HNSW) INDEXES: Update for each document ---
+        // Collect vector index info before mutable borrow
+        let vector_index_info: Vec<(String, usize)> = indexes
+            .list_vector_indexes()
+            .iter()
+            .map(|idx| (idx.config().field.clone(), idx.config().dim))
+            .collect();
+
+        for (vec_field, vec_dim) in vector_index_info {
+            if vec_field.is_empty() {
+                continue; // Skip if no field configured (legacy index)
+            }
+            for (original_doc, updated_doc) in updates {
+                let old_value = original_doc.get(&vec_field);
+                let new_value = updated_doc.get(&vec_field);
+
+                // Only update if the vector field actually changed
+                if old_value != new_value {
+                    let doc_id = &original_doc.id;
+                    let id_str = match doc_id {
+                        DocumentId::Int(i) => i.to_string(),
+                        DocumentId::String(s) => s.clone(),
+                        DocumentId::ObjectId(oid) => oid.clone(),
+                    };
+
+                    if let Some(index) =
+                        indexes.get_vector_index_for_field_mut(&self.name, &vec_field)
+                    {
+                        // Remove old vector if it existed (unconditional - remove() is ID-based)
+                        if old_value.and_then(|v| v.as_array()).is_some() {
+                            index.remove(&id_str);
+                        }
+
+                        // Insert new vector if it exists with correct dimension
+                        if let Some(arr) = new_value.and_then(|v| v.as_array()) {
+                            let vector: Vec<f32> = arr
+                                .iter()
+                                .filter_map(|v| v.as_f64().map(|f| f as f32))
+                                .collect();
+                            if vector.len() == vec_dim {
+                                if let Err(e) = index.insert(&id_str, &vector) {
+                                    log_error!(
+                                        "Failed to update vector index for field '{}': {:?}",
+                                        vec_field,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
