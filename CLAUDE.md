@@ -381,7 +381,7 @@ let limits = AggregationLimits::from_system_memory();
 | B+ Tree | ✅ Igen | `load_from_path()` threshold check |
 | Fulltext | ✅ Igen | V2/V3 format mindig lazy |
 | Fuzzy | ✅ Igen | Dinamikus threshold |
-| HNSW | ❌ Nem | Gráf struktúra miatt komplex |
+| HNSW | ❌ Nem (lazy rebuild ✅) | Gráf struktúra miatt komplex, de orphan compaction checkpoint/compact-ban |
 
 **Használat:**
 
@@ -408,6 +408,37 @@ index_manager.log_lazy_status(); // tracing::info!
 - `ironbase-core/src/index/fuzzy.rs` - Fuzzy lazy loading
 - `ironbase-core/src/fulltext.rs` - Fulltext lazy loading
 - `ironbase-core/src/index/manager.rs` - Memory tracking methods
+
+### HNSW Orphan Management (512990a6, #53)
+
+**Probléma:** HNSW `remove()` lazy — csak `id_to_index`-ből töröl, az orphan node a `self.nodes` Vec-ben marad. Delete+reimport ciklusok halmozzák az orphan-okat → memória nő, `vector_count` felfújódik.
+
+**Három rétegű fix:**
+
+| Réteg | Változás | Hatás |
+|-------|----------|-------|
+| `batch_update_indexes()` | HNSW kezelés hozzáadva (mod.rs:1931+) | `update_many` frissíti a vektorokat |
+| `len()` / `is_empty()` | `id_to_index.len()` (nem `nodes.len()`) | Pontos aktív vektor szám |
+| Orphan rebuild | Checkpoint + compact integráció | Memória felszabadítás |
+
+**API:**
+```rust
+index.len()            // Aktív vektorok (id_to_index)
+index.total_nodes()    // Összes node (beleértve orphan-okat)
+index.orphan_count()   // total_nodes - len
+index.needs_rebuild()  // >30% orphan ÉS >100 orphan
+index.rebuild_if_needed()  // Rebuild ha needs_rebuild()
+```
+
+**Automatikus orphan compaction:**
+- **Checkpoint** (60s): `rebuild_vector_indexes_if_needed()` — csak ha >30% orphan
+- **Compact** (`db_compact`): `rebuild_all_vector_indexes()` — minden orphan eltávolítása
+
+**Key files:**
+- `ironbase-core/src/vector/hnsw.rs` — `len()`, `orphan_count()`, `needs_rebuild()`, `rebuild_if_needed()`
+- `ironbase-core/src/index/manager.rs` — `rebuild_vector_indexes_if_needed()`, `rebuild_all_vector_indexes()`
+- `ironbase-core/src/database/maintenance.rs` — checkpoint + compact integráció
+- `ironbase-core/src/collection_core/mod.rs` — `batch_update_indexes()` HNSW szekció
 
 ### Egységes Range Query API (KÖTELEZŐ!)
 
@@ -487,6 +518,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Fulltext candidate limit** | aa3b8ed5 | Filtrált fulltext 0 eredmény gyakori szóra | `calculate_candidate_limit()` max 300 jelöltet kért, de pl. "ajánlat" 6766 match-ből a year=2026 dokuk a 6735+ pozíción voltak | Filter esetén 100K cap (TF-IDF amúgy is O(N), limit csak output-ot csonkít) |
 | **Fulltext empty collection reject** | #49 | `rag_collection_create` üres collection-re nem hoz létre fulltext indexet | `search.rs:498` validáció `num_documents == 0` → error + cleanup, üres collection is triggereli | `live_document_count == 0` check: üres collection → üres index valid |
 | **Vector count stale metadata** | #50 | `vector_count: 0` a stats-ban működő HNSW index mellett | `VectorIndexMetadata.vector_count` csak creation-kor íródik, auto-indexing nem frissíti | `list_vector_indexes()` az in-memory HNSW `len()`-ből frissíti a clone-t |
+| **HNSW orphan accumulation** | 512990a6, #53 | `vector_count` 2x a valós után delete+reimport; növekvő memória | `batch_update_indexes()` nem kezelte HNSW-t + `remove()` lazy (orphan node marad) + `len()` orphan-okat is számolta | HNSW kezelés `batch_update_indexes`-ben + `len()` = `id_to_index.len()` + orphan rebuild checkpoint/compact-ban |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
