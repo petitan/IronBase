@@ -352,18 +352,54 @@ impl DatabaseCore<StorageEngine> {
             // 2. Flush one-by-one, lock/unlock between each index
             //    This reduces lock hold time from O(all_indexes) to O(1_index),
             //    allowing insert_one/add_to_indexes to proceed between flushes.
+            //
+            //    Fulltext uses two-phase flush: brief lock for snapshot, NO lock
+            //    for serialize+fsync (13+ seconds), brief lock for commit.
             for name in &dirty_ft {
                 let t = std::time::Instant::now();
-                let mut mgr = index_manager.write();
-                let lock_wait_ms = t.elapsed().as_millis() as u64;
-                if mgr.flush_one_fulltext_index(name)? {
-                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
-                    tracing::info!(
-                        collection = %collection_name, index = %name,
-                        kind = "fulltext", lock_wait_ms, flush_ms,
-                        "Index flushed"
-                    );
-                    total_flushed += 1;
+
+                // Phase 1: Brief write lock — take snapshot (~µs)
+                let snapshot = {
+                    let mut mgr = index_manager.write();
+                    mgr.take_fulltext_flush_snapshot(name)
+                };
+                let snapshot_ms = t.elapsed().as_millis() as u64;
+
+                if let Some(snapshot) = snapshot {
+                    // Phase 2: NO lock — serialize + file write + fsync
+                    match crate::fulltext::FulltextIndex::serialize_flush(&snapshot) {
+                        Ok(result) => {
+                            let serialize_ms = t.elapsed().as_millis() as u64 - snapshot_ms;
+
+                            // Phase 3: Brief write lock — commit results (~ms)
+                            {
+                                let mut mgr = index_manager.write();
+                                mgr.commit_fulltext_flush(name, result)?;
+                            }
+                            let commit_ms =
+                                t.elapsed().as_millis() as u64 - snapshot_ms - serialize_ms;
+
+                            tracing::info!(
+                                collection = %collection_name, index = %name,
+                                kind = "fulltext", snapshot_ms, serialize_ms, commit_ms,
+                                total_ms = t.elapsed().as_millis() as u64,
+                                "Index flushed (two-phase)"
+                            );
+                            total_flushed += 1;
+                        }
+                        Err(e) => {
+                            // Rollback: restore inverted_index from frozen snapshot
+                            // to prevent data loss on the next checkpoint
+                            tracing::error!(
+                                collection = %collection_name, index = %name,
+                                error = %e,
+                                "Two-phase fulltext flush failed, rolling back"
+                            );
+                            let mut mgr = index_manager.write();
+                            mgr.rollback_fulltext_flush(name);
+                            return Err(e);
+                        }
+                    }
                 }
             }
             for name in &dirty_fz {

@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use unicode_normalization::UnicodeNormalization;
 
 // ============================================================================
@@ -756,6 +757,53 @@ pub struct FulltextIndex {
     /// True while index is being built - search operations should return empty results
     /// to prevent using partially populated indexes
     pub building: bool,
+
+    // === Two-Phase Flush Support ===
+    /// Frozen inverted index snapshot during background flush.
+    /// When a flush is in progress, inverted_index is moved here (via Arc) so that
+    /// search can still find entries while the flush serializes WITHOUT holding a lock.
+    /// Set to None when no flush is in progress.
+    frozen_inverted: Option<Arc<HashMap<String, Vec<TokenEntry>>>>,
+}
+
+// ============================================================================
+// Two-Phase Flush Types
+// ============================================================================
+
+/// Snapshot data for two-phase fulltext flush.
+///
+/// Contains all data needed to serialize the .ftidx file WITHOUT holding
+/// the IndexManager write lock. Created by `take_flush_snapshot()`,
+/// consumed by `serialize_flush()`.
+pub(crate) struct FulltextFlushSnapshot {
+    /// Inverted index entries (moved from FulltextIndex via Arc)
+    pub inverted: Arc<HashMap<String, Vec<TokenEntry>>>,
+    /// Token offsets for lazy mode disk entries (cloned)
+    pub token_offsets: HashMap<String, (u64, u32)>,
+    /// Document token offsets (cloned)
+    pub doc_tokens_offsets: HashMap<DocumentId, u64>,
+    /// Deleted document IDs for filtering (cloned)
+    pub deleted_doc_ids: HashSet<DocumentId>,
+    /// Current write position (start of index data region)
+    pub write_offset: u64,
+    /// Whether lazy mode was active
+    pub lazy_mode: bool,
+    /// File format version (for reading old entries)
+    pub file_version: u32,
+    /// Index metadata
+    pub name: String,
+    pub field: String,
+    pub options: FtsOptions,
+    /// Path to .ftidx file
+    pub storage_path: PathBuf,
+}
+
+/// Result of a two-phase flush, to be committed under write lock.
+pub(crate) struct FulltextFlushResult {
+    /// New token offsets table (pointing to freshly written data)
+    pub new_token_offsets: HashMap<String, (u64, u32)>,
+    /// New write offset (end of all written data)
+    pub new_write_offset: u64,
 }
 
 /// Search result with score and matched tokens
@@ -810,7 +858,6 @@ pub struct HighlightResult {
 use serde_json::Value;
 use std::collections::HashMap as StdHashMap;
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 use std::time::Instant;
 
 /// Unified fulltext search options - CORE LEVEL
@@ -1301,6 +1348,7 @@ impl FulltextIndex {
             file_version: FTIDX_VERSION_V3, // New indexes use V3 format
             deleted_doc_ids: HashSet::new(),
             building: false,
+            frozen_inverted: None,
         }
     }
 
@@ -1326,6 +1374,7 @@ impl FulltextIndex {
             file_version: FTIDX_VERSION_V3, // New indexes use V3 format
             deleted_doc_ids: HashSet::new(),
             building: false,
+            frozen_inverted: None,
         };
 
         // Create and initialize the file with header
@@ -1566,6 +1615,8 @@ impl FulltextIndex {
     /// V2 format: TF=1 placeholder (backward compatible)
     fn get_token_entries_merged(&self, token: &str) -> Option<Vec<TokenEntry>> {
         let mem_entries = self.inverted_index.get(token);
+        // During two-phase flush, frozen_inverted holds entries moved from inverted_index
+        let frozen_entries = self.frozen_inverted.as_ref().and_then(|f| f.get(token));
         let disk_entries: Option<Vec<TokenEntry>> = if self.lazy_mode {
             self.token_offsets.get(token).and_then(|(offset, _)| {
                 if self.file_version >= FTIDX_VERSION_V3 {
@@ -1582,36 +1633,53 @@ impl FulltextIndex {
             None
         };
 
-        let result = match (mem_entries, disk_entries) {
-            (Some(mem), Some(disk)) => {
-                // Merge with deduplication: memory entries take priority (have accurate TF)
-                let mem_doc_ids: std::collections::HashSet<_> =
-                    mem.iter().map(|(id, _)| id.clone()).collect();
-                let mut merged = mem.clone();
-                // Only add disk entries for doc_ids NOT already in memory
-                for (doc_id, tf) in disk {
-                    if !mem_doc_ids.contains(&doc_id) {
-                        merged.push((doc_id, tf));
-                    }
-                }
-                Some(merged)
+        // Merge all sources: mem (new inserts) > frozen (snapshot) > disk (previous flush)
+        let mut seen_doc_ids: HashSet<DocumentId> = HashSet::new();
+        let mut merged: Vec<TokenEntry> = Vec::new();
+
+        // Memory entries take priority (most recent, accurate TF)
+        if let Some(mem) = mem_entries {
+            for entry in mem {
+                seen_doc_ids.insert(entry.0.clone());
+                merged.push(entry.clone());
             }
-            (Some(mem), None) => Some(mem.clone()),
-            (None, Some(disk)) => Some(disk),
-            (None, None) => None,
-        };
+        }
+        // Frozen entries next (snapshot from current flush, also accurate TF)
+        if let Some(frozen) = frozen_entries {
+            for entry in frozen {
+                if !seen_doc_ids.contains(&entry.0) {
+                    seen_doc_ids.insert(entry.0.clone());
+                    merged.push(entry.clone());
+                }
+            }
+        }
+        // Disk entries last (from previous flush)
+        if let Some(disk) = disk_entries {
+            for (doc_id, tf) in disk {
+                if !seen_doc_ids.contains(&doc_id) {
+                    merged.push((doc_id, tf));
+                }
+            }
+        }
+
+        if merged.is_empty() {
+            return None;
+        }
 
         // Filter out deleted documents (important for lazy mode correctness)
-        result.map(|entries| {
-            if self.deleted_doc_ids.is_empty() {
-                entries
+        if self.deleted_doc_ids.is_empty() {
+            Some(merged)
+        } else {
+            let filtered: Vec<_> = merged
+                .into_iter()
+                .filter(|(doc_id, _)| !self.deleted_doc_ids.contains(doc_id))
+                .collect();
+            if filtered.is_empty() {
+                None
             } else {
-                entries
-                    .into_iter()
-                    .filter(|(doc_id, _)| !self.deleted_doc_ids.contains(doc_id))
-                    .collect()
+                Some(filtered)
             }
-        })
+        }
     }
 
     /// Check if a token exists in the index (memory or disk)
@@ -1623,6 +1691,10 @@ impl FulltextIndex {
     #[allow(dead_code)]
     fn has_token(&self, token: &str) -> bool {
         self.inverted_index.contains_key(token)
+            || self
+                .frozen_inverted
+                .as_ref()
+                .is_some_and(|f| f.contains_key(token))
             || (self.lazy_mode && self.token_offsets.contains_key(token))
     }
 
@@ -2093,6 +2165,276 @@ impl FulltextIndex {
         self.flush()
     }
 
+    // ========================================================================
+    // Two-Phase Flush (lock-free serialization for checkpoint)
+    // ========================================================================
+    //
+    // The standard flush() holds the IndexManager write lock for the entire
+    // serialize + file write + fsync cycle (13+ seconds for 130K docs).
+    // Two-phase flush splits this into:
+    //   Phase 1: take_flush_snapshot() — brief write lock (~µs)
+    //   Phase 2: serialize_flush()     — NO lock (13+ seconds)
+    //   Phase 3: commit_flush()        — brief write lock (~ms)
+    //
+    // During Phase 2, search still works via frozen_inverted + disk.
+    // Inserts buffer doc_tokens in memory (file_handle closed).
+
+    /// Phase 1: Take a snapshot for two-phase flush (under write lock — brief).
+    ///
+    /// Moves inverted_index into frozen_inverted (for search visibility),
+    /// clones metadata, and closes file_handle so inserts use doc_tokens_memory.
+    ///
+    /// Returns None if no storage_path is set (memory-only index).
+    pub(crate) fn take_flush_snapshot(&mut self) -> Option<FulltextFlushSnapshot> {
+        let storage_path = self.storage_path.as_ref()?.clone();
+
+        // Move inverted_index → frozen_inverted (search still finds entries)
+        let taken = std::mem::take(&mut self.inverted_index);
+        let inverted_arc = Arc::new(taken);
+        self.frozen_inverted = Some(Arc::clone(&inverted_arc));
+
+        // Close file_handle → inserts fall back to doc_tokens_memory
+        // (insert() checks: if storage_path.is_some() && file_handle.is_some())
+        self.file_handle = None;
+
+        // Enable lazy_mode so remove() during Phase 2 tracks deleted_doc_ids.
+        // Safe: frozen_inverted provides all entries for search during Phase 2,
+        // regardless of whether we were in lazy mode before.
+        self.lazy_mode = true;
+
+        Some(FulltextFlushSnapshot {
+            inverted: inverted_arc,
+            token_offsets: self.token_offsets.clone(),
+            doc_tokens_offsets: self.doc_tokens_offsets.clone(),
+            deleted_doc_ids: self.deleted_doc_ids.clone(),
+            write_offset: self.write_offset,
+            lazy_mode: self.lazy_mode,
+            file_version: self.file_version,
+            name: self.name.clone(),
+            field: self.field.clone(),
+            options: self.options.clone(),
+            storage_path,
+        })
+    }
+
+    /// Phase 2: Serialize flush snapshot to .ftidx file (NO lock held).
+    ///
+    /// Opens its own file handle, writes the complete index data (V3 format),
+    /// and returns the new offsets for commit. Uses the same serialization
+    /// logic as flush() but operates on snapshot data.
+    pub(crate) fn serialize_flush(snapshot: &FulltextFlushSnapshot) -> Result<FulltextFlushResult> {
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&snapshot.storage_path)?;
+
+        // Build sorted token list from memory snapshot + disk offsets
+        let mut tokens: Vec<String> = snapshot.inverted.keys().cloned().collect();
+        if snapshot.lazy_mode {
+            tokens.extend(snapshot.token_offsets.keys().cloned());
+        }
+        tokens.sort();
+        tokens.dedup();
+
+        // Write doc_tokens offset table
+        let offsets_offset = snapshot.write_offset;
+        let offsets_vec: Vec<(&DocumentId, &u64)> = snapshot.doc_tokens_offsets.iter().collect();
+        let offsets_bytes = serde_json::to_vec(&offsets_vec)?;
+        file.seek(SeekFrom::Start(offsets_offset))?;
+        file.write_all(&offsets_bytes)?;
+
+        // Write V3 token entries with TF embedded
+        let token_entries_offset = offsets_offset + offsets_bytes.len() as u64;
+        let mut current_offset = token_entries_offset;
+        let mut new_token_offsets: HashMap<String, (u64, u32)> = HashMap::new();
+
+        for token in &tokens {
+            let mut entries: Vec<TokenEntry> = Vec::new();
+
+            if let Some(mem_entries) = snapshot.inverted.get(token) {
+                entries.extend(mem_entries.iter().cloned());
+            }
+
+            if snapshot.lazy_mode {
+                if let Some((offset, _count)) = snapshot.token_offsets.get(token) {
+                    let disk_entries = Self::read_token_entries_from_file(
+                        &mut file,
+                        *offset,
+                        snapshot.file_version,
+                    );
+                    if let Ok(disk) = disk_entries {
+                        let existing_doc_ids: HashSet<_> =
+                            entries.iter().map(|(id, _)| id.clone()).collect();
+                        for (doc_id, tf) in disk {
+                            if !existing_doc_ids.contains(&doc_id)
+                                && !snapshot.deleted_doc_ids.contains(&doc_id)
+                            {
+                                entries.push((doc_id, tf));
+                            }
+                        }
+                    }
+                }
+            }
+
+            if entries.is_empty() {
+                continue;
+            }
+
+            let token_bytes = token.as_bytes();
+            let entries_bytes = serde_json::to_vec(&entries)?;
+            file.seek(SeekFrom::Start(current_offset))?;
+            file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
+            file.write_all(token_bytes)?;
+            file.write_all(&(entries_bytes.len() as u32).to_le_bytes())?;
+            file.write_all(&entries_bytes)?;
+
+            new_token_offsets.insert(token.clone(), (current_offset, entries.len() as u32));
+            current_offset += 4 + token_bytes.len() as u64 + 4 + entries_bytes.len() as u64;
+        }
+
+        // Write token_offsets table
+        let token_offsets_offset = current_offset;
+        let token_offsets_vec: Vec<(&String, &(u64, u32))> = new_token_offsets.iter().collect();
+        let token_offsets_bytes = serde_json::to_vec(&token_offsets_vec)?;
+        file.seek(SeekFrom::Start(token_offsets_offset))?;
+        file.write_all(&token_offsets_bytes)?;
+
+        // Write metadata
+        let metadata_offset = token_offsets_offset + token_offsets_bytes.len() as u64;
+        let metadata = FulltextIndexMetadataForSave {
+            name: snapshot.name.clone(),
+            field: snapshot.field.clone(),
+            options: snapshot.options.clone(),
+        };
+        let metadata_bytes = serde_json::to_vec(&metadata)?;
+        file.write_all(&metadata_bytes)?;
+
+        // Update V3 header
+        file.seek(SeekFrom::Start(8))?; // After magic
+        file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
+        file.write_all(&(snapshot.doc_tokens_offsets.len() as u64).to_le_bytes())?;
+        file.write_all(&offsets_offset.to_le_bytes())?;
+        file.write_all(&token_entries_offset.to_le_bytes())?;
+        file.write_all(&token_offsets_offset.to_le_bytes())?;
+        file.write_all(&metadata_offset.to_le_bytes())?;
+
+        file.flush()?;
+        file.sync_all()?;
+
+        let new_write_offset = metadata_offset + metadata_bytes.len() as u64;
+
+        Ok(FulltextFlushResult {
+            new_token_offsets,
+            new_write_offset,
+        })
+    }
+
+    /// Phase 3: Commit flush results (under write lock — brief).
+    ///
+    /// Installs new token_offsets, re-opens file_handle, flushes buffered
+    /// doc_tokens from concurrent inserts, and clears frozen state.
+    pub(crate) fn commit_flush(&mut self, result: FulltextFlushResult) -> Result<()> {
+        // 1. Install new token_offsets and switch to lazy mode
+        self.token_offsets = result.new_token_offsets;
+        self.write_offset = result.new_write_offset;
+        self.lazy_mode = true;
+        self.file_version = FTIDX_VERSION_V3;
+        // NOTE: Do NOT clear deleted_doc_ids here.
+        // - Snapshot's deleted entries are already filtered out of the flushed data
+        //   (serialize_flush checks snapshot.deleted_doc_ids), so they're harmless in memory.
+        // - Phase 2 deletions (added to self.deleted_doc_ids during the flush) are NEEDED
+        //   because those docs are still in the freshly written token_offsets on disk.
+        // - The next full flush (close/compact via flush()) will clear deleted_doc_ids.
+
+        // 2. Clear frozen_inverted (entries are now on disk via token_offsets)
+        self.frozen_inverted = None;
+        // inverted_index has only new entries from concurrent inserts — keep them
+
+        // 3. Re-open file_handle for subsequent inserts
+        self.open_storage_file_rw()?;
+
+        // 4. Flush buffered doc_tokens (inserts during Phase 2 used doc_tokens_memory)
+        //    doc_tokens_offsets already has old entries (not moved, only cloned to snapshot).
+        //    New entries from concurrent inserts have offset=0 in doc_tokens_offsets;
+        //    write them to disk now and update with real offsets.
+        let buffered: Vec<(DocumentId, HashMap<String, u32>)> =
+            self.doc_tokens_memory.drain().collect();
+        for (doc_id, tokens) in buffered {
+            let offset = self.write_doc_tokens_to_disk(&doc_id, &tokens)?;
+            self.doc_tokens_offsets.insert(doc_id, offset);
+        }
+
+        Ok(())
+    }
+
+    /// Rollback a failed two-phase flush (under write lock — brief).
+    ///
+    /// Restores inverted_index from frozen_inverted and re-opens file_handle.
+    /// Called when serialize_flush() returns an error, to prevent data loss
+    /// on the next checkpoint (which would overwrite frozen_inverted).
+    pub(crate) fn rollback_flush(&mut self) {
+        if let Some(frozen) = self.frozen_inverted.take() {
+            // Restore: merge frozen entries back into inverted_index
+            // (inverted_index may have new entries from concurrent inserts during Phase 2)
+            match Arc::try_unwrap(frozen) {
+                Ok(entries) => {
+                    for (token, mut vec) in entries {
+                        self.inverted_index
+                            .entry(token)
+                            .or_default()
+                            .append(&mut vec);
+                    }
+                }
+                Err(arc) => {
+                    // Snapshot still referenced (shouldn't happen, but be safe)
+                    for (token, entries) in arc.as_ref() {
+                        self.inverted_index
+                            .entry(token.clone())
+                            .or_default()
+                            .extend(entries.iter().cloned());
+                    }
+                }
+            }
+        }
+        // Re-open file_handle (best effort — if this fails, next insert uses memory)
+        let _ = self.open_storage_file_rw();
+    }
+
+    /// Read token entries from a file at a given offset (standalone, no &self).
+    ///
+    /// Handles both V2 (HashSet<DocumentId> → TokenEntry with TF=1) and V3 (Vec<TokenEntry>).
+    /// Used by serialize_flush() which operates on its own file handle.
+    fn read_token_entries_from_file(
+        file: &mut File,
+        offset: u64,
+        file_version: u32,
+    ) -> Result<Vec<TokenEntry>> {
+        file.seek(SeekFrom::Start(offset))?;
+
+        let mut len_buf = [0u8; 4];
+
+        // Read and skip token name
+        file.read_exact(&mut len_buf)?;
+        let token_len = u32::from_le_bytes(len_buf) as usize;
+        let mut token_buf = vec![0u8; token_len];
+        file.read_exact(&mut token_buf)?;
+
+        // Read entries
+        file.read_exact(&mut len_buf)?;
+        let entries_len = u32::from_le_bytes(len_buf) as usize;
+        let mut entries_buf = vec![0u8; entries_len];
+        file.read_exact(&mut entries_buf)?;
+
+        if file_version >= FTIDX_VERSION_V3 {
+            let entries: Vec<TokenEntry> = serde_json::from_slice(&entries_buf)?;
+            Ok(entries)
+        } else {
+            // V2: HashSet<DocumentId> → convert to TokenEntry with TF=1
+            let doc_ids: HashSet<DocumentId> = serde_json::from_slice(&entries_buf)?;
+            Ok(doc_ids.into_iter().map(|id| (id, 1u32)).collect())
+        }
+    }
+
     /// Load index from file (supports both V1 and V2 formats)
     ///
     /// V1: Loads entire inverted_index into memory (backward compatible)
@@ -2178,6 +2520,7 @@ impl FulltextIndex {
                 file_version: FTIDX_VERSION_V1, // Will upgrade to V3 on next flush
                 deleted_doc_ids: HashSet::new(),
                 building: false, // Loaded from disk = already complete
+                frozen_inverted: None,
             })
         } else {
             // V2/V3 format: token_entries_offset, token_offsets_offset, metadata_offset
@@ -2234,6 +2577,7 @@ impl FulltextIndex {
                 file_version: version, // V2 will upgrade to V3 on next flush, V3 stays V3
                 deleted_doc_ids: HashSet::new(),
                 building: false, // Loaded from disk = already complete
+                frozen_inverted: None,
             })
         }
     }
@@ -2257,13 +2601,15 @@ impl FulltextIndex {
     /// In lazy mode, tokens may exist in both disk (token_offsets) and memory
     /// (inverted_index), so we compute the union to avoid double-counting.
     pub fn unique_token_count(&self) -> usize {
-        if self.lazy_mode {
-            // Compute union of disk and memory tokens to avoid double-counting
-            let mem_tokens: HashSet<&str> =
+        if self.lazy_mode || self.frozen_inverted.is_some() {
+            // Compute union of all token sources to avoid double-counting
+            let mut all_tokens: HashSet<&str> =
                 self.inverted_index.keys().map(|s| s.as_str()).collect();
-            let disk_tokens: HashSet<&str> =
-                self.token_offsets.keys().map(|s| s.as_str()).collect();
-            mem_tokens.union(&disk_tokens).count()
+            if let Some(ref frozen) = self.frozen_inverted {
+                all_tokens.extend(frozen.keys().map(|s| s.as_str()));
+            }
+            all_tokens.extend(self.token_offsets.keys().map(|s| s.as_str()));
+            all_tokens.len()
         } else {
             self.inverted_index.len()
         }

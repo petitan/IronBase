@@ -975,6 +975,49 @@ impl IndexManager {
         }
     }
 
+    /// Two-phase flush Phase 1: Take snapshot from a dirty fulltext index.
+    ///
+    /// Returns None if the index is not dirty or not found.
+    /// After this call, the index is in "flush in progress" state:
+    /// - inverted_index moved to frozen_inverted (search still works)
+    /// - file_handle closed (inserts use doc_tokens_memory)
+    pub(crate) fn take_fulltext_flush_snapshot(
+        &mut self,
+        name: &str,
+    ) -> Option<crate::fulltext::FulltextFlushSnapshot> {
+        if !self.dirty_fulltext_indexes.contains(name) {
+            return None;
+        }
+        self.fulltext_indexes.get_mut(name)?.take_flush_snapshot()
+    }
+
+    /// Two-phase flush error recovery: rollback a failed flush.
+    ///
+    /// Restores inverted_index from frozen_inverted and re-opens file_handle.
+    /// Must be called if serialize_flush() fails to prevent data loss on the
+    /// next checkpoint (which would overwrite frozen_inverted).
+    pub(crate) fn rollback_fulltext_flush(&mut self, name: &str) {
+        if let Some(index) = self.fulltext_indexes.get_mut(name) {
+            index.rollback_flush();
+        }
+    }
+
+    /// Two-phase flush Phase 3: Commit flush results back to the index.
+    ///
+    /// Installs new token_offsets, re-opens file_handle, flushes buffered
+    /// doc_tokens, and clears the dirty flag.
+    pub(crate) fn commit_fulltext_flush(
+        &mut self,
+        name: &str,
+        result: crate::fulltext::FulltextFlushResult,
+    ) -> Result<()> {
+        if let Some(index) = self.fulltext_indexes.get_mut(name) {
+            index.commit_flush(result)?;
+            self.dirty_fulltext_indexes.remove(name);
+        }
+        Ok(())
+    }
+
     /// Flush a single fuzzy index to disk
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty, no storage path, or not found.
