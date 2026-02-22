@@ -571,12 +571,14 @@ impl HnswIndex {
 
     /// Rebuild the index (useful after many deletions)
     pub fn rebuild(&mut self) -> Result<()> {
-        // Collect all vectors that haven't been removed
+        // Collect active vectors using id_to_index as the source of truth.
+        // IMPORTANT: iterate id_to_index (HashMap, unique keys) instead of nodes,
+        // because nodes may contain duplicate IDs after remove+reinsert cycles
+        // (orphan node + new active node with same ID).
         let items: Vec<(String, Vec<f32>)> = self
-            .nodes
+            .id_to_index
             .iter()
-            .filter(|n| self.id_to_index.contains_key(&n.id))
-            .map(|n| (n.id.clone(), n.vector.clone()))
+            .map(|(id, &idx)| (id.clone(), self.nodes[idx].vector.clone()))
             .collect();
 
         // Clear and reinsert

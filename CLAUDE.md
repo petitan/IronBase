@@ -519,6 +519,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Fulltext empty collection reject** | #49 | `rag_collection_create` üres collection-re nem hoz létre fulltext indexet | `search.rs:498` validáció `num_documents == 0` → error + cleanup, üres collection is triggereli | `live_document_count == 0` check: üres collection → üres index valid |
 | **Vector count stale metadata** | #50 | `vector_count: 0` a stats-ban működő HNSW index mellett | `VectorIndexMetadata.vector_count` csak creation-kor íródik, auto-indexing nem frissíti | `list_vector_indexes()` az in-memory HNSW `len()`-ből frissíti a clone-t |
 | **HNSW orphan accumulation** | 512990a6, #53 | `vector_count` 2x a valós után delete+reimport; növekvő memória | `batch_update_indexes()` nem kezelte HNSW-t + `remove()` lazy (orphan node marad) + `len()` orphan-okat is számolta | HNSW kezelés `batch_update_indexes`-ben + `len()` = `id_to_index.len()` + orphan rebuild checkpoint/compact-ban |
+| **Fulltext flush dirty flag** | ed9016d3, #54 | fulltext_search dokumentumok nagy része nem kereshető restart után | `commit_fulltext_flush()` feltétel nélkül törölte a dirty flag-et → Phase 2 alatti concurrent insert-ek elvesztek | `has_pending_entries()` check: dirty flag csak akkor törlődik ha `inverted_index` üres |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
@@ -659,6 +660,55 @@ pub fn calculate_candidate_limit(effective_limit: usize, has_filter_or_phrase: b
 
 **Érintett fájl:**
 - `ironbase-core/src/fulltext.rs:922` — `calculate_candidate_limit()`
+
+</details>
+
+<details>
+<summary>Fulltext Flush Dirty Flag Bug (ed9016d3, #54) - Részletes elemzés</summary>
+
+**Probléma:** `fulltext_search` a dokumentumok nagy részét nem találta meg restart után. Az index csak a legutolsó checkpoint óta beszúrt dokumentumokat tartalmazta.
+
+**Root Cause — Three-phase flush race condition:**
+
+A three-phase flush (8bbdc022) célja a write lock idejének minimalizálása:
+- **Phase 1** (write lock): `take_flush_snapshot()` — snapshot készítés az `inverted_index`-ről, majd kiürítés
+- **Phase 2** (NO lock): `serialize_flush()` — snapshot szerializálása fájlba
+- **Phase 3** (write lock): `commit_flush()` — eredmény commitolása, fájl handle frissítés
+
+A Phase 2 alatt NINCS lock → concurrent `insert_one`/`insert_many` hívások az `inverted_index`-be írnak ÉS dirty-re jelölik az indexet.
+
+**A bug:** `commit_fulltext_flush()` (manager.rs) Phase 3-ban feltétel nélkül törölte a dirty flag-et:
+```rust
+// HIBÁS (régi kód):
+self.dirty_fulltext_indexes.remove(name);  // Phase 2 insert-ek dirty flag-jét is törli!
+```
+
+**Következmény lánc:**
+1. Phase 2 insert → `inverted_index`-be ír + dirty = true
+2. Phase 3 → dirty = false (feltétel nélkül)
+3. Következő checkpoint → dirty = false → skip fulltext flush
+4. `close()`/`Drop` → dirty = false → skip flush
+5. Restart → stale `.ftidx` betöltve → Phase 2 entry-k ELVESZTEK
+
+**Miért nem véd a WAL:** WAL recovery (database/mod.rs:395-417) CSAK btree indexekre vonatkozik. Fulltext/fuzzy/vector indexeknek NINCS WAL védelme.
+
+**Fix:**
+```rust
+// HELYES (új kód):
+index.commit_flush(result)?;
+if !index.has_pending_entries() {  // inverted_index üres?
+    self.dirty_fulltext_indexes.remove(name);
+}
+```
+
+`has_pending_entries()` (fulltext.rs:2366): `!self.inverted_index.is_empty()` — ha Phase 2 alatt insert történt, az `inverted_index` nem üres → dirty flag megmarad → következő checkpoint kiírja.
+
+**Miért NEM érintett a normál `flush()`:** A `save_to_file()` → `flush()` path KIÜRÍTI az `inverted_index`-et, tehát ott a dirty clear biztonságos.
+
+**Érintett fájlok:**
+- `ironbase-core/src/fulltext.rs:2366` — `has_pending_entries()` method
+- `ironbase-core/src/index/manager.rs:1005` — `commit_fulltext_flush()` conditional dirty clear
+- `ironbase-core/src/database/maintenance.rs:457` — `flush_fulltext_batch()` three-phase orchestration
 
 </details>
 
