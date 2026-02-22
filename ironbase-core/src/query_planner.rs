@@ -292,6 +292,313 @@ impl QueryPlanner {
 
         Some((op, clauses.clone()))
     }
+
+    /// Merge $and/$or same-field clauses into implicit form for better index usage.
+    ///
+    /// Returns `Some(merged_query)` if the clauses can be rewritten as an equivalent
+    /// implicit query that the standard planner can optimize. Returns `None` if the
+    /// clauses cannot be safely merged.
+    ///
+    /// **$and merge rules:**
+    /// - Same field, range operators ($gte/$gt/$lte/$lt) → single condition object
+    /// - Conflicting ranges (e.g., 2× $gte) → tighter bound (max lower, min upper)
+    /// - Different fields (1 clause per field) → implicit AND: {field1:cond1, field2:cond2}
+    /// - Bare equality {field: val} → {field: {$eq: val}}
+    /// - Unsupported ($regex, $fuzzy, $text, nested $and/$or, multi-field clause) → None
+    ///
+    /// **$or merge rules:**
+    /// - Same field, all simple equality → {field: {$in: [val1, val2, ...]}}
+    /// - Otherwise → None
+    pub fn try_merge_logical_clauses(
+        logical_op: LogicalOperator,
+        clauses: &[Value],
+        index_fields: &[IndexPrefixInfo],
+    ) -> Option<Value> {
+        match logical_op {
+            LogicalOperator::And => Self::try_merge_and_clauses(clauses, index_fields),
+            LogicalOperator::Or => Self::try_merge_or_clauses(clauses, index_fields),
+            LogicalOperator::Nor => None, // $nor: complex semantics, never merge
+        }
+    }
+
+    /// Try to merge $and clauses into implicit form.
+    fn try_merge_and_clauses(clauses: &[Value], index_fields: &[IndexPrefixInfo]) -> Option<Value> {
+        use serde_json::Map;
+
+        // Collect per-field conditions from all clauses
+        // Key: field name, Value: list of (operator, value) pairs
+        let mut field_conditions: std::collections::HashMap<String, Vec<(String, Value)>> =
+            std::collections::HashMap::new();
+
+        for clause in clauses {
+            let obj = clause.as_object()?;
+
+            // Multi-field clause → cannot merge
+            if obj.len() != 1 {
+                return None;
+            }
+
+            let (field, value) = obj.iter().next()?;
+
+            // Nested logical operators → cannot merge
+            if field.starts_with('$') {
+                return None;
+            }
+
+            // Check what kind of condition this is
+            match value {
+                // Bare equality: {field: "value"} or {field: 123}
+                Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => {
+                    field_conditions
+                        .entry(field.clone())
+                        .or_default()
+                        .push(("$eq".to_string(), value.clone()));
+                }
+                // Operator object: {field: {$gte: 10, $lte: 20}}
+                Value::Object(cond_map) => {
+                    for (op, val) in cond_map {
+                        // Unsupported operators → cannot merge
+                        match op.as_str() {
+                            "$gt" | "$gte" | "$lt" | "$lte" | "$eq" | "$ne" | "$in" | "$nin"
+                            | "$exists" | "$type" => {}
+                            _ => return None, // $regex, $fuzzy, $text, $elemMatch, etc.
+                        }
+                        field_conditions
+                            .entry(field.clone())
+                            .or_default()
+                            .push((op.clone(), val.clone()));
+                    }
+                }
+                // Array or other → cannot merge
+                _ => return None,
+            }
+        }
+
+        // Check that at least one field has an index
+        let has_indexed_field = field_conditions
+            .keys()
+            .any(|field| Self::find_index_for_field(field, index_fields).is_some());
+        if !has_indexed_field {
+            return None;
+        }
+
+        // Build merged query: {field1: {$op1: val1, $op2: val2}, field2: ...}
+        let mut merged = Map::new();
+
+        for (field, conditions) in &field_conditions {
+            // Resolve conflicting range operators for the same field
+            let resolved = Self::resolve_range_conditions(conditions)?;
+            merged.insert(field.clone(), resolved);
+        }
+
+        Some(Value::Object(merged))
+    }
+
+    /// Resolve potentially conflicting conditions on a single field into one condition object.
+    ///
+    /// For conflicting bounds (e.g., 2× $gte), picks the tighter bound.
+    fn resolve_range_conditions(conditions: &[(String, Value)]) -> Option<Value> {
+        use serde_json::Map;
+
+        // Single condition shortcut
+        if conditions.len() == 1 {
+            let (op, val) = &conditions[0];
+            if op == "$eq" {
+                // Bare equality stays as operator form for planner
+                let mut m = Map::new();
+                m.insert("$eq".to_string(), val.clone());
+                return Some(Value::Object(m));
+            }
+            let mut m = Map::new();
+            m.insert(op.clone(), val.clone());
+            return Some(Value::Object(m));
+        }
+
+        let mut result = Map::new();
+
+        // Track bound values for conflict resolution
+        let mut gte_val: Option<&Value> = None;
+        let mut gt_val: Option<&Value> = None;
+        let mut lte_val: Option<&Value> = None;
+        let mut lt_val: Option<&Value> = None;
+        let mut eq_vals: Vec<&Value> = Vec::new();
+
+        for (op, val) in conditions {
+            match op.as_str() {
+                "$gte" => {
+                    gte_val = Some(match gte_val {
+                        Some(existing) => {
+                            // Tighter bound: max of the two
+                            if Self::compare_json_for_bound(val, existing)
+                                == std::cmp::Ordering::Greater
+                            {
+                                val
+                            } else {
+                                existing
+                            }
+                        }
+                        None => val,
+                    });
+                }
+                "$gt" => {
+                    gt_val = Some(match gt_val {
+                        Some(existing) => {
+                            if Self::compare_json_for_bound(val, existing)
+                                == std::cmp::Ordering::Greater
+                            {
+                                val
+                            } else {
+                                existing
+                            }
+                        }
+                        None => val,
+                    });
+                }
+                "$lte" => {
+                    lte_val = Some(match lte_val {
+                        Some(existing) => {
+                            // Tighter bound: min of the two
+                            if Self::compare_json_for_bound(val, existing)
+                                == std::cmp::Ordering::Less
+                            {
+                                val
+                            } else {
+                                existing
+                            }
+                        }
+                        None => val,
+                    });
+                }
+                "$lt" => {
+                    lt_val = Some(match lt_val {
+                        Some(existing) => {
+                            if Self::compare_json_for_bound(val, existing)
+                                == std::cmp::Ordering::Less
+                            {
+                                val
+                            } else {
+                                existing
+                            }
+                        }
+                        None => val,
+                    });
+                }
+                "$eq" => {
+                    eq_vals.push(val);
+                }
+                // Pass through other operators as-is ($ne, $in, $nin, $exists, $type)
+                other => {
+                    result.insert(other.to_string(), val.clone());
+                }
+            }
+        }
+
+        // Handle conflicting equality: $and: [{f:1}, {f:2}] → impossible, but let engine handle it
+        if eq_vals.len() > 1 {
+            return None;
+        }
+
+        // If we have an $eq combined with range, that's unusual but valid — pass $eq through
+        if let Some(eq_v) = eq_vals.first() {
+            result.insert("$eq".to_string(), (*eq_v).clone());
+        }
+
+        // Emit resolved range operators
+        if let Some(v) = gte_val {
+            result.insert("$gte".to_string(), v.clone());
+        }
+        if let Some(v) = gt_val {
+            result.insert("$gt".to_string(), v.clone());
+        }
+        if let Some(v) = lte_val {
+            result.insert("$lte".to_string(), v.clone());
+        }
+        if let Some(v) = lt_val {
+            result.insert("$lt".to_string(), v.clone());
+        }
+
+        Some(Value::Object(result))
+    }
+
+    /// Try to merge $or clauses into implicit $in form.
+    fn try_merge_or_clauses(clauses: &[Value], index_fields: &[IndexPrefixInfo]) -> Option<Value> {
+        // All clauses must be single-field simple equality on the same field
+        let mut target_field: Option<String> = None;
+        let mut values: Vec<Value> = Vec::new();
+
+        for clause in clauses {
+            let obj = clause.as_object()?;
+            if obj.len() != 1 {
+                return None; // Multi-field clause
+            }
+            let (field, value) = obj.iter().next()?;
+            if field.starts_with('$') {
+                return None; // Nested logical
+            }
+
+            // Extract the equality value
+            let eq_value = match value {
+                // Bare equality: {field: "value"}
+                Value::String(_) | Value::Number(_) | Value::Bool(_) | Value::Null => value.clone(),
+                // Explicit $eq: {field: {$eq: value}}
+                Value::Object(cond_map) => {
+                    if cond_map.len() == 1 {
+                        if let Some(v) = cond_map.get("$eq") {
+                            v.clone()
+                        } else {
+                            return None; // Non-equality operator
+                        }
+                    } else {
+                        return None; // Multiple operators
+                    }
+                }
+                _ => return None,
+            };
+
+            // Verify all clauses target the same field
+            match &target_field {
+                Some(existing) => {
+                    if existing != field {
+                        return None; // Different fields
+                    }
+                }
+                None => {
+                    target_field = Some(field.clone());
+                }
+            }
+
+            values.push(eq_value);
+        }
+
+        let field = target_field?;
+
+        // Must have an index on this field
+        Self::find_index_for_field(&field, index_fields)?;
+
+        // Build {field: {$in: [val1, val2, ...]}}
+        let mut merged = serde_json::Map::new();
+        let mut in_obj = serde_json::Map::new();
+        in_obj.insert("$in".to_string(), Value::Array(values));
+        merged.insert(field, Value::Object(in_obj));
+
+        Some(Value::Object(merged))
+    }
+
+    /// Compare two JSON values for bound tightening (used in conflicting range resolution).
+    ///
+    /// Supports Number and String comparisons. Falls back to Equal for incompatible types.
+    fn compare_json_for_bound(a: &Value, b: &Value) -> std::cmp::Ordering {
+        match (a, b) {
+            (Value::Number(an), Value::Number(bn)) => {
+                let af = an.as_f64().unwrap_or(0.0);
+                let bf = bn.as_f64().unwrap_or(0.0);
+                af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            (Value::String(a_s), Value::String(b_s)) => a_s.cmp(b_s),
+            _ => std::cmp::Ordering::Equal,
+        }
+    }
+
     /// Find an index for a given field (compound index aware)
     ///
     /// Takes a list of IndexPrefixInfo containing:
@@ -1007,6 +1314,36 @@ impl QueryPlanner {
         use serde_json::json;
 
         if let Some((logical_op, clauses)) = Self::extract_logical_clauses(query_json) {
+            let operator = match logical_op {
+                LogicalOperator::And => "$and",
+                LogicalOperator::Or => "$or",
+                LogicalOperator::Nor => "$nor",
+            };
+
+            // Try clause merge optimization
+            if let Some(merged_query) =
+                Self::try_merge_logical_clauses(logical_op, &clauses, index_fields)
+            {
+                let candidates = Self::collect_candidates(&merged_query, index_fields);
+                if let Some(best) = Self::select_best_candidate(candidates.clone()) {
+                    let chosen_plan = Self::plan_to_json(&best.plan, &best.field);
+                    let candidates_json: Vec<Value> =
+                        candidates.iter().map(Self::candidate_to_json).collect();
+
+                    return json!({
+                        "chosenPlan": chosen_plan,
+                        "selectionReason": best.reason,
+                        "estimatedRows": best.estimated_cost,
+                        "optimization": "clause_merge",
+                        "originalOperator": operator,
+                        "mergedQuery": merged_query,
+                        "candidates": candidates_json,
+                        "candidateCount": candidates_json.len(),
+                    });
+                }
+            }
+
+            // Fallback: per-clause explain
             let mut total_candidates = 0usize;
             let clauses_json: Vec<Value> = clauses
                 .iter()
@@ -1025,12 +1362,6 @@ impl QueryPlanner {
                     })
                 })
                 .collect();
-
-            let operator = match logical_op {
-                LogicalOperator::And => "$and",
-                LogicalOperator::Or => "$or",
-                LogicalOperator::Nor => "$nor",
-            };
 
             return json!({
                 "chosenPlan": {
@@ -2048,5 +2379,312 @@ mod tests {
         };
         assert!(non_exact.is_optimizable());
         assert!(!non_exact.is_optimizable_for_in());
+    }
+
+    // --- Clause merge tests ---
+
+    fn make_index(field: &str, name: &str) -> IndexPrefixInfo {
+        IndexPrefixInfo {
+            index_name: name.to_string(),
+            prefix_field: field.to_string(),
+            is_compound: false,
+            num_fields: 1,
+            sparse: false,
+            distinct_count: 0,
+            building: false,
+            num_keys: 0,
+            case_insensitive: false,
+            null_count: 0,
+            multikey_ratio: 0.0,
+            histogram: None,
+            mcv: None,
+        }
+    }
+
+    #[test]
+    fn test_merge_and_same_field_range() {
+        // $and: [{year: {$gte: 2024}}, {year: {$lte: 2025}}] → {year: {$gte: 2024, $lte: 2025}}
+        let clauses = vec![
+            json!({"year": {"$gte": 2024}}),
+            json!({"year": {"$lte": 2025}}),
+        ];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        let year_obj = merged.get("year").unwrap().as_object().unwrap();
+        assert_eq!(year_obj.get("$gte").unwrap(), &json!(2024));
+        assert_eq!(year_obj.get("$lte").unwrap(), &json!(2025));
+    }
+
+    #[test]
+    fn test_merge_and_conflicting_gte_takes_tighter() {
+        // $and: [{year: {$gte: 2020}}, {year: {$gte: 2024}}] → {year: {$gte: 2024}}
+        let clauses = vec![
+            json!({"year": {"$gte": 2020}}),
+            json!({"year": {"$gte": 2024}}),
+        ];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        let year_obj = merged.get("year").unwrap().as_object().unwrap();
+        assert_eq!(year_obj.get("$gte").unwrap(), &json!(2024));
+        assert!(year_obj.get("$lte").is_none());
+    }
+
+    #[test]
+    fn test_merge_and_conflicting_lte_takes_tighter() {
+        // $and: [{year: {$lte: 2030}}, {year: {$lte: 2025}}] → {year: {$lte: 2025}}
+        let clauses = vec![
+            json!({"year": {"$lte": 2030}}),
+            json!({"year": {"$lte": 2025}}),
+        ];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        let year_obj = merged.get("year").unwrap().as_object().unwrap();
+        assert_eq!(year_obj.get("$lte").unwrap(), &json!(2025));
+    }
+
+    #[test]
+    fn test_merge_and_different_fields() {
+        // $and: [{year: {$gte: 2024}}, {name: "Alice"}] → {year: {$gte: 2024}, name: {$eq: "Alice"}}
+        let clauses = vec![json!({"year": {"$gte": 2024}}), json!({"name": "Alice"})];
+        let indexes = vec![
+            make_index("year", "idx_year"),
+            make_index("name", "idx_name"),
+        ];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        assert!(merged.get("year").is_some());
+        assert!(merged.get("name").is_some());
+    }
+
+    #[test]
+    fn test_merge_and_bare_equality() {
+        // $and: [{year: 2024}, {name: "Alice"}] → {year: {$eq: 2024}, name: {$eq: "Alice"}}
+        let clauses = vec![json!({"year": 2024}), json!({"name": "Alice"})];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        let year_obj = merged.get("year").unwrap().as_object().unwrap();
+        assert_eq!(year_obj.get("$eq").unwrap(), &json!(2024));
+    }
+
+    #[test]
+    fn test_merge_or_same_field_equality_to_in() {
+        // $or: [{year: 2024}, {year: 2025}] → {year: {$in: [2024, 2025]}}
+        let clauses = vec![json!({"year": 2024}), json!({"year": 2025})];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::Or, &clauses, &indexes);
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        let year_obj = merged.get("year").unwrap().as_object().unwrap();
+        let in_arr = year_obj.get("$in").unwrap().as_array().unwrap();
+        assert_eq!(in_arr.len(), 2);
+        assert!(in_arr.contains(&json!(2024)));
+        assert!(in_arr.contains(&json!(2025)));
+    }
+
+    #[test]
+    fn test_merge_or_explicit_eq_to_in() {
+        // $or: [{year: {$eq: 2024}}, {year: {$eq: 2025}}] → {year: {$in: [2024, 2025]}}
+        let clauses = vec![
+            json!({"year": {"$eq": 2024}}),
+            json!({"year": {"$eq": 2025}}),
+        ];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::Or, &clauses, &indexes);
+        assert!(result.is_some());
+        let merged = result.unwrap();
+        let year_obj = merged.get("year").unwrap().as_object().unwrap();
+        let in_arr = year_obj.get("$in").unwrap().as_array().unwrap();
+        assert_eq!(in_arr.len(), 2);
+    }
+
+    // --- Edge cases that should NOT merge ---
+
+    #[test]
+    fn test_merge_and_conflicting_equality_returns_none() {
+        // $and: [{year: 2024}, {year: 2025}] → None (conflicting equalities)
+        let clauses = vec![json!({"year": 2024}), json!({"year": 2025})];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_or_range_returns_none() {
+        // $or: [{year: {$gte: 2024}}, {year: {$lte: 2020}}] → None (range $or not mergeable)
+        let clauses = vec![
+            json!({"year": {"$gte": 2024}}),
+            json!({"year": {"$lte": 2020}}),
+        ];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::Or, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_or_different_fields_returns_none() {
+        // $or: [{year: 2024}, {name: "Alice"}] → None (different fields)
+        let clauses = vec![json!({"year": 2024}), json!({"name": "Alice"})];
+        let indexes = vec![
+            make_index("year", "idx_year"),
+            make_index("name", "idx_name"),
+        ];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::Or, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_nested_logical_returns_none() {
+        // $and: [{$or: [{year: 2024}]}, {year: 2025}] → None (nested logical)
+        let clauses = vec![json!({"$or": [{"year": 2024}]}), json!({"year": 2025})];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_multi_field_clause_returns_none() {
+        // $and: [{year: 2024, name: "A"}, {city: "B"}] → None (multi-field clause)
+        let clauses = vec![json!({"year": 2024, "name": "A"}), json!({"city": "B"})];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_no_index_returns_none() {
+        // No index on the field → None
+        let clauses = vec![
+            json!({"year": {"$gte": 2024}}),
+            json!({"year": {"$lte": 2025}}),
+        ];
+        let indexes: Vec<IndexPrefixInfo> = vec![]; // No indexes
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_regex_returns_none() {
+        // $and with $regex → None (unsupported operator)
+        let clauses = vec![
+            json!({"name": {"$regex": "^A"}}),
+            json!({"name": {"$regex": ".*B$"}}),
+        ];
+        let indexes = vec![make_index("name", "idx_name")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_nor_returns_none() {
+        // $nor never merges
+        let clauses = vec![json!({"year": 2024}), json!({"year": 2025})];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let result =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::Nor, &clauses, &indexes);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_merge_and_produces_valid_plan() {
+        // End-to-end: merged query should produce an IndexRangeScan plan
+        let clauses = vec![
+            json!({"year": {"$gte": 2024}}),
+            json!({"year": {"$lte": 2025}}),
+        ];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let merged =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::And, &clauses, &indexes)
+                .unwrap();
+
+        let (_, plan) = QueryPlanner::analyze_query_with_fields(&merged, &indexes).unwrap();
+        match plan {
+            QueryPlan::IndexRangeScan {
+                index_name,
+                start,
+                end,
+                inclusive_start,
+                inclusive_end,
+                ..
+            } => {
+                assert_eq!(index_name, "idx_year");
+                assert!(start.is_some());
+                assert!(end.is_some());
+                assert!(inclusive_start);
+                assert!(inclusive_end);
+            }
+            other => panic!("Expected IndexRangeScan, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_or_produces_valid_plan() {
+        // End-to-end: merged $or query should produce a MultiValueScan plan
+        let clauses = vec![json!({"year": 2024}), json!({"year": 2025})];
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let merged =
+            QueryPlanner::try_merge_logical_clauses(LogicalOperator::Or, &clauses, &indexes)
+                .unwrap();
+
+        let (_, plan) = QueryPlanner::analyze_query_with_fields(&merged, &indexes).unwrap();
+        match plan {
+            QueryPlan::MultiValueScan {
+                index_name, keys, ..
+            } => {
+                assert_eq!(index_name, "idx_year");
+                assert_eq!(keys.len(), 2);
+            }
+            other => panic!("Expected MultiValueScan, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_merge_explain_shows_optimization() {
+        let query = json!({"$and": [{"year": {"$gte": 2024}}, {"year": {"$lte": 2025}}]});
+        let indexes = vec![make_index("year", "idx_year")];
+
+        let explain = QueryPlanner::explain_query_with_fields(&query, &indexes);
+        assert_eq!(explain.get("optimization").unwrap(), "clause_merge");
+        assert_eq!(explain.get("originalOperator").unwrap(), "$and");
+        assert!(explain.get("mergedQuery").is_some());
     }
 }

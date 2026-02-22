@@ -2480,6 +2480,33 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             Some(self.create_plan_for_hint(query_json, hint_name, &field)?)
         } else {
             if let Some((logical_op, clauses)) = QueryPlanner::extract_logical_clauses(query_json) {
+                // Try clause merge optimization first: rewrite $and/$or to implicit form
+                // so the standard planner can use a single index scan instead of HashSet merge.
+                let indexes = self.indexes.read();
+                let index_fields = indexes.list_indexes_with_compound_info();
+                drop(indexes);
+
+                if let Some(merged_query) =
+                    QueryPlanner::try_merge_logical_clauses(logical_op, &clauses, &index_fields)
+                {
+                    // Plan with merged query, but post-filter with ORIGINAL query for correctness
+                    if let Some((_, plan)) =
+                        QueryPlanner::analyze_query_with_fields(&merged_query, &index_fields)
+                    {
+                        return self.collect_doc_ids_from_plan(
+                            &parsed_query,
+                            plan,
+                            sort_field,
+                            sort_desc,
+                            skip,
+                            limit,
+                            cancel_flag,
+                            deadline,
+                        );
+                    }
+                }
+
+                // Fallback: original per-clause logical operator handling
                 if let Some(result) = self.collect_doc_ids_for_logical_operator(
                     &parsed_query,
                     logical_op,

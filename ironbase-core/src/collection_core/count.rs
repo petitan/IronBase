@@ -188,9 +188,174 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         let index_fields = indexes.list_indexes_with_compound_info();
 
         if let Some((logical_op, clauses)) = QueryPlanner::extract_logical_clauses(query_json) {
+            // Try clause merge optimization first: rewrite $and/$or to implicit form
+            // so the standard planner can use a single index scan instead of HashSet merge.
+            if let Some(merged_query) =
+                QueryPlanner::try_merge_logical_clauses(logical_op, &clauses, &index_fields)
+            {
+                if let Some((_, plan)) =
+                    QueryPlanner::analyze_query_with_fields(&merged_query, &index_fields)
+                {
+                    let fully_covered = query_fully_covered_by_plan(&merged_query, &plan);
+
+                    // Handle fully-covered merged plans with O(1) memory count
+                    match &plan {
+                        QueryPlan::IndexRangeScan {
+                            ref index_name,
+                            ref start,
+                            ref end,
+                            inclusive_start,
+                            inclusive_end,
+                            ..
+                        } => {
+                            if let Some(index) = indexes.get_btree_index(index_name) {
+                                let default_start = IndexKey::Null;
+                                let default_end = max_string_key();
+                                let start_key = start.as_ref().unwrap_or(&default_start);
+                                let end_key = end.as_ref().unwrap_or(&default_end);
+
+                                if fully_covered {
+                                    let result = index.range_query(
+                                        start_key,
+                                        end_key,
+                                        *inclusive_start,
+                                        *inclusive_end,
+                                        RangeQueryMode::Count,
+                                    );
+                                    let raw_count = match result {
+                                        RangeQueryResult::Count(c) => c,
+                                        _ => unreachable!("Count mode always returns Count"),
+                                    };
+                                    drop(indexes);
+                                    return self.adjust_count_for_tombstones(raw_count);
+                                } else {
+                                    let mode = RangeQueryMode::Scan {
+                                        skip: 0,
+                                        limit: None,
+                                        order: ScanOrder::Asc,
+                                    };
+                                    let doc_ids = index
+                                        .range_query(
+                                            start_key,
+                                            end_key,
+                                            *inclusive_start,
+                                            *inclusive_end,
+                                            mode,
+                                        )
+                                        .unwrap_docs();
+                                    drop(indexes);
+                                    return self.count_index_narrowed(doc_ids, query_json, ctx);
+                                }
+                            }
+                        }
+                        QueryPlan::MultiValueScan {
+                            ref index_name,
+                            ref keys,
+                            ..
+                        } => {
+                            if let Some(index) = indexes.get_btree_index(index_name) {
+                                if fully_covered {
+                                    let mut total_count = 0usize;
+                                    for key in keys {
+                                        let result = index.range_query(
+                                            key,
+                                            key,
+                                            true,
+                                            true,
+                                            RangeQueryMode::Count,
+                                        );
+                                        if let RangeQueryResult::Count(c) = result {
+                                            total_count += c;
+                                        }
+                                    }
+                                    drop(indexes);
+                                    return self.adjust_count_for_tombstones(total_count);
+                                } else {
+                                    let mut all_doc_ids = Vec::new();
+                                    for key in keys {
+                                        let mode = RangeQueryMode::Scan {
+                                            skip: 0,
+                                            limit: None,
+                                            order: ScanOrder::Asc,
+                                        };
+                                        let ids = index
+                                            .range_query(key, key, true, true, mode)
+                                            .unwrap_docs();
+                                        all_doc_ids.extend(ids);
+                                    }
+                                    all_doc_ids.sort_unstable();
+                                    all_doc_ids.dedup();
+                                    drop(indexes);
+                                    return self.count_index_narrowed(all_doc_ids, query_json, ctx);
+                                }
+                            }
+                        }
+                        QueryPlan::IndexScan {
+                            ref index_name,
+                            ref key,
+                            is_compound,
+                            ..
+                        } => {
+                            if let Some(index) = indexes.get_btree_index(index_name) {
+                                let (start, end) = if *is_compound {
+                                    index.build_prefix_range(key.clone())
+                                } else {
+                                    (key.clone(), key.clone())
+                                };
+
+                                if fully_covered {
+                                    let result = index.range_query(
+                                        &start,
+                                        &end,
+                                        true,
+                                        true,
+                                        RangeQueryMode::Count,
+                                    );
+                                    let raw_count = match result {
+                                        RangeQueryResult::Count(c) => c,
+                                        _ => unreachable!("Count mode always returns Count"),
+                                    };
+                                    drop(indexes);
+                                    return self.adjust_count_for_tombstones(raw_count);
+                                } else {
+                                    let mode = RangeQueryMode::Scan {
+                                        skip: 0,
+                                        limit: None,
+                                        order: ScanOrder::Asc,
+                                    };
+                                    let doc_ids = index
+                                        .range_query(&start, &end, true, true, mode)
+                                        .unwrap_docs();
+                                    drop(indexes);
+                                    return self.count_index_narrowed(doc_ids, query_json, ctx);
+                                }
+                            }
+                        }
+                        _ => {
+                            // Other plan types: use collect_doc_ids_from_plan as fallback
+                            drop(indexes);
+                            let parsed_query = Query::from_json(query_json)?;
+                            let cancel_flag = ctx.and_then(|c| c.cancel_flag());
+                            let deadline = ctx.and_then(|c| c.deadline());
+                            let (doc_ids, _) = self.collect_doc_ids_from_plan(
+                                &parsed_query,
+                                plan,
+                                None,
+                                false,
+                                0,
+                                None,
+                                cancel_flag,
+                                deadline,
+                            )?;
+                            return Ok(doc_ids.len() as u64);
+                        }
+                    }
+                }
+            }
+
+            // Fallback: original per-clause logical operator handling
             drop(indexes);
             let parsed_query = Query::from_json(query_json)?;
-            // Extract cancel_flag and deadline from ExecutionContext
             let cancel_flag = ctx.and_then(|c| c.cancel_flag());
             let deadline = ctx.and_then(|c| c.deadline());
             if let Some((doc_ids, _)) = self.collect_doc_ids_for_logical_operator(
