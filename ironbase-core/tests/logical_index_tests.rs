@@ -343,3 +343,170 @@ fn test_and_conflicting_gte_tighter_bound() {
     let results = collection.find(&query).unwrap();
     assert_eq!(results.len(), 3); // 2028, 2029, 2030
 }
+
+#[test]
+fn test_and_clause_merge_gt_lt_exclusive() {
+    // $gt/$lt (exclusive boundaries) should also merge
+    let (db, coll_name) = create_memory_db();
+    let collection = db.collection(&coll_name).unwrap();
+
+    for year in 2020..=2030 {
+        db.insert_one(
+            &coll_name,
+            HashMap::from([("year".to_string(), json!(year))]),
+        )
+        .unwrap();
+    }
+
+    collection
+        .create_index("year".to_string(), false, false)
+        .unwrap();
+
+    // $gt: 2024 means > 2024 (exclusive), $lt: 2028 means < 2028 (exclusive)
+    let query = json!({"$and": [{"year": {"$gt": 2024}}, {"year": {"$lt": 2028}}]});
+    let results = collection.find(&query).unwrap();
+    assert_eq!(results.len(), 3); // 2025, 2026, 2027
+
+    // Same with implicit form
+    let implicit = collection
+        .find(&json!({"year": {"$gt": 2024, "$lt": 2028}}))
+        .unwrap();
+    assert_eq!(results.len(), implicit.len());
+}
+
+#[test]
+fn test_and_clause_merge_string_range() {
+    let (db, coll_name) = create_memory_db();
+    let collection = db.collection(&coll_name).unwrap();
+
+    for name in ["Alice", "Bob", "Charlie", "Dave", "Eve"] {
+        db.insert_one(
+            &coll_name,
+            HashMap::from([("name".to_string(), json!(name))]),
+        )
+        .unwrap();
+    }
+
+    collection
+        .create_index("name".to_string(), false, false)
+        .unwrap();
+
+    let query = json!({"$and": [{"name": {"$gte": "Bob"}}, {"name": {"$lte": "Dave"}}]});
+    let results = collection.find(&query).unwrap();
+    assert_eq!(results.len(), 3); // Bob, Charlie, Dave
+}
+
+#[test]
+fn test_or_clause_merge_boolean() {
+    let (db, coll_name) = create_memory_db();
+    let collection = db.collection(&coll_name).unwrap();
+
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("active".to_string(), json!(true))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("active".to_string(), json!(false))]),
+    )
+    .unwrap();
+
+    collection
+        .create_index("active".to_string(), false, false)
+        .unwrap();
+
+    let query = json!({"$or": [{"active": true}, {"active": false}]});
+    let results = collection.find(&query).unwrap();
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_and_regex_fallback_still_works() {
+    // $and with $regex should NOT merge but still return correct results via fallback
+    let (db, coll_name) = create_memory_db();
+    let collection = db.collection(&coll_name).unwrap();
+
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("name".to_string(), json!("Alice"))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("name".to_string(), json!("Bob"))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("name".to_string(), json!("Charlie"))]),
+    )
+    .unwrap();
+
+    collection
+        .create_index("name".to_string(), false, false)
+        .unwrap();
+
+    let query = json!({"$and": [{"name": {"$regex": "^A"}}, {"name": {"$regex": ".*ce$"}}]});
+    let results = collection.find(&query).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["name"], "Alice");
+}
+
+#[test]
+fn test_and_count_non_fully_covered() {
+    // $and where merged query has both indexed and non-indexed fields
+    let (db, coll_name) = create_memory_db();
+    let collection = db.collection(&coll_name).unwrap();
+
+    for year in 2020..=2025 {
+        for status in ["active", "inactive"] {
+            db.insert_one(
+                &coll_name,
+                HashMap::from([
+                    ("year".to_string(), json!(year)),
+                    ("status".to_string(), json!(status)),
+                ]),
+            )
+            .unwrap();
+        }
+    }
+
+    collection
+        .create_index("year".to_string(), false, false)
+        .unwrap();
+
+    // year is indexed, status is not → non-fully-covered
+    let query = json!({
+        "$and": [
+            {"year": {"$gte": 2024}},
+            {"status": "active"}
+        ]
+    });
+
+    let count = collection.count_documents(&query).unwrap();
+    assert_eq!(count, 2); // 2024+active, 2025+active
+}
+
+#[test]
+fn test_and_single_clause_merge() {
+    // $and with single clause should merge and work
+    let (db, coll_name) = create_memory_db();
+    let collection = db.collection(&coll_name).unwrap();
+
+    for year in 2020..=2025 {
+        db.insert_one(
+            &coll_name,
+            HashMap::from([("year".to_string(), json!(year))]),
+        )
+        .unwrap();
+    }
+
+    collection
+        .create_index("year".to_string(), false, false)
+        .unwrap();
+
+    let query = json!({"$and": [{"year": {"$gte": 2024}}]});
+    let results = collection.find(&query).unwrap();
+    assert_eq!(results.len(), 2); // 2024, 2025
+}
