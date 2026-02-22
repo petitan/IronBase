@@ -2346,12 +2346,13 @@ impl FulltextIndex {
         //   because those docs are still in the freshly written token_offsets on disk.
         // - The next full flush (close/compact via flush()) will clear deleted_doc_ids.
 
-        // 2. Clear frozen_inverted (entries are now on disk via token_offsets)
+        // 2. Re-open file_handle BEFORE clearing frozen_inverted.
+        //    If this fails, rollback_flush() can still restore frozen → inverted_index.
+        self.open_storage_file_rw()?;
+
+        // 3. Clear frozen_inverted (entries are now on disk via token_offsets)
         self.frozen_inverted = None;
         // inverted_index has only new entries from concurrent inserts — keep them
-
-        // 3. Re-open file_handle for subsequent inserts
-        self.open_storage_file_rw()?;
 
         // 4. Flush buffered doc_tokens (inserts during Phase 2 used doc_tokens_memory)
         //    doc_tokens_offsets already has old entries (not moved, only cloned to snapshot).

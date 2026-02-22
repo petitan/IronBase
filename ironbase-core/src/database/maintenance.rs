@@ -283,184 +283,291 @@ impl DatabaseCore<StorageEngine> {
     /// This only writes index files (.idx, .ftidx, .fzidx, .hnsw) to disk.
     /// It does NOT touch the WAL or metadata. Safe to call with db.read().
     ///
-    /// # Known issue: fulltext flush blocks insert_one (v1.0.314)
+    /// # Parallelism (v1.0.351+)
     ///
-    /// Each index flush holds `index_manager.write()` for the ENTIRE serialize + file write.
-    /// Under memory pressure (page swapping), fulltext flush for 130K docs takes 13s+ (normal)
-    /// to 10+ MINUTES (swapping). During this time, `insert_one` blocks at
-    /// `check_index_constraints()` which needs `indexes.read()` — blocked by the writer.
+    /// Two levels of parallelism (feature-gated: `parallel`):
     ///
-    /// **Measured (v1.0.314 tracing):**
-    /// - `emails_body.plain_fts` fulltext: 13,203ms flush under `index_manager.write()`
-    /// - `attachment_contents_markdown_fts`: 4,060ms flush
-    /// - All btree indexes: < 300ms each
-    /// - Metadata serialize: 57ms (8.4MB) — NOT the bottleneck
+    /// 1. **Cross-collection**: Multiple collections flush concurrently via `par_iter()`.
+    ///    Each collection has its own `Arc<RwLock<IndexManager>>` — no contention.
     ///
-    /// # TODO: Arc COW snapshot (iparági sztenderd megoldás)
+    /// 2. **Within-collection fulltext batch**: All fulltext indexes in one collection
+    ///    use batched three-phase flush: take all snapshots (single brief write lock),
+    ///    serialize all in parallel (NO lock), commit all (single brief write lock).
+    ///    N fulltext indexes at 13s each → ~13s total instead of N×13s.
     ///
-    /// Wrap index data in `Arc<T>`, use copy-on-write to eliminate lock contention:
-    ///
-    /// ```text
-    /// FLUSH (checkpoint thread):
-    ///   1. Brief write lock: snapshot = Arc::clone(&self.data)  // microseconds
-    ///   2. Release lock
-    ///   3. Serialize snapshot → file                             // minutes, NO LOCK
-    ///   4. Brief write lock: dirty = false
-    ///
-    /// INSERT (concurrent):
-    ///   1. Arc::make_mut(&mut self.data)  // COW: clone only if flush holds a ref
-    ///   2. Modify in-place
-    /// ```
-    ///
-    /// Affected files:
-    /// - `ironbase-core/src/fulltext.rs` — FulltextIndex internals → Arc<FulltextData>
-    /// - `ironbase-core/src/index/fuzzy.rs` — FuzzyIndex internals → Arc<FuzzyData>
-    /// - `ironbase-core/src/index/manager.rs` — flush_one_* methods: Arc::clone + lockless write
-    /// - This file — flush loop: brief lock for Arc::clone, no lock for serialize+write
+    /// Btree/fuzzy/vector flushes remain sequential (< 300ms each, lock contention
+    /// dominates over I/O — parallelizing would just serialize on the write lock).
     pub fn flush_all_indexes_counted(&self) -> Result<usize> {
         let db_path = {
             let storage = self.storage.read();
             storage.get_file_path().to_string()
         };
 
-        let mut total_flushed = 0usize;
         let index_managers = self.index_managers.read();
-        for (collection_name, index_manager) in index_managers.iter() {
-            // 1. Collect dirty names under brief READ lock
-            let (dirty_bt, dirty_ft, dirty_fz, dirty_vec) = {
-                let mgr = index_manager.read();
-                (
-                    mgr.dirty_btree_index_names(),
-                    mgr.dirty_fulltext_index_names(),
-                    mgr.dirty_fuzzy_index_names(),
-                    mgr.dirty_vector_index_names(),
-                )
-            };
 
-            let dirty_total = dirty_bt.len() + dirty_ft.len() + dirty_fz.len() + dirty_vec.len();
-            if dirty_total > 0 {
+        // Parallel across collections: each collection has its own
+        // Arc<RwLock<IndexManager>>, so they can flush concurrently.
+        #[cfg(feature = "parallel")]
+        {
+            let cpus = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+
+            if cpus > 1 && index_managers.len() > 1 {
+                use rayon::prelude::*;
+
+                let results: Vec<Result<usize>> = index_managers
+                    .par_iter()
+                    .map(|(collection_name, index_manager)| {
+                        Self::flush_collection_indexes(collection_name, index_manager, &db_path)
+                    })
+                    .collect();
+
+                let mut total = 0;
+                for r in results {
+                    total += r?;
+                }
+                return Ok(total);
+            }
+        }
+
+        // Sequential fallback: single collection, single core, or no parallel feature
+        let mut total_flushed = 0;
+        for (collection_name, index_manager) in index_managers.iter() {
+            total_flushed +=
+                Self::flush_collection_indexes(collection_name, index_manager, &db_path)?;
+        }
+        Ok(total_flushed)
+    }
+
+    /// Flush all dirty indexes for a single collection.
+    ///
+    /// Extracted from `flush_all_indexes_counted()` to enable cross-collection
+    /// parallelism via rayon. Each collection has its own `Arc<RwLock<IndexManager>>`,
+    /// so multiple collections can flush concurrently without lock contention.
+    fn flush_collection_indexes(
+        collection_name: &str,
+        index_manager: &std::sync::Arc<parking_lot::RwLock<crate::index::IndexManager>>,
+        db_path: &str,
+    ) -> Result<usize> {
+        let mut total_flushed = 0;
+
+        // 1. Collect dirty names under brief READ lock
+        let (dirty_bt, dirty_ft, dirty_fz, dirty_vec) = {
+            let mgr = index_manager.read();
+            (
+                mgr.dirty_btree_index_names(),
+                mgr.dirty_fulltext_index_names(),
+                mgr.dirty_fuzzy_index_names(),
+                mgr.dirty_vector_index_names(),
+            )
+        };
+
+        let dirty_total = dirty_bt.len() + dirty_ft.len() + dirty_fz.len() + dirty_vec.len();
+        if dirty_total > 0 {
+            tracing::info!(
+                collection = %collection_name,
+                btree = dirty_bt.len(),
+                fulltext = dirty_ft.len(),
+                fuzzy = dirty_fz.len(),
+                vector = dirty_vec.len(),
+                "Checkpoint: flushing dirty indexes"
+            );
+        }
+
+        // 2. Fulltext: batch three-phase flush with parallel serialize
+        //    Phase 1: take ALL snapshots in single write lock (~µs each)
+        //    Phase 2: serialize ALL in parallel (NO lock, 13s+ each → max(individual))
+        //    Phase 3: commit ALL in single write lock (~ms each)
+        if !dirty_ft.is_empty() {
+            total_flushed += Self::flush_fulltext_batch(collection_name, index_manager, &dirty_ft)?;
+        }
+
+        // 3. Fuzzy, btree (sequential — each flush < 300ms, not worth parallelizing)
+        for name in &dirty_fz {
+            let t = std::time::Instant::now();
+            let mut mgr = index_manager.write();
+            let lock_wait_ms = t.elapsed().as_millis() as u64;
+            if mgr.flush_one_fuzzy_index(name)? {
+                let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                tracing::info!(
+                    collection = %collection_name, index = %name,
+                    kind = "fuzzy", lock_wait_ms, flush_ms,
+                    "Index flushed"
+                );
+                total_flushed += 1;
+            }
+        }
+        for name in &dirty_bt {
+            let t = std::time::Instant::now();
+            let mut mgr = index_manager.write();
+            let lock_wait_ms = t.elapsed().as_millis() as u64;
+            if mgr.flush_one_btree_index(name, db_path)? {
+                let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                tracing::info!(
+                    collection = %collection_name, index = %name,
+                    kind = "btree", lock_wait_ms, flush_ms,
+                    "Index flushed"
+                );
+                total_flushed += 1;
+            }
+        }
+
+        // 4. HNSW orphan compaction + vector flush
+        {
+            let t = std::time::Instant::now();
+            let mut mgr = index_manager.write();
+            let lock_wait_ms = t.elapsed().as_millis() as u64;
+            let rebuilt = mgr.rebuild_vector_indexes_if_needed()?;
+            if rebuilt > 0 {
+                let rebuild_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
                 tracing::info!(
                     collection = %collection_name,
-                    btree = dirty_bt.len(),
-                    fulltext = dirty_ft.len(),
-                    fuzzy = dirty_fz.len(),
-                    vector = dirty_vec.len(),
-                    "Checkpoint: flushing dirty indexes"
+                    rebuilt, lock_wait_ms, rebuild_ms,
+                    "HNSW orphan compaction"
                 );
             }
+        }
+        for name in &dirty_vec {
+            let t = std::time::Instant::now();
+            let mut mgr = index_manager.write();
+            let lock_wait_ms = t.elapsed().as_millis() as u64;
+            if mgr.flush_one_vector_index(name, db_path)? {
+                let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                tracing::info!(
+                    collection = %collection_name, index = %name,
+                    kind = "vector", lock_wait_ms, flush_ms,
+                    "Index flushed"
+                );
+                total_flushed += 1;
+            }
+        }
 
-            // 2. Flush one-by-one, lock/unlock between each index
-            //    This reduces lock hold time from O(all_indexes) to O(1_index),
-            //    allowing insert_one/add_to_indexes to proceed between flushes.
-            //
-            //    Fulltext uses two-phase flush: brief lock for snapshot, NO lock
-            //    for serialize+fsync (13+ seconds), brief lock for commit.
-            for name in &dirty_ft {
-                let t = std::time::Instant::now();
+        Ok(total_flushed)
+    }
 
-                // Phase 1: Brief write lock — take snapshot (~µs)
-                let snapshot = {
-                    let mut mgr = index_manager.write();
+    /// Batch three-phase fulltext flush with parallel serialization.
+    ///
+    /// Instead of sequential Phase1→Phase2→Phase3 per index, this batches:
+    /// - Phase 1: Take ALL snapshots in a single write lock (~µs each)
+    /// - Phase 2: Serialize ALL snapshots in parallel (NO lock, 13s+ each)
+    /// - Phase 3: Commit/rollback ALL results in a single write lock (~ms each)
+    ///
+    /// With N fulltext indexes, total time drops from N×13s to ~13s (parallel I/O).
+    fn flush_fulltext_batch(
+        collection_name: &str,
+        index_manager: &std::sync::Arc<parking_lot::RwLock<crate::index::IndexManager>>,
+        dirty_ft: &[String],
+    ) -> Result<usize> {
+        let t_batch = std::time::Instant::now();
+
+        // Phase 1: Take all snapshots in a single write lock (~µs each)
+        let snapshots: Vec<(String, crate::fulltext::FulltextFlushSnapshot)> = {
+            let mut mgr = index_manager.write();
+            dirty_ft
+                .iter()
+                .filter_map(|name| {
                     mgr.take_fulltext_flush_snapshot(name)
-                };
-                let snapshot_ms = t.elapsed().as_millis() as u64;
+                        .map(|s| (name.clone(), s))
+                })
+                .collect()
+        };
+        let snapshot_ms = t_batch.elapsed().as_millis() as u64;
 
-                if let Some(snapshot) = snapshot {
-                    // Phase 2: NO lock — serialize + file write + fsync
-                    match crate::fulltext::FulltextIndex::serialize_flush(&snapshot) {
-                        Ok(result) => {
-                            let serialize_ms = t.elapsed().as_millis() as u64 - snapshot_ms;
+        if snapshots.is_empty() {
+            return Ok(0);
+        }
 
-                            // Phase 3: Brief write lock — commit results (~ms)
-                            {
-                                let mut mgr = index_manager.write();
-                                mgr.commit_fulltext_flush(name, result)?;
-                            }
-                            let commit_ms =
-                                t.elapsed().as_millis() as u64 - snapshot_ms - serialize_ms;
+        // Phase 2: Serialize all snapshots — parallel when >1 index and parallel feature
+        let results: Vec<(String, Result<crate::fulltext::FulltextFlushResult>)>;
 
-                            tracing::info!(
-                                collection = %collection_name, index = %name,
-                                kind = "fulltext", snapshot_ms, serialize_ms, commit_ms,
-                                total_ms = t.elapsed().as_millis() as u64,
-                                "Index flushed (two-phase)"
-                            );
-                            total_flushed += 1;
-                        }
+        #[cfg(feature = "parallel")]
+        {
+            let cpus = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1);
+
+            if cpus > 1 && snapshots.len() > 1 {
+                use rayon::prelude::*;
+
+                results = snapshots
+                    .into_par_iter()
+                    .map(|(name, snapshot)| {
+                        let result = crate::fulltext::FulltextIndex::serialize_flush(&snapshot);
+                        (name, result)
+                    })
+                    .collect();
+            } else {
+                results = snapshots
+                    .into_iter()
+                    .map(|(name, snapshot)| {
+                        let result = crate::fulltext::FulltextIndex::serialize_flush(&snapshot);
+                        (name, result)
+                    })
+                    .collect();
+            }
+        }
+
+        #[cfg(not(feature = "parallel"))]
+        {
+            results = snapshots
+                .into_iter()
+                .map(|(name, snapshot)| {
+                    let result = crate::fulltext::FulltextIndex::serialize_flush(&snapshot);
+                    (name, result)
+                })
+                .collect();
+        }
+
+        let serialize_ms = t_batch.elapsed().as_millis() as u64 - snapshot_ms;
+
+        // Phase 3: Commit successes, rollback failures in a single write lock
+        let mut committed = 0usize;
+        let mut last_error: Option<crate::error::IronBaseError> = None;
+        {
+            let mut mgr = index_manager.write();
+            for (name, result) in results {
+                match result {
+                    Ok(r) => match mgr.commit_fulltext_flush(&name, r) {
+                        Ok(()) => committed += 1,
                         Err(e) => {
-                            // Rollback: restore inverted_index from frozen snapshot
-                            // to prevent data loss on the next checkpoint
                             tracing::error!(
                                 collection = %collection_name, index = %name,
                                 error = %e,
-                                "Two-phase fulltext flush failed, rolling back"
+                                "Fulltext flush commit failed, rolling back"
                             );
-                            let mut mgr = index_manager.write();
-                            mgr.rollback_fulltext_flush(name);
-                            return Err(e);
+                            mgr.rollback_fulltext_flush(&name);
+                            last_error = Some(e);
+                        }
+                    },
+                    Err(e) => {
+                        tracing::error!(
+                            collection = %collection_name, index = %name,
+                            error = %e,
+                            "Fulltext flush serialize failed, rolling back"
+                        );
+                        mgr.rollback_fulltext_flush(&name);
+                        if last_error.is_none() {
+                            last_error = Some(e);
                         }
                     }
                 }
             }
-            for name in &dirty_fz {
-                let t = std::time::Instant::now();
-                let mut mgr = index_manager.write();
-                let lock_wait_ms = t.elapsed().as_millis() as u64;
-                if mgr.flush_one_fuzzy_index(name)? {
-                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
-                    tracing::info!(
-                        collection = %collection_name, index = %name,
-                        kind = "fuzzy", lock_wait_ms, flush_ms,
-                        "Index flushed"
-                    );
-                    total_flushed += 1;
-                }
-            }
-            for name in &dirty_bt {
-                let t = std::time::Instant::now();
-                let mut mgr = index_manager.write();
-                let lock_wait_ms = t.elapsed().as_millis() as u64;
-                if mgr.flush_one_btree_index(name, &db_path)? {
-                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
-                    tracing::info!(
-                        collection = %collection_name, index = %name,
-                        kind = "btree", lock_wait_ms, flush_ms,
-                        "Index flushed"
-                    );
-                    total_flushed += 1;
-                }
-            }
-            // HNSW orphan compaction: rebuild indexes with >30% orphan ratio before flush
-            {
-                let t = std::time::Instant::now();
-                let mut mgr = index_manager.write();
-                let lock_wait_ms = t.elapsed().as_millis() as u64;
-                let rebuilt = mgr.rebuild_vector_indexes_if_needed()?;
-                if rebuilt > 0 {
-                    let rebuild_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
-                    tracing::info!(
-                        collection = %collection_name,
-                        rebuilt, lock_wait_ms, rebuild_ms,
-                        "HNSW orphan compaction"
-                    );
-                }
-            }
-            for name in &dirty_vec {
-                let t = std::time::Instant::now();
-                let mut mgr = index_manager.write();
-                let lock_wait_ms = t.elapsed().as_millis() as u64;
-                if mgr.flush_one_vector_index(name, &db_path)? {
-                    let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
-                    tracing::info!(
-                        collection = %collection_name, index = %name,
-                        kind = "vector", lock_wait_ms, flush_ms,
-                        "Index flushed"
-                    );
-                    total_flushed += 1;
-                }
-            }
         }
-        Ok(total_flushed)
+        let commit_ms = t_batch.elapsed().as_millis() as u64 - snapshot_ms - serialize_ms;
+
+        tracing::info!(
+            collection = %collection_name,
+            count = committed, snapshot_ms, serialize_ms, commit_ms,
+            total_ms = t_batch.elapsed().as_millis() as u64,
+            "Fulltext indexes flushed (batch three-phase)"
+        );
+
+        if let Some(e) = last_error {
+            return Err(e);
+        }
+
+        Ok(committed)
     }
 
     /// Flush only B+ tree indexes to disk (skip fulltext, fuzzy, vector).
