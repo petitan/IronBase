@@ -520,6 +520,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Vector count stale metadata** | #50 | `vector_count: 0` a stats-ban működő HNSW index mellett | `VectorIndexMetadata.vector_count` csak creation-kor íródik, auto-indexing nem frissíti | `list_vector_indexes()` az in-memory HNSW `len()`-ből frissíti a clone-t |
 | **HNSW orphan accumulation** | 512990a6, #53 | `vector_count` 2x a valós után delete+reimport; növekvő memória | `batch_update_indexes()` nem kezelte HNSW-t + `remove()` lazy (orphan node marad) + `len()` orphan-okat is számolta | HNSW kezelés `batch_update_indexes`-ben + `len()` = `id_to_index.len()` + orphan rebuild checkpoint/compact-ban |
 | **Fulltext flush dirty flag** | ed9016d3, #54 | fulltext_search dokumentumok nagy része nem kereshető restart után | `commit_fulltext_flush()` feltétel nélkül törölte a dirty flag-et → Phase 2 alatti concurrent insert-ek elvesztek | `has_pending_entries()` check: dirty flag csak akkor törlődik ha `inverted_index` üres |
+| **HNSW rebuild duplicate ID** | d83885bf, #55 | `db_compact` "ID already exists in vector index" hiba | `rebuild()` `nodes` Vec-ből iterált — remove+reinsert után orphan+aktív node ugyanazzal az ID-vel, mindkettő átment a `contains_key` filter-en | `id_to_index` HashMap-ből iterálás (egyedi kulcsok, mindig a helyes node) |
 
 <details>
 <summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
