@@ -1005,7 +1005,15 @@ impl IndexManager {
     /// Two-phase flush Phase 3: Commit flush results back to the index.
     ///
     /// Installs new token_offsets, re-opens file_handle, flushes buffered
-    /// doc_tokens, and clears the dirty flag.
+    /// doc_tokens, and conditionally clears the dirty flag.
+    ///
+    /// The dirty flag is only cleared if `inverted_index` is empty after commit.
+    /// During Phase 2 (no lock held), concurrent inserts may have added entries
+    /// to `inverted_index` — those entries still need a subsequent flush to persist.
+    /// Without this check, a server restart would lose Phase 2 entries because:
+    /// 1. dirty cleared → next checkpoint skips fulltext flush
+    /// 2. close()/Drop skips flush (not dirty)
+    /// 3. restart loads stale .ftidx → Phase 2 entries gone
     pub(crate) fn commit_fulltext_flush(
         &mut self,
         name: &str,
@@ -1013,7 +1021,9 @@ impl IndexManager {
     ) -> Result<()> {
         if let Some(index) = self.fulltext_indexes.get_mut(name) {
             index.commit_flush(result)?;
-            self.dirty_fulltext_indexes.remove(name);
+            if !index.has_pending_entries() {
+                self.dirty_fulltext_indexes.remove(name);
+            }
         }
         Ok(())
     }

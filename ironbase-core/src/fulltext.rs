@@ -2363,6 +2363,16 @@ impl FulltextIndex {
         Ok(())
     }
 
+    /// Check if the index has entries in the in-memory inverted_index
+    /// that have not yet been flushed to disk.
+    ///
+    /// Used by IndexManager after commit_flush() to decide whether to
+    /// clear the dirty flag. If Phase 2 concurrent inserts added entries
+    /// to inverted_index, they still need a subsequent flush to persist.
+    pub(crate) fn has_pending_entries(&self) -> bool {
+        !self.inverted_index.is_empty()
+    }
+
     /// Rollback a failed two-phase flush (under write lock — brief).
     ///
     /// Restores inverted_index from frozen_inverted and re-opens file_handle.
