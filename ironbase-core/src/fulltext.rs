@@ -1870,23 +1870,7 @@ impl FulltextIndex {
             })
             .collect();
 
-        // Parallel sort when result set is large enough to justify fork-join overhead
-        #[cfg(feature = "parallel")]
-        {
-            let cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            if cpus > 1 && results.len() > cpus * 500 {
-                use rayon::prelude::*;
-                results.par_sort_unstable_by(Self::compare_search_results);
-            } else {
-                results.sort_unstable_by(Self::compare_search_results);
-            }
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            results.sort_unstable_by(Self::compare_search_results);
-        }
+        results.sort_unstable_by(Self::compare_search_results);
 
         // Apply skip and limit
         results.into_iter().skip(skip).take(limit).collect()
@@ -1960,23 +1944,7 @@ impl FulltextIndex {
             })
             .collect();
 
-        // Parallel sort when result set is large enough to justify fork-join overhead
-        #[cfg(feature = "parallel")]
-        {
-            let cpus = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(1);
-            if cpus > 1 && results.len() > cpus * 500 {
-                use rayon::prelude::*;
-                results.par_sort_unstable_by(Self::compare_search_results);
-            } else {
-                results.sort_unstable_by(Self::compare_search_results);
-            }
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            results.sort_unstable_by(Self::compare_search_results);
-        }
+        results.sort_unstable_by(Self::compare_search_results);
 
         Ok(results.into_iter().skip(skip).take(limit).collect())
     }
