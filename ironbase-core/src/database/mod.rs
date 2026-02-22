@@ -48,7 +48,7 @@ mod transactions;
 
 pub use durability::BatchFlush;
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::{Condvar, Mutex, RwLock};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -204,7 +204,7 @@ fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::Ind
 /// │                         │ IndexManager shared across instances    │
 /// ├─────────────────────────┼─────────────────────────────────────────┤
 /// │ write_transaction_lock  │ SQLite-style: only one write tx at a    │
-/// │                         │ time, 5s timeout, 10ms polling          │
+/// │                         │ time, 5s timeout, Condvar notification  │
 /// ├─────────────────────────┼─────────────────────────────────────────┤
 /// │ collection_write_locks  │ Fine-grained Mutex per collection for   │
 /// │                         │ Safe mode prepare-WAL-persist atomicity │
@@ -268,7 +268,9 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Only one write transaction can be active at a time (SQLite-style)
     // None = no active write transaction
     // Some(tx_id) = this transaction holds the exclusive write lock
-    pub(crate) write_transaction_lock: Arc<RwLock<Option<TransactionId>>>,
+    pub(crate) write_transaction_lock: Arc<Mutex<Option<TransactionId>>>,
+    // Condvar notified on release_write_lock — waiters wake up instead of polling
+    pub(crate) write_lock_condvar: Arc<Condvar>,
 
     // Flag to prevent operations after close() is called
     // Arc-wrapped so CollectionCore can share the same flag
@@ -370,7 +372,8 @@ impl DatabaseCore<StorageEngine> {
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
-            write_transaction_lock: Arc::new(RwLock::new(None)),
+            write_transaction_lock: Arc::new(Mutex::new(None)),
+            write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
         };
@@ -466,7 +469,8 @@ impl DatabaseCore<MemoryStorage> {
             unsafe_op_counter: AtomicU64::new(0),
             index_managers: Arc::new(RwLock::new(HashMap::new())),
             schema_managers: Arc::new(RwLock::new(HashMap::new())),
-            write_transaction_lock: Arc::new(RwLock::new(None)),
+            write_transaction_lock: Arc::new(Mutex::new(None)),
+            write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
         })

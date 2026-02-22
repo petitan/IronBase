@@ -228,48 +228,42 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         tx_id: TransactionId,
         timeout: std::time::Duration,
     ) -> Result<()> {
-        let start = std::time::Instant::now();
-        let poll_interval = std::time::Duration::from_millis(10);
+        let mut lock = self.write_transaction_lock.lock();
 
         loop {
-            // Try to acquire the lock
-            {
-                let mut lock = self.write_transaction_lock.write();
-                match *lock {
-                    None => {
-                        // No transaction holds the lock - acquire it
-                        *lock = Some(tx_id);
+            match *lock {
+                None => {
+                    // No transaction holds the lock - acquire it
+                    *lock = Some(tx_id);
 
-                        // Mark transaction as holding write lock
-                        let mut active = self.active_transactions.write();
-                        if let Some(tx) = active.get_mut(&tx_id) {
-                            tx.mark_write_lock_acquired();
-                        }
+                    // Mark transaction as holding write lock
+                    let mut active = self.active_transactions.write();
+                    if let Some(tx) = active.get_mut(&tx_id) {
+                        tx.mark_write_lock_acquired();
+                    }
 
-                        return Ok(());
-                    }
-                    Some(holder) if holder == tx_id => {
-                        // This transaction already holds the lock - OK
-                        return Ok(());
-                    }
-                    Some(_) => {
-                        // Another transaction holds the lock - will retry
-                    }
+                    return Ok(());
                 }
-            } // Release the RwLock here
+                Some(holder) if holder == tx_id => {
+                    // This transaction already holds the lock - OK
+                    return Ok(());
+                }
+                Some(_) => {
+                    // Another transaction holds the lock — wait for Condvar notification
+                }
+            }
 
-            // Check timeout
-            if start.elapsed() >= timeout {
-                let holder = self.get_write_lock_holder();
+            // Wait for release_write_lock() to notify us, or timeout
+            let wait_result = self.write_lock_condvar.wait_for(&mut lock, timeout);
+            if wait_result.timed_out() {
+                let holder = *lock;
                 return Err(IronBaseError::TransactionAborted(format!(
                     "Timeout waiting for write lock after {:?}. Lock held by transaction {}.",
                     timeout,
                     holder.map_or("unknown".to_string(), |h| h.to_string())
                 )));
             }
-
-            // Wait before retrying
-            std::thread::sleep(poll_interval);
+            // Condvar woke us — loop back to check if lock is now free
         }
     }
 
@@ -278,27 +272,29 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Called automatically on commit or rollback.
     /// Safe to call even if transaction doesn't hold the lock.
     pub fn release_write_lock(&self, tx_id: TransactionId) {
-        let mut lock = self.write_transaction_lock.write();
+        let mut lock = self.write_transaction_lock.lock();
         if *lock == Some(tx_id) {
             *lock = None;
+            // Wake up one waiter (if any) that's blocked in acquire_write_lock
+            self.write_lock_condvar.notify_one();
         }
     }
 
     /// Check if a transaction currently holds the write lock
     pub fn holds_write_lock(&self, tx_id: TransactionId) -> bool {
-        let lock = self.write_transaction_lock.read();
+        let lock = self.write_transaction_lock.lock();
         *lock == Some(tx_id)
     }
 
     /// Check if any transaction holds the write lock (for auto-commit conflict check)
     pub fn has_active_write_transaction(&self) -> bool {
-        let lock = self.write_transaction_lock.read();
+        let lock = self.write_transaction_lock.lock();
         lock.is_some()
     }
 
     /// Get the ID of the transaction holding the write lock, if any
     pub fn get_write_lock_holder(&self) -> Option<TransactionId> {
-        let lock = self.write_transaction_lock.read();
+        let lock = self.write_transaction_lock.lock();
         *lock
     }
 
@@ -315,27 +311,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         &self,
         timeout: std::time::Duration,
     ) -> Result<()> {
-        let start = std::time::Instant::now();
-        let poll_interval = std::time::Duration::from_millis(10);
+        let mut lock = self.write_transaction_lock.lock();
 
         loop {
-            // Check if lock is free
-            if !self.has_active_write_transaction() {
+            if lock.is_none() {
                 return Ok(());
             }
 
-            // Check timeout
-            if start.elapsed() >= timeout {
-                let holder = self.get_write_lock_holder();
+            // Wait for release_write_lock() to notify us, or timeout
+            let wait_result = self.write_lock_condvar.wait_for(&mut lock, timeout);
+            if wait_result.timed_out() {
+                let holder = *lock;
                 return Err(IronBaseError::TransactionAborted(format!(
                     "Timeout waiting for write transaction to complete after {:?}. Lock held by transaction {}.",
                     timeout,
                     holder.map_or("unknown".to_string(), |h| h.to_string())
                 )));
             }
-
-            // Wait before retrying
-            std::thread::sleep(poll_interval);
+            // Condvar woke us — loop back to check if lock is now free
         }
     }
 
