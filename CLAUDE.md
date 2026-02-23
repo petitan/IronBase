@@ -986,6 +986,15 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 - Title match: 1.0-1.5x (ha `title_field` megadva)
 - Short content penalty: 0.8x (<50 char)
 
+**Adjacent chunk merge (afd45313, STEP 5.5):**
+- RAG chunking overlap (~100 char) → szomszédos chunkok duplikálják a határszöveget → top-K helyet pazarolnak
+- `merge_chunks`: `true` (default) — same `doc_id`, consecutive `chunk_index` → összevonás
+- Szöveg: `start_char`/`end_char` alapján overlap levágás, UTF-8 safe
+- Score: max(final_score) a futamból, embedding: legjobb score-ú chunk
+- Metadata: `chunk_merged: true`, `chunks_in_merge: N`, frissített `start_char`/`end_char`/`chunk_index`
+- Elhelyezés: reranking UTÁN, MMR ELŐTT
+- Response: `"chunks_merged": N`
+
 **MMR diversity reranking (deduplication):**
 - Algoritmus: `mmr(c) = λ * relevance(c) - (1-λ) * max_sim(c, selected)`
 - `mmr_lambda`: 1.0 = pure relevance, 0.0 = pure diversity, 0.5 = balanced (default)
@@ -1042,9 +1051,21 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 
 Prioritás: explicit weights > search_mode preset > balanced default
 
-**Shared fusion modul (febba776):**
-- `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
+**Shared fusion modul (febba776, afd45313):**
+- `mcp-server/src/tools/fusion.rs` — közös reranking/fusion kód (FusedResult, rerank_results, merge_adjacent_chunks, mmr_reorder, apply_projection, id_to_string, strip_punctuation, extract_embedding)
 - hybrid.rs importálja (rag.rs már csak thin wrapper, nem használ fusion kódot)
+
+**hybrid_search pipeline (hybrid.rs):**
+```
+STEP 1: Resolve vector + field names (explicit vs auto-embed)
+STEP 2: Vector search → ranks
+STEP 3: Fulltext search → ranks
+STEP 4: RRF Fusion (weighted rank combination)
+STEP 5: Reranking (phrase, density, title, length)    [rerank=true]
+STEP 5.5: Adjacent chunk merge (overlap dedup)        [merge_chunks=true]
+STEP 6: MMR diversity reranking                       [deduplicate=true]
+STEP 7: Projection + response
+```
 
 **Rétegek:**
 ```
