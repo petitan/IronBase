@@ -110,6 +110,11 @@ pub fn tools() -> Vec<Value> {
                     "type": "array",
                     "items": { "type": "string" },
                     "description": "Multiple fulltext fields to search across (overrides 'text_field'). Scores merged per document using best-field strategy (max score). Each field must have a fulltext index."
+                },
+                "merge_chunks": {
+                    "type": "boolean",
+                    "description": "Merge adjacent chunks from same source document into single result (default: true). Eliminates overlap-caused duplicates while preserving more context.",
+                    "default": true
                 }
             },
             "required": ["collection", "query"]

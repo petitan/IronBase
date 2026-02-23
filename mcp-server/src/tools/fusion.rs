@@ -187,6 +187,183 @@ pub(crate) fn rerank_results(
 }
 
 // ============================================================================
+// Adjacent Chunk Merge
+// ============================================================================
+
+/// Merge adjacent chunks from the same source document into single results.
+///
+/// RAG chunking with overlap (~100 chars) can cause the same text to appear in
+/// consecutive chunks. When both match, they waste top-K slots with redundant
+/// content. This post-processing step merges runs of consecutive chunk_index
+/// values (same doc_id) into a single result with concatenated text (overlap removed).
+///
+/// Placement: after reranking, before MMR. This ensures merged results carry the
+/// best score from the run, and MMR sees fewer near-duplicates.
+///
+/// Returns the number of results removed by merging.
+pub(crate) fn merge_adjacent_chunks(
+    results: &mut Vec<FusedResult>,
+    text_field: &str,
+) -> usize {
+    if results.len() < 2 {
+        return 0;
+    }
+
+    // Collect (doc_id, chunk_index, results_index) for RAG chunks only
+    let mut chunk_info: Vec<(String, u64, usize)> = Vec::new();
+    for (i, item) in results.iter().enumerate() {
+        let doc_id = item.doc.get("doc_id").and_then(|v| v.as_str());
+        let chunk_index = item.doc.get("chunk_index").and_then(|v| v.as_u64());
+        if let (Some(did), Some(ci)) = (doc_id, chunk_index) {
+            chunk_info.push((did.to_string(), ci, i));
+        }
+    }
+
+    if chunk_info.is_empty() {
+        return 0;
+    }
+
+    // Group by doc_id
+    let mut groups: HashMap<String, Vec<(u64, usize)>> = HashMap::with_capacity(chunk_info.len());
+    for (doc_id, ci, idx) in chunk_info {
+        groups.entry(doc_id).or_default().push((ci, idx));
+    }
+
+    // For each group, sort by chunk_index and find consecutive runs
+    let mut indices_to_remove: HashSet<usize> = HashSet::new();
+
+    for (_doc_id, mut entries) in groups {
+        if entries.len() < 2 {
+            continue;
+        }
+        entries.sort_by_key(|(ci, _)| *ci);
+
+        // Detect consecutive runs
+        let mut run_start = 0;
+        while run_start < entries.len() {
+            let mut run_end = run_start;
+            while run_end + 1 < entries.len()
+                && entries[run_end + 1].0 == entries[run_end].0 + 1
+            {
+                run_end += 1;
+            }
+
+            if run_end > run_start {
+                // Found a consecutive run of length > 1 — merge
+                let run = &entries[run_start..=run_end];
+
+                // Find the entry with the best final_score in this run
+                let best_idx_in_run = run
+                    .iter()
+                    .max_by(|a, b| {
+                        results[a.1]
+                            .final_score
+                            .partial_cmp(&results[b.1].final_score)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .unwrap()
+                    .1;
+
+                // Build merged text from all chunks in the run (overlap removed)
+                let mut merged_text = String::new();
+                let mut min_start_char: Option<u64> = None;
+                let mut max_end_char: Option<u64> = None;
+
+                for (i, &(_, res_idx)) in run.iter().enumerate() {
+                    let doc = &results[res_idx].doc;
+                    let chunk_text = doc
+                        .get(text_field)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+
+                    if i == 0 {
+                        merged_text.push_str(chunk_text);
+                    } else {
+                        // Calculate overlap from start_char/end_char if available
+                        let prev_end = results[run[i - 1].1]
+                            .doc
+                            .get("end_char")
+                            .and_then(|v| v.as_u64());
+                        let curr_start = doc.get("start_char").and_then(|v| v.as_u64());
+
+                        let overlap_chars = match (prev_end, curr_start) {
+                            (Some(pe), Some(cs)) if pe > cs => (pe - cs) as usize,
+                            _ => 0,
+                        };
+
+                        // Skip overlap characters from the beginning of this chunk's text
+                        let text_to_append = if overlap_chars > 0
+                            && overlap_chars < chunk_text.chars().count()
+                        {
+                            // Find byte offset for char boundary
+                            let byte_offset = chunk_text
+                                .char_indices()
+                                .nth(overlap_chars)
+                                .map(|(idx, _)| idx)
+                                .unwrap_or(chunk_text.len());
+                            &chunk_text[byte_offset..]
+                        } else {
+                            chunk_text
+                        };
+
+                        merged_text.push_str(text_to_append);
+                    }
+
+                    // Track start_char/end_char range
+                    if let Some(sc) = doc.get("start_char").and_then(|v| v.as_u64()) {
+                        min_start_char = Some(min_start_char.map_or(sc, |m: u64| m.min(sc)));
+                    }
+                    if let Some(ec) = doc.get("end_char").and_then(|v| v.as_u64()) {
+                        max_end_char = Some(max_end_char.map_or(ec, |m: u64| m.max(ec)));
+                    }
+                }
+
+                // Update the best-scored result's doc with merged content
+                if let Value::Object(ref mut obj) = results[best_idx_in_run].doc {
+                    obj.insert(
+                        text_field.to_string(),
+                        Value::String(merged_text),
+                    );
+                    obj.insert(
+                        "chunk_index".to_string(),
+                        json!(run[0].0),
+                    );
+                    if let Some(sc) = min_start_char {
+                        obj.insert("start_char".to_string(), json!(sc));
+                    }
+                    if let Some(ec) = max_end_char {
+                        obj.insert("end_char".to_string(), json!(ec));
+                    }
+                    obj.insert("chunk_merged".to_string(), json!(true));
+                    obj.insert("chunks_in_merge".to_string(), json!(run.len()));
+                }
+
+                // Mark all other entries in this run for removal
+                for &(_, res_idx) in run {
+                    if res_idx != best_idx_in_run {
+                        indices_to_remove.insert(res_idx);
+                    }
+                }
+            }
+
+            run_start = run_end + 1;
+        }
+    }
+
+    let removed = indices_to_remove.len();
+    if removed > 0 {
+        let mut idx = 0;
+        results.retain(|_| {
+            let keep = !indices_to_remove.contains(&idx);
+            idx += 1;
+            keep
+        });
+    }
+
+    removed
+}
+
+// ============================================================================
 // MMR (Maximal Marginal Relevance) Reordering
 // ============================================================================
 
@@ -743,5 +920,144 @@ mod tests {
 
         assert_eq!(removed, 0);
         assert_eq!(results.len(), 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Adjacent Chunk Merge Tests
+    // -------------------------------------------------------------------------
+
+    fn make_chunk(
+        id: &str,
+        doc_id: &str,
+        chunk_index: u64,
+        text: &str,
+        start_char: u64,
+        end_char: u64,
+        score: f64,
+    ) -> FusedResult {
+        FusedResult {
+            id: id.to_string(),
+            doc: json!({
+                "_id": id,
+                "doc_id": doc_id,
+                "chunk_index": chunk_index,
+                "content": text,
+                "start_char": start_char,
+                "end_char": end_char
+            }),
+            rrf_score: score,
+            final_score: score,
+            rerank_boost: 1.0,
+            v_rank: 1,
+            t_rank: 1,
+            v_score: Some(0.9),
+            t_score: Some(10.0),
+        }
+    }
+
+    #[test]
+    fn test_merge_adjacent_basic() {
+        // Two adjacent chunks from same doc → merge into 1
+        let mut results = vec![
+            make_chunk("c6", "docA", 6, "Hello world overlap_", 600, 700, 0.03),
+            make_chunk("c7", "docA", 7, "overlap_region end text", 680, 800, 0.02),
+        ];
+
+        let removed = merge_adjacent_chunks(&mut results, "content");
+
+        assert_eq!(removed, 1);
+        assert_eq!(results.len(), 1);
+        // Best score kept
+        assert!((results[0].final_score - 0.03).abs() < 1e-10);
+        // Metadata
+        assert_eq!(results[0].doc["chunk_merged"], true);
+        assert_eq!(results[0].doc["chunks_in_merge"], 2);
+        assert_eq!(results[0].doc["chunk_index"], 6);
+        assert_eq!(results[0].doc["start_char"], 600);
+        assert_eq!(results[0].doc["end_char"], 800);
+    }
+
+    #[test]
+    fn test_merge_distant_chunks_preserved() {
+        // Same doc_id but non-adjacent chunk_index → NOT merged
+        let mut results = vec![
+            make_chunk("c10", "docA", 10, "Chunk 10 text", 1000, 1100, 0.03),
+            make_chunk("c15", "docA", 15, "Chunk 15 text", 1500, 1600, 0.02),
+        ];
+
+        let removed = merge_adjacent_chunks(&mut results, "content");
+
+        assert_eq!(removed, 0);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_three_consecutive() {
+        // Three consecutive chunks → merge into 1
+        // Realistic overlap: 4 chars overlap out of ~14 char chunks
+        let mut results = vec![
+            make_chunk("c5", "docA", 5, "AAAA BBBB CCCC", 0, 14, 0.01),
+            make_chunk("c6", "docA", 6, "CCCC DDDD EEEE", 10, 24, 0.03),
+            make_chunk("c7", "docA", 7, "EEEE FFFF GGGG", 20, 34, 0.02),
+        ];
+
+        let removed = merge_adjacent_chunks(&mut results, "content");
+
+        assert_eq!(removed, 2);
+        assert_eq!(results.len(), 1);
+        // Best score from run (c6 = 0.03)
+        assert!((results[0].final_score - 0.03).abs() < 1e-10);
+        assert_eq!(results[0].doc["chunks_in_merge"], 3);
+        assert_eq!(results[0].doc["start_char"], 0);
+        assert_eq!(results[0].doc["end_char"], 34);
+        // Text should be merged with overlap removed
+        let merged_text = results[0].doc["content"].as_str().unwrap();
+        assert_eq!(merged_text, "AAAA BBBB CCCC DDDD EEEE FFFF GGGG");
+    }
+
+    #[test]
+    fn test_merge_no_doc_id() {
+        // Results without doc_id → untouched
+        let mut results = vec![
+            make_fused_result("doc1", "Content A", "Title", 0.03),
+            make_fused_result("doc2", "Content B", "Title", 0.02),
+        ];
+
+        let removed = merge_adjacent_chunks(&mut results, "content");
+
+        assert_eq!(removed, 0);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_mixed_docs() {
+        // doc_A chunk 6+7 (adjacent) + doc_B chunk 3 (alone) → doc_A merges, doc_B stays
+        let mut results = vec![
+            make_chunk("a6", "docA", 6, "A chunk six_", 600, 700, 0.03),
+            make_chunk("a7", "docA", 7, "six_A chunk seven", 680, 800, 0.02),
+            make_chunk("b3", "docB", 3, "B chunk three", 300, 400, 0.025),
+        ];
+
+        let removed = merge_adjacent_chunks(&mut results, "content");
+
+        assert_eq!(removed, 1);
+        assert_eq!(results.len(), 2);
+        // docA merged, docB untouched
+        let has_doc_a = results
+            .iter()
+            .any(|r| r.doc.get("doc_id").and_then(|v| v.as_str()) == Some("docA"));
+        let has_doc_b = results
+            .iter()
+            .any(|r| r.doc.get("doc_id").and_then(|v| v.as_str()) == Some("docB"));
+        assert!(has_doc_a);
+        assert!(has_doc_b);
+    }
+
+    #[test]
+    fn test_merge_empty() {
+        let mut results: Vec<FusedResult> = vec![];
+        let removed = merge_adjacent_chunks(&mut results, "content");
+        assert_eq!(removed, 0);
+        assert_eq!(results.len(), 0);
     }
 }

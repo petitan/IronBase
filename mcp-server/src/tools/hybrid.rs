@@ -20,7 +20,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD};
-use super::fusion::{apply_projection, id_to_string, mmr_reorder, rerank_results, FusedResult};
+use super::fusion::{
+    apply_projection, id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
+    FusedResult,
+};
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{resolve_weights, HybridSearchParams, ParseParams};
 use super::rag::get_rag_config;
@@ -297,6 +300,15 @@ fn handle_hybrid_search(
     }
 
     // ========================================================================
+    // STEP 5.5: Merge adjacent chunks from same document (overlap dedup)
+    // ========================================================================
+    let chunks_merged = if p.merge_chunks {
+        merge_adjacent_chunks(&mut fused, &effective_text_field)
+    } else {
+        0
+    };
+
+    // ========================================================================
     // STEP 6: MMR diversity reranking (optional)
     // ========================================================================
     let dedup_removed = if p.deduplicate {
@@ -364,7 +376,8 @@ fn handle_hybrid_search(
         "query": p.query,
         "auto_embedded": auto_embedded,
         "provider": provider_name,
-        "dedup_removed": dedup_removed
+        "dedup_removed": dedup_removed,
+        "chunks_merged": chunks_merged
     }))
 }
 
