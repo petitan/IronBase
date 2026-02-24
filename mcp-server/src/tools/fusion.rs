@@ -424,9 +424,32 @@ pub(crate) fn mmr_reorder(
     let mut selected_indices: Vec<usize> = Vec::with_capacity(target);
     let mut candidate_mask: Vec<bool> = vec![true; original_len];
 
+    // Incremental max similarity cache: max_sim_cache[i] = max cosine similarity
+    // between candidate i and any already-selected result. Updated incrementally
+    // when a new result is selected, avoiding O(selected) re-scan per candidate.
+    let mut max_sim_cache: Vec<f64> = vec![0.0; original_len];
+
     // Select first: highest relevance (results are pre-sorted by final_score)
     selected_indices.push(0);
     candidate_mask[0] = false;
+
+    // Update cache for the first selected result
+    if let Some(ref emb_first) = embeddings[0] {
+        for (i, is_candidate) in candidate_mask.iter().enumerate() {
+            if !is_candidate {
+                continue;
+            }
+            if let Some(ref emb_i) = embeddings[i] {
+                if emb_i.len() == emb_first.len() && !emb_i.is_empty() {
+                    let sim =
+                        ironbase_core::vector::simd::cosine_similarity(emb_i, emb_first) as f64;
+                    if sim > max_sim_cache[i] {
+                        max_sim_cache[i] = sim;
+                    }
+                }
+            }
+        }
+    }
 
     // Greedy MMR selection
     while selected_indices.len() < target {
@@ -445,31 +468,7 @@ pub(crate) fn mmr_reorder(
                 1.0
             };
 
-            // Max similarity to any selected result
-            let max_sim = if let Some(ref emb_i) = embeddings[i] {
-                selected_indices
-                    .iter()
-                    .filter_map(|&si| {
-                        embeddings[si].as_ref().map(|emb_s| {
-                            if emb_i.len() == emb_s.len() && !emb_i.is_empty() {
-                                ironbase_core::vector::simd::cosine_similarity(emb_i, emb_s)
-                                    as f64
-                            } else {
-                                0.0 // Dimension mismatch → no penalty
-                            }
-                        })
-                    })
-                    .fold(f64::NEG_INFINITY, f64::max)
-            } else {
-                0.0 // No embedding → no diversity penalty
-            };
-            let max_sim = if max_sim == f64::NEG_INFINITY {
-                0.0
-            } else {
-                max_sim
-            };
-
-            let mmr_score = lambda * relevance - (1.0 - lambda) * max_sim;
+            let mmr_score = lambda * relevance - (1.0 - lambda) * max_sim_cache[i];
 
             if mmr_score > best_mmr {
                 best_mmr = mmr_score;
@@ -481,6 +480,25 @@ pub(crate) fn mmr_reorder(
             Some(idx) => {
                 selected_indices.push(idx);
                 candidate_mask[idx] = false;
+
+                // Update cache: compare each remaining candidate against newly selected
+                if let Some(ref emb_new) = embeddings[idx] {
+                    for (i, is_candidate) in candidate_mask.iter().enumerate() {
+                        if !is_candidate {
+                            continue;
+                        }
+                        if let Some(ref emb_i) = embeddings[i] {
+                            if emb_i.len() == emb_new.len() && !emb_i.is_empty() {
+                                let sim =
+                                    ironbase_core::vector::simd::cosine_similarity(emb_i, emb_new)
+                                        as f64;
+                                if sim > max_sim_cache[i] {
+                                    max_sim_cache[i] = sim;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             None => break, // No more candidates
         }
