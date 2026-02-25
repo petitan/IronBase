@@ -931,7 +931,6 @@ coll.update_one_with_options(&filter, &update, opts)?;
 | **Contains** | `{"$contains": "Rust"}` | Substring match, case-insensitive default |
 | **Fulltext** | `fulltext_search(field, query, limit)` | TF-IDF, stemming, HU/EN/DE |
 | **Hybrid** | `hybrid_search(collection, query)` | RRF score fusion, auto-embed ha nincs vector |
-| **RAG (deprecated)** | `rag_search(collection, query)` | Alias: delegál hybrid_search-nek |
 
 `$text`, `$startsWith`, `$endsWith`, `$contains` mindegyik támogatja:
 - Egyszerű forma: `{"field": {"$op": "value"}}` (case-insensitive)
@@ -954,7 +953,6 @@ let results = coll.fulltext_search("content", "király", Some(10), None, None, N
 |------|--------|
 | `rag_collection_create` | Collection + FastText model |
 | `rag_document_import` | Auto-chunked import |
-| `rag_search` | **DEPRECATED** — delegál hybrid_search-nek |
 | `rag_collection_stats` | Statisztikák |
 | `hybrid_search` | Unified keresés: explicit vector VAGY auto-embed |
 
@@ -1020,7 +1018,6 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 | Tool | Fájl | Algoritmus |
 |------|------|-----------|
 | `hybrid_search` | `mcp-server/src/tools/hybrid.rs` | RRF fusion (explicit vector VAGY auto-embed) |
-| `rag_search` | `mcp-server/src/tools/rag.rs` | DEPRECATED alias → delegál hybrid_search-nek |
 
 **RRF formula:** `score = Σ(weight_i / (K + rank_i))` ahol K=20 (default, konfigurálható `rrf_k` paraméterrel)
 
@@ -1060,7 +1057,7 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **Fulltext mode paraméter (45f74bf7, #47):**
 - `mode`: `"or"` (default) = bármely szó elég, `"and"` = MINDEN szó kell a dokumentumban
-- Elérhető: `hybrid_search`, `fulltext_search` (`rag_search` deprecated alias)
+- Elérhető: `hybrid_search`, `fulltext_search`
 - AND mód szűkíti a fulltext komponenst; vektor keresés változatlan → RRF fusion vektor-only eredményeket is ad
 - Backward compatible: `mode` hiánya = `"or"` (régi viselkedés)
 
@@ -1072,7 +1069,7 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **Multi-field fulltext (b938c487, #48):**
 - `text_fields`: string tömb — több mező párhuzamos fulltext keresése, best-field strategy (max score merge)
-- Elérhető: `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven, `rag_search` deprecated alias)
+- Elérhető: `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven)
 - `text_fields` felülírja a `text_field` (string) paramétert ha mindkettő megadva
 - Előfeltétel: minden megadott mezőn fulltext index kell (`index_create_fulltext`)
 - Backward compatible: `text_fields` hiánya = single-field (régi viselkedés)
@@ -1084,7 +1081,7 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **Search mode presets (220679f3):**
 - `search_mode`: `"balanced"` (default), `"semantic"`, `"keyword"` — LLM-barát nevesített preset a numerikus weight-ek helyett
-- Elérhető: `hybrid_search` (`rag_search` deprecated alias)
+- Elérhető: `hybrid_search`
 - Explicit `vector_weight`/`fulltext_weight` felülírja a preset-et ha megadva
 
 | Mode | vector_weight | fulltext_weight | Mikor |
@@ -1115,7 +1112,7 @@ STEP 7: Projection + response
 ```
 Query operátorok ($text, $fuzzy, $regex...)  → boolean predikátum, per-doc
 Collection metódusok (fulltext_search...)    → scored results, index-alapú
-MCP tools (hybrid_search)                    → score fusion, ranked retrieval (rag_search = deprecated alias)
+MCP tools (hybrid_search)                    → score fusion, ranked retrieval
 ```
 </details>
 

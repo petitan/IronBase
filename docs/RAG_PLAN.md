@@ -383,44 +383,6 @@ impl RagManager {
 }
 ```
 
-### rag_search
-
-```javascript
-{
-  "name": "rag_search",
-  "arguments": {
-    "collection": "iso_17025",
-    "query": "mérési bizonytalanság számítása",
-    "top_k": 5,
-    "include_tables": true
-  }
-}
-
-// Válasz
-{
-  "results": [
-    {
-      "doc_id": "doc_17025_v3",
-      "doc_title": "ISO/IEC 17025:2017 Kézikönyv",
-      "chunk_id": "chunk_17025_089",
-      "section": "7.6 A mérési bizonytalanság értékelése",
-      "text": "A laboratóriumnak azonosítania kell a bizonytalansági forrásokat...",
-      "score": 0.91,
-      "block_type": "paragraph"
-    },
-    {
-      "doc_id": "doc_17025_v3",
-      "chunk_id": "table_17025_023",
-      "section": "7.6 A mérési bizonytalanság értékelése",
-      "text": "| Bizonytalansági forrás | Típus | Értékelés módja |...",
-      "score": 0.87,
-      "block_type": "table"
-    }
-  ],
-  "search_time_ms": 8
-}
-```
-
 ### rag_hybrid_search
 
 ```javascript

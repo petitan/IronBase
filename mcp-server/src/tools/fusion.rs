@@ -1,7 +1,7 @@
 //! Shared fusion utilities for hybrid and RAG search
 //!
 //! Contains the reranking pipeline, MMR diversity reranking, and common helpers
-//! shared between `hybrid_search` and `rag_search` tools.
+//! shared between hybrid search tools.
 //!
 //! Extracted from duplicated code in hybrid.rs and rag.rs (2026-02-18).
 

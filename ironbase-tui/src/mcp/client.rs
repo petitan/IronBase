@@ -1084,7 +1084,7 @@ impl McpClient {
         self.call_tool("rag_document_import", args).await
     }
 
-    /// RAG semantic search with automatic query embedding
+    /// Hybrid search with automatic query embedding (auto-embed mode)
     pub async fn rag_search(
         &self,
         collection: &str,
@@ -1102,7 +1102,7 @@ impl McpClient {
             "rerank": true,
             "deduplicate": true
         });
-        self.call_tool("rag_search", args).await
+        self.call_tool("hybrid_search", args).await
     }
 
     /// Get RAG collection statistics

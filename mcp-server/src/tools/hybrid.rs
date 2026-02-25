@@ -8,7 +8,6 @@
 //! - Unified tool: `hybrid_search` handles both explicit vector and auto-embed modes
 //! - If `vector` is provided → explicit mode (client embeds query)
 //! - If `vector` is omitted → auto-embed mode (server embeds query via RAG config/provider)
-//! - `rag_search` is a deprecated alias that delegates here
 //! - Reranking: phrase match, keyword density, title boost
 //! - MMR diversity reranking: embedding cosine similarity based
 

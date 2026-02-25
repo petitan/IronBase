@@ -763,49 +763,6 @@ pub struct RagDocumentImportParams {
     pub provider: Option<String>,
 }
 
-/// Parameters for `rag_search` tool - THE KEY TOOL
-/// Unlike hybrid_search, this takes a TEXT query and embeds it automatically
-#[derive(Debug, Deserialize)]
-pub struct RagSearchParams {
-    pub collection: String,
-    /// Natural language query (auto-embedded)
-    pub query: String,
-    #[serde(default = "default_hybrid_limit")]
-    pub limit: usize,
-    /// Explicit vector weight override (takes priority over search_mode)
-    pub vector_weight: Option<f64>,
-    /// Explicit fulltext weight override (takes priority over search_mode)
-    pub fulltext_weight: Option<f64>,
-    /// Search mode preset: "balanced" (0.5/0.5), "semantic" (0.8/0.2), "keyword" (0.2/0.8)
-    /// Overridden by explicit vector_weight/fulltext_weight if provided
-    pub search_mode: Option<String>,
-    #[serde(default = "default_rerank")]
-    pub rerank: bool,
-    #[serde(default = "default_deduplicate")]
-    pub deduplicate: bool,
-    /// MMR lambda parameter for diversity vs relevance trade-off (default: 0.5)
-    /// 1.0 = pure relevance, 0.0 = pure diversity
-    #[serde(default = "default_mmr_lambda")]
-    pub mmr_lambda: f64,
-    pub projection: Option<Value>,
-    pub provider: Option<String>,
-    /// MongoDB-style filter applied BEFORE both vector and fulltext search
-    pub filter: Option<Value>,
-
-    /// RRF K constant — lower = wider score spread (default: 20)
-    #[serde(default = "default_rrf_k")]
-    pub rrf_k: f64,
-
-    /// Optional title field for title match boost in reranking (up to 1.5x)
-    pub title_field: Option<String>,
-
-    /// Fulltext search mode: "or" (default) = any word matches, "and" = ALL words must match
-    pub mode: Option<String>,
-
-    /// Multiple fulltext fields to search across (overrides text_field from RAG config). Best-field strategy (max score).
-    pub text_fields: Option<Vec<String>>,
-}
-
 /// Parameters for `rag_collection_stats` tool
 #[derive(Debug, Deserialize)]
 pub struct RagCollectionStatsParams {
@@ -1185,19 +1142,6 @@ mod tests {
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert!(p.vector.is_none());
         assert_eq!(p.provider.as_deref(), Some("fasttext"));
-    }
-
-    #[test]
-    fn test_rag_params_with_search_mode() {
-        let params = json!({
-            "collection": "docs",
-            "query": "keresés",
-            "search_mode": "keyword"
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        assert_eq!(p.search_mode.as_deref(), Some("keyword"));
-        assert!(p.vector_weight.is_none());
-        assert!(p.fulltext_weight.is_none());
     }
 
     #[test]

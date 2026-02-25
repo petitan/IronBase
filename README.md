@@ -229,7 +229,6 @@ results = db.find("data", {"$**.name": "Alice"})  # Matches name at any level
 ```
 hybrid_search      → RRF fusion of fulltext + vector results with reranking + MMR diversity
                      If 'vector' omitted → auto-embeds query (FastText/Ollama/OpenAI)
-rag_search         → DEPRECATED alias for hybrid_search (auto-embed mode)
 ```
 
 Uses **MMR (Maximal Marginal Relevance)** for result diversity — removes near-duplicate chunks using embedding cosine similarity instead of naive prefix matching.
@@ -535,7 +534,6 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `embed_job_cancel` | Cancel running job |
 | `rag_collection_create` | Create RAG-optimized collection |
 | `rag_document_import` | Import document with auto-chunking |
-| `rag_search` | **DEPRECATED** — use `hybrid_search` (omit `vector`). Compatibility alias |
 | `rag_collection_stats` | Get RAG collection statistics |
 
 </details>

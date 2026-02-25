@@ -3,10 +3,9 @@
 //! Provides MCP tools for RAG collection management:
 //! - rag_collection_create: Set up collection with indexes
 //! - rag_document_import: Chunk + embed + insert
-//! - rag_search: DEPRECATED alias for hybrid_search (auto-embed mode)
 //! - rag_collection_stats: RAG-specific statistics
 //!
-//! Search logic has been unified into hybrid_search (see hybrid.rs).
+//! Search logic lives in hybrid_search (see hybrid.rs).
 
 use crate::adapter::IronBaseAdapter;
 use crate::chunking::{chunk_content, ChunkMode, ChunkOptions};
@@ -20,7 +19,6 @@ use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAU
 use super::helpers::validate_collection_name;
 use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
-    RagSearchParams,
 };
 
 /// System collection for RAG configs
@@ -116,7 +114,6 @@ pub fn dispatch(
     match name {
         "rag_collection_create" => handle_rag_collection_create(params, adapter, embedding_manager),
         "rag_document_import" => handle_rag_document_import(params, adapter, embedding_manager),
-        "rag_search" => handle_rag_search(params, adapter, embedding_manager),
         "rag_collection_stats" => handle_rag_collection_stats(params, adapter, embedding_manager),
         _ => Err(McpError::invalid_params(format!(
             "Unknown RAG tool: {}",
@@ -417,62 +414,6 @@ fn handle_rag_document_import(
 }
 
 // ============================================================================
-// rag_search Handler - DEPRECATED ALIAS for hybrid_search (auto-embed mode)
-// ============================================================================
-
-fn handle_rag_search(
-    params: Value,
-    adapter: &Arc<IronBaseAdapter>,
-    embedding_manager: &Option<Arc<EmbeddingManager>>,
-) -> Result<Value> {
-    // Parse as RagSearchParams for backward compatibility validation
-    let p: RagSearchParams = RagSearchParams::parse(params)?;
-
-    // Convert to hybrid_search JSON params (auto-embed mode: no vector)
-    let mut hybrid_params = json!({
-        "collection": p.collection,
-        "query": p.query,
-        "limit": p.limit,
-        "rerank": p.rerank,
-        "deduplicate": p.deduplicate,
-        "mmr_lambda": p.mmr_lambda,
-        "rrf_k": p.rrf_k
-    });
-
-    // Forward optional params
-    if let Some(ref vw) = p.vector_weight {
-        hybrid_params["vector_weight"] = json!(vw);
-    }
-    if let Some(ref fw) = p.fulltext_weight {
-        hybrid_params["fulltext_weight"] = json!(fw);
-    }
-    if let Some(ref sm) = p.search_mode {
-        hybrid_params["search_mode"] = json!(sm);
-    }
-    if let Some(ref provider) = p.provider {
-        hybrid_params["provider"] = json!(provider);
-    }
-    if let Some(ref projection) = p.projection {
-        hybrid_params["projection"] = projection.clone();
-    }
-    if let Some(ref filter) = p.filter {
-        hybrid_params["filter"] = filter.clone();
-    }
-    if let Some(ref title_field) = p.title_field {
-        hybrid_params["title_field"] = json!(title_field);
-    }
-    if let Some(ref mode) = p.mode {
-        hybrid_params["mode"] = json!(mode);
-    }
-    if let Some(ref text_fields) = p.text_fields {
-        hybrid_params["text_fields"] = json!(text_fields);
-    }
-
-    // Delegate to hybrid_search (auto-embed mode since no vector is provided)
-    super::hybrid::dispatch("hybrid_search", hybrid_params, adapter, embedding_manager)
-}
-
-// ============================================================================
 // rag_collection_stats Handler
 // ============================================================================
 
@@ -567,99 +508,4 @@ mod tests {
         assert_eq!(parsed.dimension, 300);
     }
 
-    #[test]
-    fn test_rag_search_params_defaults() {
-        let params = json!({
-            "collection": "docs",
-            "query": "semantic search test"
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        assert_eq!(p.collection, "docs");
-        assert_eq!(p.query, "semantic search test");
-        assert_eq!(p.limit, 10);
-        assert!(p.vector_weight.is_none()); // no explicit weight
-        assert!(p.fulltext_weight.is_none()); // no explicit weight
-        assert!(p.search_mode.is_none()); // no mode → balanced default
-        assert!(p.rerank);
-        assert!(p.deduplicate);
-        assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON);
-        assert!(p.projection.is_none());
-        assert!(p.provider.is_none());
-        assert!(p.filter.is_none()); // default: no filter
-        assert!(p.mode.is_none()); // default: None (= "or")
-        assert!(p.text_fields.is_none()); // default: None (= single text_field)
-    }
-
-    #[test]
-    fn test_rag_search_params_with_mode_and() {
-        let params = json!({
-            "collection": "docs",
-            "query": "ajánlat karbantartás",
-            "mode": "and"
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        assert_eq!(p.mode.as_deref(), Some("and"));
-    }
-
-    #[test]
-    fn test_rag_search_params_with_mode_or() {
-        let params = json!({
-            "collection": "docs",
-            "query": "test",
-            "mode": "or"
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        assert_eq!(p.mode.as_deref(), Some("or"));
-    }
-
-    #[test]
-    fn test_rag_search_params_with_text_fields() {
-        let params = json!({
-            "collection": "docs",
-            "query": "Juhai ajánlat",
-            "text_fields": ["content_text", "title", "customer"]
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        let fields = p.text_fields.unwrap();
-        assert_eq!(fields, vec!["content_text", "title", "customer"]);
-    }
-
-    #[test]
-    fn test_rag_search_params_text_fields_with_mode_and() {
-        let params = json!({
-            "collection": "docs",
-            "query": "ajánlat karbantartás",
-            "mode": "and",
-            "text_fields": ["content_text", "title"]
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        assert_eq!(p.mode.as_deref(), Some("and"));
-        assert_eq!(p.text_fields.unwrap(), vec!["content_text", "title"]);
-    }
-
-    #[test]
-    fn test_rag_search_params_with_filter() {
-        let params = json!({
-            "collection": "docs",
-            "query": "keresés",
-            "filter": {"doc_type": "ajanlat", "year": 2026}
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        assert!(p.filter.is_some());
-        let filter = p.filter.unwrap();
-        assert_eq!(filter["doc_type"], "ajanlat");
-        assert_eq!(filter["year"], 2026);
-    }
-
-    #[test]
-    fn test_rag_search_params_with_empty_filter() {
-        let params = json!({
-            "collection": "docs",
-            "query": "test",
-            "filter": {}
-        });
-        let p: RagSearchParams = RagSearchParams::parse(params).unwrap();
-        assert!(p.filter.is_some());
-        assert!(p.filter.unwrap().as_object().unwrap().is_empty());
-    }
 }

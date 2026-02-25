@@ -129,11 +129,11 @@ mod tests {
         // Verify we have the expected number of tools
         // Database: 4, Collection: 3, Document: 11, Index: 13, Schema: 2,
         // Script: 12, Transaction: 7, Admin: 8, ACL: 5, Listener: 6,
-        // Vector: 5, Hybrid: 1, Embedding: 6, AutoEmbed: 3, Jobs: 3, RAG: 4 = 93 total
+        // Vector: 5, Hybrid: 1, Embedding: 6, AutoEmbed: 3, Jobs: 3, RAG: 3 = 92 total
         assert_eq!(
             tools.len(),
-            93,
-            "Expected 93 tools, got {}",
+            92,
+            "Expected 92 tools, got {}",
             tools.len()
         );
     }

@@ -423,7 +423,6 @@ The v2 format is recommended for Hungarian and other agglutinative languages whe
 |------|-------------|
 | `rag_collection_create` | Create RAG-optimized collection (auto: vector + fulltext indexes) |
 | `rag_document_import` | Import document with auto-chunking and embedding |
-| `rag_search` | **DEPRECATED** — use `hybrid_search` (omit `vector` for auto-embedding). Compatibility alias. |
 | `rag_collection_stats` | Get RAG collection statistics (chunks, sources, indexes) |
 
 ---
