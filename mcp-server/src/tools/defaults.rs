@@ -123,3 +123,13 @@ pub fn default_async() -> bool {
 
 /// Maximum consecutive empty batches before stopping backfill
 pub const MAX_EMPTY_BATCHES: usize = 3;
+
+// ============================================================================
+// Search Fusion Defaults
+// ============================================================================
+
+/// Default RRF K constant (lower = wider score spread, more reranking impact)
+pub const DEFAULT_RRF_K: f64 = 20.0;
+
+/// Maximum internal limit for search fusion to prevent OOM
+pub const MAX_INTERNAL_LIMIT: usize = 1000;

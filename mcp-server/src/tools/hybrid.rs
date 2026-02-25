@@ -19,7 +19,9 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD};
+use super::defaults::{
+    DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
+};
 use super::fusion::{
     apply_projection, id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
     FusedResult,
@@ -33,9 +35,7 @@ use super::rag::get_rag_config;
 #[cfg(test)]
 const RRF_K: f64 = 60.0;
 
-/// Maximum internal limit to prevent OOM (CLAUDE.md compliance)
-/// Even if user requests limit=100000, we cap internal processing at this value
-const MAX_INTERNAL_LIMIT: usize = 1000;
+// MAX_INTERNAL_LIMIT imported from defaults.rs
 
 /// Dispatch hybrid tool calls
 pub fn dispatch(

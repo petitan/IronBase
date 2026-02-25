@@ -12,6 +12,14 @@
 use crate::adapter::{FindOptions as AdapterFindOptions, FulltextSearchOptions, IronBaseAdapter};
 use crate::chunking::{chunk_content, ChunkMode, ChunkOptions};
 use crate::embedding::EmbeddingManager;
+use crate::tools::defaults::{
+    DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_RRF_K, DEFAULT_TEXT_FIELD,
+    MAX_INTERNAL_LIMIT,
+};
+use crate::tools::fusion::{
+    id_to_string as fusion_id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
+    FusedResult,
+};
 use rhai::{Dynamic, Engine, Map};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -115,6 +123,52 @@ fn get_bool_option_or(options: &Map, key: &str, default: bool) -> bool {
     get_bool_option(options, key).unwrap_or(default)
 }
 
+/// Extract JSON Value option from Map (returns None if key missing or value is null)
+fn get_json_option(options: &Map, key: &str) -> Option<serde_json::Value> {
+    options.get(key).and_then(|v| {
+        let json = dynamic_to_json(v);
+        if json.is_null() {
+            None
+        } else {
+            Some(json)
+        }
+    })
+}
+
+/// Extract string array option from Map
+fn get_string_array_option(options: &Map, key: &str) -> Option<Vec<String>> {
+    options.get(key).and_then(|v| {
+        v.clone().try_cast::<rhai::Array>().map(|arr| {
+            arr.into_iter()
+                .filter_map(|item| {
+                    // Clone for read_lock to avoid borrow conflict with try_cast
+                    if let Some(s) = item.clone().read_lock::<rhai::ImmutableString>() {
+                        Some(s.to_string())
+                    } else {
+                        item.try_cast::<String>()
+                    }
+                })
+                .collect()
+        })
+    })
+}
+
+/// Resolve weights from search_mode preset or explicit overrides
+///
+/// Priority: explicit weights > search_mode preset > balanced default
+fn resolve_search_mode_weights(opts: &Map, search_mode: Option<&str>) -> (f64, f64) {
+    let explicit_vw = get_float_option(opts, "vector_weight");
+    let explicit_fw = get_float_option(opts, "fulltext_weight");
+    if explicit_vw.is_some() || explicit_fw.is_some() {
+        return (explicit_vw.unwrap_or(0.5), explicit_fw.unwrap_or(0.5));
+    }
+    match search_mode {
+        Some("semantic") => (0.8, 0.2),
+        Some("keyword") => (0.2, 0.8),
+        _ => (0.5, 0.5),
+    }
+}
+
 /// Register all database functions into a Rhai engine.
 ///
 /// # Functions Registered
@@ -158,8 +212,8 @@ fn get_bool_option_or(options: &Map, key: &str, default: bool) -> bool {
 /// - `db_vector_search_filter(collection, field, query_vector, filter, limit)` - Vector search with filter
 ///
 /// ## RAG Operations (require embedding_manager)
-/// - `db_rag_search(collection, query)` - Simple RAG search
-/// - `db_rag_search(collection, query, options)` - RAG search with options
+/// - `db_hybrid_search(collection, query)` - Hybrid search (auto-embed, RRF fusion)
+/// - `db_hybrid_search(collection, query, options)` - Hybrid search with options
 /// - `db_rag_import(collection, content, title)` - Import document with chunking
 /// - `db_rag_import(collection, content, options)` - Import with options
 /// - `db_rag_create(collection)` - Create RAG collection with defaults
@@ -1040,11 +1094,8 @@ fn register_vector_functions(
 // RAG Operations
 // ============================================================
 
-/// RRF constant - empirically optimal value (Cormack et al., 2009)
-const RRF_K: f64 = 60.0;
-
-/// Maximum internal limit to prevent OOM
-const MAX_INTERNAL_LIMIT: usize = 1000;
+// RRF_K, MAX_INTERNAL_LIMIT, DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, DEFAULT_EMBEDDING_PROVIDER
+// imported from crate::tools::defaults
 
 /// Maximum documents returned by aggregate to prevent OOM
 const MAX_AGGREGATE_DOCUMENTS: usize = 10_000;
@@ -1058,15 +1109,6 @@ const RESERVED_METADATA_KEYS: &[&str] = &["_id", "doc_id", "chunk_index", "chunk
 /// System collection for RAG configs
 const RAG_CONFIG_COLLECTION: &str = "_system.rag";
 
-/// Default embedding field name
-const DEFAULT_EMBEDDING_FIELD: &str = "embedding";
-
-/// Default text field name
-const DEFAULT_TEXT_FIELD: &str = "content";
-
-/// Default embedding provider
-const DEFAULT_EMBEDDING_PROVIDER: &str = "fasttext";
-
 fn register_rag_functions(
     engine: &mut Engine,
     adapter: Arc<IronBaseAdapter>,
@@ -1075,14 +1117,14 @@ fn register_rag_functions(
 ) {
     let max_find_documents = limits.max_find_documents;
 
-    // db_rag_search(collection, query) -> array of result documents
-    let adapter_rag1 = adapter.clone();
+    // db_hybrid_search(collection, query) -> array of result documents
+    let adapter_hs1 = adapter.clone();
     let emb_mgr1 = embedding_manager.clone();
     engine.register_fn(
-        "db_rag_search",
+        "db_hybrid_search",
         move |collection: &str, query: &str| -> Dynamic {
-            rag_search_impl(
-                &adapter_rag1,
+            hybrid_search_impl(
+                &adapter_hs1,
                 &emb_mgr1,
                 collection,
                 query,
@@ -1092,14 +1134,14 @@ fn register_rag_functions(
         },
     );
 
-    // db_rag_search(collection, query, options) -> array of result documents
-    let adapter_rag2 = adapter.clone();
+    // db_hybrid_search(collection, query, options) -> array of result documents
+    let adapter_hs2 = adapter.clone();
     let emb_mgr2 = embedding_manager.clone();
     engine.register_fn(
-        "db_rag_search",
+        "db_hybrid_search",
         move |collection: &str, query: &str, options: Map| -> Dynamic {
-            rag_search_impl(
-                &adapter_rag2,
+            hybrid_search_impl(
+                &adapter_hs2,
                 &emb_mgr2,
                 collection,
                 query,
@@ -1243,17 +1285,11 @@ fn save_rag_config(
         .map_err(|e| format!("Failed to insert RAG config: {}", e))
 }
 
-/// Convert Value _id to String for HashMap key
-fn id_to_string(id: &serde_json::Value) -> Option<String> {
-    match id {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        _ => Some(id.to_string()),
-    }
-}
-
-/// RAG search implementation
-fn rag_search_impl(
+/// Hybrid search implementation (RRF fusion with reranking, chunk merge, MMR)
+///
+/// Delegates to fusion.rs for reranking, chunk merge, and MMR diversity reranking.
+/// Consistent with the MCP `hybrid_search` tool (hybrid.rs + fusion.rs).
+fn hybrid_search_impl(
     adapter: &Arc<IronBaseAdapter>,
     embedding_manager: &Option<Arc<EmbeddingManager>>,
     collection: &str,
@@ -1279,14 +1315,19 @@ fn rag_search_impl(
         }
     };
 
-    // Parse options using helper functions
+    // Parse options
     let opts = options.unwrap_or_default();
     let limit = (get_int_option_or(&opts, "limit", 10) as usize).min(max_find_documents);
-    let vector_weight = get_float_option_or(&opts, "vector_weight", 0.5);
-    let fulltext_weight = get_float_option_or(&opts, "fulltext_weight", 0.5);
+    let rrf_k = get_float_option_or(&opts, "rrf_k", DEFAULT_RRF_K);
     let rerank = get_bool_option_or(&opts, "rerank", true);
     let deduplicate = get_bool_option_or(&opts, "deduplicate", true);
     let mmr_lambda = get_float_option_or(&opts, "mmr_lambda", 0.5);
+    let merge_chunks = get_bool_option_or(&opts, "merge_chunks", true);
+    let title_field = get_string_option(&opts, "title_field");
+    let mode = get_string_option(&opts, "mode");
+    let filter_val = get_json_option(&opts, "filter");
+    let search_mode = get_string_option(&opts, "search_mode");
+    let text_fields_opt: Option<Vec<String>> = get_string_array_option(&opts, "text_fields");
 
     // Reject removed parameter with explicit error
     if opts.contains_key("dedup_threshold") {
@@ -1295,6 +1336,10 @@ fn rag_search_impl(
                 .to_string(),
         );
     }
+
+    // Resolve weights: explicit > search_mode preset > balanced default
+    let (vector_weight, fulltext_weight) =
+        resolve_search_mode_weights(&opts, search_mode.as_deref());
 
     // Get RAG config or use defaults
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
@@ -1306,56 +1351,84 @@ fn rag_search_impl(
         ),
     };
 
-    // Get provider and embed query
+    // Embed query
     let query_vector = match manager.embed(query, Some(&provider_name)) {
         Ok(v) => v,
         Err(e) => return Dynamic::from(format!("Error: Query embedding failed: {}", e)),
     };
 
-    // Internal limit for better fusion coverage
+    // Internal limit for better fusion coverage (capped for OOM protection)
     let internal_limit = (limit * 3).min(MAX_INTERNAL_LIMIT);
 
-    // Vector search
-    let vector_results =
+    // ================================================================
+    // Vector search (with optional filter)
+    // ================================================================
+    let vector_results = if let Some(ref filter) = filter_val {
+        match adapter.vector_search_with_filter(
+            collection,
+            &embedding_field,
+            &query_vector,
+            filter,
+            internal_limit,
+        ) {
+            Ok(r) => r,
+            Err(e) => return Dynamic::from(format!("Error: Vector search failed: {}", e)),
+        }
+    } else {
         match adapter.vector_search(collection, &embedding_field, &query_vector, internal_limit) {
             Ok(r) => r,
             Err(e) => return Dynamic::from(format!("Error: Vector search failed: {}", e)),
-        };
+        }
+    };
 
     // Build vector rank map (1-indexed)
     let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
     let mut vector_docs: HashMap<String, (serde_json::Value, f32)> =
         HashMap::with_capacity(vector_results.len());
     for (rank, (doc, score)) in vector_results.into_iter().enumerate() {
-        if let Some(id) = doc.get("_id").and_then(id_to_string) {
+        if let Some(id) = doc.get("_id").and_then(fusion_id_to_string) {
             vector_ranks.insert(id.clone(), rank + 1);
             vector_docs.insert(id, (doc, score));
         }
     }
 
-    // Fulltext search
+    // ================================================================
+    // Fulltext search (with filter + and_mode + multi-field support)
+    // ================================================================
     let text_options = FulltextSearchOptions {
         limit: Some(internal_limit),
         skip: None,
         min_score: None,
         projection: None,
-        filter: None,
-        and_mode: false,
+        filter: filter_val.clone(),
+        and_mode: mode.as_deref() == Some("and"),
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
     };
 
-    // Fulltext search - warn if index doesn't exist
-    let text_results = match adapter.fulltext_search(collection, &text_field, query, text_options) {
-        Ok(r) => r,
-        Err(e) => {
-            // Log warning about missing fulltext index
-            tracing::debug!(
-                "RAG search: fulltext index not available for '{}.{}': {}. Using vector-only search.",
-                collection, text_field, e
-            );
-            Vec::new()
+    let text_results = if let Some(ref fields) = text_fields_opt {
+        let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+        match adapter.fulltext_search_multi(collection, &field_refs, query, text_options) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    "hybrid_search: fulltext multi-field not available: {}. Using vector-only.",
+                    e
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        match adapter.fulltext_search(collection, &text_field, query, text_options) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    "hybrid_search: fulltext index not available for '{}.{}': {}. Using vector-only search.",
+                    collection, text_field, e
+                );
+                Vec::new()
+            }
         }
     };
 
@@ -1364,51 +1437,29 @@ fn rag_search_impl(
     let mut text_docs: HashMap<String, (serde_json::Value, f64)> =
         HashMap::with_capacity(text_results.len());
     for (rank, res) in text_results.into_iter().enumerate() {
-        if let Some(id) = res.document.get("_id").and_then(id_to_string) {
+        if let Some(id) = res.document.get("_id").and_then(fusion_id_to_string) {
             text_ranks.insert(id.clone(), rank + 1);
             text_docs.insert(id, (res.document, res.score));
         }
     }
 
-    // RRF Fusion
-    let mut all_ids: HashSet<String> = HashSet::new();
+    // ================================================================
+    // RRF Fusion (using fusion::FusedResult)
+    // ================================================================
+    let mut all_ids: HashSet<String> =
+        HashSet::with_capacity(vector_ranks.len() + text_ranks.len());
     all_ids.extend(vector_ranks.keys().cloned());
     all_ids.extend(text_ranks.keys().cloned());
 
     let default_rank = internal_limit + 1;
 
-    struct FusedResult {
-        doc: serde_json::Value,
-        rrf_score: f64,
-        final_score: f64,
-        v_rank: usize,
-        t_rank: usize,
-        v_score: Option<f32>,
-        t_score: Option<f64>,
-    }
-
-    // Normalize weights to ensure they sum to 1.0 for consistent RRF scoring
-    let total_weight = vector_weight + fulltext_weight;
-    let norm_vector_weight = if total_weight > 0.0 {
-        vector_weight / total_weight
-    } else {
-        0.5
-    };
-    let norm_fulltext_weight = if total_weight > 0.0 {
-        fulltext_weight / total_weight
-    } else {
-        0.5
-    };
-
     let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
-
     for id in all_ids.iter() {
         let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
         let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
 
-        // RRF score formula with normalized weights
-        let rrf_score = norm_vector_weight * (1.0 / (RRF_K + v_rank as f64))
-            + norm_fulltext_weight * (1.0 / (RRF_K + t_rank as f64));
+        let rrf_score = vector_weight * (1.0 / (rrf_k + v_rank as f64))
+            + fulltext_weight * (1.0 / (rrf_k + t_rank as f64));
 
         let v_score = vector_docs.get(id).map(|(_, s)| *s);
         let t_score = text_docs.get(id).map(|(_, s)| *s);
@@ -1423,9 +1474,11 @@ fn rag_search_impl(
         };
 
         fused.push(FusedResult {
+            id: id.clone(),
             doc,
             rrf_score,
             final_score: rrf_score,
+            rerank_boost: 1.0,
             v_rank,
             t_rank,
             v_score,
@@ -1440,161 +1493,32 @@ fn rag_search_impl(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Reranking (simple keyword density boost)
+    // ================================================================
+    // Reranking via fusion::rerank_results
+    // ================================================================
     if rerank {
-        // Filter words with at least 3 bytes (fast approximation for short word filtering)
-        let query_words: HashSet<String> = query
-            .to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|w| w.len() >= 3)
-            .map(|s| s.to_string())
-            .collect();
-
-        for item in fused.iter_mut() {
-            let content = item
-                .doc
-                .get(&text_field)
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let content_lower = content.to_lowercase();
-            let content_words: Vec<&str> = content_lower
-                .split(|c: char| !c.is_alphanumeric())
-                .filter(|w| !w.is_empty())
-                .collect();
-
-            let mut boost = 1.0;
-            if !content_words.is_empty() {
-                #[allow(clippy::unnecessary_to_owned)]
-                let matches = content_words
-                    .iter()
-                    .filter(|w| query_words.contains(&w.to_string()))
-                    .count();
-                let density = matches as f64 / content_words.len() as f64;
-                boost *= 1.0 + density.min(0.1);
-            }
-            if content.len() < 100 {
-                boost *= 0.8;
-            }
-            item.final_score = item.rrf_score * boost;
-        }
-
-        fused.sort_by(|a, b| {
-            b.final_score
-                .partial_cmp(&a.final_score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        rerank_results(&mut fused, query, &text_field, title_field.as_deref());
     }
 
-    // MMR diversity reranking (replaces prefix-based dedup)
+    // ================================================================
+    // Adjacent chunk merge via fusion::merge_adjacent_chunks
+    // ================================================================
+    if merge_chunks {
+        merge_adjacent_chunks(&mut fused, &text_field);
+    }
+
+    // ================================================================
+    // MMR diversity reranking via fusion::mmr_reorder
+    // ================================================================
     if deduplicate {
-        let original_len = fused.len();
-        let target = limit.min(original_len);
-
-        if !fused.is_empty() && target > 0 {
-            // Extract embeddings
-            let embeddings: Vec<Option<Vec<f32>>> = fused
-                .iter()
-                .map(|r| {
-                    r.doc
-                        .get(&embedding_field)
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_f64().map(|f| f as f32))
-                                .collect()
-                        })
-                })
-                .collect();
-
-            // Normalize relevance scores
-            let max_score = fused
-                .iter()
-                .map(|r| r.final_score)
-                .fold(f64::NEG_INFINITY, f64::max);
-            let min_score = fused
-                .iter()
-                .map(|r| r.final_score)
-                .fold(f64::INFINITY, f64::min);
-            let score_range = max_score - min_score;
-
-            let mut selected_indices: Vec<usize> = Vec::with_capacity(target);
-            let mut candidate_mask: Vec<bool> = vec![true; original_len];
-
-            // First: highest relevance
-            selected_indices.push(0);
-            candidate_mask[0] = false;
-
-            while selected_indices.len() < target {
-                let mut best_idx = None;
-                let mut best_mmr = f64::NEG_INFINITY;
-
-                for (i, is_candidate) in candidate_mask.iter().enumerate() {
-                    if !is_candidate {
-                        continue;
-                    }
-                    let relevance = if score_range > 0.0 {
-                        (fused[i].final_score - min_score) / score_range
-                    } else {
-                        1.0
-                    };
-                    let max_sim = if let Some(ref emb_i) = embeddings[i] {
-                        let s = selected_indices
-                            .iter()
-                            .filter_map(|&si| {
-                                embeddings[si].as_ref().map(|emb_s| {
-                                    if emb_i.len() == emb_s.len() && !emb_i.is_empty() {
-                                        ironbase_core::vector::simd::cosine_similarity(emb_i, emb_s)
-                                            as f64
-                                    } else {
-                                        0.0
-                                    }
-                                })
-                            })
-                            .fold(f64::NEG_INFINITY, f64::max);
-                        if s == f64::NEG_INFINITY {
-                            0.0
-                        } else {
-                            s
-                        }
-                    } else {
-                        0.0
-                    };
-                    let mmr_score = mmr_lambda * relevance - (1.0 - mmr_lambda) * max_sim;
-                    if mmr_score > best_mmr {
-                        best_mmr = mmr_score;
-                        best_idx = Some(i);
-                    }
-                }
-
-                match best_idx {
-                    Some(idx) => {
-                        selected_indices.push(idx);
-                        candidate_mask[idx] = false;
-                    }
-                    None => break,
-                }
-            }
-
-            // Reorder: keep only selected
-            let reordered: Vec<_> = selected_indices.into_iter().map(|i| {
-                let placeholder = FusedResult {
-                    doc: serde_json::Value::Null,
-                    rrf_score: 0.0,
-                    final_score: 0.0,
-                    v_rank: 0,
-                    t_rank: 0,
-                    v_score: None,
-                    t_score: None,
-                };
-                std::mem::replace(&mut fused[i], placeholder)
-            }).collect();
-            fused = reordered;
-        }
+        mmr_reorder(&mut fused, &embedding_field, mmr_lambda, limit);
     } else {
-        // No MMR → simple truncate
         fused.truncate(limit);
     }
 
+    // ================================================================
+    // Response — Dynamic conversion
+    // ================================================================
     let results: Vec<Dynamic> = fused
         .into_iter()
         .map(|item| {
@@ -1602,6 +1526,7 @@ fn rag_search_impl(
             if let Some(mut map) = result.clone().try_cast::<Map>() {
                 map.insert("_rrf_score".into(), Dynamic::from(item.rrf_score));
                 map.insert("_final_score".into(), Dynamic::from(item.final_score));
+                map.insert("_rerank_boost".into(), Dynamic::from(item.rerank_boost));
                 map.insert("_vector_rank".into(), Dynamic::from(item.v_rank as i64));
                 map.insert("_text_rank".into(), Dynamic::from(item.t_rank as i64));
                 if let Some(vs) = item.v_score {

@@ -47,7 +47,7 @@ use super::utility_functions::register_utility_functions;
 ///
 /// // With embedding manager for RAG functions
 /// let engine = RhaiEngine::new(adapter, Some(embedding_manager));
-/// let result = engine.run("db_rag_search(\"kb\", \"query\")", None)?;
+/// let result = engine.run("db_hybrid_search(\"kb\", \"query\")", None)?;
 /// ```
 pub struct RhaiEngine {
     adapter: Arc<IronBaseAdapter>,

@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 use super::defaults::{
     default_chunk_mode, default_chunk_overlap, default_chunk_size, default_embedding_provider,
+    DEFAULT_RRF_K,
 };
 
 /// Default value for query fields: empty object {}
@@ -650,7 +651,7 @@ fn default_mmr_lambda() -> f64 {
     0.5
 }
 fn default_rrf_k() -> f64 {
-    20.0
+    DEFAULT_RRF_K
 }
 
 // ============================================================================
