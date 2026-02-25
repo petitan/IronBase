@@ -792,7 +792,7 @@ pub struct RagSearchParams {
     /// MongoDB-style filter applied BEFORE both vector and fulltext search
     pub filter: Option<Value>,
 
-    /// RRF K constant — lower = wider score spread (default: 60)
+    /// RRF K constant — lower = wider score spread (default: 20)
     #[serde(default = "default_rrf_k")]
     pub rrf_k: f64,
 
