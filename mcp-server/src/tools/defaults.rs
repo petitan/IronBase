@@ -131,5 +131,5 @@ pub const MAX_EMPTY_BATCHES: usize = 3;
 /// Default RRF K constant (lower = wider score spread, more reranking impact)
 pub const DEFAULT_RRF_K: f64 = 20.0;
 
-/// Maximum internal limit for search fusion to prevent OOM
-pub const MAX_INTERNAL_LIMIT: usize = 1000;
+/// Maximum internal limit for search fusion (caps per-source fetch before RRF)
+pub const MAX_INTERNAL_LIMIT: usize = 10_000;
