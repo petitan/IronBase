@@ -599,6 +599,12 @@ Scripts have access to these database functions:
 | `db_delete_many(collection, filter)` | Delete all matching documents |
 | `db_count(collection, query)` | Count matching documents |
 | `db_aggregate(collection, pipeline)` | Run aggregation pipeline |
+| `db_hybrid_search(collection, query)` | RRF hybrid search (vector + fulltext fusion via fusion.rs) |
+| `db_hybrid_search(collection, query, options)` | Hybrid search with options (limit, rrf_k, rerank, search_mode, filter, etc.) |
+| `db_rag_import(collection, text, metadata)` | Import RAG document with auto-chunking and embedding |
+| `db_rag_create(collection)` | Create RAG-optimized collection (vector + fulltext indexes) |
+| `db_rag_create(collection, options)` | Create RAG collection with custom options (provider, chunk_size, etc.) |
+| `db_rag_stats(collection)` | Get RAG collection statistics |
 
 ## Script Tools Reference
 
@@ -683,6 +689,23 @@ let tax = calculate_tax(total, 0.08);
     gross_total: format_currency(total),
     tax: format_currency(tax),
     net_total: format_currency(total + tax)
+}
+```
+
+### Hybrid Search (RAG)
+```rhai
+// Search knowledge base with hybrid vector + fulltext fusion
+let results = db_hybrid_search("knowledge_base", "search query", #{
+    limit: 5,
+    search_mode: "semantic",
+    rerank: true,
+    merge_chunks: true,
+    title_field: "title",
+    filter: #{ year: 2026 }
+});
+
+for doc in results {
+    print(`${doc.title}: ${doc._final_score}`);
 }
 ```
 

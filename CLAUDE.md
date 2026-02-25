@@ -962,6 +962,50 @@ Storage: `_rag/` dir · Perf: ~1-5ms search/10K chunks
 </details>
 
 <details>
+<summary>Rhai Scripting DB Functions</summary>
+
+A Rhai script engine-ben elérhető adatbázis függvények (script_exec / script_run):
+
+| Függvény | Leírás |
+|----------|--------|
+| `db_find(collection, query)` | Dokumentumok keresése (`#{documents: [...], count: n}`) |
+| `db_find_one(collection, query)` | Első találat |
+| `db_insert_one(collection, doc)` | Beszúrás |
+| `db_update_one(collection, filter, update)` | Frissítés (első találat) |
+| `db_update_many(collection, filter, update)` | Frissítés (összes találat) |
+| `db_delete_one(collection, filter)` | Törlés (első találat) |
+| `db_delete_many(collection, filter)` | Törlés (összes találat) |
+| `db_count(collection, query)` | Dokumentumok számolása |
+| `db_aggregate(collection, pipeline)` | Aggregációs pipeline |
+| `db_hybrid_search(collection, query)` | RRF hybrid keresés (fusion.rs delegálás) |
+| `db_hybrid_search(collection, query, options)` | Hybrid keresés opciókkal |
+| `db_rag_import(collection, text, metadata)` | RAG dokumentum import |
+| `db_rag_create(collection)` / `db_rag_create(collection, options)` | RAG collection létrehozás |
+| `db_rag_stats(collection)` | RAG statisztikák |
+
+**`db_hybrid_search` opciók** (Rhai Map):
+```rhai
+let results = db_hybrid_search("kb", "keresett szöveg", #{
+    limit: 10,              // Max eredmények (default: 10)
+    rrf_k: 20.0,            // RRF K konstans (default: 20)
+    rerank: true,            // Reranking (phrase 1.5x, density 1.3x, title boost)
+    deduplicate: true,       // MMR diversity reranking
+    mmr_lambda: 0.5,         // MMR lambda (1.0=relevance, 0.0=diversity)
+    merge_chunks: true,      // Szomszédos chunk összevonás
+    search_mode: "balanced", // "balanced" | "semantic" | "keyword"
+    vector_weight: 0.5,      // Explicit vektor súly (felülírja search_mode-ot)
+    fulltext_weight: 0.5,    // Explicit fulltext súly
+    title_field: "title",    // Cím mező reranking boost-hoz
+    text_fields: ["content", "title"], // Multi-field fulltext
+    mode: "or",              // Fulltext mode: "or" | "and"
+    filter: #{ year: 2026 }, // Dokumentum szűrő
+});
+```
+
+**Key files:** `mcp-server/src/scripting/db_functions.rs` (registration + impl), `mcp-server/src/tools/fusion.rs` (shared pipeline)
+</details>
+
+<details>
 <summary>Score Fusion Architektúra (2026-01-30)</summary>
 
 **Döntés: Score fusion MCP tool szinten marad, NEM query operátor.**
