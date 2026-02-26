@@ -17,6 +17,24 @@ use super::params::{
     AdminKeyParams, DbOpenParams, ParseParams,
 };
 
+// ============================================================================
+// RAII Guard for compacting flag
+// ============================================================================
+
+/// RAII guard that clears the adapter's compacting flag on drop.
+///
+/// This ensures the flag is always cleared even if the compact thread panics.
+/// Created by handle_db_compact(), moved into the spawned thread.
+struct CompactGuard {
+    adapter: Arc<IronBaseAdapter>,
+}
+
+impl Drop for CompactGuard {
+    fn drop(&mut self) {
+        self.adapter.clear_compact_flag();
+    }
+}
+
 /// Dispatch admin tool calls
 pub fn dispatch(
     name: &str,
@@ -113,26 +131,33 @@ fn handle_db_compact(
         ));
     }
 
-    // 3. Acquire guard + create job
+    // 3. Acquire guard atomically (CAS: false→true)
     if !adapter.try_start_compact() {
         return Err(McpError::invalid_params(
             "Compaction already in progress",
         ));
     }
 
+    // RAII guard — ensures clear_compact_flag() is called even if thread panics
+    // or if create_job() panics below (before thread spawn)
+    let guard = CompactGuard {
+        adapter: adapter.clone(),
+    };
+
     let (job_id, _job) = job_mgr.create_job(JobType::Compact);
 
-    // 4. Clone + spawn background thread
-    let adapter_clone = adapter.clone();
+    // 4. Clone + spawn background thread (guard moves into thread)
     let job_mgr_clone = job_mgr.clone();
     let job_id_clone = job_id.clone();
     let shutdown_flag = job_mgr.shutdown_flag();
 
     let handle = std::thread::spawn(move || {
+        // guard is moved here — Drop will fire when this closure exits
+        // (whether normally, via early return, or via panic)
         run_compact_job(
             &job_id_clone,
             &job_mgr_clone,
-            &adapter_clone,
+            &guard,
             &shutdown_flag,
         );
     });
@@ -150,13 +175,18 @@ fn handle_db_compact(
 
 /// Background compact job execution
 ///
-/// Pattern follows run_backfill_job() in auto_embed.rs
+/// Pattern follows run_backfill_job() in auto_embed.rs.
+///
+/// Takes CompactGuard by reference — the guard is owned by the caller (closure)
+/// and its Drop impl will clear the compacting flag when the closure exits,
+/// whether normally or via panic. No manual clear_compact_flag() needed.
 fn run_compact_job(
     job_id: &str,
     job_mgr: &JobManager,
-    adapter: &IronBaseAdapter,
+    guard: &CompactGuard,
     shutdown_flag: &AtomicBool,
 ) {
+    let adapter = &guard.adapter;
     let start = std::time::Instant::now();
     job_mgr.update_progress(job_id, 0, None, "Starting compaction...");
 
@@ -232,8 +262,8 @@ fn run_compact_job(
         }
     }
 
-    // ALWAYS clear the guard — success, failure, or cancel
-    adapter.clear_compact_flag();
+    // NOTE: No manual clear_compact_flag() needed!
+    // The CompactGuard's Drop impl handles it when the caller closure exits.
 }
 
 fn handle_db_checkpoint(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

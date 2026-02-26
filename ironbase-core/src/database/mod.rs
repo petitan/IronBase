@@ -280,6 +280,11 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Ensures prepare-WAL-persist sequence is atomic per collection
     // Prevents race conditions in unique constraint checks
     pub(crate) collection_write_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
+
+    // Guard: true while compact_nonblocking() is running
+    // Prevents concurrent compaction from direct Rust consumers
+    // (MCP server has its own adapter-level guard; this protects core-level callers)
+    pub(crate) is_compacting: AtomicBool,
 }
 
 // ============================================================================
@@ -376,6 +381,7 @@ impl DatabaseCore<StorageEngine> {
             write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
+            is_compacting: AtomicBool::new(false),
         };
 
         // Apply recovered index changes to collections
@@ -473,6 +479,7 @@ impl DatabaseCore<MemoryStorage> {
             write_lock_condvar: Arc::new(Condvar::new()),
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
+            is_compacting: AtomicBool::new(false),
         })
     }
 }

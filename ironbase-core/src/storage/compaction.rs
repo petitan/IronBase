@@ -104,7 +104,9 @@ pub struct CompactionSnapshot {
     /// Path to the temp file
     pub temp_path: String,
     /// Snapshot of collection metadata at the time of prepare
-    pub snapshot_collections: HashMap<String, super::CollectionMeta>,
+    /// Arc-wrapped to avoid expensive clone when sharing between Phase B scan
+    /// and Phase C catch-up reconciliation
+    pub snapshot_collections: Arc<HashMap<String, super::CollectionMeta>>,
     /// data_end_offset at snapshot time — data below this is IMMUTABLE
     pub snapshot_data_end_offset: u64,
     /// Document region boundary for offset validation
@@ -152,7 +154,7 @@ impl StorageEngine {
     /// For non-blocking compact, use compact_prepare/scan_standalone/finalize separately.
     pub fn compact_with_config(&mut self, config: &CompactionConfig) -> Result<CompactionStats> {
         let snapshot = self.compact_prepare()?;
-        let snapshot_collections = snapshot.snapshot_collections.clone();
+        let snapshot_collections = Arc::clone(&snapshot.snapshot_collections);
         let scan_result = compact_scan_standalone(snapshot, config, &|_, _| {})?;
         self.compact_finalize_with_catchup(scan_result, &snapshot_collections)
     }
@@ -200,8 +202,8 @@ impl StorageEngine {
         let size_before = self.file.metadata()?.len();
         let snapshot_data_end_offset = self.header.data_end_offset;
 
-        // Snapshot collections (clone current state)
-        let snapshot_collections = self.collections.clone();
+        // Snapshot collections (clone current state, Arc-wrapped for cheap sharing)
+        let snapshot_collections = Arc::new(self.collections.clone());
 
         Ok(CompactionSnapshot {
             temp_file: new_file,
@@ -232,6 +234,10 @@ impl StorageEngine {
         mut scan_result: CompactionScanResult,
         snapshot_collections: &HashMap<String, super::CollectionMeta>,
     ) -> Result<CompactionStats> {
+        // RAII guard: removes .compact temp file on error (any early ? return)
+        // Disarmed on success before finalize_compaction() renames it.
+        let mut temp_cleanup = TempFileCleanup::new(scan_result.temp_path.clone());
+
         let mut stats = scan_result.stats;
 
         // Phase C Step 1: Catch-up reconciliation
@@ -446,6 +452,9 @@ impl StorageEngine {
 
         stats.size_after = scan_result.temp_file.metadata()?.len();
 
+        // Disarm cleanup guard — finalize_compaction will rename (not delete) the temp file
+        temp_cleanup.disarm();
+
         // Atomic file swap + reload
         self.finalize_compaction(&scan_result.temp_path, scan_result.temp_file)?;
 
@@ -520,6 +529,38 @@ impl StorageEngine {
 }
 
 // =========================================================================
+// RAII temp file cleanup guard
+// =========================================================================
+
+/// RAII guard that removes a temp file on drop unless disarmed.
+///
+/// Used by compact_finalize_with_catchup() to ensure the .compact temp file
+/// is cleaned up on any error path (early ? return). On success, the guard
+/// is disarmed before finalize_compaction() renames the temp file.
+struct TempFileCleanup {
+    path: String,
+    armed: bool,
+}
+
+impl TempFileCleanup {
+    fn new(path: String) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TempFileCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+// =========================================================================
 // PHASE B: Standalone scan (NO StorageEngine, NO lock)
 // =========================================================================
 
@@ -543,8 +584,9 @@ pub fn compact_scan_standalone(
     let mut temp_file = snapshot.temp_file;
     let mut write_offset = super::HEADER_SIZE;
 
-    // Prepare new collections metadata (clone snapshot and reset catalogs)
-    let mut new_collections = snapshot.snapshot_collections.clone();
+    // Prepare new collections metadata (deep clone the inner HashMap, reset catalogs)
+    let mut new_collections: HashMap<String, super::CollectionMeta> =
+        (*snapshot.snapshot_collections).clone();
     for coll_meta in new_collections.values_mut() {
         coll_meta.data_offset = super::HEADER_SIZE;
         coll_meta.document_catalog.clear();
@@ -621,8 +663,11 @@ pub fn compact_scan_standalone(
 
                     if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
                         if let Some(docs_by_id) = collection_docs.get_mut(coll_name.as_str()) {
+                            // serde_json::Value heap size is ~2-4x the raw JSON bytes:
+                            // String keys/values are heap-allocated, Map uses BTreeMap,
+                            // Vec/Number/Bool have per-variant overhead
                             let doc_size_bytes = doc_bytes.len() as u64;
-                            total_memory_bytes += doc_size_bytes + 64;
+                            total_memory_bytes += doc_size_bytes * 3 + 128;
 
                             let current_memory_mb = total_memory_bytes / (1024 * 1024);
                             if current_memory_mb > stats.peak_memory_mb {

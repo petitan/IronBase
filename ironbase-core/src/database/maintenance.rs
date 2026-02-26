@@ -112,6 +112,36 @@ impl DatabaseCore<StorageEngine> {
         config: &crate::storage::CompactionConfig,
         progress_callback: &dyn Fn(u64, u64),
     ) -> Result<crate::storage::CompactionStats> {
+        // Guard: prevent concurrent compaction at DatabaseCore level
+        // (MCP adapter has its own guard; this protects direct Rust callers)
+        if self
+            .is_compacting
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return Err(crate::error::IronBaseError::OperationNotAllowed(
+                "Compaction already in progress".to_string(),
+            ));
+        }
+
+        // Ensure flag is cleared on all exit paths (success, error, panic)
+        let result = self.compact_nonblocking_inner(config, progress_callback);
+        self.is_compacting
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        result
+    }
+
+    /// Inner implementation of compact_nonblocking (called within CAS guard)
+    fn compact_nonblocking_inner(
+        &self,
+        config: &crate::storage::CompactionConfig,
+        progress_callback: &dyn Fn(u64, u64),
+    ) -> Result<crate::storage::CompactionStats> {
         // Pre-Phase: HNSW rebuild + index flush (does NOT hold storage lock)
         {
             let index_managers = self.index_managers.read();
@@ -132,7 +162,8 @@ impl DatabaseCore<StorageEngine> {
         let (snapshot, snapshot_collections) = {
             let mut storage = self.storage.write();
             let snapshot = storage.compact_prepare()?;
-            let snap_colls = snapshot.snapshot_collections.clone();
+            // Arc::clone is O(1) — no deep copy of collection metadata
+            let snap_colls = std::sync::Arc::clone(&snapshot.snapshot_collections);
             (snapshot, snap_colls)
         }; // storage.write() RELEASED
 
