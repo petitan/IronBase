@@ -16,6 +16,7 @@
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
+use crate::log_error;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -2707,6 +2708,24 @@ impl LazyLoadable for FulltextIndex {
             self.inverted_index.len() as f32 / total_tokens as f32
         } else {
             1.0
+        }
+    }
+}
+
+// ============================================================================
+// Drop Implementation
+// ============================================================================
+
+impl Drop for FulltextIndex {
+    fn drop(&mut self) {
+        if let Some(ref mut file) = self.file_handle {
+            if let Err(e) = file.sync_all() {
+                log_error!(
+                    "FulltextIndex::drop sync_all failed for '{}': {}",
+                    self.name,
+                    e
+                );
+            }
         }
     }
 }

@@ -1936,14 +1936,22 @@ impl StorageEngine {
 // Automatic cleanup on drop
 impl Drop for StorageEngine {
     fn drop(&mut self) {
-        let _ = self.flush();
+        if let Err(e) = self.flush() {
+            log_error!("StorageEngine::drop flush failed: {}", e);
+        }
         // Clear WAL on close to keep it clean for next open
-        let _ = self.checkpoint();
+        if let Err(e) = self.checkpoint() {
+            log_error!("StorageEngine::drop checkpoint failed: {}", e);
+        }
         // Mark clean shutdown for fast restart (indexes can be loaded from .idx files)
-        let _ = self.mark_clean_shutdown();
+        if let Err(e) = self.mark_clean_shutdown() {
+            log_error!("StorageEngine::drop mark_clean_shutdown failed: {}", e);
+        }
         // Explicitly unlock the lock file to ensure other processes can access the database
         // This is more reliable than relying on File::drop() to release the flock
-        let _ = self.lock_file.unlock();
+        if let Err(e) = self.lock_file.unlock() {
+            log_error!("StorageEngine::drop unlock failed: {}", e);
+        }
     }
 }
 
