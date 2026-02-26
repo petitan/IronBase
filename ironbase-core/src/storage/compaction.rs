@@ -45,7 +45,7 @@ impl CompactionConfig {
     }
 
     /// Check if cancellation was requested
-    fn is_cancelled(&self) -> bool {
+    pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel_flag
             .as_ref()
             .map(|f| f.load(Ordering::Relaxed))
@@ -93,6 +93,46 @@ pub struct CheckpointStats {
     pub indexes_flushed: usize,
 }
 
+// =========================================================================
+// NON-BLOCKING COMPACTION: Lock-splitting types
+// =========================================================================
+
+/// Phase A result — snapshot of collections and temp file for standalone scan
+pub struct CompactionSnapshot {
+    /// Temporary file to write compacted data to
+    pub temp_file: std::fs::File,
+    /// Path to the temp file
+    pub temp_path: String,
+    /// Snapshot of collection metadata at the time of prepare
+    pub snapshot_collections: HashMap<String, super::CollectionMeta>,
+    /// data_end_offset at snapshot time — data below this is IMMUTABLE
+    pub snapshot_data_end_offset: u64,
+    /// Document region boundary for offset validation
+    pub file_len: u64,
+    /// Path to the source database file (for pread)
+    pub source_path: String,
+    /// Header snapshot for metadata writing
+    pub header: super::Header,
+    /// File size before compaction (for stats)
+    pub size_before: u64,
+}
+
+/// Phase B result — completed scan, ready for catch-up reconciliation
+pub struct CompactionScanResult {
+    /// Temp file with compacted documents written
+    pub temp_file: std::fs::File,
+    /// Path to the temp file
+    pub temp_path: String,
+    /// New collection metadata (document_catalog pointing into temp file)
+    pub new_collections: HashMap<String, super::CollectionMeta>,
+    /// Current write offset in the temp file
+    pub write_offset: u64,
+    /// Compaction statistics so far
+    pub stats: CompactionStats,
+    /// Header snapshot
+    pub header: super::Header,
+}
+
 impl StorageEngine {
     /// Storage compaction - removes tombstones and old document versions
     /// Uses chunked processing to minimize memory usage
@@ -103,71 +143,40 @@ impl StorageEngine {
     /// Storage compaction with custom configuration
     ///
     /// Removes tombstones and old document versions using chunked processing.
-    /// Delegates to helper functions for each phase:
-    /// 1. prepare_compaction() - Setup temp file and collections
-    /// 2. scan_and_flush_documents() - Iterate catalogs and write documents
-    /// 3. write_compacted_metadata() - Write metadata at end of file
-    /// 4. finalize_compaction() - Atomic file swap and reload
+    /// Internally uses the 3-phase lock-splitting approach:
+    /// 1. compact_prepare() - Setup temp file and snapshot
+    /// 2. compact_scan_standalone() - Iterate catalogs and write documents (pread, no lock needed)
+    /// 3. compact_finalize_with_catchup() - Catch-up reconciliation + atomic swap
+    ///
+    /// When called on &mut self (holding storage.write()), all 3 phases run sequentially.
+    /// For non-blocking compact, use compact_prepare/scan_standalone/finalize separately.
     pub fn compact_with_config(&mut self, config: &CompactionConfig) -> Result<CompactionStats> {
-        let mut stats = CompactionStats::default();
-
-        // 1. Prepare: flush metadata, create temp file, initialize collections
-        let (mut new_file, mut new_collections, file_len) = self.prepare_compaction()?;
-        stats.size_before = self.file.metadata()?.len();
-        let collections_snapshot = self.collections.clone();
-
-        // 2. Scan and flush documents (catalog-based iteration with chunking)
-        let write_offset = self.scan_and_flush_documents(
-            &mut new_file,
-            &mut new_collections,
-            &collections_snapshot,
-            file_len,
-            config,
-            &mut stats,
-        )?;
-
-        // 3. Write metadata at end of file
-        Self::write_compacted_metadata(
-            &mut new_file,
-            &self.header,
-            &new_collections,
-            write_offset,
-        )?;
-
-        stats.size_after = new_file.metadata()?.len();
-
-        // 4. Finalize: close files, rename, reload
-        let temp_path = format!("{}.compact", self.file_path);
-        self.finalize_compaction(&temp_path, new_file)?;
-
-        Ok(stats)
+        let snapshot = self.compact_prepare()?;
+        let snapshot_collections = snapshot.snapshot_collections.clone();
+        let scan_result = compact_scan_standalone(snapshot, config, &|_, _| {})?;
+        self.compact_finalize_with_catchup(scan_result, &snapshot_collections)
     }
 
     // =========================================================================
-    // COMPACTION HELPER FUNCTIONS (Phase-based decomposition)
+    // PHASE A: Prepare (brief &mut self)
     // =========================================================================
 
-    /// Prepare for compaction: flush metadata, create temp file, initialize collections
+    /// Phase A: Prepare compaction snapshot
     ///
-    /// Returns (temp_file, new_collections, document_region_end)
-    /// - temp_file: New file to write compacted data to
-    /// - new_collections: Cloned and reset collection metadata
-    /// - document_region_end: End of document region (metadata_offset for v2, file_len for v1)
-    fn prepare_compaction(
-        &mut self,
-    ) -> Result<(std::fs::File, HashMap<String, super::CollectionMeta>, u64)> {
+    /// Flushes metadata, creates temp file, snapshots collections.
+    /// This is a brief &mut self operation (~ms).
+    ///
+    /// Returns CompactionSnapshot for use by compact_scan_standalone().
+    pub fn compact_prepare(&mut self) -> Result<CompactionSnapshot> {
         // CRITICAL: Flush metadata first to ensure header.metadata_offset is up-to-date!
-        // This ensures we know where document data ends and metadata begins
         self.flush_metadata()?;
 
         let temp_path = format!("{}.compact", self.file_path);
 
         // For version 2+: only scan up to metadata_offset (don't read metadata as documents!)
-        // After flush_metadata(), metadata_offset is guaranteed to be > 0 for version 2
         let file_len = if self.header.version >= 2 && self.header.metadata_offset > 0 {
             self.header.metadata_offset
         } else {
-            // Version 1: metadata is at fixed location, scan entire data region
             self.file_len()?
         };
 
@@ -179,177 +188,275 @@ impl StorageEngine {
             .truncate(true)
             .open(&temp_path)?;
 
-        // Prepare new collections metadata (clone and reset)
-        let mut new_collections = self.collections.clone();
-        for coll_meta in new_collections.values_mut() {
-            coll_meta.data_offset = super::HEADER_SIZE; // Version 2: no reserved space
-            coll_meta.document_catalog.clear();
-            coll_meta.document_count = 0;
-            coll_meta.live_document_count = 0;
-        }
-
         // Write header only (no metadata yet - documents start at HEADER_SIZE)
         new_file.seek(SeekFrom::Start(0))?;
         let header_bytes = bincode::serialize(&self.header)
-            .map_err(|e| crate::error::IronBaseError::Serialization(e.to_string()))?;
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         new_file.write_all(&header_bytes)?;
 
         // Position at start of document region
         new_file.seek(SeekFrom::Start(super::HEADER_SIZE))?;
 
-        Ok((new_file, new_collections, file_len))
+        let size_before = self.file.metadata()?.len();
+        let snapshot_data_end_offset = self.header.data_end_offset;
+
+        // Snapshot collections (clone current state)
+        let snapshot_collections = self.collections.clone();
+
+        Ok(CompactionSnapshot {
+            temp_file: new_file,
+            temp_path,
+            snapshot_collections,
+            snapshot_data_end_offset,
+            file_len,
+            source_path: self.file_path.clone(),
+            header: self.header.clone(),
+            size_before,
+        })
     }
 
-    /// Scan documents from catalogs and write to new file with chunk-based flushing
-    ///
-    /// Iterates over all collection catalogs (not sequential file scan) and writes
-    /// live documents to the new file. Uses chunked processing to limit memory usage.
-    ///
-    /// Returns the final write offset (where metadata should be written)
-    fn scan_and_flush_documents(
-        &mut self,
-        new_file: &mut std::fs::File,
-        new_collections: &mut HashMap<String, super::CollectionMeta>,
-        collections_snapshot: &HashMap<String, super::CollectionMeta>,
-        file_len: u64,
-        config: &CompactionConfig,
-        stats: &mut CompactionStats,
-    ) -> Result<u64> {
-        let mut write_offset = super::HEADER_SIZE;
+    // =========================================================================
+    // PHASE C: Finalize with catch-up reconciliation (brief &mut self)
+    // =========================================================================
 
-        // Track documents per collection (all collections processed in single pass)
-        let mut collection_docs: HashMap<String, HashMap<crate::document::DocumentId, Value>> =
-            HashMap::new();
-        for coll_name in collections_snapshot.keys() {
-            collection_docs.insert(coll_name.clone(), HashMap::new());
+    /// Phase C: Catch-up reconciliation + finalize
+    ///
+    /// Compares the snapshot collections with the current collections to find
+    /// mutations (insert/update/delete) that happened during Phase B.
+    /// Applies those mutations to the temp file, then performs atomic swap.
+    ///
+    /// This is a brief &mut self operation — the catch-up is O(mutations),
+    /// not O(total_docs).
+    pub fn compact_finalize_with_catchup(
+        &mut self,
+        mut scan_result: CompactionScanResult,
+        snapshot_collections: &HashMap<String, super::CollectionMeta>,
+    ) -> Result<CompactionStats> {
+        let mut stats = scan_result.stats;
+
+        // Phase C Step 1: Catch-up reconciliation
+        // Diff snapshot vs current collections to find mutations during Phase B
+        //
+        // Collect mutations first, then apply them — avoids borrow conflict
+        // between iterating &self.collections and calling self.read_data_at()
+
+        // Collect all mutations into a Vec to avoid borrow conflicts
+        enum CatchupOp {
+            InsertOrUpdate {
+                coll_name: String,
+                doc_id: crate::document::DocumentId,
+                offset: u64,
+                is_update: bool,
+            },
+            Delete {
+                coll_name: String,
+                doc_id: crate::document::DocumentId,
+            },
+            NewCollection {
+                coll_name: String,
+                meta: Box<super::CollectionMeta>,
+                docs: Vec<(crate::document::DocumentId, u64)>,
+            },
+            DroppedCollection {
+                coll_name: String,
+            },
         }
 
-        // ORDER-PRESERVING ITERATION: Use document_order instead of catalog HashMap
-        // This ensures documents are written in their original insertion order,
-        // which is important for consistent query results with implicit ordering.
-        let mut chunk_count = 0;
-        let mut total_memory_bytes: u64 = 0; // Track actual memory usage across all collections
+        let mut ops: Vec<CatchupOp> = Vec::new();
 
-        for (coll_name, coll_meta) in collections_snapshot.iter() {
-            // Check for cancellation at collection boundary
-            if config.is_cancelled() {
-                stats.cancelled = true;
-                return Err(IronBaseError::Cancelled(
-                    "Compaction cancelled by user".to_string(),
-                ));
+        for (coll_name, current_meta) in &self.collections {
+            let snap_meta = snapshot_collections.get(coll_name);
+
+            match snap_meta {
+                Some(snap) => {
+                    // Find new inserts and updates
+                    for (doc_id, &current_offset) in &current_meta.document_catalog {
+                        match snap.document_catalog.get(doc_id) {
+                            None => {
+                                ops.push(CatchupOp::InsertOrUpdate {
+                                    coll_name: coll_name.clone(),
+                                    doc_id: doc_id.clone(),
+                                    offset: current_offset,
+                                    is_update: false,
+                                });
+                            }
+                            Some(&snap_offset) if snap_offset != current_offset => {
+                                ops.push(CatchupOp::InsertOrUpdate {
+                                    coll_name: coll_name.clone(),
+                                    doc_id: doc_id.clone(),
+                                    offset: current_offset,
+                                    is_update: true,
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Find deletes
+                    for doc_id in snap.document_catalog.keys() {
+                        if !current_meta.document_catalog.contains_key(doc_id) {
+                            ops.push(CatchupOp::Delete {
+                                coll_name: coll_name.clone(),
+                                doc_id: doc_id.clone(),
+                            });
+                        }
+                    }
+                }
+                None => {
+                    // New collection during Phase B
+                    let docs: Vec<_> = current_meta
+                        .document_catalog
+                        .iter()
+                        .map(|(id, &off)| (id.clone(), off))
+                        .collect();
+                    ops.push(CatchupOp::NewCollection {
+                        coll_name: coll_name.clone(),
+                        meta: Box::new(current_meta.clone()),
+                        docs,
+                    });
+                }
             }
+        }
 
-            // Iterate using document_order to preserve insertion order
-            for doc_id in &coll_meta.document_order {
-                // Get offset from catalog (document_order may have stale IDs, skip them)
-                let offset = match coll_meta.document_catalog.get(doc_id) {
-                    Some(&off) => off,
-                    None => continue, // Document was deleted, skip
-                };
+        // Dropped collections
+        for name in snapshot_collections.keys() {
+            if !self.collections.contains_key(name) {
+                ops.push(CatchupOp::DroppedCollection {
+                    coll_name: name.clone(),
+                });
+            }
+        }
 
-                // Check for cancellation periodically (every chunk)
-                if chunk_count > 0 && chunk_count % config.chunk_size == 0 && config.is_cancelled()
-                {
-                    stats.cancelled = true;
-                    return Err(IronBaseError::Cancelled(
-                        "Compaction cancelled by user".to_string(),
-                    ));
-                }
+        // Apply all mutations (now we can borrow self mutably for read_data_at)
+        let mut catchup_count: u64 = 0;
 
-                // Validate offset is before metadata (sanity check)
-                if offset >= file_len {
-                    crate::log_warn!(
-                        "Skipping document {:?} at invalid offset {} (file_len: {})",
-                        doc_id,
-                        offset,
-                        file_len
-                    );
-                    stats.tombstones_removed += 1;
-                    continue;
-                }
-
-                // Read document at catalog-specified offset
-                match self.read_data(offset) {
-                    Ok(doc_bytes) => {
-                        stats.documents_scanned += 1;
-
-                        if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
-                            if let Some(docs_by_id) = collection_docs.get_mut(coll_name.as_str()) {
-                                // Track actual memory usage (approximate: doc bytes + HashMap overhead)
-                                let doc_size_bytes = doc_bytes.len() as u64;
-                                total_memory_bytes += doc_size_bytes + 64; // +64 for HashMap entry overhead
-
-                                // Update peak memory stats
-                                let current_memory_mb = total_memory_bytes / (1024 * 1024);
-                                if current_memory_mb > stats.peak_memory_mb {
-                                    stats.peak_memory_mb = current_memory_mb;
+        for op in ops {
+            match op {
+                CatchupOp::InsertOrUpdate {
+                    coll_name,
+                    doc_id,
+                    offset,
+                    is_update,
+                } => {
+                    // read_data_at uses pread — &self, no seek
+                    match self.read_data_at(offset) {
+                        Ok(doc_bytes) => {
+                            if is_update {
+                                if let Some(coll_meta) =
+                                    scan_result.new_collections.get_mut(&coll_name)
+                                {
+                                    coll_meta.document_catalog.remove(&doc_id);
                                 }
+                            }
+                            scan_result.write_offset = write_doc_to_temp(
+                                &mut scan_result.temp_file,
+                                &mut scan_result.new_collections,
+                                &coll_name,
+                                &doc_id,
+                                &doc_bytes,
+                                scan_result.write_offset,
+                            )?;
+                            catchup_count += 1;
+                        }
+                        Err(e) => {
+                            crate::log_warn!("Compact catch-up: skip doc {:?}: {}", doc_id, e);
+                        }
+                    }
+                }
+                CatchupOp::Delete { coll_name, doc_id } => {
+                    if let Some(coll_meta) = scan_result.new_collections.get_mut(&coll_name) {
+                        coll_meta.document_catalog.remove(&doc_id);
+                        coll_meta.document_order.retain(|id| id != &doc_id);
+                        if coll_meta.live_document_count > 0 {
+                            coll_meta.live_document_count -= 1;
+                        }
+                        if coll_meta.document_count > 0 {
+                            coll_meta.document_count -= 1;
+                        }
+                    }
+                    catchup_count += 1;
+                }
+                CatchupOp::NewCollection {
+                    coll_name,
+                    meta,
+                    docs,
+                } => {
+                    let mut new_coll_meta = *meta;
+                    new_coll_meta.data_offset = super::HEADER_SIZE;
+                    new_coll_meta.document_catalog.clear();
+                    new_coll_meta.document_count = 0;
+                    new_coll_meta.live_document_count = 0;
+                    scan_result
+                        .new_collections
+                        .insert(coll_name.clone(), new_coll_meta);
 
-                                docs_by_id.insert(doc_id.clone(), doc);
-                                chunk_count += 1;
-
-                                // Force flush if memory limit exceeded OR chunk is full
-                                // This prevents OOM on large documents or many tombstones
-                                let should_flush = chunk_count >= config.chunk_size
-                                    || total_memory_bytes >= MAX_COMPACTION_MEMORY_BYTES;
-
-                                if should_flush {
-                                    for (flush_coll_name, docs) in collection_docs.iter_mut() {
-                                        if !docs.is_empty() {
-                                            write_offset = self.flush_compaction_chunk(
-                                                new_file,
-                                                new_collections,
-                                                flush_coll_name,
-                                                docs,
-                                                write_offset,
-                                                stats,
-                                            )?;
-                                            docs.clear();
-                                        }
-                                    }
-                                    chunk_count = 0;
-                                    total_memory_bytes = 0; // Reset after flush
-                                }
+                    for (doc_id, offset) in docs {
+                        match self.read_data_at(offset) {
+                            Ok(doc_bytes) => {
+                                scan_result.write_offset = write_doc_to_temp(
+                                    &mut scan_result.temp_file,
+                                    &mut scan_result.new_collections,
+                                    &coll_name,
+                                    &doc_id,
+                                    &doc_bytes,
+                                    scan_result.write_offset,
+                                )?;
+                                catchup_count += 1;
+                            }
+                            Err(e) => {
+                                crate::log_warn!(
+                                    "Compact catch-up: skip doc {:?} in new collection: {}",
+                                    doc_id,
+                                    e
+                                );
                             }
                         }
                     }
-                    Err(e) => {
-                        // Log corrupt document but continue
-                        crate::log_warn!(
-                            "Skipping corrupt document {:?} at offset {}: {}",
-                            doc_id,
-                            offset,
-                            e
-                        );
-                        stats.tombstones_removed += 1;
-                    }
+                }
+                CatchupOp::DroppedCollection { coll_name } => {
+                    scan_result.new_collections.remove(&coll_name);
+                    catchup_count += 1;
                 }
             }
         }
 
-        // Flush remaining documents for all collections
-        for (coll_name, docs) in collection_docs.iter_mut() {
-            if !docs.is_empty() {
-                write_offset = self.flush_compaction_chunk(
-                    new_file,
-                    new_collections,
-                    coll_name,
-                    docs,
-                    write_offset,
-                    stats,
-                )?;
+        // Phase C Step 2: Update document_order to match current state
+        for (coll_name, coll_meta) in scan_result.new_collections.iter_mut() {
+            if let Some(current_meta) = self.collections.get(coll_name) {
+                coll_meta.document_order = current_meta
+                    .document_order
+                    .iter()
+                    .filter(|id| coll_meta.document_catalog.contains_key(id))
+                    .cloned()
+                    .collect();
             }
         }
 
-        new_file.sync_all()?;
+        if catchup_count > 0 {
+            crate::log_info!("Compact catch-up: {} mutations reconciled", catchup_count);
+        }
 
-        Ok(write_offset)
+        // Phase C Step 3: Write metadata + finalize
+        Self::write_compacted_metadata(
+            &mut scan_result.temp_file,
+            &scan_result.header,
+            &scan_result.new_collections,
+            scan_result.write_offset,
+        )?;
+
+        stats.size_after = scan_result.temp_file.metadata()?.len();
+
+        // Atomic file swap + reload
+        self.finalize_compaction(&scan_result.temp_path, scan_result.temp_file)?;
+
+        Ok(stats)
     }
 
+    // =========================================================================
+    // INTERNAL HELPERS (used by both blocking and non-blocking paths)
+    // =========================================================================
+
     /// Write metadata at end of compacted file and update header
-    ///
-    /// Serializes collection metadata and writes it at the specified offset,
-    /// then updates the header with the new metadata location.
     fn write_compacted_metadata(
         new_file: &mut std::fs::File,
         header: &super::Header,
@@ -379,8 +486,6 @@ impl StorageEngine {
         new_file.write_all(&metadata_bytes)?;
 
         // Use write_compaction_header() to safely update header with correct offsets
-        // This function automatically sets data_end_offset = metadata_offset + metadata_size,
-        // preventing the sparse hole bug that was fixed earlier.
         write_compaction_header(new_file, header, metadata_offset, metadata_size)?;
 
         new_file.sync_all()?;
@@ -389,8 +494,6 @@ impl StorageEngine {
     }
 
     /// Finalize compaction: close files, rename temp to original, reload metadata
-    ///
-    /// Performs the atomic file swap and reloads the database state.
     fn finalize_compaction(&mut self, temp_path: &str, new_file: std::fs::File) -> Result<()> {
         // Close new file before renaming
         drop(new_file);
@@ -414,49 +517,371 @@ impl StorageEngine {
 
         Ok(())
     }
+}
 
-    /// Helper function to flush a chunk of documents to the compacted file
-    fn flush_compaction_chunk(
-        &self,
-        new_file: &mut std::fs::File,
-        new_collections: &mut HashMap<String, super::CollectionMeta>,
-        coll_name: &str,
-        docs_by_id: &mut HashMap<crate::document::DocumentId, Value>,
-        mut write_offset: u64,
-        stats: &mut CompactionStats,
-    ) -> Result<u64> {
-        for (doc_id, doc) in docs_by_id.iter() {
-            // Skip tombstones (deleted documents)
-            if doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
+// =========================================================================
+// PHASE B: Standalone scan (NO StorageEngine, NO lock)
+// =========================================================================
+
+/// Phase B: Scan and copy documents from source to temp file
+///
+/// This function does NOT require a StorageEngine reference — it opens
+/// its own read-only file handle and uses pread() for thread-safe reads.
+/// This allows it to run WITHOUT holding the storage write lock.
+///
+/// Progress is reported via the callback: (documents_processed, total_documents)
+pub fn compact_scan_standalone(
+    snapshot: CompactionSnapshot,
+    config: &CompactionConfig,
+    progress_callback: &dyn Fn(u64, u64),
+) -> Result<CompactionScanResult> {
+    let mut stats = CompactionStats {
+        size_before: snapshot.size_before,
+        ..Default::default()
+    };
+
+    let mut temp_file = snapshot.temp_file;
+    let mut write_offset = super::HEADER_SIZE;
+
+    // Prepare new collections metadata (clone snapshot and reset catalogs)
+    let mut new_collections = snapshot.snapshot_collections.clone();
+    for coll_meta in new_collections.values_mut() {
+        coll_meta.data_offset = super::HEADER_SIZE;
+        coll_meta.document_catalog.clear();
+        coll_meta.document_count = 0;
+        coll_meta.live_document_count = 0;
+    }
+
+    // Open a separate read-only handle for pread()
+    let source_file = std::fs::File::open(&snapshot.source_path)?;
+
+    // Count total documents for progress reporting
+    let total_docs: u64 = snapshot
+        .snapshot_collections
+        .values()
+        .map(|m| m.document_catalog.len() as u64)
+        .sum();
+
+    // Track documents per collection
+    let mut collection_docs: HashMap<String, HashMap<crate::document::DocumentId, Value>> =
+        HashMap::new();
+    for coll_name in snapshot.snapshot_collections.keys() {
+        collection_docs.insert(coll_name.clone(), HashMap::new());
+    }
+
+    let mut chunk_count = 0;
+    let mut total_memory_bytes: u64 = 0;
+    let mut docs_processed: u64 = 0;
+
+    for (coll_name, coll_meta) in snapshot.snapshot_collections.iter() {
+        // Check for cancellation at collection boundary
+        if config.is_cancelled() {
+            stats.cancelled = true;
+            // Cleanup temp file
+            let _ = fs::remove_file(&snapshot.temp_path);
+            return Err(IronBaseError::Cancelled(
+                "Compaction cancelled by user".to_string(),
+            ));
+        }
+
+        // Iterate using document_order to preserve insertion order
+        for doc_id in &coll_meta.document_order {
+            let offset = match coll_meta.document_catalog.get(doc_id) {
+                Some(&off) => off,
+                None => continue,
+            };
+
+            // Check for cancellation periodically (every chunk)
+            if chunk_count > 0 && chunk_count % config.chunk_size == 0 && config.is_cancelled() {
+                stats.cancelled = true;
+                let _ = fs::remove_file(&snapshot.temp_path);
+                return Err(IronBaseError::Cancelled(
+                    "Compaction cancelled by user".to_string(),
+                ));
+            }
+
+            // Validate offset is before metadata
+            if offset >= snapshot.file_len {
+                crate::log_warn!(
+                    "Skipping document {:?} at invalid offset {} (file_len: {})",
+                    doc_id,
+                    offset,
+                    snapshot.file_len
+                );
                 stats.tombstones_removed += 1;
+                docs_processed += 1;
+                progress_callback(docs_processed, total_docs);
                 continue;
             }
 
-            // Write document to new file
-            let doc_offset = write_offset;
-            let doc_bytes = serde_json::to_vec(&doc)?;
-            let len = doc_bytes.len() as u32;
+            // Read document using pread (no seek, thread-safe)
+            match read_document_pread(&source_file, offset, snapshot.snapshot_data_end_offset) {
+                Ok(doc_bytes) => {
+                    stats.documents_scanned += 1;
 
-            new_file.write_all(&len.to_le_bytes())?;
-            new_file.write_all(&doc_bytes)?;
+                    if let Ok(doc) = serde_json::from_slice::<Value>(&doc_bytes) {
+                        if let Some(docs_by_id) = collection_docs.get_mut(coll_name.as_str()) {
+                            let doc_size_bytes = doc_bytes.len() as u64;
+                            total_memory_bytes += doc_size_bytes + 64;
 
-            write_offset += 4 + doc_bytes.len() as u64;
-            stats.documents_kept += 1;
+                            let current_memory_mb = total_memory_bytes / (1024 * 1024);
+                            if current_memory_mb > stats.peak_memory_mb {
+                                stats.peak_memory_mb = current_memory_mb;
+                            }
 
-            // Update document_catalog and document_count
-            if let Some(coll_meta) = new_collections.get_mut(coll_name) {
-                coll_meta
-                    .document_catalog
-                    .insert(doc_id.clone(), doc_offset);
-                coll_meta.document_count += 1;
-                coll_meta.live_document_count = coll_meta.live_document_count.saturating_add(1);
+                            docs_by_id.insert(doc_id.clone(), doc);
+                            chunk_count += 1;
+
+                            let should_flush = chunk_count >= config.chunk_size
+                                || total_memory_bytes >= MAX_COMPACTION_MEMORY_BYTES;
+
+                            if should_flush {
+                                for (flush_coll_name, docs) in collection_docs.iter_mut() {
+                                    if !docs.is_empty() {
+                                        write_offset = flush_compaction_chunk_standalone(
+                                            &mut temp_file,
+                                            &mut new_collections,
+                                            flush_coll_name,
+                                            docs,
+                                            write_offset,
+                                            &mut stats,
+                                        )?;
+                                        docs.clear();
+                                    }
+                                }
+                                chunk_count = 0;
+                                total_memory_bytes = 0;
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    crate::log_warn!(
+                        "Skipping corrupt document {:?} at offset {}: {}",
+                        doc_id,
+                        offset,
+                        e
+                    );
+                    stats.tombstones_removed += 1;
+                }
+            }
+
+            docs_processed += 1;
+            // Report progress every 1000 docs to avoid callback overhead
+            if docs_processed % 1000 == 0 || docs_processed == total_docs {
+                progress_callback(docs_processed, total_docs);
             }
         }
-
-        Ok(write_offset)
     }
+
+    // Flush remaining documents
+    for (coll_name, docs) in collection_docs.iter_mut() {
+        if !docs.is_empty() {
+            write_offset = flush_compaction_chunk_standalone(
+                &mut temp_file,
+                &mut new_collections,
+                coll_name,
+                docs,
+                write_offset,
+                &mut stats,
+            )?;
+        }
+    }
+
+    temp_file.sync_all()?;
+
+    // Final progress report
+    progress_callback(docs_processed, total_docs);
+
+    Ok(CompactionScanResult {
+        temp_file,
+        temp_path: snapshot.temp_path,
+        new_collections,
+        write_offset,
+        stats,
+        header: snapshot.header,
+    })
+}
+
+// =========================================================================
+// FREE FUNCTIONS (no &self needed)
+// =========================================================================
+
+/// Read document at offset using pread (no seek, thread-safe)
+///
+/// Mirrors StorageEngine::read_data_at() logic but works on any File reference.
+/// Uses platform-specific positioned I/O (pread on Unix, seek_read on Windows).
+#[cfg(unix)]
+fn read_document_pread(file: &std::fs::File, offset: u64, data_boundary: u64) -> Result<Vec<u8>> {
+    use std::os::unix::fs::FileExt;
+
+    if offset >= data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: offset {} >= data boundary {}",
+            offset, data_boundary
+        )));
+    }
+
+    if offset + 4 > data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: insufficient space for length header at offset {} (boundary: {})",
+            offset, data_boundary
+        )));
+    }
+
+    // Read length header
+    let mut len_bytes = [0u8; 4];
+    file.read_at(&mut len_bytes, offset)?;
+    let len = u32::from_le_bytes(len_bytes) as usize;
+
+    if len == 0 {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: zero-length document at offset {}",
+            offset
+        )));
+    }
+    if len > super::MAX_DOCUMENT_SIZE_BYTES {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: document at offset {} exceeds max size: {} bytes",
+            offset, len
+        )));
+    }
+    if offset + 4 + (len as u64) > data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: document at offset {} claims length {} but exceeds boundary",
+            offset, len
+        )));
+    }
+
+    let mut data = vec![0u8; len];
+    file.read_at(&mut data, offset + 4)?;
+
+    Ok(data)
+}
+
+/// Read document at offset using seek_read (Windows)
+#[cfg(windows)]
+fn read_document_pread(file: &std::fs::File, offset: u64, data_boundary: u64) -> Result<Vec<u8>> {
+    use std::os::windows::fs::FileExt;
+
+    if offset >= data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: offset {} >= data boundary {}",
+            offset, data_boundary
+        )));
+    }
+
+    if offset + 4 > data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: insufficient space for length header at offset {} (boundary: {})",
+            offset, data_boundary
+        )));
+    }
+
+    let mut len_bytes = [0u8; 4];
+    file.seek_read(&mut len_bytes, offset)?;
+    let len = u32::from_le_bytes(len_bytes) as usize;
+
+    if len == 0 {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: zero-length document at offset {}",
+            offset
+        )));
+    }
+    if len > super::MAX_DOCUMENT_SIZE_BYTES {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: document at offset {} exceeds max size: {} bytes",
+            offset, len
+        )));
+    }
+    if offset + 4 + (len as u64) > data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "pread: document at offset {} claims length {} but exceeds boundary",
+            offset, len
+        )));
+    }
+
+    let mut data = vec![0u8; len];
+    file.seek_read(&mut data, offset + 4)?;
+
+    Ok(data)
+}
+
+/// Flush a chunk of documents to the compacted file (standalone, no &self)
+fn flush_compaction_chunk_standalone(
+    new_file: &mut std::fs::File,
+    new_collections: &mut HashMap<String, super::CollectionMeta>,
+    coll_name: &str,
+    docs_by_id: &mut HashMap<crate::document::DocumentId, Value>,
+    mut write_offset: u64,
+    stats: &mut CompactionStats,
+) -> Result<u64> {
+    for (doc_id, doc) in docs_by_id.iter() {
+        // Skip tombstones (deleted documents)
+        if doc
+            .get("_tombstone")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            stats.tombstones_removed += 1;
+            continue;
+        }
+
+        // Write document to new file
+        let doc_offset = write_offset;
+        let doc_bytes = serde_json::to_vec(doc)?;
+        let len = doc_bytes.len() as u32;
+
+        new_file.write_all(&len.to_le_bytes())?;
+        new_file.write_all(&doc_bytes)?;
+
+        write_offset += 4 + doc_bytes.len() as u64;
+        stats.documents_kept += 1;
+
+        // Update document_catalog and document_count
+        if let Some(coll_meta) = new_collections.get_mut(coll_name) {
+            coll_meta
+                .document_catalog
+                .insert(doc_id.clone(), doc_offset);
+            coll_meta.document_count += 1;
+            coll_meta.live_document_count = coll_meta.live_document_count.saturating_add(1);
+        }
+    }
+
+    Ok(write_offset)
+}
+
+/// Write a single document to the temp file and update its catalog entry
+///
+/// Used by catch-up reconciliation (Phase C) for new inserts and updates.
+fn write_doc_to_temp(
+    temp_file: &mut std::fs::File,
+    new_collections: &mut HashMap<String, super::CollectionMeta>,
+    coll_name: &str,
+    doc_id: &crate::document::DocumentId,
+    doc_bytes: &[u8],
+    write_offset: u64,
+) -> Result<u64> {
+    // Seek to write position
+    temp_file.seek(SeekFrom::Start(write_offset))?;
+
+    let len = doc_bytes.len() as u32;
+    temp_file.write_all(&len.to_le_bytes())?;
+    temp_file.write_all(doc_bytes)?;
+
+    let new_offset = write_offset + 4 + doc_bytes.len() as u64;
+
+    if let Some(coll_meta) = new_collections.get_mut(coll_name) {
+        let is_new = !coll_meta.document_catalog.contains_key(doc_id);
+        coll_meta
+            .document_catalog
+            .insert(doc_id.clone(), write_offset);
+        if is_new {
+            coll_meta.document_count += 1;
+            coll_meta.live_document_count = coll_meta.live_document_count.saturating_add(1);
+            coll_meta.document_order.push(doc_id.clone());
+        }
+    }
+
+    Ok(new_offset)
 }

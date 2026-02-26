@@ -5,8 +5,10 @@
 use crate::adapter::IronBaseAdapter;
 use crate::api_keys::ApiKeyCache;
 use crate::error::{McpError, Result};
+use crate::jobs::{JobManager, JobType};
 use crate::ServerInfo;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use super::helpers::verify_admin_key_opt;
@@ -22,11 +24,12 @@ pub fn dispatch(
     adapter: &Arc<IronBaseAdapter>,
     api_key_cache: Option<&ApiKeyCache>,
     server_info: Option<&ServerInfo>,
+    job_manager: &Option<Arc<JobManager>>,
 ) -> Result<Value> {
     match name {
         "db_open" => handle_db_open(params, adapter),
         "db_stats" => handle_db_stats(adapter, server_info),
-        "db_compact" => handle_db_compact(adapter),
+        "db_compact" => handle_db_compact(adapter, job_manager),
         "db_checkpoint" => handle_db_checkpoint(adapter),
         "admin_list_all_collections" => handle_admin_list_all_collections(params, adapter),
         "admin_create_system_collection" => handle_admin_create_system_collection(params, adapter),
@@ -88,8 +91,149 @@ fn handle_db_stats(
     Ok(stats)
 }
 
-fn handle_db_compact(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {
-    adapter.compact()
+fn handle_db_compact(
+    adapter: &Arc<IronBaseAdapter>,
+    job_manager: &Option<Arc<JobManager>>,
+) -> Result<Value> {
+    // 1. Singleton guard — reject if already running
+    if adapter.is_compacting() {
+        return Err(McpError::invalid_params(
+            "Compaction already in progress. Use embed_job_status to check status.",
+        ));
+    }
+
+    // 2. Job manager required for async dispatch
+    let job_mgr = job_manager.as_ref().ok_or_else(|| {
+        McpError::internal("Job manager not available")
+    })?;
+
+    if !job_mgr.can_start_job() {
+        return Err(McpError::invalid_params(
+            "Maximum concurrent jobs reached. Wait for running jobs to complete.",
+        ));
+    }
+
+    // 3. Acquire guard + create job
+    if !adapter.try_start_compact() {
+        return Err(McpError::invalid_params(
+            "Compaction already in progress",
+        ));
+    }
+
+    let (job_id, _job) = job_mgr.create_job(JobType::Compact);
+
+    // 4. Clone + spawn background thread
+    let adapter_clone = adapter.clone();
+    let job_mgr_clone = job_mgr.clone();
+    let job_id_clone = job_id.clone();
+    let shutdown_flag = job_mgr.shutdown_flag();
+
+    let handle = std::thread::spawn(move || {
+        run_compact_job(
+            &job_id_clone,
+            &job_mgr_clone,
+            &adapter_clone,
+            &shutdown_flag,
+        );
+    });
+
+    job_mgr.register_thread(job_id.clone(), handle);
+
+    tracing::info!("Compact job {} started in background", job_id);
+
+    Ok(json!({
+        "status": "started",
+        "job_id": job_id,
+        "message": "Compaction started in background. Use embed_job_status to check progress."
+    }))
+}
+
+/// Background compact job execution
+///
+/// Pattern follows run_backfill_job() in auto_embed.rs
+fn run_compact_job(
+    job_id: &str,
+    job_mgr: &JobManager,
+    adapter: &IronBaseAdapter,
+    shutdown_flag: &AtomicBool,
+) {
+    let start = std::time::Instant::now();
+    job_mgr.update_progress(job_id, 0, None, "Starting compaction...");
+
+    // Combined cancel flag: checked by CompactionConfig.is_cancelled()
+    let combined_cancel = Arc::new(AtomicBool::new(false));
+    let config = ironbase_core::storage::CompactionConfig::new()
+        .with_cancel_flag(combined_cancel.clone());
+
+    let result = adapter.compact_nonblocking(
+        &config,
+        &|processed, total| {
+            // Cancel propagation: job cancel OR shutdown → combined_cancel
+            if shutdown_flag.load(Ordering::Relaxed)
+                || job_mgr.is_cancelled(job_id)
+            {
+                combined_cancel.store(true, Ordering::Relaxed);
+            }
+            // Progress update → JobManager
+            let total_usize = if total > 0 { Some(total as usize) } else { None };
+            job_mgr.update_progress(
+                job_id,
+                processed as usize,
+                total_usize,
+                &format!("Scanning documents... {}/{}", processed, total),
+            );
+        },
+    );
+
+    // Result handling
+    match result {
+        Ok(stats) => {
+            let duration_ms = start.elapsed().as_millis() as u64;
+            let space_freed = stats.size_before.saturating_sub(stats.size_after);
+            tracing::info!(
+                job_id,
+                duration_ms,
+                size_before = stats.size_before,
+                size_after = stats.size_after,
+                space_freed,
+                docs_scanned = stats.documents_scanned,
+                docs_kept = stats.documents_kept,
+                tombstones = stats.tombstones_removed,
+                "Compact job completed"
+            );
+            job_mgr.complete_job(
+                job_id,
+                json!({
+                    "success": true,
+                    "size_before_bytes": stats.size_before,
+                    "size_after_bytes": stats.size_after,
+                    "space_freed_bytes": space_freed,
+                    "documents_scanned": stats.documents_scanned,
+                    "documents_kept": stats.documents_kept,
+                    "tombstones_removed": stats.tombstones_removed,
+                    "compression_ratio": format!("{:.1}%", stats.compression_ratio()),
+                    "duration_ms": duration_ms,
+                }),
+            );
+        }
+        Err(e) if e.to_string().contains("cancelled") => {
+            tracing::info!(job_id, "Compact job cancelled");
+            job_mgr.complete_job(
+                job_id,
+                json!({
+                    "status": "cancelled",
+                    "message": e.to_string(),
+                }),
+            );
+        }
+        Err(e) => {
+            tracing::error!(job_id, error = %e, "Compact job failed");
+            job_mgr.fail_job(job_id, e.to_string());
+        }
+    }
+
+    // ALWAYS clear the guard — success, failure, or cancel
+    adapter.clear_compact_flag();
 }
 
 fn handle_db_checkpoint(adapter: &Arc<IronBaseAdapter>) -> Result<Value> {

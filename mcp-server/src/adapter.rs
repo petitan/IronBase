@@ -205,6 +205,8 @@ pub struct IronBaseAdapter {
     db_path: RwLock<std::path::PathBuf>,
     /// In-memory document counts for fast stats() without lock contention
     collection_stats: CollectionStats,
+    /// Singleton guard: true while a background compact is running
+    compacting: std::sync::atomic::AtomicBool,
 }
 
 /// Scripts collection name
@@ -372,6 +374,7 @@ impl IronBaseAdapter {
             db: Arc::new(RwLock::new(db)),
             db_path: RwLock::new(db_path),
             collection_stats: CollectionStats::new(),
+            compacting: std::sync::atomic::AtomicBool::new(false),
         };
 
         // Ensure system collections exist
@@ -913,6 +916,45 @@ impl IronBaseAdapter {
             "compression_ratio": format!("{:.1}%", result.compression_ratio()),
             "duration_ms": duration_ms,
         }))
+    }
+
+    /// Try to set the compacting flag (singleton guard).
+    /// Returns true if we successfully set it (no other compact running).
+    pub fn try_start_compact(&self) -> bool {
+        self.compacting
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// Clear the compacting flag (MUST be called after compact finishes/fails/cancels)
+    pub fn clear_compact_flag(&self) {
+        self.compacting
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Check if a background compact is currently running
+    pub fn is_compacting(&self) -> bool {
+        self.compacting
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Non-blocking compact — delegates to DatabaseCore::compact_nonblocking()
+    ///
+    /// Uses db.read() (NOT write!) because compact_nonblocking internally
+    /// manages storage lock acquisition per-phase.
+    pub fn compact_nonblocking(
+        &self,
+        config: &ironbase_core::storage::CompactionConfig,
+        progress_callback: &dyn Fn(u64, u64),
+    ) -> std::result::Result<ironbase_core::storage::CompactionStats, ironbase_core::IronBaseError>
+    {
+        let db = self.db.read();
+        db.compact_nonblocking(config, progress_callback)
     }
 
     /// Force checkpoint (flush indexes + metadata + clear WAL)

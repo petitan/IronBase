@@ -86,7 +86,10 @@ use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 // Re-export public types
-pub use compaction::{CheckpointStats, CompactionConfig, CompactionStats};
+pub use compaction::{
+    compact_scan_standalone, CheckpointStats, CompactionConfig, CompactionScanResult,
+    CompactionSnapshot, CompactionStats,
+};
 
 // Re-export traits module
 // NOTE: RawStorage is intentionally NOT public - it uses sealed trait pattern

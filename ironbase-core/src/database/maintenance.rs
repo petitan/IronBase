@@ -98,6 +98,53 @@ impl DatabaseCore<StorageEngine> {
         storage.compact()
     }
 
+    /// Non-blocking compact: 3-phase lock splitting
+    ///
+    /// Pre-Phase: HNSW rebuild + index flush (index_manager locks, NOT storage)
+    /// Phase A: brief storage.write() — snapshot
+    /// Phase B: NO LOCK — standalone pread scan
+    /// Phase C: brief storage.write() — catch-up reconciliation + finalize
+    ///
+    /// The progress_callback receives (documents_processed, total_documents).
+    /// Cancellation is controlled via CompactionConfig.cancel_flag.
+    pub fn compact_nonblocking(
+        &self,
+        config: &crate::storage::CompactionConfig,
+        progress_callback: &dyn Fn(u64, u64),
+    ) -> Result<crate::storage::CompactionStats> {
+        // Pre-Phase: HNSW rebuild + index flush (does NOT hold storage lock)
+        {
+            let index_managers = self.index_managers.read();
+            for (collection_name, index_manager) in index_managers.iter() {
+                let mut mgr = index_manager.write();
+                let rebuilt = mgr.rebuild_all_vector_indexes()?;
+                if rebuilt > 0 {
+                    tracing::info!(
+                        collection = %collection_name, rebuilt,
+                        "Compact (non-blocking): HNSW indexes rebuilt"
+                    );
+                }
+            }
+        }
+        self.flush_all_indexes()?;
+
+        // Phase A: brief storage.write() — snapshot
+        let (snapshot, snapshot_collections) = {
+            let mut storage = self.storage.write();
+            let snapshot = storage.compact_prepare()?;
+            let snap_colls = snapshot.snapshot_collections.clone();
+            (snapshot, snap_colls)
+        }; // storage.write() RELEASED
+
+        // Phase B: NO LOCK — standalone pread scan
+        let scan_result =
+            crate::storage::compact_scan_standalone(snapshot, config, progress_callback)?;
+
+        // Phase C: brief storage.write() — catch-up + finalize
+        let mut storage = self.storage.write();
+        storage.compact_finalize_with_catchup(scan_result, &snapshot_collections)
+    }
+
     /// Checkpoint - flush indexes and clear WAL (MongoDB-style)
     ///
     /// This is the recommended way to ensure index durability in long-running processes.

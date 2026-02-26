@@ -36,7 +36,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "db_compact",
             "title": "Compact Database",
-            "description": "Reclaim disk space by removing tombstones from deleted documents.",
+            "description": "Reclaim disk space by removing tombstones. Runs in background — returns a job_id. Use embed_job_status to check progress. Non-blocking: reads and writes continue during compaction.",
             "inputSchema": schemas::empty()
         }),
         json!({

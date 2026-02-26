@@ -68,6 +68,8 @@ pub enum JobType {
     },
     /// Import and embed a document with chunking
     EmbedDocument { collection: String, doc_id: String },
+    /// Database compaction (background, non-blocking)
+    Compact,
     /// Custom job type
     Custom { name: String },
 }

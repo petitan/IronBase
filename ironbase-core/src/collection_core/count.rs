@@ -181,8 +181,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
     /// FIX #36: Previously returned unfiltered index counts when query had
     /// conditions on multiple fields (e.g., $regex on a non-indexed field).
     fn count_with_plan(&self, query_json: &Value, ctx: Option<&ExecutionContext>) -> Result<u64> {
-        use crate::index::RangeQueryResult;
-
         // Try index-based counting
         let indexes = self.indexes.read();
         let index_fields = indexes.list_indexes_with_compound_info();
@@ -215,19 +213,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 let end_key = end.as_ref().unwrap_or(&default_end);
 
                                 if fully_covered {
-                                    let result = index.range_query(
+                                    let storage = self.storage.read();
+                                    let meta = storage.get_collection_meta(&self.name).ok_or_else(
+                                        || IronBaseError::CollectionNotFound(self.name.clone()),
+                                    )?;
+                                    let count = index.count_range_validated(
                                         start_key,
                                         end_key,
                                         *inclusive_start,
                                         *inclusive_end,
-                                        RangeQueryMode::Count,
+                                        &meta.document_catalog,
                                     );
-                                    let raw_count = match result {
-                                        RangeQueryResult::Count(c) => c,
-                                        _ => unreachable!("Count mode always returns Count"),
-                                    };
-                                    drop(indexes);
-                                    return self.adjust_count_for_tombstones(raw_count);
+                                    return Ok(count as u64);
                                 } else {
                                     let mode = RangeQueryMode::Scan {
                                         skip: 0,
@@ -255,21 +252,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         } => {
                             if let Some(index) = indexes.get_btree_index(index_name) {
                                 if fully_covered {
+                                    let storage = self.storage.read();
+                                    let meta = storage.get_collection_meta(&self.name).ok_or_else(
+                                        || IronBaseError::CollectionNotFound(self.name.clone()),
+                                    )?;
                                     let mut total_count = 0usize;
                                     for key in keys {
-                                        let result = index.range_query(
+                                        total_count += index.count_range_validated(
                                             key,
                                             key,
                                             true,
                                             true,
-                                            RangeQueryMode::Count,
+                                            &meta.document_catalog,
                                         );
-                                        if let RangeQueryResult::Count(c) = result {
-                                            total_count += c;
-                                        }
                                     }
-                                    drop(indexes);
-                                    return self.adjust_count_for_tombstones(total_count);
+                                    return Ok(total_count as u64);
                                 } else {
                                     let mut all_doc_ids = Vec::new();
                                     for key in keys {
@@ -304,19 +301,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                 };
 
                                 if fully_covered {
-                                    let result = index.range_query(
+                                    let storage = self.storage.read();
+                                    let meta = storage.get_collection_meta(&self.name).ok_or_else(
+                                        || IronBaseError::CollectionNotFound(self.name.clone()),
+                                    )?;
+                                    let count = index.count_range_validated(
                                         &start,
                                         &end,
                                         true,
                                         true,
-                                        RangeQueryMode::Count,
+                                        &meta.document_catalog,
                                     );
-                                    let raw_count = match result {
-                                        RangeQueryResult::Count(c) => c,
-                                        _ => unreachable!("Count mode always returns Count"),
-                                    };
-                                    drop(indexes);
-                                    return self.adjust_count_for_tombstones(raw_count);
+                                    return Ok(count as u64);
                                 } else {
                                     let mode = RangeQueryMode::Scan {
                                         skip: 0,
@@ -393,15 +389,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         };
 
                         if fully_covered {
-                            // Fast path: query only has the indexed field — O(1) memory
-                            let result =
-                                index.range_query(&start, &end, true, true, RangeQueryMode::Count);
-                            let raw_count = match result {
-                                RangeQueryResult::Count(c) => c,
-                                _ => unreachable!("Count mode always returns Count"),
-                            };
-                            drop(indexes);
-                            return self.adjust_count_for_tombstones(raw_count);
+                            // Fast path: validate index entries against catalog — O(1) memory
+                            let storage = self.storage.read();
+                            let meta =
+                                storage.get_collection_meta(&self.name).ok_or_else(|| {
+                                    IronBaseError::CollectionNotFound(self.name.clone())
+                                })?;
+                            let count = index.count_range_validated(
+                                &start,
+                                &end,
+                                true,
+                                true,
+                                &meta.document_catalog,
+                            );
+                            return Ok(count as u64);
                         } else {
                             // FIX #36: query has extra conditions — narrow via index, then post-filter
                             let mode = RangeQueryMode::Scan {
@@ -432,20 +433,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         let end_key = end.as_ref().unwrap_or(&default_end);
 
                         if fully_covered {
-                            // Fast path: O(1) memory
-                            let result = index.range_query(
+                            // Fast path: validate index entries against catalog — O(1) memory
+                            let storage = self.storage.read();
+                            let meta =
+                                storage.get_collection_meta(&self.name).ok_or_else(|| {
+                                    IronBaseError::CollectionNotFound(self.name.clone())
+                                })?;
+                            let count = index.count_range_validated(
                                 start_key,
                                 end_key,
                                 *inclusive_start,
                                 *inclusive_end,
-                                RangeQueryMode::Count,
+                                &meta.document_catalog,
                             );
-                            let raw_count = match result {
-                                RangeQueryResult::Count(c) => c,
-                                _ => unreachable!("Count mode always returns Count"),
-                            };
-                            drop(indexes);
-                            return self.adjust_count_for_tombstones(raw_count);
+                            return Ok(count as u64);
                         } else {
                             // FIX #36: narrow via index, then post-filter
                             let mode = RangeQueryMode::Scan {
@@ -479,20 +480,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
 
                             if fully_covered {
-                                // Fast path: single-field regex, prefix is exact — O(1) memory
-                                let result = index.range_query(
+                                // Fast path: validate index entries against catalog — O(1) memory
+                                let storage = self.storage.read();
+                                let meta =
+                                    storage.get_collection_meta(&self.name).ok_or_else(|| {
+                                        IronBaseError::CollectionNotFound(self.name.clone())
+                                    })?;
+                                let count = index.count_range_validated(
                                     &start,
                                     &end,
                                     true,
                                     true,
-                                    RangeQueryMode::Count,
+                                    &meta.document_catalog,
                                 );
-                                let raw_count = match result {
-                                    RangeQueryResult::Count(c) => c,
-                                    _ => unreachable!("Count mode always returns Count"),
-                                };
-                                drop(indexes);
-                                return self.adjust_count_for_tombstones(raw_count);
+                                return Ok(count as u64);
                             } else {
                                 // FIX #36: narrow via index, then post-filter
                                 let mode = RangeQueryMode::Scan {
@@ -516,24 +517,25 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         if fully_covered {
-                            // Fast path: sum of all prefix counts — O(1) memory per prefix
+                            // Fast path: validate index entries against catalog — O(1) memory
+                            let storage = self.storage.read();
+                            let meta =
+                                storage.get_collection_meta(&self.name).ok_or_else(|| {
+                                    IronBaseError::CollectionNotFound(self.name.clone())
+                                })?;
                             let mut total_count = 0usize;
                             for prefix in prefixes {
                                 let start = IndexKey::String(prefix.clone());
                                 let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
-                                let result = index.range_query(
+                                total_count += index.count_range_validated(
                                     &start,
                                     &end,
                                     true,
                                     true,
-                                    RangeQueryMode::Count,
+                                    &meta.document_catalog,
                                 );
-                                if let RangeQueryResult::Count(c) = result {
-                                    total_count += c;
-                                }
                             }
-                            drop(indexes);
-                            return self.adjust_count_for_tombstones(total_count);
+                            return Ok(total_count as u64);
                         } else {
                             // FIX #36: narrow via index, then post-filter
                             let mut all_doc_ids = Vec::new();
@@ -564,17 +566,23 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         if fully_covered {
-                            // Fast path: O(k) index lookups
+                            // Fast path: validate index entries against catalog — O(1) memory
+                            let storage = self.storage.read();
+                            let meta =
+                                storage.get_collection_meta(&self.name).ok_or_else(|| {
+                                    IronBaseError::CollectionNotFound(self.name.clone())
+                                })?;
                             let mut total_count = 0usize;
                             for key in keys {
-                                let result =
-                                    index.range_query(key, key, true, true, RangeQueryMode::Count);
-                                if let RangeQueryResult::Count(c) = result {
-                                    total_count += c;
-                                }
+                                total_count += index.count_range_validated(
+                                    key,
+                                    key,
+                                    true,
+                                    true,
+                                    &meta.document_catalog,
+                                );
                             }
-                            drop(indexes);
-                            return self.adjust_count_for_tombstones(total_count);
+                            return Ok(total_count as u64);
                         } else {
                             // FIX #36: narrow via index, then post-filter
                             let mut all_doc_ids = Vec::new();
@@ -598,10 +606,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 QueryPlan::SparseIndexScan { ref index_name, .. } => {
                     if let Some(index) = indexes.get_btree_index(index_name) {
                         if fully_covered {
-                            // Fast path: all entries = docs where field exists — O(1)
-                            let raw_count = index.metadata.num_keys as usize;
-                            drop(indexes);
-                            return self.adjust_count_for_tombstones(raw_count);
+                            // Fast path: validate index entries against catalog — O(1) memory
+                            let storage = self.storage.read();
+                            let meta =
+                                storage.get_collection_meta(&self.name).ok_or_else(|| {
+                                    IronBaseError::CollectionNotFound(self.name.clone())
+                                })?;
+                            let count = index.count_range_validated(
+                                &IndexKey::Null,
+                                &IndexKey::MaxKey,
+                                true,
+                                true,
+                                &meta.document_catalog,
+                            );
+                            return Ok(count as u64);
                         } else {
                             // FIX #35/#36: query has extra conditions beyond $exists
                             let mode = RangeQueryMode::Scan {
@@ -626,21 +644,6 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Fallback: streaming count without Vec allocation
         self.count_with_scan(query_json, ctx)
-    }
-
-    /// Return index-based count directly.
-    ///
-    /// The index is always accurate because:
-    /// - Normal deletes remove entries via `remove_from_indexes()` (raw_operations.rs)
-    /// - Crash recovery rebuilds indexes from catalog, skipping tombstones (collections.rs)
-    /// - Clean shutdown persists indexes after delete operations
-    ///
-    /// BUG FIX #30: The previous ratio-based adjustment (`live_count / catalog_len`)
-    /// was wrong because it applied a GLOBAL tombstone ratio to LOCAL (filtered) counts.
-    /// Example: 20A + 20B docs, delete all B → ratio=0.5, but index count for A=20
-    /// was incorrectly reduced to 10.
-    fn adjust_count_for_tombstones(&self, raw_count: usize) -> Result<u64> {
-        Ok(raw_count as u64)
     }
 
     /// Count documents from an index-narrowed set of doc_ids by applying the full query filter.

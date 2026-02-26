@@ -1598,6 +1598,132 @@ impl BPlusTree {
         )
     }
 
+    /// Count entries in range, validating each entry against the document catalog.
+    ///
+    /// Same traversal as `count_range_internal()`, but instead of `end_idx - start_idx`
+    /// it checks every leaf entry's `doc_id` against the catalog HashMap.
+    /// This filters out stale index entries (from dirty-marking bugs or hard restarts).
+    ///
+    /// Memory: O(1) — only a counter; the catalog reference is already in memory.
+    /// Time: O(N) — single traversal, per-entry O(1) HashMap lookup.
+    pub fn count_range_validated(
+        &self,
+        start: &IndexKey,
+        end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
+        catalog: &std::collections::HashMap<crate::DocumentId, u64>,
+    ) -> usize {
+        // LAZY MODE: open file for on-demand child loading (same pattern as range_query)
+        let mut lazy_file = if self.lazy_mode {
+            self.source_path.as_ref().and_then(|path| {
+                File::open(path)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            index = %self.metadata.name,
+                            path = %path.display(),
+                            error = %e,
+                            "count_range_validated: failed to open lazy index file"
+                        );
+                        e
+                    })
+                    .ok()
+            })
+        } else {
+            None
+        };
+
+        fn count_validated(
+            node: &BTreeNode,
+            start: &IndexKey,
+            end: &IndexKey,
+            inclusive_start: bool,
+            inclusive_end: bool,
+            catalog: &std::collections::HashMap<crate::DocumentId, u64>,
+            lazy_file: &mut Option<File>,
+        ) -> usize {
+            match node {
+                BTreeNode::Leaf(leaf) => {
+                    let start_idx = if inclusive_start {
+                        leaf.keys.partition_point(|k| k < start)
+                    } else {
+                        leaf.keys.partition_point(|k| k <= start)
+                    };
+                    let end_idx = if inclusive_end {
+                        leaf.keys.partition_point(|k| k <= end)
+                    } else {
+                        leaf.keys.partition_point(|k| k < end)
+                    };
+                    leaf.document_ids[start_idx..end_idx]
+                        .iter()
+                        .filter(|doc_id| catalog.contains_key(doc_id))
+                        .count()
+                }
+                BTreeNode::Internal(internal) => {
+                    let mut count = 0;
+                    let child_count = if !internal.children.is_empty() {
+                        internal.children.len()
+                    } else {
+                        internal.children_offsets.len()
+                    };
+                    for i in 0..child_count {
+                        let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
+                        let child_max_might_match =
+                            i >= internal.keys.len() || &internal.keys[i] >= start;
+                        if child_min_might_match && child_max_might_match {
+                            if i < internal.children.len() {
+                                count += count_validated(
+                                    &internal.children[i],
+                                    start,
+                                    end,
+                                    inclusive_start,
+                                    inclusive_end,
+                                    catalog,
+                                    lazy_file,
+                                );
+                            } else if lazy_file.is_some() {
+                                let offset = internal.children_offsets[i];
+                                let mut f = lazy_file.take().unwrap();
+                                match BPlusTree::load_node(&mut f, offset) {
+                                    Ok(child_node) => {
+                                        *lazy_file = Some(f);
+                                        count += count_validated(
+                                            &child_node,
+                                            start,
+                                            end,
+                                            inclusive_start,
+                                            inclusive_end,
+                                            catalog,
+                                            lazy_file,
+                                        );
+                                    }
+                                    Err(e) => {
+                                        *lazy_file = Some(f);
+                                        tracing::warn!(
+                                            offset,
+                                            error = %e,
+                                            "count_range_validated: failed to load lazy child node"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    count
+                }
+            }
+        }
+        count_validated(
+            &self.root,
+            start,
+            end,
+            inclusive_start,
+            inclusive_end,
+            catalog,
+            &mut lazy_file,
+        )
+    }
+
     /// Internal: Scan ascending with skip/limit and early termination.
     /// Supports lazy mode via optional file handle for on-demand child loading.
     fn scan_asc_internal(
