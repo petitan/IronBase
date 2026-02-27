@@ -1880,6 +1880,26 @@ impl FulltextIndex {
         results.into_iter().skip(skip).take(limit).collect()
     }
 
+    /// Tokenize query using this index's config (accent folding + stop words + stemming).
+    /// Returns unique tokens — same processing as search() uses for posting list lookup.
+    pub fn tokenize_query(&self, query: &str) -> Vec<String> {
+        let tokens = tokenize(query, &self.options);
+        let unique: HashSet<String> = tokens.into_iter().collect();
+        unique.into_iter().collect()
+    }
+
+    /// Get posting list size for a stemmed token (for rarity ordering).
+    pub fn token_posting_count(&self, token: &str) -> usize {
+        self.get_token_entries_merged(token).map_or(0, |e| e.len())
+    }
+
+    /// Get all chunk _ids from posting list for a stemmed token.
+    pub fn token_chunk_ids(&self, token: &str) -> Vec<DocumentId> {
+        self.get_token_entries_merged(token)
+            .map(|entries| entries.into_iter().map(|(id, _tf)| id).collect())
+            .unwrap_or_default()
+    }
+
     /// Search for documents with ExecutionContext for cancellation support
     ///
     /// This is the cancellation-aware version of `search`. It checks the

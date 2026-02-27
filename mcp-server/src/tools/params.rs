@@ -624,6 +624,10 @@ pub struct HybridSearchParams {
     /// Fulltext search mode: "or" (default) = any word matches, "and" = ALL words must match
     pub mode: Option<String>,
 
+    /// Match scope for AND mode: "chunk" (default) or "document"
+    /// "document" = all words must appear across the document's chunks (not necessarily in one chunk)
+    pub match_scope: Option<String>,
+
     /// Multiple fulltext fields to search across (overrides text_field). Best-field strategy (max score).
     pub text_fields: Option<Vec<String>>,
 
@@ -1038,8 +1042,14 @@ mod tests {
 
     #[test]
     fn test_search_mode_from_str() {
-        assert_eq!(SearchMode::parse_mode("balanced"), Some(SearchMode::Balanced));
-        assert_eq!(SearchMode::parse_mode("semantic"), Some(SearchMode::Semantic));
+        assert_eq!(
+            SearchMode::parse_mode("balanced"),
+            Some(SearchMode::Balanced)
+        );
+        assert_eq!(
+            SearchMode::parse_mode("semantic"),
+            Some(SearchMode::Semantic)
+        );
         assert_eq!(SearchMode::parse_mode("keyword"), Some(SearchMode::Keyword));
         assert_eq!(SearchMode::parse_mode("invalid"), None);
         assert_eq!(SearchMode::parse_mode(""), None);

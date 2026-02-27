@@ -939,8 +939,7 @@ impl IronBaseAdapter {
 
     /// Check if a background compact is currently running
     pub fn is_compacting(&self) -> bool {
-        self.compacting
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.compacting.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Non-blocking compact — delegates to DatabaseCore::compact_nonblocking()
@@ -1733,6 +1732,48 @@ impl IronBaseAdapter {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
         Ok(coll.fulltext_indexed_fields()?)
+    }
+
+    /// Tokenize query using the fulltext index's config for a given field.
+    /// Returns unique stemmed tokens — same processing as fulltext search uses.
+    pub fn fulltext_tokenize_query(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+    ) -> Result<Vec<String>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_tokenize_query(field, query)?)
+    }
+
+    /// Get posting list sizes for each token (for rarity-based ordering).
+    pub fn fulltext_token_posting_counts(
+        &self,
+        collection: &str,
+        field: &str,
+        tokens: &[String],
+    ) -> Result<Vec<(String, usize)>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_token_posting_counts(field, tokens)?)
+    }
+
+    /// Get all chunk _ids from posting list for a stemmed token.
+    /// Returns DocumentIds as serde_json::Value for use in $in filters.
+    pub fn fulltext_token_chunk_ids(
+        &self,
+        collection: &str,
+        field: &str,
+        token: &str,
+    ) -> Result<Vec<Value>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        let ids = coll.fulltext_token_chunk_ids(field, token)?;
+        Ok(ids
+            .into_iter()
+            .filter_map(|id| serde_json::to_value(id).ok())
+            .collect())
     }
 
     // ============================================================

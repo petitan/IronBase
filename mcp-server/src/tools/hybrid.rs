@@ -11,7 +11,7 @@
 //! - Reranking: phrase match, keyword density, title boost
 //! - MMR diversity reranking: embedding cosine similarity based
 
-use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
+use crate::adapter::{FindOptions, FulltextSearchOptions, IronBaseAdapter};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use serde_json::{json, Value};
@@ -22,8 +22,7 @@ use super::defaults::{
     DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
 };
 use super::fusion::{
-    apply_projection, id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results,
-    FusedResult,
+    apply_projection, id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results, FusedResult,
 };
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{resolve_weights, HybridSearchParams, ParseParams};
@@ -82,7 +81,13 @@ fn handle_hybrid_search(
             Some(ref v) => {
                 // Explicit mode: client provided the vector
                 let qv: Vec<f32> = v.iter().map(|&x| x as f32).collect();
-                (qv, p.vector_field.clone(), p.text_field.clone(), false, None)
+                (
+                    qv,
+                    p.vector_field.clone(),
+                    p.text_field.clone(),
+                    false,
+                    None,
+                )
             }
             None => {
                 // Auto-embed mode: server embeds the query
@@ -102,9 +107,7 @@ fn handle_hybrid_search(
                     Some(cfg) => (
                         cfg.embedding_field.clone(),
                         cfg.text_field.clone(),
-                        p.provider
-                            .clone()
-                            .unwrap_or_else(|| cfg.provider.clone()),
+                        p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
                     ),
                     None => {
                         // Auto-detect fulltext indexed field from collection metadata
@@ -158,6 +161,25 @@ fn handle_hybrid_search(
     let internal_limit = (p.limit * 3).min(MAX_INTERNAL_LIMIT);
 
     // ========================================================================
+    // STEP 1.5: Document-level AND qualification (match_scope="document")
+    // ========================================================================
+    let is_doc_scope =
+        p.mode.as_deref() == Some("and") && p.match_scope.as_deref() == Some("document");
+
+    let doc_qualification_filter = if is_doc_scope {
+        qualify_documents(adapter, &p.collection, &effective_text_field, &p.query)?
+    } else {
+        None
+    };
+
+    let qualified_doc_count = doc_qualification_filter.as_ref().and_then(|f| {
+        f.get("doc_id")
+            .and_then(|v| v.get("$in"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+    });
+
+    // ========================================================================
     // STEP 2: Vector search → get ranks
     // ========================================================================
     let vector_results = if let Some(ref filter) = p.filter {
@@ -197,13 +219,28 @@ fn handle_hybrid_search(
     // ========================================================================
     // STEP 3: Fulltext search → get ranks (original query - Snowball handles stemming)
     // ========================================================================
+
+    // If document-level AND is active, switch fulltext to OR mode (doc qualification
+    // already ensures all tokens appear across the document's chunks) and merge filters.
+    let (fulltext_and_mode, fulltext_filter) =
+        if let Some(ref qual_filter) = doc_qualification_filter {
+            // Merge user filter + doc_id qualification filter with $and
+            let merged = match &p.filter {
+                Some(user_filter) => Some(json!({"$and": [user_filter, qual_filter]})),
+                None => Some(qual_filter.clone()),
+            };
+            (false, merged) // OR mode — doc-level AND already satisfied
+        } else {
+            (p.mode.as_deref() == Some("and"), p.filter.clone())
+        };
+
     let text_options = FulltextSearchOptions {
         limit: Some(internal_limit),
         skip: None,
         min_score: None,
         projection: None, // Get full docs for merging
-        filter: p.filter.clone(),
-        and_mode: p.mode.as_deref() == Some("and"),
+        filter: fulltext_filter,
+        and_mode: fulltext_and_mode,
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
@@ -311,12 +348,7 @@ fn handle_hybrid_search(
     // STEP 6: MMR diversity reranking (optional)
     // ========================================================================
     let dedup_removed = if p.deduplicate {
-        mmr_reorder(
-            &mut fused,
-            &effective_vector_field,
-            p.mmr_lambda,
-            p.limit,
-        )
+        mmr_reorder(&mut fused, &effective_vector_field, p.mmr_lambda, p.limit)
     } else {
         fused.truncate(p.limit);
         0
@@ -362,7 +394,9 @@ fn handle_hybrid_search(
         results.push(result);
     }
 
-    Ok(json!({
+    let match_scope = if is_doc_scope { "document" } else { "chunk" };
+
+    let mut response = json!({
         "results": results,
         "count": results.len(),
         "algorithm": "rrf",
@@ -376,8 +410,140 @@ fn handle_hybrid_search(
         "auto_embedded": auto_embedded,
         "provider": provider_name,
         "dedup_removed": dedup_removed,
-        "chunks_merged": chunks_merged
-    }))
+        "chunks_merged": chunks_merged,
+        "match_scope": match_scope
+    });
+
+    if let Some(count) = qualified_doc_count {
+        response
+            .as_object_mut()
+            .unwrap()
+            .insert("qualified_doc_ids".to_string(), json!(count));
+    }
+
+    Ok(response)
+}
+
+/// Document-level AND qualification for RAG collections.
+///
+/// When `match_scope="document"` + `mode="and"`, we need all query tokens to appear
+/// across a document's chunks (not necessarily in one chunk). This function:
+/// 1. Tokenizes the query using the fulltext index config
+/// 2. Gets posting lists ordered by rarity (smallest first for early termination)
+/// 3. Intersects posting lists at document level using chunk→doc mapping
+/// 4. Returns a filter that restricts fulltext search to qualified doc_ids
+///
+/// Returns `Ok(None)` if qualification is not needed (1 token, or no restriction).
+/// Returns `Ok(Some(filter))` with `{"doc_id": {"$in": [...]}}` when docs are qualified.
+fn qualify_documents(
+    adapter: &Arc<IronBaseAdapter>,
+    collection: &str,
+    text_field: &str,
+    query: &str,
+) -> Result<Option<Value>> {
+    // 1. Tokenize using the index's config (accent folding + stop words + stemming)
+    let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
+    if tokens.len() <= 1 {
+        // Single token: chunk-level AND = document-level AND, no qualification needed
+        return Ok(None);
+    }
+
+    // 2. Get posting list sizes → sort by rarity (smallest first for early termination)
+    let mut token_counts =
+        adapter.fulltext_token_posting_counts(collection, text_field, &tokens)?;
+    token_counts.sort_by_key(|(_, count)| *count);
+
+    // If rarest token has 0 postings → no documents can match all tokens
+    if token_counts[0].1 == 0 {
+        return Ok(Some(json!({"doc_id": {"$in": []}})));
+    }
+
+    // 3. Rarest token → chunk _ids → batch find → doc_ids
+    let rarest_chunk_ids =
+        adapter.fulltext_token_chunk_ids(collection, text_field, &token_counts[0].0)?;
+
+    let find_result = adapter.find(
+        collection,
+        json!({"_id": {"$in": rarest_chunk_ids}}),
+        FindOptions {
+            projection: Some(json!({"doc_id": 1, "_id": 1})),
+            ..Default::default()
+        },
+    )?;
+
+    // Build qualified doc_id set from rarest token's chunks
+    let mut qualified: HashSet<String> = HashSet::new();
+    for doc in &find_result.documents {
+        if let Some(did) = doc.get("doc_id").and_then(|v| v.as_str()) {
+            qualified.insert(did.to_string());
+        }
+    }
+
+    if qualified.is_empty() {
+        // No doc_id field found → not a RAG collection, can't qualify
+        return Ok(Some(json!({"doc_id": {"$in": []}})));
+    }
+
+    // 4. Load ALL chunks for qualified docs → build chunk_to_doc map
+    let qualified_vec: Vec<Value> = qualified.iter().map(|s| json!(s)).collect();
+    let all_chunks_result = adapter.find(
+        collection,
+        json!({"doc_id": {"$in": qualified_vec}}),
+        FindOptions {
+            projection: Some(json!({"_id": 1, "doc_id": 1})),
+            ..Default::default()
+        },
+    )?;
+
+    let mut chunk_to_doc: HashMap<String, String> =
+        HashMap::with_capacity(all_chunks_result.documents.len());
+    for doc in &all_chunks_result.documents {
+        if let (Some(cid), Some(did)) = (
+            doc.get("_id").and_then(id_to_string),
+            doc.get("doc_id").and_then(|v| v.as_str()),
+        ) {
+            chunk_to_doc.insert(cid, did.to_string());
+        }
+    }
+
+    // 5. Remaining tokens → posting list intersection at document level
+    for (token, _) in token_counts.iter().skip(1) {
+        let posting_ids = adapter.fulltext_token_chunk_ids(collection, text_field, token)?;
+        let posting_set: HashSet<String> = posting_ids
+            .into_iter()
+            .filter_map(|v| {
+                if let Value::String(s) = v {
+                    Some(s)
+                } else if let Value::Number(n) = v {
+                    Some(n.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Find which qualified docs have at least one chunk in this token's posting list
+        let docs_with_token: HashSet<String> = chunk_to_doc
+            .iter()
+            .filter(|(cid, did)| {
+                posting_set.contains(cid.as_str()) && qualified.contains(did.as_str())
+            })
+            .map(|(_, did)| did.clone())
+            .collect();
+
+        qualified = qualified.intersection(&docs_with_token).cloned().collect();
+
+        if qualified.is_empty() {
+            break;
+        }
+
+        // Shrink chunk_to_doc to only keep qualified docs' chunks
+        chunk_to_doc.retain(|_, did| qualified.contains(did.as_str()));
+    }
+
+    // 6. Return filter
+    let qualified_vec: Vec<Value> = qualified.into_iter().map(|s| json!(s)).collect();
+    Ok(Some(json!({"doc_id": {"$in": qualified_vec}})))
 }
 
 /// Calculate RRF score for given ranks and weights
@@ -497,7 +663,7 @@ mod tests {
         assert!(p.vector_weight.is_none()); // no explicit weight
         assert!(p.fulltext_weight.is_none()); // no explicit weight
         assert!(p.search_mode.is_none()); // no mode → balanced default
-        // v2 defaults
+                                          // v2 defaults
         assert!(p.rerank); // default: true
         assert!(p.deduplicate); // default: true
         assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON); // default
@@ -531,6 +697,48 @@ mod tests {
         });
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.mode.as_deref(), Some("and"));
+        assert!(p.match_scope.is_none()); // default: None (= "chunk")
+    }
+
+    #[test]
+    fn test_params_with_match_scope_document() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "Ifju János fékpad ár",
+            "mode": "and",
+            "match_scope": "document"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.mode.as_deref(), Some("and"));
+        assert_eq!(p.match_scope.as_deref(), Some("document"));
+    }
+
+    #[test]
+    fn test_params_with_match_scope_chunk() {
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "test query",
+            "mode": "and",
+            "match_scope": "chunk"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.match_scope.as_deref(), Some("chunk"));
+    }
+
+    #[test]
+    fn test_params_match_scope_without_mode_and() {
+        // match_scope without mode="and" — should parse but won't activate doc qualification
+        let params = json!({
+            "collection": "test",
+            "vector": [0.1, 0.2],
+            "query": "test",
+            "match_scope": "document"
+        });
+        let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
+        assert_eq!(p.match_scope.as_deref(), Some("document"));
+        assert!(p.mode.is_none()); // no "and" → doc qualification won't activate
     }
 
     #[test]

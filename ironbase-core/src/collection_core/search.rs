@@ -1308,4 +1308,46 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         })?;
         Ok(index.options.clone())
     }
+
+    /// Tokenize query using the fulltext index's config for a given field.
+    /// Returns unique stemmed tokens — same processing as fulltext search uses.
+    pub fn fulltext_tokenize_query(&self, field: &str, query: &str) -> Result<Vec<String>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+        })?;
+        Ok(index.tokenize_query(query))
+    }
+
+    /// Get posting list sizes for each token (for rarity-based ordering).
+    pub fn fulltext_token_posting_counts(
+        &self,
+        field: &str,
+        tokens: &[String],
+    ) -> Result<Vec<(String, usize)>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+        })?;
+        Ok(tokens
+            .iter()
+            .map(|t| (t.clone(), index.token_posting_count(t)))
+            .collect())
+    }
+
+    /// Get all chunk _ids from posting list for a stemmed token.
+    pub fn fulltext_token_chunk_ids(
+        &self,
+        field: &str,
+        token: &str,
+    ) -> Result<Vec<crate::document::DocumentId>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+        })?;
+        Ok(index.token_chunk_ids(token))
+    }
 }
