@@ -331,16 +331,14 @@ impl HnswIndex {
         };
 
         // First node - just add it
-        if self.entry_point.is_none() {
+        let Some(entry_point) = self.entry_point else {
             self.nodes.push(node);
             self.entry_point = Some(node_index);
             self.max_level = node_level;
             self.id_to_index.insert(id.to_string(), node_index);
             self.dirty = true;
             return Ok(());
-        }
-
-        let entry_point = self.entry_point.unwrap();
+        };
         let mut current = entry_point;
 
         // Navigate through layers above node_level to find entry point at node_level
@@ -437,11 +435,12 @@ impl HnswIndex {
     ///
     /// Vector of results sorted by similarity/distance
     pub fn search(&self, query: &[f32], k: usize) -> Vec<VectorSearchResult> {
-        if self.entry_point.is_none() || query.len() != self.config.dim {
+        let Some(entry_point) = self.entry_point else {
+            return Vec::new();
+        };
+        if query.len() != self.config.dim {
             return Vec::new();
         }
-
-        let entry_point = self.entry_point.unwrap();
         let mut current = entry_point;
 
         // Navigate through layers from top to 1
@@ -479,11 +478,12 @@ impl HnswIndex {
     where
         F: Fn(&str) -> bool,
     {
-        if self.entry_point.is_none() || query.len() != self.config.dim {
+        let Some(entry_point) = self.entry_point else {
+            return Vec::new();
+        };
+        if query.len() != self.config.dim {
             return Vec::new();
         }
-
-        let entry_point = self.entry_point.unwrap();
         let mut current = entry_point;
 
         // Navigate through layers from top to 1
@@ -631,7 +631,12 @@ impl HnswIndex {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         // Check for v2 format (has HNSW magic header)
         if bytes.len() >= 8 && &bytes[0..4] == Self::MAGIC_HEADER {
-            let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+            let version = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| {
+                IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "HNSW header version bytes corrupted",
+                )))
+            })?);
 
             if version > Self::SERIALIZATION_VERSION {
                 return Err(IronBaseError::Serialization(format!(
