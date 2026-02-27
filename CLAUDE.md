@@ -990,6 +990,7 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
     deduplicate: true,       // MMR diversity reranking
     mmr_lambda: 0.5,         // MMR lambda (1.0=relevance, 0.0=diversity)
     merge_chunks: true,      // Szomszédos chunk összevonás
+    match_scope: "document", // "chunk" (default) | "document" (mode=and + RAG)
     search_mode: "balanced", // "balanced" | "semantic" | "keyword"
     vector_weight: 0.5,      // Explicit vektor súly (felülírja search_mode-ot)
     fulltext_weight: 0.5,    // Explicit fulltext súly
@@ -1067,6 +1068,27 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 | `definitions/hybrid.rs`, `definitions/rag.rs` | `"mode"` schema entry |
 | `hybrid.rs`, `rag.rs` | `and_mode: p.mode.as_deref() == Some("and")` |
 
+**Document-level AND mode (0f208d41, #56):**
+- `match_scope`: `"chunk"` (default) = minden szó egyetlen chunkban, `"document"` = szavak a dokumentum különböző chunkjaiban is lehetnek
+- Csak `mode="and"` + RAG collection (doc_id mező) esetén aktív
+- Algoritmus: posting list interszekcióval kvalifikálja a dokumentumokat, majd OR módban keres a kvalifikált doc_id-kre szűrve
+- Vektor keresés NEM szűrt (RRF természetesen kezeli)
+- Response: `"match_scope": "document"/"chunk"`, `"qualified_doc_ids": N`
+
+| Réteg | Változás |
+|-------|----------|
+| `fulltext.rs` | `tokenize_query()`, `token_posting_count()`, `token_chunk_ids()` pub metódusok |
+| `search.rs` | Delegáló metódusok a CollectionCore-on |
+| `adapter.rs` | Adapter metódusok (DocumentId→Value konverzió) |
+| `params.rs` | `pub match_scope: Option<String>` |
+| `definitions/hybrid.rs` | `"match_scope"` schema (enum: chunk/document) |
+| `hybrid.rs` | `qualify_documents()` fn + STEP 1.5 pipeline |
+
+```json
+{"collection": "docs", "query": "Ifju János fékpad ár",
+ "mode": "and", "match_scope": "document", "text_field": "content_text"}
+```
+
 **Multi-field fulltext (b938c487, #48):**
 - `text_fields`: string tömb — több mező párhuzamos fulltext keresése, best-field strategy (max score merge)
 - Elérhető: `hybrid_search` (a `fulltext_search` már korábban támogatta `fields` néven)
@@ -1099,8 +1121,9 @@ Prioritás: explicit weights > search_mode preset > balanced default
 **hybrid_search pipeline (hybrid.rs):**
 ```
 STEP 1: Resolve vector + field names (explicit vs auto-embed)
+STEP 1.5: Document-level AND qualification             [match_scope=document + mode=and]
 STEP 2: Vector search → ranks
-STEP 3: Fulltext search → ranks
+STEP 3: Fulltext search → ranks (OR mode + doc_id filter if STEP 1.5 active)
 STEP 4: RRF Fusion (weighted rank combination)
 STEP 5: Reranking (phrase, density, title, length)    [rerank=true]
 STEP 5.5: Adjacent chunk merge (overlap dedup)        [merge_chunks=true]
