@@ -76,9 +76,9 @@ pub mod traits; // NEW: Storage trait definitions
 
 use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
-use crate::log_error;
 use crate::transaction::{Transaction, TransactionId};
 use crate::wal::WriteAheadLog;
+use crate::{log_error, log_warn};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -585,6 +585,22 @@ impl StorageEngine {
             .write(true)
             .create(true)
             .open(&path)?;
+
+        // Clean up orphaned .idx.tmp files from interrupted two-phase index commits
+        if let Some(db_dir) = Path::new(&path_str).parent() {
+            if let Ok(entries) = std::fs::read_dir(db_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.to_string_lossy().ends_with(".idx.tmp") {
+                        log_warn!(
+                            path = %p.display(),
+                            "Removing orphaned index temp file from interrupted commit"
+                        );
+                        let _ = std::fs::remove_file(&p);
+                    }
+                }
+            }
+        }
 
         // Open WAL file first (needed for potential recovery)
         let wal_path = PathBuf::from(&path_str).with_extension("wal");

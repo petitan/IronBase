@@ -234,6 +234,14 @@ impl WriteAheadLog {
     }
 }
 
+impl Drop for WriteAheadLog {
+    fn drop(&mut self) {
+        if let Err(e) = self.file.sync_all() {
+            tracing::error!(error = %e, "WriteAheadLog::drop sync_all failed");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
