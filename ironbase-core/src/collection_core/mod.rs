@@ -1751,6 +1751,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             return Ok(());
         }
 
+        // NOTE: Single write lock held for entire batch — typical hold time 100-300ms
+        // (20K updates × 10 indexes). Concurrent inserts/queries on this collection
+        // are blocked during this window. Splitting is non-trivial because btree,
+        // fulltext, fuzzy, and HNSW updates must see a consistent document state.
         let mut indexes = self.indexes.write();
         let id_index_name = format!("{}_id", self.name);
         let index_names: Vec<String> = indexes.list_indexes();

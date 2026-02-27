@@ -1419,6 +1419,9 @@ impl FulltextIndex {
         writer.flush()?;
 
         self.write_offset = FTIDX_HEADER_SIZE;
+        // NOTE: If into_inner() fails, BufWriter::drop still flushes to disk,
+        // but file_handle remains None. The file exists on disk with valid data,
+        // however subsequent appends will fail until next initialize_disk_storage().
         self.file_handle = Some(
             writer
                 .into_inner()
