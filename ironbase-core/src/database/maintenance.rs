@@ -56,6 +56,7 @@ use std::sync::atomic::Ordering;
 
 use crate::durability::DurabilityMode;
 use crate::error::Result;
+use crate::log_warn;
 use crate::storage::{RawStorage, Storage, StorageEngine};
 
 use super::durability::BatchFlush;
@@ -733,17 +734,17 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
             if let Err(e) = manager.flush_fulltext_indexes() {
-                eprintln!("Warning: Failed to flush fulltext indexes on drop: {}", e);
+                log_warn!("Failed to flush fulltext indexes on drop: {}", e);
             }
             if let Err(e) = manager.flush_fuzzy_indexes() {
-                eprintln!("Warning: Failed to flush fuzzy indexes on drop: {}", e);
+                log_warn!("Failed to flush fuzzy indexes on drop: {}", e);
             }
             if !db_path.is_empty() {
                 if let Err(e) = manager.flush_btree_indexes(&db_path) {
-                    eprintln!("Warning: Failed to flush btree indexes on drop: {}", e);
+                    log_warn!("Failed to flush btree indexes on drop: {}", e);
                 }
                 if let Err(e) = manager.flush_vector_indexes(&db_path) {
-                    eprintln!("Warning: Failed to flush vector indexes on drop: {}", e);
+                    log_warn!("Failed to flush vector indexes on drop: {}", e);
                 }
             }
         }
@@ -755,14 +756,14 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
         // For full safety in Batch mode, always call close() explicitly.
         if let Some(mut storage) = self.storage.try_write() {
             if let Err(e) = storage.flush() {
-                eprintln!("Warning: Failed to flush storage on drop: {}", e);
+                log_warn!("Failed to flush storage on drop: {}", e);
             }
             // 4. Mark as clean shutdown for fast restart
             if let Err(e) = storage.mark_clean_shutdown() {
-                eprintln!("Warning: Failed to mark clean shutdown on drop: {}", e);
+                log_warn!("Failed to mark clean shutdown on drop: {}", e);
             }
         } else {
-            eprintln!("Warning: Could not acquire storage lock on drop");
+            log_warn!("Could not acquire storage lock on drop");
         }
     }
 }

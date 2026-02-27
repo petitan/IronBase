@@ -49,7 +49,10 @@ pub(crate) fn parse_value_expression(value: &Value, op_name: &str) -> Result<Val
         }
 
         // Check if first key is an operator ($)
-        let first_key = obj.keys().next().unwrap();
+        // Safety: obj.is_empty() checked above, so .next() is guaranteed Some
+        let first_key = obj.keys().next().ok_or_else(|| {
+            IronBaseError::AggregationError(format!("{} expression unexpectedly empty", op_name))
+        })?;
         if first_key.starts_with('$') {
             // Operator expression — must have exactly one key
             if obj.len() != 1 {
@@ -58,7 +61,12 @@ pub(crate) fn parse_value_expression(value: &Value, op_name: &str) -> Result<Val
                     op_name
                 )));
             }
-            let (op, arg) = obj.iter().next().unwrap();
+            let (op, arg) = obj.iter().next().ok_or_else(|| {
+                IronBaseError::AggregationError(format!(
+                    "{} operator expression unexpectedly empty",
+                    op_name
+                ))
+            })?;
             match op.as_str() {
                 "$substr" => {
                     let (field, start, length) = parse_substr_spec(arg, op_name)?;

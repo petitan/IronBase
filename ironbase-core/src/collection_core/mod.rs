@@ -2941,10 +2941,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         break;
                     }
 
+                    let Some(plan) = plan_opt.clone() else {
+                        continue;
+                    };
                     let remaining = target_limit.saturating_sub(union.len());
                     let (ids, _) = self.collect_doc_ids_from_plan(
                         clause_query,
-                        plan_opt.clone().unwrap(),
+                        plan,
                         None,
                         false,
                         0,

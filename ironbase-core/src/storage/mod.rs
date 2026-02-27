@@ -78,7 +78,7 @@ use crate::document::{Document, DocumentId};
 use crate::error::{IronBaseError, Result};
 use crate::transaction::{Transaction, TransactionId};
 use crate::wal::WriteAheadLog;
-use crate::{log_error, log_warn};
+use crate::{log_error, log_info, log_warn};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -509,7 +509,7 @@ impl StorageEngine {
                 if let Ok(pid) = pid_str.trim().parse::<u32>() {
                     if !Self::is_process_alive(pid) {
                         // Process is dead - lock is stale
-                        eprintln!(
+                        log_warn!(
                             "[WARN] Stale lock detected (PID {} is dead), cleaning up...",
                             pid
                         );
@@ -623,7 +623,7 @@ impl StorageEngine {
                         );
 
                     if is_recoverable_corruption {
-                        eprintln!("[WARN] Metadata corrupted: {}, attempting WAL recovery", e);
+                        log_warn!("[WARN] Metadata corrupted: {}, attempting WAL recovery", e);
                         // Return default header/collections - will attempt recovery below
                         (Header::default(), HashMap::new(), true)
                     } else {
@@ -673,14 +673,14 @@ impl StorageEngine {
             storage.was_clean_shutdown = false;
             // First try WAL recovery (has most recent metadata snapshot)
             if storage.recover_metadata_from_wal()? {
-                eprintln!("[INFO] Successfully recovered metadata from WAL");
+                log_info!("[INFO] Successfully recovered metadata from WAL");
             } else {
                 // WAL recovery failed - fall back to document scan
-                eprintln!("[WARN] WAL recovery failed, rebuilding metadata from documents");
+                log_warn!("[WARN] WAL recovery failed, rebuilding metadata from documents");
                 storage.rebuild_from_documents()?;
             }
             // CRITICAL: Flush to persist recovered metadata and fix corrupt header on disk
-            eprintln!("[INFO] Persisting recovered metadata to fix corrupt header");
+            log_info!("[INFO] Persisting recovered metadata to fix corrupt header");
             storage.flush_metadata()?;
             storage.metadata_snapshot_pending = false;
             storage.file.sync_all()?;
@@ -697,9 +697,10 @@ impl StorageEngine {
             if has_docs {
                 match Self::calculate_data_end_from_last_doc(&mut storage.file, max_offset) {
                     Ok(recovered_offset) => {
-                        eprintln!(
+                        log_warn!(
                             "[WARN] Recovered corrupted data_end_offset: {} -> {}",
-                            storage.header.data_end_offset, recovered_offset
+                            storage.header.data_end_offset,
+                            recovered_offset
                         );
                         storage.header.data_end_offset = recovered_offset;
                         storage.mark_metadata_dirty()?;
@@ -1018,7 +1019,7 @@ impl StorageEngine {
             let entry = match entry_result {
                 Ok(e) => e,
                 Err(e) => {
-                    eprintln!(
+                    log_warn!(
                         "[WARN] Skipping corrupted WAL entry during metadata recovery: {}",
                         e
                     );
@@ -1034,7 +1035,7 @@ impl StorageEngine {
 
         // Restore from snapshot if found
         if let Some(snapshot) = latest_snapshot {
-            eprintln!(
+            log_info!(
                 "[INFO] Recovering metadata from WAL: {} collections, data_end_offset={}",
                 snapshot.collections.len(),
                 snapshot.data_end_offset
@@ -1069,7 +1070,7 @@ impl StorageEngine {
         use crate::document::DocumentId;
         use std::io::{Read, Seek, SeekFrom};
 
-        eprintln!("[INFO] Starting metadata rebuild from document scan...");
+        log_info!("[INFO] Starting metadata rebuild from document scan...");
 
         let file_len = self.file.metadata()?.len();
 
@@ -1204,7 +1205,7 @@ impl StorageEngine {
         self.metadata_snapshot_pending = false;
         self.file.sync_all()?;
 
-        eprintln!(
+        log_info!(
             "[INFO] Rebuilt metadata: {} collections, {} documents from file scan",
             self.collections.len(),
             documents_found

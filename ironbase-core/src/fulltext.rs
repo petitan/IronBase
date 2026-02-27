@@ -2048,7 +2048,9 @@ impl FulltextIndex {
         let offsets_vec: Vec<(&DocumentId, &u64)> = self.doc_tokens_offsets.iter().collect();
         let offsets_bytes = serde_json::to_vec(&offsets_vec)?;
         {
-            let file = self.file_handle.as_mut().unwrap();
+            let file = self.file_handle.as_mut().ok_or_else(|| {
+                IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
+            })?;
             file.flush()?;
             file.seek(SeekFrom::Start(offsets_offset))?;
             file.write_all(&offsets_bytes)?;
@@ -2098,7 +2100,9 @@ impl FulltextIndex {
             let entries_bytes = serde_json::to_vec(&entries)?;
 
             {
-                let file = self.file_handle.as_mut().unwrap();
+                let file = self.file_handle.as_mut().ok_or_else(|| {
+                    IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
+                })?;
                 file.seek(SeekFrom::Start(current_offset))?;
                 file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
                 file.write_all(token_bytes)?;
@@ -2115,7 +2119,9 @@ impl FulltextIndex {
         let token_offsets_vec: Vec<(&String, &(u64, u32))> = new_token_offsets.iter().collect();
         let token_offsets_bytes = serde_json::to_vec(&token_offsets_vec)?;
         {
-            let file = self.file_handle.as_mut().unwrap();
+            let file = self.file_handle.as_mut().ok_or_else(|| {
+                IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
+            })?;
             file.seek(SeekFrom::Start(token_offsets_offset))?;
             file.write_all(&token_offsets_bytes)?;
         }
@@ -2129,13 +2135,17 @@ impl FulltextIndex {
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         {
-            let file = self.file_handle.as_mut().unwrap();
+            let file = self.file_handle.as_mut().ok_or_else(|| {
+                IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
+            })?;
             file.write_all(&metadata_bytes)?;
         }
 
         // Update V3 header with final offsets
         {
-            let file = self.file_handle.as_mut().unwrap();
+            let file = self.file_handle.as_mut().ok_or_else(|| {
+                IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
+            })?;
             file.seek(SeekFrom::Start(8))?; // After magic
             file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
             file.write_all(&(self.doc_tokens_offsets.len() as u64).to_le_bytes())?;

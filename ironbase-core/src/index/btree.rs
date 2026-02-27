@@ -68,6 +68,7 @@
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
+use crate::log_warn;
 use crate::value_utils::get_all_nested_values;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -832,23 +833,25 @@ impl BPlusTree {
                             Ok(mut file) => match Self::load_node(&mut file, offset) {
                                 Ok(child_node) => self.search_in_node(&child_node, key),
                                 Err(e) => {
-                                    eprintln!(
+                                    log_warn!(
                                         "[LAZY_LOAD_ERROR] Failed to load node at offset {}: {:?}",
-                                        offset, e
+                                        offset,
+                                        e
                                     );
                                     None
                                 }
                             },
                             Err(e) => {
-                                eprintln!(
+                                log_warn!(
                                     "[LAZY_LOAD_ERROR] Failed to open file {:?}: {:?}",
-                                    path, e
+                                    path,
+                                    e
                                 );
                                 None
                             }
                         }
                     } else {
-                        eprintln!(
+                        log_warn!(
                             "[LAZY_LOAD_ERROR] No source_path for lazy loading! children={}, offsets={}",
                             internal.children.len(),
                             internal.children_offsets.len()
@@ -856,7 +859,7 @@ impl BPlusTree {
                         None
                     }
                 } else {
-                    eprintln!(
+                    log_warn!(
                         "[LAZY_LOAD_ERROR] child_index {} out of bounds: children={}, offsets={}",
                         child_index,
                         internal.children.len(),
@@ -1559,7 +1562,9 @@ impl BPlusTree {
                             } else if lazy_file.is_some() {
                                 // Lazy load: take file, load node, put file back
                                 let offset = internal.children_offsets[i];
-                                let mut f = lazy_file.take().unwrap();
+                                let Some(mut f) = lazy_file.take() else {
+                                    break;
+                                };
                                 match BPlusTree::load_node(&mut f, offset) {
                                     Ok(child_node) => {
                                         *lazy_file = Some(f);
@@ -1683,7 +1688,9 @@ impl BPlusTree {
                                 );
                             } else if lazy_file.is_some() {
                                 let offset = internal.children_offsets[i];
-                                let mut f = lazy_file.take().unwrap();
+                                let Some(mut f) = lazy_file.take() else {
+                                    break;
+                                };
                                 match BPlusTree::load_node(&mut f, offset) {
                                     Ok(child_node) => {
                                         *lazy_file = Some(f);
@@ -1806,7 +1813,9 @@ impl BPlusTree {
                                 )
                             } else if lazy_file.is_some() {
                                 let offset = internal.children_offsets[i];
-                                let mut f = lazy_file.take().unwrap();
+                                let Some(mut f) = lazy_file.take() else {
+                                    break;
+                                };
                                 let result = match BPlusTree::load_node(&mut f, offset) {
                                     Ok(child_node) => {
                                         *lazy_file = Some(f);
@@ -1942,7 +1951,9 @@ impl BPlusTree {
                                 )
                             } else if lazy_file.is_some() {
                                 let offset = internal.children_offsets[i];
-                                let mut f = lazy_file.take().unwrap();
+                                let Some(mut f) = lazy_file.take() else {
+                                    break;
+                                };
                                 let result = match BPlusTree::load_node(&mut f, offset) {
                                     Ok(child_node) => {
                                         *lazy_file = Some(f);
@@ -2029,7 +2040,9 @@ impl BPlusTree {
                 } else if lazy_file.is_some() {
                     // Lazy load children from file: traverse RIGHT to LEFT
                     for &offset in internal.children_offsets.iter().rev() {
-                        let mut f = lazy_file.take().unwrap();
+                        let Some(mut f) = lazy_file.take() else {
+                            break;
+                        };
                         match BPlusTree::load_node(&mut f, offset) {
                             Ok(child_node) => {
                                 *lazy_file = Some(f);
