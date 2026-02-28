@@ -38,8 +38,16 @@ pub fn split(content: &str, chunk_size: usize, overlap: usize) -> Result<Vec<Chu
     for raw_chunk in &raw_chunks {
         let start = raw_chunk.as_ptr() as usize - content_start;
         let end = start + raw_chunk.len();
-        debug_assert!(content.is_char_boundary(start), "start {} not a char boundary", start);
-        debug_assert!(content.is_char_boundary(end), "end {} not a char boundary", end);
+        debug_assert!(
+            content.is_char_boundary(start),
+            "start {} not a char boundary",
+            start
+        );
+        debug_assert!(
+            content.is_char_boundary(end),
+            "end {} not a char boundary",
+            end
+        );
         positions.push((start, end));
     }
 
@@ -171,7 +179,8 @@ mod tests {
             content.push('\n');
         }
         // Add special chars from issue: ' (U+2019), ➢ (U+27A2), NBSP
-        content.push_str("\n\nSpeciális: \u{2019}idézet\u{2019}, \u{27A2} nyíl, szóköz\u{a0}itt.\n");
+        content
+            .push_str("\n\nSpeciális: \u{2019}idézet\u{2019}, \u{27A2} nyíl, szóköz\u{a0}itt.\n");
 
         let result = split(&content, 1000, 100);
         assert!(
@@ -180,12 +189,20 @@ mod tests {
             result.err()
         );
         let chunks = result.unwrap();
-        assert!(chunks.len() > 1, "Expected multiple chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() > 1,
+            "Expected multiple chunks, got {}",
+            chunks.len()
+        );
 
         // Verify all chunks are valid UTF-8 (they are Strings, so this is guaranteed,
         // but verify they contain actual content)
         for chunk in &chunks {
-            assert!(!chunk.text.is_empty(), "Empty chunk at index {}", chunk.index);
+            assert!(
+                !chunk.text.is_empty(),
+                "Empty chunk at index {}",
+                chunk.index
+            );
         }
     }
 

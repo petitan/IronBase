@@ -201,10 +201,7 @@ pub(crate) fn rerank_results(
 /// best score from the run, and MMR sees fewer near-duplicates.
 ///
 /// Returns the number of results removed by merging.
-pub(crate) fn merge_adjacent_chunks(
-    results: &mut Vec<FusedResult>,
-    text_field: &str,
-) -> usize {
+pub(crate) fn merge_adjacent_chunks(results: &mut Vec<FusedResult>, text_field: &str) -> usize {
     if results.len() < 2 {
         return 0;
     }
@@ -242,9 +239,7 @@ pub(crate) fn merge_adjacent_chunks(
         let mut run_start = 0;
         while run_start < entries.len() {
             let mut run_end = run_start;
-            while run_end + 1 < entries.len()
-                && entries[run_end + 1].0 == entries[run_end].0 + 1
-            {
+            while run_end + 1 < entries.len() && entries[run_end + 1].0 == entries[run_end].0 + 1 {
                 run_end += 1;
             }
 
@@ -271,10 +266,7 @@ pub(crate) fn merge_adjacent_chunks(
 
                 for (i, &(_, res_idx)) in run.iter().enumerate() {
                     let doc = &results[res_idx].doc;
-                    let chunk_text = doc
-                        .get(text_field)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
+                    let chunk_text = doc.get(text_field).and_then(|v| v.as_str()).unwrap_or("");
 
                     if i == 0 {
                         merged_text.push_str(chunk_text);
@@ -292,19 +284,18 @@ pub(crate) fn merge_adjacent_chunks(
                         };
 
                         // Skip overlap characters from the beginning of this chunk's text
-                        let text_to_append = if overlap_chars > 0
-                            && overlap_chars < chunk_text.chars().count()
-                        {
-                            // Find byte offset for char boundary
-                            let byte_offset = chunk_text
-                                .char_indices()
-                                .nth(overlap_chars)
-                                .map(|(idx, _)| idx)
-                                .unwrap_or(chunk_text.len());
-                            &chunk_text[byte_offset..]
-                        } else {
-                            chunk_text
-                        };
+                        let text_to_append =
+                            if overlap_chars > 0 && overlap_chars < chunk_text.chars().count() {
+                                // Find byte offset for char boundary
+                                let byte_offset = chunk_text
+                                    .char_indices()
+                                    .nth(overlap_chars)
+                                    .map(|(idx, _)| idx)
+                                    .unwrap_or(chunk_text.len());
+                                &chunk_text[byte_offset..]
+                            } else {
+                                chunk_text
+                            };
 
                         merged_text.push_str(text_to_append);
                     }
@@ -320,14 +311,8 @@ pub(crate) fn merge_adjacent_chunks(
 
                 // Update the best-scored result's doc with merged content
                 if let Value::Object(ref mut obj) = results[best_idx_in_run].doc {
-                    obj.insert(
-                        text_field.to_string(),
-                        Value::String(merged_text),
-                    );
-                    obj.insert(
-                        "chunk_index".to_string(),
-                        json!(run[0].0),
-                    );
+                    obj.insert(text_field.to_string(), Value::String(merged_text));
+                    obj.insert("chunk_index".to_string(), json!(run[0].0));
                     if let Some(sc) = min_start_char {
                         obj.insert("start_char".to_string(), json!(sc));
                     }
@@ -680,12 +665,7 @@ mod tests {
             ),
         ];
 
-        rerank_results(
-            &mut results,
-            "the exact phrase test query",
-            "content",
-            None,
-        );
+        rerank_results(&mut results, "the exact phrase test query", "content", None);
 
         // doc2 should be boosted (contains exact phrase)
         assert!(results[0].id == "doc2");
@@ -792,23 +772,21 @@ mod tests {
 
     #[test]
     fn test_rerank_title_match_partial() {
-        let mut results = vec![
-            FusedResult {
-                id: "doc1".to_string(),
-                doc: json!({
-                    "_id": "doc1",
-                    "content": "Tartalom ami elég hosszú ahhoz hogy ne kapjon rövid tartalom büntetést a rerankertől",
-                    "title": "Fékerőmérő javítás"  // 1 of 2 query words
-                }),
-                rrf_score: 0.02,
-                final_score: 0.02,
-                rerank_boost: 1.0,
-                v_rank: 1,
-                t_rank: 1,
-                v_score: Some(0.9),
-                t_score: Some(10.0),
-            },
-        ];
+        let mut results = vec![FusedResult {
+            id: "doc1".to_string(),
+            doc: json!({
+                "_id": "doc1",
+                "content": "Tartalom ami elég hosszú ahhoz hogy ne kapjon rövid tartalom büntetést a rerankertől",
+                "title": "Fékerőmérő javítás"  // 1 of 2 query words
+            }),
+            rrf_score: 0.02,
+            final_score: 0.02,
+            rerank_boost: 1.0,
+            v_rank: 1,
+            t_rank: 1,
+            v_score: Some(0.9),
+            t_score: Some(10.0),
+        }];
 
         rerank_results(
             &mut results,
@@ -824,23 +802,21 @@ mod tests {
 
     #[test]
     fn test_rerank_no_title_field() {
-        let mut results = vec![
-            FusedResult {
-                id: "doc1".to_string(),
-                doc: json!({
-                    "_id": "doc1",
-                    "content": "Tartalom ami elég hosszú ahhoz hogy ne kapjon rövid tartalom büntetést a rerankertől",
-                    "title": "Fékerőmérő kalibrálás"
-                }),
-                rrf_score: 0.02,
-                final_score: 0.02,
-                rerank_boost: 1.0,
-                v_rank: 1,
-                t_rank: 1,
-                v_score: Some(0.9),
-                t_score: Some(10.0),
-            },
-        ];
+        let mut results = vec![FusedResult {
+            id: "doc1".to_string(),
+            doc: json!({
+                "_id": "doc1",
+                "content": "Tartalom ami elég hosszú ahhoz hogy ne kapjon rövid tartalom büntetést a rerankertől",
+                "title": "Fékerőmérő kalibrálás"
+            }),
+            rrf_score: 0.02,
+            final_score: 0.02,
+            rerank_boost: 1.0,
+            v_rank: 1,
+            t_rank: 1,
+            v_score: Some(0.9),
+            t_score: Some(10.0),
+        }];
 
         rerank_results(
             &mut results,

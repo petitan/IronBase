@@ -655,6 +655,12 @@ pub struct HybridSearchParams {
     /// eliminating overlap-caused duplicates while preserving more context.
     #[serde(default = "default_merge_chunks")]
     pub merge_chunks: bool,
+
+    /// Group results by document (default: false).
+    /// When true, results are grouped by doc_id with all matching chunks per document.
+    /// Limit applies to document count (not chunk count).
+    #[serde(default = "default_group_by_document")]
+    pub group_by_document: bool,
 }
 
 fn default_merge_chunks() -> bool {
@@ -668,10 +674,13 @@ fn default_rerank() -> bool {
     true
 }
 fn default_deduplicate() -> bool {
-    true
+    false
 }
 fn default_mmr_lambda() -> f64 {
-    0.5
+    0.7
+}
+fn default_group_by_document() -> bool {
+    false
 }
 fn default_rrf_k() -> f64 {
     DEFAULT_RRF_K

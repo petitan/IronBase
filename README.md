@@ -227,17 +227,23 @@ results = db.find("data", {"$**.name": "Alice"})  # Matches name at any level
 ### Hybrid Search (via MCP Server)
 
 ```
-hybrid_search      → RRF fusion of fulltext + vector results with reranking + MMR diversity
+hybrid_search      → RRF fusion of fulltext + vector results with reranking
                      If 'vector' omitted → auto-embeds query (FastText/Ollama/OpenAI)
+                     Supports flat (per-chunk) and grouped (per-document) response modes
 ```
-
-Uses **MMR (Maximal Marginal Relevance)** for result diversity — removes near-duplicate chunks using embedding cosine similarity instead of naive prefix matching.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `mmr_lambda` | `0.5` | Relevance vs diversity: `1.0` = pure relevance, `0.0` = pure diversity |
-| `deduplicate` | `true` | Enable/disable MMR reranking |
-| `rerank` | `true` | Phrase match (1.3x), keyword density (1.0–1.1x), short content penalty (0.8x) |
+| `search_mode` | `"balanced"` | Preset: `"balanced"` (0.5/0.5), `"semantic"` (0.8/0.2), `"keyword"` (0.2/0.8) |
+| `mode` | `"and"` | Fulltext: `"and"` = all words required, `"or"` = any word |
+| `rerank` | `true` | Phrase match (1.5x), keyword density (1.0–1.3x), title boost (1.5x), short penalty (0.8x) |
+| `deduplicate` | `false` | Enable MMR diversity reranking |
+| `mmr_lambda` | `0.7` | Relevance vs diversity: `1.0` = pure relevance, `0.0` = pure diversity |
+| `merge_chunks` | `true` | Merge adjacent chunks from same document (overlap dedup) |
+| `group_by_document` | `false` | Group results by source document with all relevant chunks |
+| `filter` | - | MongoDB-style pre-filter |
+
+**`group_by_document` mode:** When `true`, results are grouped by source document. Document selection uses AND (all query words somewhere in document), chunk retrieval uses OR (any query word). The `limit` applies to document count, not chunk count.
 
 ## Aggregation
 
@@ -438,7 +444,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `index_drop_vector` | Drop vector index |
 | `vector_search` | Vector similarity search |
 | `vector_search_filter` | Vector search with document filters |
-| `hybrid_search` | RRF fusion of vector + text results with MMR diversity (auto-embeds if vector omitted) |
+| `hybrid_search` | RRF fusion of vector + text results with reranking. Auto-embeds if vector omitted. Flat or grouped-by-document modes. |
 | `schema_set` | Define JSON Schema validation |
 | `schema_get` | Get collection schema |
 

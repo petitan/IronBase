@@ -121,9 +121,9 @@ fn handle_db_compact(
     }
 
     // 2. Job manager required for async dispatch
-    let job_mgr = job_manager.as_ref().ok_or_else(|| {
-        McpError::internal("Job manager not available")
-    })?;
+    let job_mgr = job_manager
+        .as_ref()
+        .ok_or_else(|| McpError::internal("Job manager not available"))?;
 
     if !job_mgr.can_start_job() {
         return Err(McpError::invalid_params(
@@ -133,9 +133,7 @@ fn handle_db_compact(
 
     // 3. Acquire guard atomically (CAS: false→true)
     if !adapter.try_start_compact() {
-        return Err(McpError::invalid_params(
-            "Compaction already in progress",
-        ));
+        return Err(McpError::invalid_params("Compaction already in progress"));
     }
 
     // RAII guard — ensures clear_compact_flag() is called even if thread panics
@@ -154,12 +152,7 @@ fn handle_db_compact(
     let handle = std::thread::spawn(move || {
         // guard is moved here — Drop will fire when this closure exits
         // (whether normally, via early return, or via panic)
-        run_compact_job(
-            &job_id_clone,
-            &job_mgr_clone,
-            &guard,
-            &shutdown_flag,
-        );
+        run_compact_job(&job_id_clone, &job_mgr_clone, &guard, &shutdown_flag);
     });
 
     job_mgr.register_thread(job_id.clone(), handle);
@@ -192,28 +185,27 @@ fn run_compact_job(
 
     // Combined cancel flag: checked by CompactionConfig.is_cancelled()
     let combined_cancel = Arc::new(AtomicBool::new(false));
-    let config = ironbase_core::storage::CompactionConfig::new()
-        .with_cancel_flag(combined_cancel.clone());
+    let config =
+        ironbase_core::storage::CompactionConfig::new().with_cancel_flag(combined_cancel.clone());
 
-    let result = adapter.compact_nonblocking(
-        &config,
-        &|processed, total| {
-            // Cancel propagation: job cancel OR shutdown → combined_cancel
-            if shutdown_flag.load(Ordering::Relaxed)
-                || job_mgr.is_cancelled(job_id)
-            {
-                combined_cancel.store(true, Ordering::Relaxed);
-            }
-            // Progress update → JobManager
-            let total_usize = if total > 0 { Some(total as usize) } else { None };
-            job_mgr.update_progress(
-                job_id,
-                processed as usize,
-                total_usize,
-                &format!("Scanning documents... {}/{}", processed, total),
-            );
-        },
-    );
+    let result = adapter.compact_nonblocking(&config, &|processed, total| {
+        // Cancel propagation: job cancel OR shutdown → combined_cancel
+        if shutdown_flag.load(Ordering::Relaxed) || job_mgr.is_cancelled(job_id) {
+            combined_cancel.store(true, Ordering::Relaxed);
+        }
+        // Progress update → JobManager
+        let total_usize = if total > 0 {
+            Some(total as usize)
+        } else {
+            None
+        };
+        job_mgr.update_progress(
+            job_id,
+            processed as usize,
+            total_usize,
+            &format!("Scanning documents... {}/{}", processed, total),
+        );
+    });
 
     // Result handling
     match result {

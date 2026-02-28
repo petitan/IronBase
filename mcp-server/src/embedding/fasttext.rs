@@ -131,7 +131,10 @@ impl FastTextProvider {
 
         let word_index = Self::build_word_index(&mmap, 8, vocab_size, dim)?;
         let actual_vocab_size = word_index.len();
-        log::info!("FastText v1 model loaded: {} words indexed", actual_vocab_size);
+        log::info!(
+            "FastText v1 model loaded: {} words indexed",
+            actual_vocab_size
+        );
 
         Ok(Self {
             mmap,
@@ -157,10 +160,8 @@ impl FastTextProvider {
         // Parse 32-byte header: magic(4) + dim(4) + vocab_size(4) + bucket_count(4)
         //                        + minn(4) + maxn(4) + bucket_offset(8)
         let dim = u32::from_le_bytes([mmap[4], mmap[5], mmap[6], mmap[7]]) as usize;
-        let vocab_size =
-            u32::from_le_bytes([mmap[8], mmap[9], mmap[10], mmap[11]]) as usize;
-        let bucket_count =
-            u32::from_le_bytes([mmap[12], mmap[13], mmap[14], mmap[15]]) as usize;
+        let vocab_size = u32::from_le_bytes([mmap[8], mmap[9], mmap[10], mmap[11]]) as usize;
+        let bucket_count = u32::from_le_bytes([mmap[12], mmap[13], mmap[14], mmap[15]]) as usize;
         let minn = u32::from_le_bytes([mmap[16], mmap[17], mmap[18], mmap[19]]) as usize;
         let maxn = u32::from_le_bytes([mmap[20], mmap[21], mmap[22], mmap[23]]) as usize;
         let bucket_offset = u64::from_le_bytes([
@@ -492,19 +493,34 @@ mod tests {
 
         // Hungarian stop words ("van", "egy", "és") should be filtered out
         let tokens = fulltext_tokenize("A király és egy vitéz van itt.", &opts);
-        assert!(!tokens.contains(&"van".to_string()), "stop word 'van' should be filtered");
-        assert!(!tokens.contains(&"egy".to_string()), "stop word 'egy' should be filtered");
-        assert!(!tokens.contains(&"és".to_string()), "stop word 'és' should be filtered");
+        assert!(
+            !tokens.contains(&"van".to_string()),
+            "stop word 'van' should be filtered"
+        );
+        assert!(
+            !tokens.contains(&"egy".to_string()),
+            "stop word 'egy' should be filtered"
+        );
+        assert!(
+            !tokens.contains(&"és".to_string()),
+            "stop word 'és' should be filtered"
+        );
 
         // Single char 'a' should be filtered out (min_word_length=2 + stop word)
         assert!(!tokens.contains(&"a".to_string()));
 
         // Content words should survive (possibly stemmed)
-        assert!(!tokens.is_empty(), "content words should remain after filtering");
+        assert!(
+            !tokens.is_empty(),
+            "content words should remain after filtering"
+        );
 
         // Stemming test: "királyok" → "király" (plural suffix removed)
         let tokens2 = fulltext_tokenize("királyok vitézek", &opts);
-        assert!(tokens2.iter().any(|t| t.starts_with("király")), "stemmer should stem 'királyok'");
+        assert!(
+            tokens2.iter().any(|t| t.starts_with("király")),
+            "stemmer should stem 'királyok'"
+        );
     }
 
     #[test]

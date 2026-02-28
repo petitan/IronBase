@@ -642,18 +642,10 @@ pub fn check_model_changes_and_reembed(
             let mut updated_config = config.clone();
             updated_config.model = Some(current_model);
             updated_config.preprocessing_version = Some(current_preproc);
-            if let Err(e) =
-                adapter.set_auto_embedding_config(collection, Some(updated_config))
-            {
-                tracing::warn!(
-                    "Failed to update config for '{}': {}",
-                    collection,
-                    e
-                );
+            if let Err(e) = adapter.set_auto_embedding_config(collection, Some(updated_config)) {
+                tracing::warn!("Failed to update config for '{}': {}", collection, e);
             }
-        } else if saved_model != current_model
-            || saved_preproc != current_preproc
-            || force_reembed
+        } else if saved_model != current_model || saved_preproc != current_preproc || force_reembed
         {
             // Something changed or force requested — start re-embed
             let reason = if force_reembed {
@@ -666,10 +658,7 @@ pub fn check_model_changes_and_reembed(
             } else if saved_model != current_model {
                 format!("model '{}' → '{}'", saved_model, current_model)
             } else {
-                format!(
-                    "preprocessing '{}' → '{}'",
-                    saved_preproc, current_preproc
-                )
+                format!("preprocessing '{}' → '{}'", saved_preproc, current_preproc)
             };
 
             tracing::info!(
@@ -685,11 +674,7 @@ pub fn check_model_changes_and_reembed(
             if let Err(e) =
                 adapter.set_auto_embedding_config(collection, Some(updated_config.clone()))
             {
-                tracing::warn!(
-                    "Failed to update config for '{}': {}",
-                    collection,
-                    e
-                );
+                tracing::warn!("Failed to update config for '{}': {}", collection, e);
                 continue;
             }
 

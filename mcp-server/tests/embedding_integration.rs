@@ -122,8 +122,15 @@ fn test_v2_model_oov_nonzero_vector() {
 
     let provider = FastTextProvider::load(Path::new(&model_path)).expect("Failed to load v2 model");
 
-    println!("Model: {}, dim={}", provider.model_name(), provider.dimension());
-    assert!(provider.has_subword_support(), "v2 model should have subword support");
+    println!(
+        "Model: {}, dim={}",
+        provider.model_name(),
+        provider.dimension()
+    );
+    assert!(
+        provider.has_subword_support(),
+        "v2 model should have subword support"
+    );
 
     // OOV compound words that don't exist in the vocabulary
     let oov_words = ["fékerőmérő", "lengéscsillapító", "PEF", "SICE"];

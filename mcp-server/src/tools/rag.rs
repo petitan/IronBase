@@ -51,7 +51,10 @@ pub struct RagConfig {
 }
 
 /// Get RAG config for a collection from _system.rag
-pub(crate) fn get_rag_config(adapter: &IronBaseAdapter, collection: &str) -> Result<Option<RagConfig>> {
+pub(crate) fn get_rag_config(
+    adapter: &IronBaseAdapter,
+    collection: &str,
+) -> Result<Option<RagConfig>> {
     // Try to find config
     let result = adapter.find_one(RAG_CONFIG_COLLECTION, json!({"collection": collection}));
 
@@ -507,5 +510,4 @@ mod tests {
         assert_eq!(parsed.collection, "test");
         assert_eq!(parsed.dimension, 300);
     }
-
 }

@@ -35,6 +35,29 @@ const RRF_K: f64 = 60.0;
 
 // MAX_INTERNAL_LIMIT imported from defaults.rs
 
+/// Apply projection and add score metadata to a fused result
+fn enrich_result(item: FusedResult, projection: &Option<HashMap<String, i32>>) -> Value {
+    let mut result = if let Some(ref proj) = projection {
+        apply_projection(&item.doc, proj)
+    } else {
+        item.doc
+    };
+    if let Value::Object(ref mut obj) = result {
+        obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
+        obj.insert("_final_score".to_string(), json!(item.final_score));
+        obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
+        obj.insert("_vector_rank".to_string(), json!(item.v_rank));
+        obj.insert("_text_rank".to_string(), json!(item.t_rank));
+        if let Some(vs) = item.v_score {
+            obj.insert("_vector_score".to_string(), json!(vs));
+        }
+        if let Some(ts) = item.t_score {
+            obj.insert("_text_score".to_string(), json!(ts));
+        }
+    }
+    result
+}
+
 /// Dispatch hybrid tool calls
 pub fn dispatch(
     name: &str,
@@ -155,16 +178,18 @@ fn handle_hybrid_search(
             }
         };
 
-    // Internal limit multiplier for better fusion coverage
-    // Need more results when reranking/deduplication will filter some out
-    // Cap at MAX_INTERNAL_LIMIT to prevent OOM (CLAUDE.md compliance)
-    let internal_limit = (p.limit * 3).min(MAX_INTERNAL_LIMIT);
+    // Internal limit: higher when grouping to capture enough chunks per document
+    let internal_multiplier = if p.group_by_document { 20 } else { 3 };
+    let internal_limit = (p.limit * internal_multiplier).min(MAX_INTERNAL_LIMIT);
 
     // ========================================================================
     // STEP 1.5: Document-level AND qualification (match_scope="document")
     // ========================================================================
+    let and_mode = p.mode.as_deref() != Some("or");
+    // group_by_document implies document-level AND: select docs where ALL words appear,
+    // then use OR mode to find all relevant chunks within those docs
     let is_doc_scope =
-        p.mode.as_deref() == Some("and") && p.match_scope.as_deref() == Some("document");
+        and_mode && (p.match_scope.as_deref() == Some("document") || p.group_by_document);
 
     let doc_qualification_filter = if is_doc_scope {
         qualify_documents(adapter, &p.collection, &effective_text_field, &p.query)?
@@ -180,7 +205,7 @@ fn handle_hybrid_search(
     });
 
     // ========================================================================
-    // STEP 2: Vector search → get ranks
+    // STEP 2: Vector search → ranks + docs (single pass)
     // ========================================================================
     let vector_results = if let Some(ref filter) = p.filter {
         adapter.vector_search_with_filter(
@@ -199,25 +224,18 @@ fn handle_hybrid_search(
         )?
     };
 
-    // Build vector rank map (1-indexed) with pre-allocated capacity (OOM protection)
     let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
-    for (rank, (doc, _score)) in vector_results.iter().enumerate() {
-        if let Some(id) = doc.get("_id").and_then(id_to_string) {
-            vector_ranks.insert(id, rank + 1);
-        }
-    }
-
-    // Store vector docs for later retrieval with pre-allocated capacity
     let mut vector_docs: HashMap<String, (Value, f32)> =
         HashMap::with_capacity(vector_results.len());
-    for (doc, score) in vector_results.into_iter() {
+    for (rank, (doc, score)) in vector_results.into_iter().enumerate() {
         if let Some(id) = doc.get("_id").and_then(id_to_string) {
+            vector_ranks.insert(id.clone(), rank + 1);
             vector_docs.insert(id, (doc, score));
         }
     }
 
     // ========================================================================
-    // STEP 3: Fulltext search → get ranks (original query - Snowball handles stemming)
+    // STEP 3: Fulltext search → ranks + docs (single pass)
     // ========================================================================
 
     // If document-level AND is active, switch fulltext to OR mode (doc qualification
@@ -231,7 +249,7 @@ fn handle_hybrid_search(
             };
             (false, merged) // OR mode — doc-level AND already satisfied
         } else {
-            (p.mode.as_deref() == Some("and"), p.filter.clone())
+            (and_mode, p.filter.clone())
         };
 
     let text_options = FulltextSearchOptions {
@@ -254,65 +272,60 @@ fn handle_hybrid_search(
         adapter.fulltext_search(&p.collection, &effective_text_field, &p.query, text_options)?
     };
 
-    // Build fulltext rank map (1-indexed) with pre-allocated capacity (OOM protection)
     let mut text_ranks: HashMap<String, usize> = HashMap::with_capacity(text_results.len());
-    for (rank, res) in text_results.iter().enumerate() {
-        if let Some(id) = res.document.get("_id").and_then(id_to_string) {
-            text_ranks.insert(id, rank + 1);
-        }
-    }
-
-    // Store fulltext docs for later retrieval with pre-allocated capacity
     let mut text_docs: HashMap<String, (Value, f64)> = HashMap::with_capacity(text_results.len());
-    for res in text_results.into_iter() {
+    for (rank, res) in text_results.into_iter().enumerate() {
         if let Some(id) = res.document.get("_id").and_then(id_to_string) {
+            text_ranks.insert(id.clone(), rank + 1);
             text_docs.insert(id, (res.document, res.score));
         }
     }
 
     // ========================================================================
-    // STEP 4: RRF Fusion (with pre-allocated capacity for OOM protection)
+    // STEP 4: RRF Fusion (zero-copy drain, no intermediate HashSet)
     // ========================================================================
-    let max_ids = vector_ranks.len() + text_ranks.len();
-    let mut all_ids: HashSet<String> = HashSet::with_capacity(max_ids);
-    all_ids.extend(vector_ranks.keys().cloned());
-    all_ids.extend(text_ranks.keys().cloned());
-
     let default_rank = internal_limit + 1;
+    let mut fused: Vec<FusedResult> = Vec::with_capacity(vector_docs.len() + text_docs.len());
 
-    // Pre-allocate fused results vector
-    let mut fused: Vec<FusedResult> = Vec::with_capacity(all_ids.len());
-    for id in all_ids.iter() {
-        let v_rank = *vector_ranks.get(id).unwrap_or(&default_rank);
-        let t_rank = *text_ranks.get(id).unwrap_or(&default_rank);
+    // Vector docs first — consume matching text docs via remove (no clone)
+    for (id, (doc, v_score)) in vector_docs.drain() {
+        let v_rank = vector_ranks.get(&id).copied().unwrap_or(default_rank);
+        let t_rank = text_ranks.get(&id).copied().unwrap_or(default_rank);
+        let t_score = text_docs.remove(&id).map(|(_, s)| s);
 
-        // RRF score formula: weight * 1/(k + rank)
-        let rrf_score = vector_weight * (1.0 / (p.rrf_k + v_rank as f64))
-            + fulltext_weight * (1.0 / (p.rrf_k + t_rank as f64));
-
-        let v_score = vector_docs.get(id).map(|(_, s)| *s);
-        let t_score = text_docs.get(id).map(|(_, s)| *s);
-
-        // Get document from either source (prefer vector for consistency)
-        let doc = match vector_docs
-            .get(id)
-            .map(|(d, _)| d.clone())
-            .or_else(|| text_docs.get(id).map(|(d, _)| d.clone()))
-        {
-            Some(d) => d,
-            None => continue, // Skip if no doc found (shouldn't happen)
-        };
+        let rrf_score = vector_weight / (p.rrf_k + v_rank as f64)
+            + fulltext_weight / (p.rrf_k + t_rank as f64);
 
         fused.push(FusedResult {
-            id: id.clone(),
+            id,
             doc,
             rrf_score,
-            final_score: rrf_score, // Will be updated by reranking
+            final_score: rrf_score,
             rerank_boost: 1.0,
             v_rank,
             t_rank,
-            v_score,
+            v_score: Some(v_score),
             t_score,
+        });
+    }
+
+    // Text-only docs (remaining after vector drain consumed overlaps)
+    for (id, (doc, t_score)) in text_docs.drain() {
+        let t_rank = text_ranks.get(&id).copied().unwrap_or(default_rank);
+
+        let rrf_score = vector_weight / (p.rrf_k + default_rank as f64)
+            + fulltext_weight / (p.rrf_k + t_rank as f64);
+
+        fused.push(FusedResult {
+            id,
+            doc,
+            rrf_score,
+            final_score: rrf_score,
+            rerank_boost: 1.0,
+            v_rank: default_rank,
+            t_rank,
+            v_score: None,
+            t_score: Some(t_score),
         });
     }
 
@@ -345,83 +358,204 @@ fn handle_hybrid_search(
     };
 
     // ========================================================================
-    // STEP 6: MMR diversity reranking (optional)
+    // STEP 6: MMR diversity reranking (skipped when grouping — limit applies
+    //         at document level in STEP 7)
     // ========================================================================
-    let dedup_removed = if p.deduplicate {
-        mmr_reorder(&mut fused, &effective_vector_field, p.mmr_lambda, p.limit)
-    } else {
+    let dedup_removed = if p.deduplicate && !p.group_by_document {
+        mmr_reorder(
+            &mut fused,
+            &effective_vector_field,
+            p.mmr_lambda,
+            p.limit,
+        )
+    } else if !p.group_by_document {
+        // Flat mode: truncate to limit here
         fused.truncate(p.limit);
+        0
+    } else {
+        // group_by_document: no truncation, limit applied at doc level in STEP 7
         0
     };
 
     // ========================================================================
-    // STEP 7: Apply projection and build response
+    // STEP 7: Projection + response
     // ========================================================================
     let projection = parse_projection_value(p.projection)?;
+    let match_scope = if is_doc_scope { "document" } else { "chunk" };
 
-    // Pre-allocate with try_reserve for OOM protection
-    let mut results: Vec<Value> = Vec::new();
-    results.try_reserve(fused.len()).map_err(|e| {
-        McpError::internal(format!(
-            "OOM: cannot allocate {} results: {}",
-            fused.len(),
-            e
-        ))
-    })?;
+    // Common response metadata (shared between flat and grouped modes)
+    let mut response = serde_json::Map::new();
+    response.insert("algorithm".into(), json!("rrf"));
+    response.insert("rrf_k".into(), json!(p.rrf_k));
+    response.insert(
+        "weights".into(),
+        json!({
+            "vector": vector_weight,
+            "fulltext": fulltext_weight
+        }),
+    );
+    response.insert(
+        "search_mode".into(),
+        json!(p.search_mode.as_deref().unwrap_or("balanced")),
+    );
+    response.insert("query".into(), json!(p.query));
+    response.insert("auto_embedded".into(), json!(auto_embedded));
+    response.insert("provider".into(), json!(provider_name));
+    response.insert("dedup_removed".into(), json!(dedup_removed));
+    response.insert("chunks_merged".into(), json!(chunks_merged));
+    response.insert("match_scope".into(), json!(match_scope));
+    if let Some(count) = qualified_doc_count {
+        response.insert("qualified_doc_ids".into(), json!(count));
+    }
 
-    for item in fused {
-        let doc_projected = if let Some(ref proj) = projection {
-            apply_projection(&item.doc, proj)
-        } else {
-            item.doc
-        };
+    if p.group_by_document {
+        // ----------------------------------------------------------------
+        // Grouped response: two-phase document grouping
+        //
+        // Phase 1: From fused results, identify top N unique doc_ids
+        //          (fused is sorted by score → first occurrence = best score)
+        // Phase 2: Single fulltext OR search filtered to those N doc_ids
+        //          → fetches ALL relevant chunks from the top documents
+        //
+        // This is O(1) extra search (not O(limit) like per-doc search).
+        // Document selection uses AND (all words in doc), chunk retrieval
+        // uses OR (any word in chunk) — exactly what the user expects.
+        // ----------------------------------------------------------------
 
-        let mut result = doc_projected;
-        if let Value::Object(ref mut obj) = result {
-            obj.insert("_rrf_score".to_string(), json!(item.rrf_score));
-            obj.insert("_final_score".to_string(), json!(item.final_score));
-            obj.insert("_rerank_boost".to_string(), json!(item.rerank_boost));
-            obj.insert("_vector_rank".to_string(), json!(item.v_rank));
-            obj.insert("_text_rank".to_string(), json!(item.t_rank));
-            if let Some(vs) = item.v_score {
-                obj.insert("_vector_score".to_string(), json!(vs));
-            }
-            if let Some(ts) = item.t_score {
-                obj.insert("_text_score".to_string(), json!(ts));
+        // Phase 1: Extract top N unique doc_ids from fused results
+        let mut doc_best_scores: HashMap<String, f64> = HashMap::new();
+        let mut doc_order: Vec<String> = Vec::new();
+
+        for item in &fused {
+            let doc_id = item
+                .doc
+                .get("doc_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    item.doc
+                        .get("_id")
+                        .and_then(id_to_string)
+                        .unwrap_or_else(|| item.id.clone())
+                });
+
+            if !doc_best_scores.contains_key(&doc_id) {
+                doc_best_scores.insert(doc_id.clone(), item.final_score);
+                doc_order.push(doc_id);
+                if doc_order.len() >= p.limit {
+                    break;
+                }
             }
         }
 
-        results.push(result);
+        // Phase 2: Single fulltext OR search for top doc_ids' chunks
+        let top_doc_ids: Vec<Value> = doc_order.iter().map(|id| json!(id)).collect();
+        let doc_filter = json!({"doc_id": {"$in": top_doc_ids}});
+        let phase2_filter = match &p.filter {
+            Some(user_filter) => Some(json!({"$and": [user_filter, doc_filter]})),
+            None => Some(doc_filter),
+        };
+
+        let phase2_options = FulltextSearchOptions {
+            limit: Some(500), // Generous: top docs rarely have >100 chunks each
+            skip: None,
+            min_score: None,
+            projection: None,
+            filter: phase2_filter,
+            and_mode: false, // OR mode: any query word → relevant chunk
+            highlight: false,
+            highlight_context: None,
+            highlight_max_snippets: None,
+        };
+
+        let phase2_results = if let Some(ref fields) = p.text_fields {
+            let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
+            adapter.fulltext_search_multi(
+                &p.collection,
+                &field_refs,
+                &p.query,
+                phase2_options,
+            )?
+        } else {
+            adapter.fulltext_search(
+                &p.collection,
+                &effective_text_field,
+                &p.query,
+                phase2_options,
+            )?
+        };
+
+        // Group Phase 2 chunks by doc_id
+        let mut doc_groups: HashMap<String, Vec<Value>> =
+            HashMap::with_capacity(doc_order.len());
+        for res in phase2_results {
+            let doc_id = res
+                .document
+                .get("doc_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            let mut chunk = if let Some(ref proj) = projection {
+                apply_projection(&res.document, proj)
+            } else {
+                res.document
+            };
+            if let Value::Object(ref mut obj) = chunk {
+                obj.insert("_text_score".to_string(), json!(res.score));
+            }
+
+            doc_groups.entry(doc_id).or_default().push(chunk);
+        }
+
+        // Build grouped response in doc_order (best score first)
+        let mut total_chunks: usize = 0;
+        let grouped_results: Vec<Value> = doc_order
+            .into_iter()
+            .filter_map(|doc_id| {
+                let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
+                let chunks = doc_groups.remove(&doc_id).unwrap_or_default();
+                if chunks.is_empty() {
+                    return None;
+                }
+                total_chunks += chunks.len();
+                Some(json!({
+                    "doc_id": doc_id,
+                    "best_score": best_score,
+                    "chunk_count": chunks.len(),
+                    "chunks": chunks
+                }))
+            })
+            .collect();
+
+        let doc_count = grouped_results.len();
+        response.insert("results".into(), json!(grouped_results));
+        response.insert("count".into(), json!(doc_count));
+        response.insert("total_chunks".into(), json!(total_chunks));
+        response.insert("group_by_document".into(), json!(true));
+    } else {
+        // ----------------------------------------------------------------
+        // Flat response (default): list of chunks ordered by score
+        // ----------------------------------------------------------------
+        let mut results: Vec<Value> = Vec::new();
+        results.try_reserve(fused.len()).map_err(|e| {
+            McpError::internal(format!(
+                "OOM: cannot allocate {} results: {}",
+                fused.len(),
+                e
+            ))
+        })?;
+
+        for item in fused {
+            results.push(enrich_result(item, &projection));
+        }
+
+        let count = results.len();
+        response.insert("results".into(), json!(results));
+        response.insert("count".into(), json!(count));
     }
 
-    let match_scope = if is_doc_scope { "document" } else { "chunk" };
-
-    let mut response = json!({
-        "results": results,
-        "count": results.len(),
-        "algorithm": "rrf",
-        "rrf_k": p.rrf_k,
-        "weights": {
-            "vector": vector_weight,
-            "fulltext": fulltext_weight
-        },
-        "search_mode": p.search_mode.as_deref().unwrap_or("balanced"),
-        "query": p.query,
-        "auto_embedded": auto_embedded,
-        "provider": provider_name,
-        "dedup_removed": dedup_removed,
-        "chunks_merged": chunks_merged,
-        "match_scope": match_scope
-    });
-
-    if let Some(count) = qualified_doc_count {
-        response
-            .as_object_mut()
-            .unwrap()
-            .insert("qualified_doc_ids".to_string(), json!(count));
-    }
-
-    Ok(response)
+    Ok(Value::Object(response))
 }
 
 /// Document-level AND qualification for RAG collections.
@@ -665,11 +799,12 @@ mod tests {
         assert!(p.search_mode.is_none()); // no mode → balanced default
                                           // v2 defaults
         assert!(p.rerank); // default: true
-        assert!(p.deduplicate); // default: true
-        assert!((p.mmr_lambda - 0.5).abs() < f64::EPSILON); // default
+        assert!(!p.deduplicate); // default: false
+        assert!((p.mmr_lambda - 0.7).abs() < f64::EPSILON); // default
+        assert!(!p.group_by_document); // default: false
         assert!(p.provider.is_none()); // no provider → use collection config
         assert!(p.filter.is_none()); // default: no filter
-        assert!(p.mode.is_none()); // default: None (= "or")
+        assert!(p.mode.is_none()); // default: None (= "and")
         assert!(p.text_fields.is_none()); // default: None (= single text_field)
         assert!(p.vector.is_some()); // explicit vector provided
     }
@@ -854,6 +989,7 @@ mod tests {
 
     #[test]
     fn test_params_with_empty_filter() {
+        // Empty filter {} is normalized to None to avoid unnecessary collection scans
         let params = json!({
             "collection": "test",
             "vector_field": "embedding",
@@ -864,8 +1000,7 @@ mod tests {
         });
 
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
-        assert!(p.filter.is_some());
-        assert!(p.filter.unwrap().as_object().unwrap().is_empty());
+        assert!(p.filter.is_none(), "Empty filter {{}} should be normalized to None");
     }
 
     #[test]

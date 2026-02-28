@@ -987,8 +987,8 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
     limit: 10,              // Max eredmények (default: 10)
     rrf_k: 20.0,            // RRF K konstans (default: 20)
     rerank: true,            // Reranking (phrase 1.5x, density 1.3x, title boost)
-    deduplicate: true,       // MMR diversity reranking
-    mmr_lambda: 0.5,         // MMR lambda (1.0=relevance, 0.0=diversity)
+    deduplicate: false,      // MMR diversity reranking (default: false)
+    mmr_lambda: 0.7,         // MMR lambda (1.0=relevance, 0.0=diversity, default: 0.7)
     merge_chunks: true,      // Szomszédos chunk összevonás
     match_scope: "document", // "chunk" (default) | "document" (mode=and + RAG)
     search_mode: "balanced", // "balanced" | "semantic" | "keyword"
@@ -996,7 +996,8 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
     fulltext_weight: 0.5,    // Explicit fulltext súly
     title_field: "title",    // Cím mező reranking boost-hoz
     text_fields: ["content", "title"], // Multi-field fulltext
-    mode: "or",              // Fulltext mode: "or" | "and"
+    mode: "and",             // Fulltext mode: "and" (default) | "or"
+    group_by_document: true, // Dokumentumok szerinti csoportosítás (default: false)
     filter: #{ year: 2026 }, // Dokumentum szűrő
 });
 ```
@@ -1039,9 +1040,11 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 
 **MMR diversity reranking (deduplication):**
 - Algoritmus: `mmr(c) = λ * relevance(c) - (1-λ) * max_sim(c, selected)`
-- `mmr_lambda`: 1.0 = pure relevance, 0.0 = pure diversity, 0.5 = balanced (default)
+- `mmr_lambda`: 1.0 = pure relevance, 0.0 = pure diversity, 0.7 = relevance-favoring (default)
+- `deduplicate`: default `false` — hívó döntse el kell-e MMR dedup
 - Cosine similarity: `ironbase_core::vector::simd::cosine_similarity()` (SIMD)
 - Embedding nélküli doc-ok: relevance order (nincs diversity penalty)
+- MMR skip-elve `group_by_document=true` esetén (limit dokumentum szinten alkalmazva)
 
 **Eredmény metadata:**
 ```json
@@ -1057,20 +1060,21 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 ```
 
 **Fulltext mode paraméter (45f74bf7, #47):**
-- `mode`: `"or"` (default) = bármely szó elég, `"and"` = MINDEN szó kell a dokumentumban
+- `mode`: `"and"` (default) = MINDEN szó kell a dokumentumban, `"or"` = bármely szó elég (deprecated)
 - Elérhető: `hybrid_search`, `fulltext_search`
 - AND mód szűkíti a fulltext komponenst; vektor keresés változatlan → RRF fusion vektor-only eredményeket is ad
-- Backward compatible: `mode` hiánya = `"or"` (régi viselkedés)
+- `mode` hiánya = `"and"` (v1.0.375+)
 
 | Fájl | Változás |
 |------|----------|
 | `params.rs` | `pub mode: Option<String>` mindkét struct-ban |
-| `definitions/hybrid.rs`, `definitions/rag.rs` | `"mode"` schema entry |
-| `hybrid.rs`, `rag.rs` | `and_mode: p.mode.as_deref() == Some("and")` |
+| `definitions/hybrid.rs` | `"mode"` schema entry (default: "and", "or" deprecated) |
+| `hybrid.rs` | `and_mode: p.mode.as_deref() != Some("or")` |
 
 **Document-level AND mode (0f208d41, #56):**
 - `match_scope`: `"chunk"` (default) = minden szó egyetlen chunkban, `"document"` = szavak a dokumentum különböző chunkjaiban is lehetnek
-- Csak `mode="and"` + RAG collection (doc_id mező) esetén aktív
+- Aktiválódik: `mode="and"` + (`match_scope="document"` VAGY `group_by_document=true`) + RAG collection (doc_id mező)
+- `group_by_document=true` automatikusan bekapcsolja a document-level qualification-t (nem kell explicit `match_scope="document"`)
 - Algoritmus: posting list interszekcióval kvalifikálja a dokumentumokat, majd OR módban keres a kvalifikált doc_id-kre szűrve
 - Vektor keresés NEM szűrt (RRF természetesen kezeli)
 - Response: `"match_scope": "document"/"chunk"`, `"qualified_doc_ids": N`
@@ -1080,13 +1084,13 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 | `fulltext.rs` | `tokenize_query()`, `token_posting_count()`, `token_chunk_ids()` pub metódusok |
 | `search.rs` | Delegáló metódusok a CollectionCore-on |
 | `adapter.rs` | Adapter metódusok (DocumentId→Value konverzió) |
-| `params.rs` | `pub match_scope: Option<String>` |
-| `definitions/hybrid.rs` | `"match_scope"` schema (enum: chunk/document) |
-| `hybrid.rs` | `qualify_documents()` fn + STEP 1.5 pipeline |
+| `params.rs` | `pub match_scope: Option<String>`, `pub group_by_document: bool` |
+| `definitions/hybrid.rs` | `"match_scope"` schema (enum: chunk/document), `"group_by_document"` schema |
+| `hybrid.rs` | `qualify_documents()` fn + STEP 1.5 pipeline + STEP 7 grouped response |
 
 ```json
 {"collection": "docs", "query": "Ifju János fékpad ár",
- "mode": "and", "match_scope": "document", "text_field": "content_text"}
+ "group_by_document": true}
 ```
 
 **Multi-field fulltext (b938c487, #48):**
@@ -1121,14 +1125,42 @@ Prioritás: explicit weights > search_mode preset > balanced default
 **hybrid_search pipeline (hybrid.rs):**
 ```
 STEP 1: Resolve vector + field names (explicit vs auto-embed)
-STEP 1.5: Document-level AND qualification             [match_scope=document + mode=and]
-STEP 2: Vector search → ranks
-STEP 3: Fulltext search → ranks (OR mode + doc_id filter if STEP 1.5 active)
-STEP 4: RRF Fusion (weighted rank combination)
+STEP 1.5: Document-level AND qualification             [match_scope=document OR group_by_document + mode=and]
+STEP 2: Vector search → ranks (single-pass HashMap)
+STEP 3: Fulltext search → ranks (single-pass HashMap, OR mode + doc_id filter if STEP 1.5)
+STEP 4: RRF Fusion (drain-based, no cloning)
 STEP 5: Reranking (phrase, density, title, length)    [rerank=true]
 STEP 5.5: Adjacent chunk merge (overlap dedup)        [merge_chunks=true]
-STEP 6: MMR diversity reranking                       [deduplicate=true]
+STEP 6: MMR diversity reranking                       [deduplicate=true, skip if group_by_document]
 STEP 7: Projection + response
+        ├─ Flat mode (default): chunks ordered by score, limit = chunk count
+        └─ Grouped mode [group_by_document=true]:
+           Phase 1: Top N doc_ids from fused results
+           Phase 2: Single fulltext OR search filtered to N doc_ids → ALL chunks
+           Group by doc_id, limit = document count
+```
+
+**`group_by_document` paraméter:**
+- Default: `false` — flat chunk lista score sorrendben (hagyományos viselkedés)
+- `true` — eredmények doc_id szerint csoportosítva, dokumentumonként MINDEN releváns chunk visszajön
+- Limit szemantika: flat → max chunk szám, grouped → max dokumentum szám
+- Automatikusan bekapcsolja document-level AND qualification-t (qualify_documents + OR mode)
+- Dokumentum kiválasztás: AND (minden query szó benne van a dokumentumban)
+- Chunk retrieval: OR (bármely query szó → releváns chunk)
+- Phase 2: egyetlen fulltext OR search `doc_id $in` filterrel (nem N külön keresés)
+- MMR deduplicate skip-elve grouped módban
+- Response formátum:
+```json
+{
+  "results": [
+    {"doc_id": "abc", "best_score": 0.039, "chunk_count": 9, "chunks": [...]},
+    {"doc_id": "def", "best_score": 0.028, "chunk_count": 4, "chunks": [...]}
+  ],
+  "count": 2,
+  "total_chunks": 13,
+  "group_by_document": true,
+  "qualified_doc_ids": 359
+}
 ```
 
 **Rétegek:**

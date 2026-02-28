@@ -254,19 +254,82 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
 | `index_drop_vector` | Drop a vector index |
 | `vector_search` | Vector similarity search (requires HNSW index) |
 | `vector_search_filter` | Vector similarity search with document filter |
-| `hybrid_search` | RRF fusion of vector + fulltext results with MMR diversity. Auto-embeds query if `vector` is omitted. |
+| `hybrid_search` | RRF fusion of vector + fulltext results. Auto-embeds query if `vector` is omitted. Supports flat and grouped response modes. |
 
-`hybrid_search` uses **MMR (Maximal Marginal Relevance)** to remove near-duplicate results using embedding cosine similarity.
+`hybrid_search` combines vector similarity and fulltext search using **Reciprocal Rank Fusion (RRF)**. Optionally uses **MMR (Maximal Marginal Relevance)** for diversity reranking.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `collection` | string | *(required)* | Collection to search |
+| `query` | string | *(required)* | Text query for fulltext search (and auto-embedding if vector omitted) |
 | `vector` | array | *(optional)* | Query embedding vector. If omitted, query is auto-embedded using collection's provider. |
 | `provider` | string | *(auto)* | Embedding provider for auto-embed mode (uses collection RAG config if not specified). |
-| `mmr_lambda` | number | `0.5` | Balance between relevance (`1.0`) and diversity (`0.0`) |
-| `deduplicate` | boolean | `true` | Enable/disable MMR diversity reranking |
+| `limit` | integer | `10` | Maximum results (chunks in flat mode, documents in grouped mode) |
+| `search_mode` | string | `"balanced"` | Preset: `"balanced"` (0.5/0.5), `"semantic"` (0.8/0.2), `"keyword"` (0.2/0.8) |
+| `vector_weight` | number | *(from mode)* | Explicit vector weight override (0.0–1.0) |
+| `fulltext_weight` | number | *(from mode)* | Explicit fulltext weight override (0.0–1.0) |
+| `mode` | string | `"and"` | Fulltext mode: `"and"` = ALL words required, `"or"` = any word (deprecated) |
 | `rerank` | boolean | `true` | Enable reranking: phrase match (1.5x), keyword density (1.0–1.3x), short content penalty (0.8x) |
+| `deduplicate` | boolean | `false` | Enable MMR diversity reranking |
+| `mmr_lambda` | number | `0.7` | MMR balance: relevance (`1.0`) vs diversity (`0.0`) |
+| `merge_chunks` | boolean | `true` | Merge adjacent chunks from same document (overlap dedup) |
+| `group_by_document` | boolean | `false` | Group results by source document (see below) |
+| `match_scope` | string | `"chunk"` | AND match scope: `"chunk"` or `"document"` (all words across doc's chunks) |
+| `text_fields` | array | *(optional)* | Multiple fulltext fields to search (overrides `text_field`) |
+| `title_field` | string | *(optional)* | Field for title match boost (up to 1.5x) |
+| `filter` | object | *(optional)* | MongoDB-style pre-filter |
+| `rrf_k` | number | `20` | RRF K constant (lower = wider score spread) |
 
-**Example - Explicit vector mode:**
+**`group_by_document` mode:**
+
+When `true`, results are grouped by source document. Each document includes ALL relevant chunks (not just the best one). Document selection uses AND logic (all query words must appear somewhere in the document), while chunk retrieval uses OR logic (any query word makes a chunk relevant). The `limit` parameter applies to document count, not chunk count.
+
+Response format:
+```json
+{
+  "results": [
+    {"doc_id": "abc", "best_score": 0.039, "chunk_count": 9, "chunks": [...]},
+    {"doc_id": "def", "best_score": 0.028, "chunk_count": 4, "chunks": [...]}
+  ],
+  "count": 2,
+  "total_chunks": 13,
+  "group_by_document": true,
+  "qualified_doc_ids": 359
+}
+```
+
+**Example - Flat mode (default):**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "hybrid_search",
+    "arguments": {
+      "collection": "articles",
+      "query": "keresett kifejezés",
+      "limit": 10
+    }
+  }
+}
+```
+
+**Example - Grouped by document:**
+```json
+{
+  "method": "tools/call",
+  "params": {
+    "name": "hybrid_search",
+    "arguments": {
+      "collection": "articles",
+      "query": "keresett kifejezés",
+      "group_by_document": true,
+      "limit": 5
+    }
+  }
+}
+```
+
+**Example - Explicit vector with semantic mode:**
 ```json
 {
   "method": "tools/call",
@@ -276,23 +339,7 @@ IRONBASE_PATH=/path/to/database.mlite ./mcp-ironbase-server --stdio
       "collection": "articles",
       "query": "keresett kifejezés",
       "vector": [0.1, 0.2, 0.3],
-      "mmr_lambda": 0.3,
-      "limit": 10
-    }
-  }
-}
-```
-
-**Example - Auto-embed mode (no vector needed):**
-```json
-{
-  "method": "tools/call",
-  "params": {
-    "name": "hybrid_search",
-    "arguments": {
-      "collection": "articles",
-      "query": "keresett kifejezés",
-      "mmr_lambda": 0.5,
+      "search_mode": "semantic",
       "limit": 10
     }
   }

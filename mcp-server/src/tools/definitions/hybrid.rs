@@ -86,13 +86,13 @@ pub fn tools() -> Vec<Value> {
                 },
                 "deduplicate": {
                     "type": "boolean",
-                    "description": "Enable MMR (Maximal Marginal Relevance) diversity reranking (default: true). Uses embedding cosine similarity to remove near-duplicate results while preserving diversity.",
-                    "default": true
+                    "description": "Enable MMR (Maximal Marginal Relevance) diversity reranking (default: false). Uses embedding cosine similarity to remove near-duplicate results while preserving diversity. Off by default to keep relevance-ordered results.",
+                    "default": false
                 },
                 "mmr_lambda": {
                     "type": "number",
-                    "description": "MMR lambda: balance between relevance (1.0) and diversity (0.0). Default: 0.5 (balanced).",
-                    "default": 0.5,
+                    "description": "MMR lambda: balance between relevance (1.0) and diversity (0.0). Default: 0.7 (relevance-favoring). Only effective when deduplicate=true.",
+                    "default": 0.7,
                     "minimum": 0.0,
                     "maximum": 1.0
                 },
@@ -102,9 +102,9 @@ pub fn tools() -> Vec<Value> {
                 },
                 "mode": {
                     "type": "string",
-                    "description": "Fulltext search mode: 'or' (default) = any word matches, 'and' = ALL words must match in document",
-                    "enum": ["or", "and"],
-                    "default": "or"
+                    "description": "Fulltext search mode: 'and' (default) = ALL query words must match, 'or' (deprecated) = any word matches. Use 'or' only if you explicitly want partial matches.",
+                    "enum": ["and", "or"],
+                    "default": "and"
                 },
                 "match_scope": {
                     "type": "string",
@@ -121,6 +121,11 @@ pub fn tools() -> Vec<Value> {
                     "type": "boolean",
                     "description": "Merge adjacent chunks from same source document into single result (default: true). Eliminates overlap-caused duplicates while preserving more context.",
                     "default": true
+                },
+                "group_by_document": {
+                    "type": "boolean",
+                    "description": "Group results by source document (default: false). When true, results are grouped by doc_id with all matching chunks per document returned together. Limit applies to document count, not chunk count. Useful for seeing all relevant chunks from the same document together.",
+                    "default": false
                 }
             },
             "required": ["collection", "query"]

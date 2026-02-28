@@ -367,9 +367,14 @@ fn dispatch_tool_inner(
         | "admin_apikey_create"
         | "admin_apikey_list"
         | "admin_apikey_revoke"
-        | "admin_apikey_delete" => {
-            admin::dispatch(name, params, adapter, api_key_cache, server_info, job_manager)
-        }
+        | "admin_apikey_delete" => admin::dispatch(
+            name,
+            params,
+            adapter,
+            api_key_cache,
+            server_info,
+            job_manager,
+        ),
 
         // Vector operations (similarity search)
         "index_create_vector"
