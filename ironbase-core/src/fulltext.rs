@@ -1841,8 +1841,12 @@ impl FulltextIndex {
                 let idf = (1.0 + total_docs / entries.len() as f64).ln();
 
                 for (doc_id, tf) in entries {
-                    // TF-IDF score: TF comes directly from inverted index (V3 format)
-                    *doc_scores.entry(doc_id.clone()).or_default() += (tf as f64) * idf;
+                    // BM25 TF saturation: score = ((k1+1)*tf) / (k1+tf) * idf
+                    // Prevents high-TF documents from dominating (tf=3 → 1.86x instead of 3x)
+                    const BM25_K1: f64 = 1.2;
+                    let tf_f = tf as f64;
+                    let saturated_tf = ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f);
+                    *doc_scores.entry(doc_id.clone()).or_default() += saturated_tf * idf;
 
                     matched
                         .entry(doc_id.clone())
@@ -1943,7 +1947,11 @@ impl FulltextIndex {
                     }
                     iteration += 1;
 
-                    *doc_scores.entry(doc_id.clone()).or_default() += (tf as f64) * idf;
+                    // BM25 TF saturation: score = ((k1+1)*tf) / (k1+tf) * idf
+                    const BM25_K1: f64 = 1.2;
+                    let tf_f = tf as f64;
+                    let saturated_tf = ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f);
+                    *doc_scores.entry(doc_id.clone()).or_default() += saturated_tf * idf;
                     matched
                         .entry(doc_id.clone())
                         .or_default()
@@ -2888,6 +2896,45 @@ mod tests {
         // doc1 should have higher score (more "fox" occurrences)
         assert!(results[0].doc_id == doc1);
         assert!(results[0].score > results[1].score);
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_dir);
+    }
+
+    #[test]
+    fn test_bm25_tf_saturation() {
+        // Verify that TF=3 does NOT produce 3x the score of TF=1
+        // BM25 k1=1.2: saturated_tf(1) = 1.0, saturated_tf(3) ≈ 1.86
+        let options = FtsOptions::new(FtsLanguage::None);
+        let temp_dir = std::env::temp_dir().join("fts_test_bm25_sat.ftidx");
+        let mut index =
+            FulltextIndex::new_with_storage("test_idx", "content", options, temp_dir.clone())
+                .unwrap();
+
+        let doc1 = DocumentId::Int(1);
+        let doc2 = DocumentId::Int(2);
+
+        // doc1: "fox" appears 3 times, doc2: "fox" appears 1 time
+        index.insert(&doc1, "fox fox fox").unwrap();
+        index.insert(&doc2, "fox").unwrap();
+
+        let results = index.search("fox", 10, 0, None);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].doc_id, doc1);
+        assert_eq!(results[1].doc_id, doc2);
+
+        let ratio = results[0].score / results[1].score;
+        // With BM25 k1=1.2: ratio should be ~1.86, NOT 3.0
+        assert!(
+            ratio < 2.5,
+            "BM25 saturation failed: tf=3/tf=1 ratio={:.2}, expected < 2.5",
+            ratio
+        );
+        assert!(
+            ratio > 1.5,
+            "BM25 saturation too aggressive: ratio={:.2}, expected > 1.5",
+            ratio
+        );
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_dir);

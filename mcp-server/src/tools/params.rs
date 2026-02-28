@@ -3,7 +3,7 @@
 //! These structs provide compile-time type safety and automatic validation
 //! via serde deserialization, replacing manual Value parsing.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
 use super::defaults::{
@@ -14,6 +14,19 @@ use super::defaults::{
 /// Default value for query fields: empty object {}
 fn empty_object() -> Value {
     json!({})
+}
+
+/// Deserialize an optional filter, normalizing empty `{}` to `None`.
+///
+/// MongoDB semantics: `{}` = "match all" = no filter.
+/// Sending an empty filter to vector_search_with_filter or fulltext post-filter
+/// triggers a full collection scan (69K+ docs) for no benefit.
+fn deserialize_nonempty_filter<'de, D>(deserializer: D) -> std::result::Result<Option<Value>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v: Option<Value> = Option::deserialize(deserializer)?;
+    Ok(v.filter(|val| !val.as_object().is_some_and(|m| m.is_empty())))
 }
 
 // ============================================================================
@@ -202,7 +215,9 @@ pub struct FuzzySearchParams {
     pub limit: Option<usize>,
     pub skip: Option<usize>,
     pub projection: Option<Value>,
-    /// MongoDB-style filter applied AFTER fuzzy matching (core-level filtering)
+    /// MongoDB-style filter applied AFTER fuzzy matching (core-level filtering).
+    /// Empty `{}` is normalized to `None` to avoid unnecessary collection scans.
+    #[serde(default, deserialize_with = "deserialize_nonempty_filter")]
     pub filter: Option<Value>,
     /// Enable highlight of matched value (default: false)
     #[serde(default)]
@@ -232,9 +247,11 @@ pub struct FulltextSearchParams {
     pub projection: Option<Value>,
     /// Search mode: "or" (default) = any word matches, "and" = ALL words must match
     pub mode: Option<String>,
-    /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering)
+    /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering).
     /// Use this to combine fulltext search with other query operators (e.g., $regex, $eq)
     /// Example: {"from.email": {"$regex": "@scania.com$"}}
+    /// Empty `{}` is normalized to `None` to avoid unnecessary collection scans.
+    #[serde(default, deserialize_with = "deserialize_nonempty_filter")]
     pub filter: Option<Value>,
     /// Enable highlight/snippet generation (default: false)
     #[serde(default)]
@@ -611,7 +628,9 @@ pub struct HybridSearchParams {
     /// 1.0 = pure relevance, 0.0 = pure diversity
     #[serde(default = "default_mmr_lambda")]
     pub mmr_lambda: f64,
-    /// MongoDB-style filter applied BEFORE both vector and fulltext search
+    /// MongoDB-style filter applied BEFORE both vector and fulltext search.
+    /// Empty `{}` is normalized to `None` to avoid unnecessary collection scans.
+    #[serde(default, deserialize_with = "deserialize_nonempty_filter")]
     pub filter: Option<Value>,
 
     /// RRF K constant — lower = wider score spread (default: 20)

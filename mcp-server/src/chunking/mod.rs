@@ -195,9 +195,46 @@ pub(crate) fn overlap_start_byte(
     char_to_byte_offset(content, target_char)
 }
 
+/// Convert markdown table rows to plain comma-separated text.
+///
+/// - Separator rows (`|---|---|`) are removed entirely
+/// - Data/header rows (`| a | b |`) become `a, b`
+/// - Non-table lines pass through unchanged
+pub fn strip_markdown_tables(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('|') {
+            // Separator row: only pipes, dashes, colons, spaces → skip
+            let is_separator = trimmed
+                .chars()
+                .all(|c| c == '|' || c == '-' || c == ':' || c == ' ');
+            if is_separator {
+                continue;
+            }
+            // Data/header row: split by pipe, trim cells, join with ", "
+            let cells: Vec<&str> = trimmed
+                .split('|')
+                .map(|c| c.trim())
+                .filter(|c| !c.is_empty())
+                .collect();
+            out.push_str(&cells.join(", "));
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    // Remove trailing newline if original didn't have one
+    if !text.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 /// Split content into chunks
 ///
 /// Uses the specified mode, or auto-detects if mode is Auto.
+/// Markdown table rows are converted to plain text for better tokenization.
 pub fn chunk_content(content: &str, options: &ChunkOptions) -> Result<Vec<Chunk>, ChunkError> {
     if content.is_empty() {
         return Ok(vec![]);
@@ -208,12 +245,21 @@ pub fn chunk_content(content: &str, options: &ChunkOptions) -> Result<Vec<Chunk>
         other => other,
     };
 
-    match mode {
+    let mut chunks = match mode {
         ChunkMode::Markdown | ChunkMode::Auto => {
-            markdown::split(content, options.chunk_size, options.overlap)
+            markdown::split(content, options.chunk_size, options.overlap)?
         }
-        ChunkMode::Text => text::split(content, options.chunk_size, options.overlap),
+        ChunkMode::Text => text::split(content, options.chunk_size, options.overlap)?,
+    };
+
+    // Strip markdown tables from each chunk's text for cleaner tokenization/embedding
+    for chunk in &mut chunks {
+        if chunk.text.contains('|') {
+            chunk.text = strip_markdown_tables(&chunk.text);
+        }
     }
+
+    Ok(chunks)
 }
 
 /// Errors that can occur during chunking
@@ -296,7 +342,11 @@ mod tests {
                         élt egy szegény öregasszony. Volt neki három fia, akik közül \
                         a legkisebbik volt a legügyesebb. Elment világgá szerencsét próbálni.";
         let result = text::split(content, 80, 20);
-        assert!(result.is_ok(), "Hungarian text chunking panicked: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Hungarian text chunking panicked: {:?}",
+            result.err()
+        );
         let chunks = result.unwrap();
         assert!(!chunks.is_empty());
     }
@@ -338,7 +388,7 @@ mod tests {
     #[test]
     fn test_overlap_start_byte_basic() {
         let content = "abcdefghij"; // 10 ASCII chars
-        // Go back 3 chars from byte 7 ('h') → byte 4 ('e')
+                                    // Go back 3 chars from byte 7 ('h') → byte 4 ('e')
         assert_eq!(overlap_start_byte(content, 7, 3), 4);
         // Go back 0 chars → same position
         assert_eq!(overlap_start_byte(content, 7, 0), 7);
@@ -354,7 +404,7 @@ mod tests {
         // = 12 bytes, 11 chars
         let content = "Helló világ";
         assert_eq!(content.len(), 13); // actual byte len
-        // Go back 3 chars from byte 7 (which is 'v', char index 6) → char 3 = 'l' = byte 3
+                                       // Go back 3 chars from byte 7 (which is 'v', char index 6) → char 3 = 'l' = byte 3
         assert_eq!(overlap_start_byte(content, 7, 3), 3);
     }
 
@@ -411,5 +461,33 @@ mod tests {
                 chunks[0].end_char
             );
         }
+    }
+
+    #[test]
+    fn test_strip_markdown_table_basic() {
+        let input = "| Me. | Megnevezés | Nettó Ft/db |\n|---|---|---|\n| 1 | PEF-35 fékerőmérő | 1 750 000 Ft |";
+        let result = strip_markdown_tables(input);
+        assert_eq!(result, "Me., Megnevezés, Nettó Ft/db\n1, PEF-35 fékerőmérő, 1 750 000 Ft");
+    }
+
+    #[test]
+    fn test_strip_markdown_table_separator_removed() {
+        let input = "|---|---|---|\n| a | b |";
+        let result = strip_markdown_tables(input);
+        assert_eq!(result, "a, b");
+    }
+
+    #[test]
+    fn test_strip_markdown_table_mixed_content() {
+        let input = "Some text before\n| A | B |\n|---|---|\n| 1 | 2 |\nSome text after";
+        let result = strip_markdown_tables(input);
+        assert_eq!(result, "Some text before\nA, B\n1, 2\nSome text after");
+    }
+
+    #[test]
+    fn test_strip_markdown_table_no_table() {
+        let input = "Just plain text\nwith multiple lines";
+        let result = strip_markdown_tables(input);
+        assert_eq!(result, input);
     }
 }
