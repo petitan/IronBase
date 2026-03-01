@@ -8,7 +8,7 @@
 | API-k | Rust, Python (PyO3), C# (.NET 8) |
 | Operátorok | 25 query, 7 update |
 | Indexek | B+ tree, compound, fuzzy, fulltext, HNSW |
-| Keresés | Fuzzy (Jaro-Winkler/Levenshtein), TF-IDF, RAG |
+| Keresés | Fuzzy (Jaro-Winkler/Levenshtein), BM25 fulltext, RAG |
 
 ---
 
@@ -522,242 +522,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **Fulltext flush dirty flag** | ed9016d3, #54 | fulltext_search dokumentumok nagy része nem kereshető restart után | `commit_fulltext_flush()` feltétel nélkül törölte a dirty flag-et → Phase 2 alatti concurrent insert-ek elvesztek | `has_pending_entries()` check: dirty flag csak akkor törlődik ha `inverted_index` üres |
 | **HNSW rebuild duplicate ID** | d83885bf, #55 | `db_compact` "ID already exists in vector index" hiba | `rebuild()` `nodes` Vec-ből iterált — remove+reinsert után orphan+aktív node ugyanazzal az ID-vel, mindkettő átment a `contains_key` filter-en | `id_to_index` HashMap-ből iterálás (egyedi kulcsok, mindig a helyes node) |
 
-<details>
-<summary>Lazy Index get_all_entries() Bug - Részletes elemzés</summary>
-
-**Probléma:** `$group` aggregáció és `distinct()` 0 eredményt adott vissza nagy kollekciókon (130K+ doc).
-
-**Érintett kód:** `ironbase-core/src/index/btree.rs` - `get_all_entries()`
-
-**Root Cause:**
-- Ha az index **lazy mode**-ban van (nagy fájl, vagy dirty shutdown után), a `self.root` üres
-- A `get_all_entries()` NEM ellenőrizte a `lazy_mode` flag-et
-- Így a `collect_entries_recursive(üres_root)` mindig üres Vec-et adott vissza
-
-**Tünetek:**
-- `$group` aggregáció: 0 csoport
-- `distinct()`: 0 egyedi érték
-- DE: `count_documents()`, `find()` működött (nem használják `get_all_entries()`-t)
-
-**Fix:**
-```rust
-pub fn get_all_entries(&self) -> Vec<(IndexKey, DocumentId)> {
-    // LAZY MODE: read directly from file
-    if self.lazy_mode {
-        if let Some(ref path) = self.source_path {
-            if let Ok(mut file) = File::open(path) {
-                if let Ok(entries) = self.get_all_entries_with_file(&mut file) {
-                    return entries;
-                }
-            }
-        }
-    }
-    // IN-MEMORY PATH (existing logic)
-    ...
-}
-```
-
-**Érintett függvények:**
-- `aggregation/stages/group_stage.rs:664` - `try_index_based_execute_with_context()`
-- `collection_core/distinct.rs:188` - `try_index_based_distinct()`
-
-</details>
-
-<details>
-<summary>read_data() Boundary Bug (d37e442a) - Részletes elemzés</summary>
-
-**Probléma:** Duplikátum keresésnél 1 dokumentumnyi különbség volt a várt és tényleges count között.
-
-**.mlite fájl szerkezete:**
-```
-┌─────────────────────────────────────────────────────────────────┐
-│ Header (256 bytes)                                              │
-│ ├─ magic: "MONGOLTE"                                            │
-│ ├─ data_end_offset: u64  ← dokumentumok vége                    │
-│ └─ metadata_offset: u64  ← metaadatok kezdete                   │
-├─────────────────────────────────────────────────────────────────┤
-│ Document Region (append-only)                                   │
-│ ├─ [len:4][JSON doc 1]                                          │
-│ ├─ [len:4][JSON doc 2]                                          │
-│ └─ ...                                                          │
-│ ↑ offset: 256 .. data_end_offset                                │
-├─────────────────────────────────────────────────────────────────┤
-│ Padding (változó hossz)                                         │
-│ ↑ data_end_offset .. metadata_offset                            │
-├─────────────────────────────────────────────────────────────────┤
-│ Collection Metadata (JSON)                                      │
-│ ├─ document_catalog: HashMap<DocumentId, offset>                │
-│ ├─ live_document_count: u64                                     │
-│ └─ indexes, schemas...                                          │
-│ ↑ metadata_offset .. FILE_END                                   │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-**Root Cause:** Két különböző határ!
-
-| Érték | Mit mér | Tartalmazza |
-|-------|---------|-------------|
-| `file.metadata()?.len()` | Teljes fájl | Header + Docs + Padding + **Metadata** |
-| `data_end_offset` | Dokumentum régió | Header + Docs (metadata NÉLKÜL) |
-
-**Hogyan okozott 1 doc különbséget:**
-```rust
-// Régi kód (HIBÁS):
-pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
-    let file_len = self.file.metadata()?.len();  // ← SYSCALL + rossz határ
-    if offset >= file_len { ... }  // ← padding/metadata-t is "dokumentumnak" látta
-}
-
-// Új kód (HELYES):
-pub fn read_data(&mut self, offset: u64) -> Result<Vec<u8>> {
-    let data_boundary = self.header.data_end_offset;  // ← Cached + helyes határ
-    if offset >= data_boundary { ... }  // ← csak dokumentum régiót nézi
-}
-```
-
-**Eredmények:**
-
-| Metrika | Előtte | Utána |
-|---------|--------|-------|
-| Határ ellenőrzés | Teljes fájl | Csak dokumentum régió |
-| Syscall / olvasás | 1 fstat() | 0 |
-| Index rebuild 133K doc | ~60 perc | ~15 perc |
-| Duplikátum különbség | 1 doc | 0 |
-
-**Érintett fájlok:**
-- `storage/io.rs:57-119` - `read_data()` javítva
-- `storage/io.rs:141,199` - `read_data_at()` már korábban `data_end_offset`-et használt
-
-</details>
-
-<details>
-<summary>Fulltext Candidate Limit Bug (aa3b8ed5) - Részletes elemzés</summary>
-
-**Probléma:** `rag_search("ajánlat", filter={year:2026})` és `hybrid_search` 0 eredményt adott, holott 31 releváns dokumentum létezik.
-
-**Root Cause:**
-- `calculate_candidate_limit(30, true)` = `max(30*10, 100)` = **300** TF-IDF jelölt
-- "ajánlat" = 6766 dokumentumban szerepel
-- A 31 year=2026 dokumentum TF-IDF score-ja a legalacsonyabb (1.6447), pozíciójuk: **6735–6766**
-- 300 jelöltből 0 db year=2026 → post-filter mindent kiszűrt
-
-**Miért nem OOM kockázat a nagy candidate limit:**
-- A TF-IDF search (`search_with_ctx`) belül **AMÚGY IS O(N)**: score-olja az összes matching doc-ot, rendezi, és CSAK a `limit` paraméter csonkítja az outputot
-- A `candidate_limit` tehát NEM extra munkát jelent, hanem az output Vec méretét szabályozza
-- 100K jelölt ≈ 10MB memória (lightweight: doc_id + score + tokens)
-- A post-filter loopban early termination van (`results.len() >= effective_limit` → break)
-
-**Fix:**
-```rust
-// fulltext.rs:922
-pub fn calculate_candidate_limit(effective_limit: usize, has_filter_or_phrase: bool) -> usize {
-    if has_filter_or_phrase {
-        100_000  // TF-IDF is O(N) anyway, limit only truncates output
-    } else {
-        effective_limit
-    }
-}
-```
-
-**Érintett fájl:**
-- `ironbase-core/src/fulltext.rs:922` — `calculate_candidate_limit()`
-
-</details>
-
-<details>
-<summary>Fulltext Flush Dirty Flag Bug (ed9016d3, #54) - Részletes elemzés</summary>
-
-**Probléma:** `fulltext_search` a dokumentumok nagy részét nem találta meg restart után. Az index csak a legutolsó checkpoint óta beszúrt dokumentumokat tartalmazta.
-
-**Root Cause — Three-phase flush race condition:**
-
-A three-phase flush (8bbdc022) célja a write lock idejének minimalizálása:
-- **Phase 1** (write lock): `take_flush_snapshot()` — snapshot készítés az `inverted_index`-ről, majd kiürítés
-- **Phase 2** (NO lock): `serialize_flush()` — snapshot szerializálása fájlba
-- **Phase 3** (write lock): `commit_flush()` — eredmény commitolása, fájl handle frissítés
-
-A Phase 2 alatt NINCS lock → concurrent `insert_one`/`insert_many` hívások az `inverted_index`-be írnak ÉS dirty-re jelölik az indexet.
-
-**A bug:** `commit_fulltext_flush()` (manager.rs) Phase 3-ban feltétel nélkül törölte a dirty flag-et:
-```rust
-// HIBÁS (régi kód):
-self.dirty_fulltext_indexes.remove(name);  // Phase 2 insert-ek dirty flag-jét is törli!
-```
-
-**Következmény lánc:**
-1. Phase 2 insert → `inverted_index`-be ír + dirty = true
-2. Phase 3 → dirty = false (feltétel nélkül)
-3. Következő checkpoint → dirty = false → skip fulltext flush
-4. `close()`/`Drop` → dirty = false → skip flush
-5. Restart → stale `.ftidx` betöltve → Phase 2 entry-k ELVESZTEK
-
-**Miért nem véd a WAL:** WAL recovery (database/mod.rs:395-417) CSAK btree indexekre vonatkozik. Fulltext/fuzzy/vector indexeknek NINCS WAL védelme.
-
-**Fix:**
-```rust
-// HELYES (új kód):
-index.commit_flush(result)?;
-if !index.has_pending_entries() {  // inverted_index üres?
-    self.dirty_fulltext_indexes.remove(name);
-}
-```
-
-`has_pending_entries()` (fulltext.rs:2366): `!self.inverted_index.is_empty()` — ha Phase 2 alatt insert történt, az `inverted_index` nem üres → dirty flag megmarad → következő checkpoint kiírja.
-
-**Miért NEM érintett a normál `flush()`:** A `save_to_file()` → `flush()` path KIÜRÍTI az `inverted_index`-et, tehát ott a dirty clear biztonságos.
-
-**Érintett fájlok:**
-- `ironbase-core/src/fulltext.rs:2366` — `has_pending_entries()` method
-- `ironbase-core/src/index/manager.rs:1005` — `commit_fulltext_flush()` conditional dirty clear
-- `ironbase-core/src/database/maintenance.rs:457` — `flush_fulltext_batch()` three-phase orchestration
-
-</details>
-
-<details>
-<summary>Workaround-ok (kattints)</summary>
-
-**WAL Unbounded Growth:**
-- Tünet: `[STARTUP/DB] StorageEngine opened, recovering WAL...` után crash
-- Workaround: Töröld a `.wal` fájlt (backup mlite előtte!)
-- `.wal.tmp` auto-törlés startup-kor (2026-01-22)
-
-**Stale Index Loading:**
-- `database/collections.rs` - `load_persisted_indexes(..., was_clean: bool)`
-- `storage/mod.rs` - `mark_clean_shutdown()` a Drop-ban
-- Érintett: `.idx`, `.fzidx`, `.ftidx`, `.hnsw`
-</details>
-
-<details>
-<summary>Btree Delete Not Dirty Bug (265f0c2e) - Részletes elemzés</summary>
-
-**Probléma:** `count_documents` szűrt query-kre ~3x-os eredményt adott. A `year` index 87287 bejegyzést tartalmazott 28298 élő doc helyett.
-
-**Root Cause:**
-- `remove_document_from_indexes()` (manager.rs) és `batch_update_indexes()` (mod.rs) módosították a btree indexet memóriában, de **NEM jelölték dirty-nek**
-- A checkpoint CSAK dirty indexeket ment ki → törlések elvesztek
-- Server restart → stale `.idx` fájl betöltve (clean shutdown esetén)
-- Minden import ciklus halmozta a stale bejegyzéseket
-
-**Bizonyíték:**
-- `_id` index: 28298 (helyes) — soha nem dirty → soha nem persistálva → minden startup rebuild-ből
-- `year` index: 87287 (~3x) — INSERT dirty → persistálva, DELETE nem dirty → nem persistálva
-- `add_document_to_indexes` (manager.rs:1281): `dirty_btree_indexes.insert()` ✅
-- `remove_document_from_indexes` (manager.rs:1437): hiányzott ❌
-- `batch_update_indexes` (mod.rs:1832,1843): hiányzott ❌
-
-**Javított helyek (5 db):**
-
-| Hely | Művelet |
-|------|---------|
-| `manager.rs:1437` | `remove_document_from_indexes` btree delete |
-| `mod.rs:1695` | `remove_from_indexes` _id delete |
-| `mod.rs:1808` | `batch_update_indexes` _id apply_batch_updates |
-| `mod.rs:1848` | `batch_update_indexes` other index delete+insert |
-| `database/mod.rs:411` | WAL recovery index replay |
-
-**Szabály:** MINDEN `index.delete()`, `index.insert()`, `apply_batch_updates()` hívás után KÖTELEZŐ `mark_btree_dirty()` / `dirty_btree_indexes.insert()`!
-
-</details>
+**Részletes bug elemzések:** Lásd `memory/critical-bugs.md` (Lazy Index, read_data boundary, Fulltext candidate limit, Fulltext flush dirty flag, Btree delete not dirty, Workaround-ok)
 
 ### Checkpoint Per-Index Flush (2026-02-01)
 
@@ -929,7 +694,7 @@ coll.update_one_with_options(&filter, &update, opts)?;
 | **StartsWith** | `{"$startsWith": "Al"}` | Prefix match, case-insensitive default |
 | **EndsWith** | `{"$endsWith": ".hu"}` | Suffix match, case-insensitive default |
 | **Contains** | `{"$contains": "Rust"}` | Substring match, case-insensitive default |
-| **Fulltext** | `fulltext_search(field, query, limit)` | TF-IDF, stemming, HU/EN/DE |
+| **Fulltext** | `fulltext_search(field, query, limit)` | BM25 (k1=1.2, b=0.75), stemming, HU/EN/DE |
 | **Hybrid** | `hybrid_search(collection, query)` | RRF score fusion, auto-embed ha nincs vector |
 
 `$text`, `$startsWith`, `$endsWith`, `$contains` mindegyik támogatja:
@@ -944,6 +709,27 @@ coll.update_one_with_options(&filter, &update, opts)?;
 coll.create_fulltext_index("content".into(), "hungarian", None, None)?;
 let results = coll.fulltext_search("content", "király", Some(10), None, None, None)?;
 ```
+</details>
+
+<details>
+<summary>BM25 Scoring (29e2ef8c, #58)</summary>
+
+**Formula:** `score = IDF * ((k1+1) * tf) / (k1 * (1 - b + b * dl/avgdl) + tf)`
+
+| Paraméter | Érték | Jelentés |
+|-----------|-------|----------|
+| k1 | 1.2 | TF szaturáció (magasabb = lineárisabb TF hatás) |
+| b | 0.75 | Doc length normalizáció (0=nincs, 1=teljes) |
+| dl | per-doc | Dokumentum token száma |
+| avgdl | globális | Átlagos dokumentumhossz (total_doc_length / doc_count) |
+
+**Memória:** `doc_lengths: HashMap<DocumentId, u32>` + `total_doc_length: u64` per index.
+
+**Backward compat:** `#[serde(default)]` → régi .ftidx fájlok betöltésekor üres doc_lengths → fallback TF-saturation-only. `rebuild_doc_lengths_if_needed()` startup migration.
+
+**Perzisztálás:** `FulltextIndexMetadataForSave`-ben `Vec<(DocumentId, u32)>` (JSON DocumentId kulcs compat).
+
+**Key file:** `ironbase-core/src/fulltext.rs`
 </details>
 
 <details>
