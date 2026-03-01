@@ -652,6 +652,10 @@ struct FulltextIndexMetadataForSave {
     name: String,
     field: String,
     options: FtsOptions,
+    #[serde(default)]
+    doc_lengths: Vec<(DocumentId, u32)>,
+    #[serde(default)]
+    total_doc_length: u64,
 }
 
 // ============================================================================
@@ -759,6 +763,12 @@ pub struct FulltextIndex {
     /// to prevent using partially populated indexes
     pub building: bool,
 
+    // === BM25 Document Length Normalization ===
+    /// Per-document token count for BM25 length normalization (dl)
+    doc_lengths: HashMap<DocumentId, u32>,
+    /// Sum of all document lengths for computing average doc length (avgdl = total / doc_count)
+    total_doc_length: u64,
+
     // === Two-Phase Flush Support ===
     /// Frozen inverted index snapshot during background flush.
     /// When a flush is in progress, inverted_index is moved here (via Arc) so that
@@ -797,6 +807,10 @@ pub(crate) struct FulltextFlushSnapshot {
     pub options: FtsOptions,
     /// Path to .ftidx file
     pub storage_path: PathBuf,
+    /// BM25 per-document token counts
+    pub doc_lengths: HashMap<DocumentId, u32>,
+    /// BM25 sum of all document lengths
+    pub total_doc_length: u64,
 }
 
 /// Result of a two-phase flush, to be committed under write lock.
@@ -1346,10 +1360,12 @@ impl FulltextIndex {
             doc_tokens_memory: HashMap::new(),
             token_offsets: HashMap::new(),
             lazy_mode: false,
-            file_version: FTIDX_VERSION_V3, // New indexes use V3 format
+            file_version: FTIDX_VERSION_V3,
             deleted_doc_ids: HashSet::new(),
             building: false,
             frozen_inverted: None,
+            doc_lengths: HashMap::new(),
+            total_doc_length: 0,
         }
     }
 
@@ -1372,10 +1388,12 @@ impl FulltextIndex {
             doc_tokens_memory: HashMap::new(),
             token_offsets: HashMap::new(),
             lazy_mode: false,
-            file_version: FTIDX_VERSION_V3, // New indexes use V3 format
+            file_version: FTIDX_VERSION_V3,
             deleted_doc_ids: HashSet::new(),
             building: false,
             frozen_inverted: None,
+            doc_lengths: HashMap::new(),
+            total_doc_length: 0,
         };
 
         // Create and initialize the file with header
@@ -1726,6 +1744,11 @@ impl FulltextIndex {
                 .push((doc_id.clone(), *count));
         }
 
+        // Track document length for BM25 normalization
+        let doc_len: u32 = token_counts.values().sum();
+        self.doc_lengths.insert(doc_id.clone(), doc_len);
+        self.total_doc_length += doc_len as u64;
+
         // Store token frequencies - disk or memory
         if self.storage_path.is_some() && self.file_handle.is_some() {
             let offset = self.write_doc_tokens_to_disk(doc_id, &token_counts)?;
@@ -1755,6 +1778,11 @@ impl FulltextIndex {
             // Memory-based: get from memory
             self.doc_tokens_memory.remove(doc_id)
         };
+
+        // Remove document length tracking for BM25
+        if let Some(old_len) = self.doc_lengths.remove(doc_id) {
+            self.total_doc_length -= old_len as u64;
+        }
 
         // Remove from offsets
         self.doc_tokens_offsets.remove(doc_id);
@@ -1832,6 +1860,16 @@ impl FulltextIndex {
         // - Calculate IDF and accumulate scores directly
         // - NO read_doc_tokens_from_disk calls needed!
 
+        // BM25 parameters
+        const BM25_K1: f64 = 1.2;
+        const BM25_B: f64 = 0.75;
+        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
+            self.total_doc_length as f64 / total_docs
+        } else {
+            0.0
+        };
+        let has_bm25_data = !self.doc_lengths.is_empty();
+
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
         let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
 
@@ -1841,12 +1879,17 @@ impl FulltextIndex {
                 let idf = (1.0 + total_docs / entries.len() as f64).ln();
 
                 for (doc_id, tf) in entries {
-                    // BM25 TF saturation: score = ((k1+1)*tf) / (k1+tf) * idf
-                    // Prevents high-TF documents from dominating (tf=3 → 1.86x instead of 3x)
-                    const BM25_K1: f64 = 1.2;
                     let tf_f = tf as f64;
-                    let saturated_tf = ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f);
-                    *doc_scores.entry(doc_id.clone()).or_default() += saturated_tf * idf;
+                    let bm25_score = if has_bm25_data && avg_dl > 0.0 {
+                        // Full BM25: score = IDF * ((k1+1)*tf) / (k1*(1-b+b*dl/avgdl) + tf)
+                        let dl = *self.doc_lengths.get(&doc_id).unwrap_or(&0) as f64;
+                        let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
+                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
+                    } else {
+                        // Fallback: no doc length data (legacy index) → TF saturation only
+                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
+                    };
+                    *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
 
                     matched
                         .entry(doc_id.clone())
@@ -1860,8 +1903,6 @@ impl FulltextIndex {
             return Vec::new();
         }
 
-        // Old Phase 2 code removed - TF now comes from inverted index entries!
-        // This eliminates the 7GB disk I/O for doc_tokens during search.
         let scores = doc_scores;
 
         // Apply min_score filter
@@ -1926,6 +1967,16 @@ impl FulltextIndex {
             return Ok(Vec::new());
         }
 
+        // BM25 parameters
+        const BM25_K1: f64 = 1.2;
+        const BM25_B: f64 = 0.75;
+        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
+            self.total_doc_length as f64 / total_docs
+        } else {
+            0.0
+        };
+        let has_bm25_data = !self.doc_lengths.is_empty();
+
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
         let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
         let mut iteration: usize = 0;
@@ -1947,11 +1998,15 @@ impl FulltextIndex {
                     }
                     iteration += 1;
 
-                    // BM25 TF saturation: score = ((k1+1)*tf) / (k1+tf) * idf
-                    const BM25_K1: f64 = 1.2;
                     let tf_f = tf as f64;
-                    let saturated_tf = ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f);
-                    *doc_scores.entry(doc_id.clone()).or_default() += saturated_tf * idf;
+                    let bm25_score = if has_bm25_data && avg_dl > 0.0 {
+                        let dl = *self.doc_lengths.get(&doc_id).unwrap_or(&0) as f64;
+                        let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
+                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
+                    } else {
+                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
+                    };
+                    *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
                     matched
                         .entry(doc_id.clone())
                         .or_default()
@@ -2154,12 +2209,18 @@ impl FulltextIndex {
             file.write_all(&token_offsets_bytes)?;
         }
 
-        // Write metadata (name, field, options)
+        // Write metadata (name, field, options, doc_lengths, total_doc_length)
         let metadata_offset = token_offsets_offset + token_offsets_bytes.len() as u64;
         let metadata = FulltextIndexMetadataForSave {
             name: self.name.clone(),
             field: self.field.clone(),
             options: self.options.clone(),
+            doc_lengths: self
+                .doc_lengths
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            total_doc_length: self.total_doc_length,
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         {
@@ -2251,6 +2312,8 @@ impl FulltextIndex {
             field: self.field.clone(),
             options: self.options.clone(),
             storage_path,
+            doc_lengths: self.doc_lengths.clone(),
+            total_doc_length: self.total_doc_length,
         })
     }
 
@@ -2342,6 +2405,12 @@ impl FulltextIndex {
             name: snapshot.name.clone(),
             field: snapshot.field.clone(),
             options: snapshot.options.clone(),
+            doc_lengths: snapshot
+                .doc_lengths
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
+            total_doc_length: snapshot.total_doc_length,
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         file.write_all(&metadata_bytes)?;
@@ -2553,7 +2622,7 @@ impl FulltextIndex {
             let metadata_reader = BufReader::new(&file);
             let metadata: FulltextIndexMetadataForSave = serde_json::from_reader(metadata_reader)?;
 
-            Ok(FulltextIndex {
+            let mut index = FulltextIndex {
                 name: metadata.name,
                 field: metadata.field,
                 options: metadata.options,
@@ -2567,9 +2636,13 @@ impl FulltextIndex {
                 lazy_mode: false,               // V1: full in-memory mode
                 file_version: FTIDX_VERSION_V1, // Will upgrade to V3 on next flush
                 deleted_doc_ids: HashSet::new(),
-                building: false, // Loaded from disk = already complete
+                building: false,
                 frozen_inverted: None,
-            })
+                doc_lengths: metadata.doc_lengths.into_iter().collect(),
+                total_doc_length: metadata.total_doc_length,
+            };
+            index.rebuild_doc_lengths_if_needed();
+            Ok(index)
         } else {
             // V2/V3 format: token_entries_offset, token_offsets_offset, metadata_offset
             file.read_exact(&mut buf8)?;
@@ -2610,7 +2683,7 @@ impl FulltextIndex {
             // Now we append new content at the end, preserving old data until merge completes.
             let file_end = file.seek(SeekFrom::End(0))?;
 
-            Ok(FulltextIndex {
+            let mut index = FulltextIndex {
                 name: metadata.name,
                 field: metadata.field,
                 options: metadata.options,
@@ -2624,9 +2697,13 @@ impl FulltextIndex {
                 lazy_mode: true,       // V2/V3: lazy loading mode
                 file_version: version, // V2 will upgrade to V3 on next flush, V3 stays V3
                 deleted_doc_ids: HashSet::new(),
-                building: false, // Loaded from disk = already complete
+                building: false,
                 frozen_inverted: None,
-            })
+                doc_lengths: metadata.doc_lengths.into_iter().collect(),
+                total_doc_length: metadata.total_doc_length,
+            };
+            index.rebuild_doc_lengths_if_needed();
+            Ok(index)
         }
     }
 
@@ -2641,6 +2718,49 @@ impl FulltextIndex {
     /// on-demand token loading from disk.
     pub fn is_lazy_mode(&self) -> bool {
         self.lazy_mode
+    }
+
+    /// Rebuild doc_lengths from disk-based doc_tokens (startup migration for legacy indexes).
+    ///
+    /// Called when loading an index that was saved before BM25 doc length tracking.
+    /// Reads each document's token counts from disk and populates doc_lengths + total_doc_length.
+    pub fn rebuild_doc_lengths_if_needed(&mut self) {
+        if !self.doc_lengths.is_empty() || self.doc_tokens_offsets.is_empty() {
+            return; // Already has data or empty index
+        }
+
+        // Collect doc_ids first to avoid borrow conflict
+        let doc_ids: Vec<DocumentId> = self.doc_tokens_offsets.keys().cloned().collect();
+        let mut total: u64 = 0;
+
+        for doc_id in &doc_ids {
+            // Try disk first, then memory
+            let doc_len = if self.storage_path.is_some() {
+                self.read_doc_tokens_from_disk(doc_id)
+                    .ok()
+                    .map(|tokens| tokens.values().sum::<u32>())
+            } else {
+                self.doc_tokens_memory
+                    .get(doc_id)
+                    .map(|tokens| tokens.values().sum::<u32>())
+            };
+
+            if let Some(len) = doc_len {
+                self.doc_lengths.insert(doc_id.clone(), len);
+                total += len as u64;
+            }
+        }
+
+        self.total_doc_length = total;
+
+        if !self.doc_lengths.is_empty() {
+            tracing::info!(
+                index = %self.name,
+                doc_count = self.doc_lengths.len(),
+                avg_dl = total as f64 / self.doc_lengths.len() as f64,
+                "Rebuilt BM25 doc_lengths from existing doc_tokens (startup migration)"
+            );
+        }
     }
 
     /// Get the number of unique tokens in the index
@@ -2903,8 +3023,9 @@ mod tests {
 
     #[test]
     fn test_bm25_tf_saturation() {
-        // Verify that TF=3 does NOT produce 3x the score of TF=1
-        // BM25 k1=1.2: saturated_tf(1) = 1.0, saturated_tf(3) ≈ 1.86
+        // Verify BM25 scoring with TF saturation + doc length normalization
+        // doc1 (dl=3) has higher TF but longer doc → penalty from b=0.75
+        // doc2 (dl=1) has lower TF but shorter doc → boost from b=0.75
         let options = FtsOptions::new(FtsLanguage::None);
         let temp_dir = std::env::temp_dir().join("fts_test_bm25_sat.ftidx");
         let mut index =
@@ -2914,30 +3035,165 @@ mod tests {
         let doc1 = DocumentId::Int(1);
         let doc2 = DocumentId::Int(2);
 
-        // doc1: "fox" appears 3 times, doc2: "fox" appears 1 time
+        // doc1: "fox" appears 3 times (dl=3), doc2: "fox" appears 1 time (dl=1)
+        // avgdl = 2.0
         index.insert(&doc1, "fox fox fox").unwrap();
         index.insert(&doc2, "fox").unwrap();
 
         let results = index.search("fox", 10, 0, None);
         assert_eq!(results.len(), 2);
+        // doc1 still ranks higher (higher TF outweighs length penalty)
         assert_eq!(results[0].doc_id, doc1);
         assert_eq!(results[1].doc_id, doc2);
 
         let ratio = results[0].score / results[1].score;
-        // With BM25 k1=1.2: ratio should be ~1.86, NOT 3.0
+        // Full BM25 with length normalization: ratio is lower than pure TF saturation
+        // doc1: norm=1.375, bm25_tf≈1.42; doc2: norm=0.625, bm25_tf≈1.26 → ratio≈1.13
         assert!(
-            ratio < 2.5,
-            "BM25 saturation failed: tf=3/tf=1 ratio={:.2}, expected < 2.5",
+            ratio < 2.0,
+            "BM25 saturation+normalization failed: ratio={:.2}, expected < 2.0",
             ratio
         );
         assert!(
-            ratio > 1.5,
-            "BM25 saturation too aggressive: ratio={:.2}, expected > 1.5",
+            ratio > 1.0,
+            "BM25 scoring inverted: ratio={:.2}, expected > 1.0",
             ratio
         );
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_dir);
+    }
+
+    #[test]
+    fn test_bm25_full_scoring_short_doc_wins() {
+        // Full BM25: shorter doc with same TF should score HIGHER than longer doc
+        // This is the key improvement over TF-saturation-only scoring
+        let options = FtsOptions::new(FtsLanguage::None);
+        let temp_dir = std::env::temp_dir().join("fts_test_bm25_full.ftidx");
+        let mut index =
+            FulltextIndex::new_with_storage("test_idx", "content", options, temp_dir.clone())
+                .unwrap();
+
+        let short_doc = DocumentId::Int(1);
+        let long_doc = DocumentId::Int(2);
+
+        // Both have "fox" once, but long_doc has many other tokens
+        index.insert(&short_doc, "fox").unwrap();
+        index
+            .insert(&long_doc, "fox the quick brown lazy dog jumps over fence")
+            .unwrap();
+
+        let results = index.search("fox", 10, 0, None);
+        assert_eq!(results.len(), 2);
+        // Short doc should rank higher (same TF=1, but shorter → higher BM25 score)
+        assert_eq!(
+            results[0].doc_id, short_doc,
+            "BM25 length normalization: short doc should rank higher with same TF"
+        );
+        assert!(
+            results[0].score > results[1].score,
+            "Short doc score ({:.4}) should be > long doc score ({:.4})",
+            results[0].score,
+            results[1].score
+        );
+
+        let _ = std::fs::remove_file(&temp_dir);
+    }
+
+    #[test]
+    fn test_bm25_backward_compat_empty_doc_lengths() {
+        // When doc_lengths is empty (legacy index), fallback to TF-saturation-only
+        let options = FtsOptions::new(FtsLanguage::None);
+        let mut index = FulltextIndex::new("test_idx", "content", options);
+
+        let doc1 = DocumentId::Int(1);
+        let doc2 = DocumentId::Int(2);
+
+        index.insert(&doc1, "fox fox fox").unwrap();
+        index.insert(&doc2, "fox").unwrap();
+
+        // Manually clear doc_lengths to simulate legacy index
+        index.doc_lengths.clear();
+        index.total_doc_length = 0;
+
+        let results = index.search("fox", 10, 0, None);
+        assert_eq!(results.len(), 2);
+        // With fallback (no length normalization), doc1 should still rank first
+        assert_eq!(results[0].doc_id, doc1);
+
+        // Verify scores are non-zero (fallback scoring works)
+        assert!(results[0].score > 0.0);
+        assert!(results[1].score > 0.0);
+    }
+
+    #[test]
+    fn test_bm25_insert_remove_doc_lengths() {
+        // Verify doc_lengths tracking is correct across insert/remove operations
+        let options = FtsOptions::new(FtsLanguage::None);
+        let temp_dir = std::env::temp_dir().join("fts_test_bm25_dl_track.ftidx");
+        let mut index =
+            FulltextIndex::new_with_storage("test_idx", "content", options, temp_dir.clone())
+                .unwrap();
+
+        let doc1 = DocumentId::Int(1);
+        let doc2 = DocumentId::Int(2);
+
+        // Insert two docs
+        index.insert(&doc1, "hello world").unwrap(); // dl=2
+        index.insert(&doc2, "hello rust lang").unwrap(); // dl=3
+
+        assert_eq!(index.doc_lengths.len(), 2);
+        assert_eq!(*index.doc_lengths.get(&doc1).unwrap(), 2);
+        assert_eq!(*index.doc_lengths.get(&doc2).unwrap(), 3);
+        assert_eq!(index.total_doc_length, 5);
+
+        // Remove doc1
+        index.remove(&doc1).unwrap();
+        assert_eq!(index.doc_lengths.len(), 1);
+        assert!(!index.doc_lengths.contains_key(&doc1));
+        assert_eq!(index.total_doc_length, 3);
+
+        // Remove doc2
+        index.remove(&doc2).unwrap();
+        assert_eq!(index.doc_lengths.len(), 0);
+        assert_eq!(index.total_doc_length, 0);
+
+        let _ = std::fs::remove_file(&temp_dir);
+    }
+
+    #[test]
+    fn test_bm25_doc_lengths_persist_roundtrip() {
+        // Verify doc_lengths survive save/load cycle
+        let options = FtsOptions::new(FtsLanguage::None);
+        let temp_path = std::env::temp_dir().join("fts_test_bm25_persist.ftidx");
+        let mut index =
+            FulltextIndex::new_with_storage("test_idx", "content", options, temp_path.clone())
+                .unwrap();
+
+        index.insert(&DocumentId::Int(1), "hello world").unwrap();
+        index
+            .insert(&DocumentId::Int(2), "hello rust lang test")
+            .unwrap();
+
+        assert_eq!(index.total_doc_length, 6); // 2 + 4
+
+        // Flush to disk
+        index.flush().unwrap();
+
+        // Load from disk
+        let loaded = FulltextIndex::load_from_file(temp_path.clone()).unwrap();
+        assert_eq!(loaded.doc_lengths.len(), 2);
+        assert_eq!(*loaded.doc_lengths.get(&DocumentId::Int(1)).unwrap(), 2);
+        assert_eq!(*loaded.doc_lengths.get(&DocumentId::Int(2)).unwrap(), 4);
+        assert_eq!(loaded.total_doc_length, 6);
+
+        // Verify search still works correctly after load
+        let results = loaded.search("hello", 10, 0, None);
+        assert_eq!(results.len(), 2);
+        // Shorter doc should rank higher (same TF=1, dl=2 vs dl=4)
+        assert_eq!(results[0].doc_id, DocumentId::Int(1));
+
+        let _ = std::fs::remove_file(&temp_path);
     }
 
     #[test]
