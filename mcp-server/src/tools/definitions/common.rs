@@ -386,7 +386,7 @@ pub mod fields {
     pub fn min_score() -> Value {
         json!({
             "type": "number",
-            "description": "Minimum TF-IDF relevance score threshold"
+            "description": "Minimum BM25 relevance score threshold"
         })
     }
 
@@ -394,7 +394,7 @@ pub mod fields {
     pub fn fulltext_filter() -> Value {
         json!({
             "type": "object",
-            "description": "MongoDB-style filter applied AFTER TF-IDF scoring. Use to combine fulltext search with other operators. Example: {\"from.email\": {\"$regex\": \"@company\\\\.com$\"}}"
+            "description": "MongoDB-style filter applied AFTER BM25 scoring. Use to combine fulltext search with other operators. Example: {\"from.email\": {\"$regex\": \"@company\\\\.com$\"}}"
         })
     }
 

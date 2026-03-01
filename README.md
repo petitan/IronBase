@@ -34,8 +34,8 @@ Written in Rust. Single-file storage, zero-configuration, serverless. Bindings f
 | **Query Operators (25)** | `$eq` `$ne` `$gt` `$gte` `$lt` `$lte` `$in` `$nin` `$and` `$or` `$not` `$nor` `$exists` `$type` `$all` `$elemMatch` `$size` `$regex` `$fuzzy` `$text` `$startsWith` `$endsWith` `$contains` `$expr` `$**` |
 | **Update Operators (7)** | `$set` `$inc` `$unset` `$push` `$pull` `$addToSet` `$pop` |
 | **Aggregation** | 8 stages + 8 accumulators with Top-K optimization |
-| **Indexes** | B+ tree, compound, case-insensitive, fuzzy, fulltext (TF-IDF), HNSW vector |
-| **Search** | Fuzzy (Jaro-Winkler/Levenshtein/Damerau), fulltext (TF-IDF + stemming), RAG (FastText + HNSW), hybrid (RRF score fusion) |
+| **Indexes** | B+ tree, compound, case-insensitive, fuzzy, fulltext (BM25), HNSW vector |
+| **Search** | Fuzzy (Jaro-Winkler/Levenshtein/Damerau), fulltext (BM25 + stemming), RAG (FastText + HNSW), hybrid (RRF score fusion) |
 | **Durability** | ACID transactions, WAL, crash recovery, 3 durability modes |
 | **OOM Protection** | Dynamic RAM-based limits, streaming, `try_reserve()`, Top-K heap |
 | **Languages** | Rust, Python (PyO3), C# (.NET 8 FFI) |
@@ -156,7 +156,7 @@ IronBase supports 5 index types for different access patterns:
 | **B+ Tree** | Equality, range queries | O(log n) lookup | `.idx` |
 | **Compound** | Multi-field queries (prefix matching) | O(log n) lookup | `.idx` |
 | **Fuzzy** | Similarity search (typo-tolerant) | O(n) scan | `.fzidx` |
-| **Fulltext** | TF-IDF text search with stemming | O(terms) lookup | `.ftidx` |
+| **Fulltext** | BM25 text search with stemming | O(terms) lookup | `.ftidx` |
 | **HNSW Vector** | Nearest neighbor / semantic search | O(log n) approx | `.hnsw` |
 
 ```python
@@ -195,7 +195,7 @@ results = users.find({"name": {"$fuzzy": "jonh"}})  # Finds "John"
 results = users.fuzzy_search("name", "jonh", threshold=0.7, limit=10)
 ```
 
-### Fulltext Search (TF-IDF)
+### Fulltext Search (BM25)
 
 Tokenization + stemming + stop word removal. Languages: Hungarian, English, German.
 
@@ -427,9 +427,9 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `find_with_hint` | Query with forced index hint |
 | `index_create_fuzzy` | Create fuzzy search index |
 | `fuzzy_search` | Approximate string matching |
-| `index_create_fulltext` | Create TF-IDF fulltext index |
+| `index_create_fulltext` | Create BM25 fulltext index |
 | `index_list_fulltext` | List fulltext indexes |
-| `fulltext_search` | Search with TF-IDF scoring |
+| `fulltext_search` | Search with BM25 scoring |
 | `fulltext_analyze` | Debug text tokenization |
 | `index_create_vector` | Create HNSW vector index |
 | `index_list_vector` | List vector indexes |
@@ -699,7 +699,7 @@ ironbase-core/          Core database engine (Rust library)
   ├── query/              Query parser + 25 operator matchers
   ├── aggregation/        Pipeline stages + accumulators
   ├── index/              B+ tree, fuzzy, HNSW, manager
-  ├── fulltext.rs         TF-IDF search with stemming
+  ├── fulltext.rs         BM25 search with stemming
   ├── storage/            Append-only engine (.mlite format)
   ├── transaction.rs      ACID transactions
   ├── wal.rs              Write-ahead log

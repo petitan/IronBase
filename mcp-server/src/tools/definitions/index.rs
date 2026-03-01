@@ -52,7 +52,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "index_create_fulltext",
             "title": "Create Full-Text Search Index",
-            "description": "Create a TF-IDF full-text search index with language-aware stemming.",
+            "description": "Create a BM25 full-text search index with language-aware stemming and document length normalization.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -71,7 +71,7 @@ pub fn tools() -> Vec<Value> {
         json!({
             "name": "fulltext_search",
             "title": "Full-Text Search",
-            "description": "Search documents using TF-IDF relevance scoring. Requires index_create_fulltext first. Use 'filter' to apply MongoDB-style filtering on results (fast, applies AFTER TF-IDF scoring). Set highlight=true for <mark>...</mark> snippets. Searched field must be in projection for highlights. Use 'fields' (array) for multi-field search, or 'field' (string) for single-field. If both are provided, 'fields' takes precedence.",
+            "description": "Search documents using BM25 relevance scoring (TF saturation + document length normalization). Requires index_create_fulltext first. Use 'filter' to apply MongoDB-style filtering on results (fast, applies AFTER scoring). Set highlight=true for <mark>...</mark> snippets. Searched field must be in projection for highlights. Use 'fields' (array) for multi-field search, or 'field' (string) for single-field. If both are provided, 'fields' takes precedence.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
