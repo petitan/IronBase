@@ -1040,6 +1040,22 @@ impl IronBaseAdapter {
         }))
     }
 
+    /// Compute storage wastage statistics for auto-compaction decisions.
+    ///
+    /// Delegates to DatabaseCore::storage_wastage(). O(C) cost.
+    pub fn compute_wastage(&self) -> ironbase_core::storage::StorageWastage {
+        let db = self.db.read();
+        db.storage_wastage()
+    }
+
+    /// Store the file size after the last successful compaction.
+    ///
+    /// Called after compact finishes to calibrate bloat_ratio.
+    pub fn set_last_compact_size(&self, size: u64) {
+        let db = self.db.read();
+        db.set_last_compact_size(size);
+    }
+
     /// Graceful shutdown - flush indexes and mark clean shutdown
     ///
     /// This enables fast restart by allowing the next startup to trust

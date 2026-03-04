@@ -285,6 +285,11 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Prevents concurrent compaction from direct Rust consumers
     // (MCP server has its own adapter-level guard; this protects core-level callers)
     pub(crate) is_compacting: AtomicBool,
+
+    // Last compaction result size (size_after from CompactionStats)
+    // Used by storage_wastage() to estimate bloat ratio.
+    // Starts at 0 (never compacted) — bloat_ratio = infinity until first compact.
+    pub(crate) last_compact_size: AtomicU64,
 }
 
 // ============================================================================
@@ -382,6 +387,7 @@ impl DatabaseCore<StorageEngine> {
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
+            last_compact_size: AtomicU64::new(0),
         };
 
         // Apply recovered index changes to collections
@@ -480,6 +486,7 @@ impl DatabaseCore<MemoryStorage> {
             is_closed: Arc::new(AtomicBool::new(false)),
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
+            last_compact_size: AtomicU64::new(0),
         })
     }
 }

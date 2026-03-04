@@ -93,6 +93,26 @@ pub struct CheckpointStats {
     pub indexes_flushed: usize,
 }
 
+/// Storage wastage statistics for auto-compaction decisions
+///
+/// Computed by iterating collections (O(C) cost, not O(N) documents).
+/// Uses file_size vs estimated_live_bytes to determine bloat ratio.
+#[derive(Debug, Clone)]
+pub struct StorageWastage {
+    /// Current .mlite file size on disk
+    pub file_size_bytes: u64,
+    /// Estimated live data size (last compact size_after, or 0 if never compacted)
+    pub estimated_live_bytes: u64,
+    /// file_size / estimated_live (1.0 = no bloat, f64::INFINITY if never compacted)
+    pub bloat_ratio: f64,
+    /// Total document writes (including tombstones and old versions)
+    pub total_writes: u64,
+    /// Total live documents
+    pub total_live: u64,
+    /// Dead writes (total_writes - total_live)
+    pub dead_writes: u64,
+}
+
 // =========================================================================
 // NON-BLOCKING COMPACTION: Lock-splitting types
 // =========================================================================

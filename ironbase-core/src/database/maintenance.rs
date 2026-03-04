@@ -73,6 +73,51 @@ impl DatabaseCore<StorageEngine> {
         storage.stats()
     }
 
+    /// Compute storage wastage statistics for auto-compaction decisions.
+    ///
+    /// O(C) cost — iterates collections for document counts, reads file size via fs::metadata.
+    /// Does NOT load documents or indexes.
+    pub fn storage_wastage(&self) -> crate::storage::StorageWastage {
+        let storage = self.storage.read();
+
+        let mut total_writes: u64 = 0;
+        let mut total_live: u64 = 0;
+        for meta in storage.collections_ref().values() {
+            total_writes += meta.document_count;
+            total_live += meta.live_document_count;
+        }
+        let dead_writes = total_writes.saturating_sub(total_live);
+        drop(storage); // Release read lock early
+
+        let file_size_bytes = std::fs::metadata(&self.db_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        let estimated_live_bytes = self.last_compact_size.load(Ordering::Relaxed);
+
+        let bloat_ratio = if estimated_live_bytes == 0 {
+            f64::INFINITY
+        } else {
+            file_size_bytes as f64 / estimated_live_bytes as f64
+        };
+
+        crate::storage::StorageWastage {
+            file_size_bytes,
+            estimated_live_bytes,
+            bloat_ratio,
+            total_writes,
+            total_live,
+            dead_writes,
+        }
+    }
+
+    /// Store the file size after the last successful compaction.
+    ///
+    /// Called by the MCP layer after compact finishes to calibrate bloat_ratio.
+    pub fn set_last_compact_size(&self, size: u64) {
+        self.last_compact_size.store(size, Ordering::Relaxed);
+    }
+
     /// Storage compaction - removes tombstones and old document versions (StorageEngine-specific)
     ///
     /// Also flushes all indexes to disk (B+ tree and fulltext).

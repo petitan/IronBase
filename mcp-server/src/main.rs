@@ -407,6 +407,14 @@ fn run_stdio_server(cli: &Cli) {
         cli.force_reembed,
     );
 
+    // Start auto-compact timer (background thread, checks wastage periodically)
+    let _auto_compact_handle = mcp_ironbase::compaction::spawn_auto_compact_timer(
+        adapter.clone(),
+        job_manager.clone(),
+        mcp_ironbase::compaction::AutoCompactConfig::default(),
+        job_manager_for_shutdown.shutdown_flag(),
+    );
+
     eprintln!("Ready for requests...");
 
     // Read from stdin line by line

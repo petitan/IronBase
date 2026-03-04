@@ -7,6 +7,7 @@ pub mod adapter;
 pub mod api_keys;
 pub mod cancellation;
 pub mod chunking;
+pub mod compaction;
 pub mod embedding;
 pub mod engine;
 pub mod error;

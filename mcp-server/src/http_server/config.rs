@@ -38,6 +38,8 @@ pub struct Config {
     pub core_log_level: Option<String>,
     /// Path to FastText embedding model for RAG/semantic search
     pub fasttext_model: Option<String>,
+    /// Auto-compaction configuration
+    pub auto_compact: crate::compaction::AutoCompactConfig,
 }
 
 /// Load configuration from environment or config file
@@ -93,6 +95,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             sync_logging: toml_config.logging.sync,
             core_log_level: toml_config.logging.core_level,
             fasttext_model: toml_config.rag.fasttext_model,
+            auto_compact: toml_config.compaction,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -112,6 +115,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             sync_logging: false,
             core_log_level: None,
             fasttext_model: None,
+            auto_compact: crate::compaction::AutoCompactConfig::default(),
         }
     };
 
@@ -147,6 +151,8 @@ struct TomlConfig {
     logging: LoggingConfig,
     #[serde(default)]
     rag: RagConfig,
+    #[serde(default)]
+    compaction: crate::compaction::AutoCompactConfig,
 }
 
 #[derive(Debug, serde::Deserialize)]

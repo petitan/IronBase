@@ -357,6 +357,9 @@ async fn run_http_server_internal(
         require_api_key: config.require_api_key,
     };
 
+    // Clone job_manager before it's moved into IronBaseService::new()
+    let job_manager_for_compact = job_manager.clone();
+
     // Create central service layer
     let service = Arc::new(crate::IronBaseService::new(
         adapter.clone(),
@@ -439,6 +442,51 @@ async fn run_http_server_internal(
             }
         }
     });
+
+    // Spawn auto-compact timer task (checks wastage periodically, triggers compact if needed)
+    if config.auto_compact.enabled {
+        let auto_compact_state = Arc::new(parking_lot::Mutex::new(
+            crate::compaction::AutoCompactState::new(config.auto_compact.clone()),
+        ));
+        let adapter_for_compact = adapter.clone();
+        let check_interval_secs = config.auto_compact.check_interval_secs;
+        tokio::spawn(async move {
+            // Use 60s tick interval; should_check() gates actual checks to check_interval_secs
+            let tick_secs = check_interval_secs.min(60);
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+            // Skip the first immediate tick (let server warm up)
+            interval.tick().await;
+            let shutdown = shutdown::shutdown_signal();
+            tokio::pin!(shutdown);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let should = { auto_compact_state.lock().should_check() };
+                        if should {
+                            let adapter_clone = adapter_for_compact.clone();
+                            let job_mgr_clone = job_manager_for_compact.clone();
+                            let state_clone = auto_compact_state.clone();
+                            if let Err(e) = tokio::task::spawn_blocking(move || {
+                                crate::compaction::auto_compact_check(
+                                    &adapter_clone,
+                                    &job_mgr_clone,
+                                    &state_clone,
+                                );
+                            }).await {
+                                tracing::warn!("Auto-compact check panicked: {}", e);
+                            }
+                        }
+                    }
+                    _ = &mut shutdown => {
+                        tracing::debug!("Auto-compact task received shutdown signal");
+                        break;
+                    }
+                }
+            }
+        });
+        tracing::info!("Auto-compact timer started (HTTP mode)");
+    }
 
     let app_state = Arc::new(HttpAppState {
         service,

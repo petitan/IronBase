@@ -88,7 +88,7 @@ use std::path::{Path, PathBuf};
 // Re-export public types
 pub use compaction::{
     compact_scan_standalone, CheckpointStats, CompactionConfig, CompactionScanResult,
-    CompactionSnapshot, CompactionStats,
+    CompactionSnapshot, CompactionStats, StorageWastage,
 };
 
 // Re-export traits module
