@@ -141,7 +141,10 @@ impl DatabaseCore<StorageEngine> {
         self.flush_all_indexes()?;
 
         let mut storage = self.storage.write();
-        storage.compact()
+        let stats = storage.compact()?;
+        // Calibrate last_compact_size for bloat_ratio calculations
+        self.set_last_compact_size(stats.size_after);
+        Ok(stats)
     }
 
     /// Non-blocking compact: 3-phase lock splitting
@@ -179,6 +182,10 @@ impl DatabaseCore<StorageEngine> {
         let result = self.compact_nonblocking_inner(config, progress_callback);
         self.is_compacting
             .store(false, std::sync::atomic::Ordering::SeqCst);
+        // Calibrate last_compact_size on success
+        if let Ok(ref stats) = result {
+            self.set_last_compact_size(stats.size_after);
+        }
         result
     }
 
