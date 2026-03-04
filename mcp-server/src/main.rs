@@ -508,12 +508,20 @@ fn run_stdio_server(cli: &Cli) {
     eprintln!("Shutting down gracefully...");
 
     // 1. Stop all background jobs and wait for threads to complete
+    //    (sets shutdown_flag = true, which also signals the auto-compact timer)
     let completed = job_manager_for_shutdown.shutdown();
     if completed > 0 {
         eprintln!("Stopped {} background job threads", completed);
     }
 
-    // 2. Close the adapter (flush indexes)
+    // 2. Wait for auto-compact timer thread to exit (max ~5s due to sleep step)
+    if let Some(handle) = _auto_compact_handle {
+        if let Err(e) = handle.join() {
+            eprintln!("Auto-compact timer thread panicked: {:?}", e);
+        }
+    }
+
+    // 3. Close the adapter (flush indexes)
     if let Err(e) = adapter.close() {
         eprintln!("Error closing database: {}", e);
     } else {
