@@ -619,12 +619,12 @@ pub struct HybridSearchParams {
     #[serde(default = "default_rerank")]
     pub rerank: bool,
 
-    /// Enable MMR diversity reranking (default: true)
+    /// Enable MMR diversity reranking (default: false)
     /// Uses embedding cosine similarity to select diverse results
     #[serde(default = "default_deduplicate")]
     pub deduplicate: bool,
 
-    /// MMR lambda parameter for diversity vs relevance trade-off (default: 0.5)
+    /// MMR lambda parameter for diversity vs relevance trade-off (default: 0.7)
     /// 1.0 = pure relevance, 0.0 = pure diversity
     #[serde(default = "default_mmr_lambda")]
     pub mmr_lambda: f64,
@@ -640,7 +640,7 @@ pub struct HybridSearchParams {
     /// Optional title field for title match boost in reranking (up to 1.5x)
     pub title_field: Option<String>,
 
-    /// Fulltext search mode: "or" (default) = any word matches, "and" = ALL words must match
+    /// Fulltext search mode: "and" (default) = ALL words must match, "or" (deprecated) = any word matches
     pub mode: Option<String>,
 
     /// Match scope for AND mode: "chunk" (default) or "document"

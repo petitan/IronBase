@@ -162,14 +162,18 @@ fn handle_hybrid_search(
                     .embed(&p.query, Some(&prov_name))
                     .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
 
-                // Use user-specified fields if provided, otherwise use resolved defaults
+                // Use user-specified fields if provided, otherwise use resolved defaults.
+                // NOTE: detection is heuristic — if user explicitly passes the default value
+                // (e.g. vector_field="embedding"), it is treated as "not set" and RAG config
+                // takes priority. This is acceptable because explicitly passing the default
+                // value has no practical difference from not passing it.
                 let eff_vf = if p.vector_field != "embedding" {
-                    p.vector_field.clone() // User explicitly set vector_field
+                    p.vector_field.clone()
                 } else {
                     emb_field
                 };
                 let eff_tf = if p.text_field != "content" {
-                    p.text_field.clone() // User explicitly set text_field
+                    p.text_field.clone()
                 } else {
                     txt_field
                 };
@@ -456,8 +460,9 @@ fn handle_hybrid_search(
             None => Some(doc_filter),
         };
 
+        let phase2_limit = (p.limit * 100).min(MAX_INTERNAL_LIMIT);
         let phase2_options = FulltextSearchOptions {
-            limit: Some(500), // Generous: top docs rarely have >100 chunks each
+            limit: Some(phase2_limit), // Scale with requested doc count
             skip: None,
             min_score: None,
             projection: None,
@@ -489,12 +494,14 @@ fn handle_hybrid_search(
         let mut doc_groups: HashMap<String, Vec<Value>> =
             HashMap::with_capacity(doc_order.len());
         for res in phase2_results {
-            let doc_id = res
-                .document
-                .get("doc_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .unwrap_or_default();
+            let doc_id = match res.document.get("doc_id").and_then(|v| v.as_str()) {
+                Some(did) => did.to_string(),
+                None => {
+                    tracing::warn!("Phase 2 chunk without doc_id, skipping: {:?}",
+                        res.document.get("_id"));
+                    continue;
+                }
+            };
 
             let mut chunk = if let Some(ref proj) = projection {
                 apply_projection(&res.document, proj)
@@ -510,7 +517,15 @@ fn handle_hybrid_search(
 
         // Build grouped response in doc_order (best score first)
         let mut total_chunks: usize = 0;
-        let grouped_results: Vec<Value> = doc_order
+        let mut grouped_results: Vec<Value> = Vec::new();
+        grouped_results.try_reserve(doc_order.len()).map_err(|e| {
+            McpError::internal(format!(
+                "OOM: cannot allocate {} grouped results: {}",
+                doc_order.len(),
+                e
+            ))
+        })?;
+        grouped_results.extend(doc_order
             .into_iter()
             .filter_map(|doc_id| {
                 let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
@@ -525,8 +540,7 @@ fn handle_hybrid_search(
                     "chunk_count": chunks.len(),
                     "chunks": chunks
                 }))
-            })
-            .collect();
+            }));
 
         let doc_count = grouped_results.len();
         response.insert("results".into(), json!(grouped_results));

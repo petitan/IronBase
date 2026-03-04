@@ -914,6 +914,62 @@ fn test_aggregate_sort_limit() {
 }
 
 #[test]
+fn test_aggregate_sort_mixed_types_no_panic() {
+    // Issue #58: $sort must not panic with mixed types (int/string/null/bool)
+    let (db, coll_name) = create_test_db("test");
+
+    // Insert documents with deliberately mixed types in the "value" field
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("value".to_string(), json!(42))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("value".to_string(), json!("hello"))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("value".to_string(), json!(null))]),
+    )
+    .unwrap();
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("value".to_string(), json!(true))]),
+    )
+    .unwrap();
+    db.insert_one(&coll_name, HashMap::from([("value".to_string(), json!(7))]))
+        .unwrap();
+    // Document with missing "value" field entirely
+    db.insert_one(
+        &coll_name,
+        HashMap::from([("other".to_string(), json!("x"))]),
+    )
+    .unwrap();
+
+    let collection = db.collection(&coll_name).unwrap();
+
+    // Ascending sort — must not panic, must return all 6 docs
+    let asc = collection
+        .aggregate(&json!([{"$sort": {"value": 1}}]))
+        .unwrap();
+    assert_eq!(asc.len(), 6);
+
+    // Descending sort — must not panic, must return all 6 docs
+    let desc = collection
+        .aggregate(&json!([{"$sort": {"value": -1}}]))
+        .unwrap();
+    assert_eq!(desc.len(), 6);
+
+    // TopK path (sort + limit) — must not panic
+    let topk = collection
+        .aggregate(&json!([{"$sort": {"value": 1}}, {"$limit": 3}]))
+        .unwrap();
+    assert_eq!(topk.len(), 3);
+}
+
+#[test]
 fn test_aggregate_skip() {
     let (db, coll_name) = create_test_db("test");
     let collection = db.collection(&coll_name).unwrap();
