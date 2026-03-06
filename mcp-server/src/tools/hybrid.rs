@@ -159,7 +159,7 @@ fn handle_hybrid_search(
 
                 // Embed the query
                 let qv = manager
-                    .embed(&p.query, Some(&prov_name))
+                    .embed_query(&p.query, Some(&prov_name))
                     .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
 
                 // Use user-specified fields if provided, otherwise use resolved defaults.

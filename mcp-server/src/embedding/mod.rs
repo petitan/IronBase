@@ -82,6 +82,11 @@ pub trait EmbeddingProvider: Send + Sync {
         self.provider_name()
     }
 
+    /// Embed a query text (may use different prefix than document embedding)
+    fn embed_query(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
+        self.embed(text)
+    }
+
     /// Preprocessing pipeline version string.
     /// Changes trigger automatic re-embedding on server restart.
     fn preprocessing_version(&self) -> &str {
@@ -297,6 +302,36 @@ impl EmbeddingManager {
         // Store in cache
         if let Some(ref cache) = self.cache {
             cache.put(text, provider_name, model_name, vector.clone());
+        }
+
+        Ok(vector)
+    }
+
+    /// Embed a query text using specified or default provider (with cache)
+    ///
+    /// Uses query-specific prefix (e.g., "query: " for BGE-M3) for better retrieval.
+    pub fn embed_query(&self, text: &str, provider: Option<&str>) -> EmbeddingResult<Vec<f32>> {
+        let provider_name = provider.unwrap_or(&self.default_provider);
+        let provider = self
+            .providers
+            .get(provider_name)
+            .ok_or_else(|| EmbeddingError::ProviderNotFound(provider_name.to_string()))?;
+
+        let model_name = provider.model_name();
+
+        // Cache key includes "query:" prefix to differentiate from document embeddings
+        let cache_key = format!("query:{}", text);
+
+        if let Some(ref cache) = self.cache {
+            if let Some(cached) = cache.get(&cache_key, provider_name, model_name) {
+                return Ok(cached.vector);
+            }
+        }
+
+        let vector = provider.embed_query(text)?;
+
+        if let Some(ref cache) = self.cache {
+            cache.put(&cache_key, provider_name, model_name, vector.clone());
         }
 
         Ok(vector)

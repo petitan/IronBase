@@ -47,6 +47,8 @@ impl HttpProviderConfig {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         }
     }
 
@@ -90,6 +92,8 @@ impl HttpProviderConfig {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         }
     }
 
@@ -136,6 +140,8 @@ impl HttpProviderConfig {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         }
     }
 
@@ -176,6 +182,8 @@ impl HttpProviderConfig {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         }
     }
 
@@ -217,6 +225,8 @@ impl HttpProviderConfig {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         }
     }
 
@@ -253,6 +263,8 @@ impl HttpProviderConfig {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         }
     }
 
@@ -294,6 +306,8 @@ impl HttpProviderConfig {
             preprocessing_version: Some("bge_m3_v1".to_string()),
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: Some("passage: ".to_string()),
+            query_prefix: Some("query: ".to_string()),
         }
     }
 
@@ -332,6 +346,8 @@ impl HttpProviderConfig {
             preprocessing_version: Some("bge_m3_v1".to_string()),
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: Some("passage: ".to_string()),
+            query_prefix: Some("query: ".to_string()),
         }
     }
 
@@ -374,6 +390,8 @@ impl HttpProviderConfig {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         }
     }
 }

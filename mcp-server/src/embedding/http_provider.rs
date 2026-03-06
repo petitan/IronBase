@@ -153,6 +153,14 @@ pub struct HttpProviderConfig {
     #[serde(default)]
     pub preprocessing_version: Option<String>,
 
+    /// Prefix for document/passage texts (e.g., "passage: " for BGE-M3)
+    #[serde(default)]
+    pub document_prefix: Option<String>,
+
+    /// Prefix for query texts (e.g., "query: " for BGE-M3)
+    #[serde(default)]
+    pub query_prefix: Option<String>,
+
     /// Max retries for transient errors (connection refused, timeout, 5xx)
     #[serde(default = "default_max_retries")]
     pub max_retries: usize,
@@ -419,14 +427,32 @@ impl HttpEmbeddingProvider {
         }
     }
 
+    /// Apply prefix to texts (document_prefix or query_prefix)
+    fn apply_prefix(&self, texts: &[&str], is_query: bool) -> Vec<String> {
+        let prefix = if is_query {
+            self.config.query_prefix.as_deref()
+        } else {
+            self.config.document_prefix.as_deref()
+        };
+
+        match prefix {
+            Some(p) => texts.iter().map(|t| format!("{}{}", p, t)).collect(),
+            None => texts.iter().map(|t| t.to_string()).collect(),
+        }
+    }
+
     /// Make HTTP request and parse response (with retry + exponential backoff)
-    fn call_api(&self, texts: &[&str]) -> EmbeddingResult<Vec<Vec<f32>>> {
+    fn call_api(&self, texts: &[&str], is_query: bool) -> EmbeddingResult<Vec<Vec<f32>>> {
         let url = self.build_url();
 
-        let body = if texts.len() == 1 {
-            self.build_single_body(texts[0])
+        // Apply prefix (e.g., "passage: " for documents, "query: " for queries)
+        let prefixed = self.apply_prefix(texts, is_query);
+        let prefixed_refs: Vec<&str> = prefixed.iter().map(|s| s.as_str()).collect();
+
+        let body = if prefixed_refs.len() == 1 {
+            self.build_single_body(prefixed_refs[0])
         } else {
-            self.build_batch_body(texts)
+            self.build_batch_body(&prefixed_refs)
         };
 
         let max_retries = self.config.max_retries;
@@ -503,7 +529,15 @@ impl HttpEmbeddingProvider {
 
 impl EmbeddingProvider for HttpEmbeddingProvider {
     fn embed(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
-        let results = self.call_api(&[text])?;
+        let results = self.call_api(&[text], false)?;
+        results
+            .into_iter()
+            .next()
+            .ok_or_else(|| EmbeddingError::ApiError("Empty response".to_string()))
+    }
+
+    fn embed_query(&self, text: &str) -> EmbeddingResult<Vec<f32>> {
+        let results = self.call_api(&[text], true)?;
         results
             .into_iter()
             .next()
@@ -516,7 +550,7 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             let mut all_results = Vec::with_capacity(texts.len());
 
             for chunk in texts.chunks(self.config.max_batch_size) {
-                let results = self.call_api(chunk)?;
+                let results = self.call_api(chunk, false)?;
                 all_results.extend(results);
             }
 
@@ -679,6 +713,8 @@ mod tests {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         };
 
         let provider = HttpEmbeddingProvider::new(config);
@@ -715,6 +751,8 @@ mod tests {
             preprocessing_version: None,
             max_retries: 3,
             retry_base_delay_ms: 500,
+            document_prefix: None,
+            query_prefix: None,
         };
 
         let provider = HttpEmbeddingProvider::new(config);

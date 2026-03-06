@@ -1353,7 +1353,7 @@ fn hybrid_search_impl(
     };
 
     // Embed query
-    let query_vector = match manager.embed(query, Some(&provider_name)) {
+    let query_vector = match manager.embed_query(query, Some(&provider_name)) {
         Ok(v) => v,
         Err(e) => return Dynamic::from(format!("Error: Query embedding failed: {}", e)),
     };
