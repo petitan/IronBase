@@ -391,6 +391,164 @@ impl EmbeddingManager {
     }
 }
 
+/// Create an EmbeddingManager from TOML config
+///
+/// Supports: "fasttext", "ollama", "vllm", "openai"
+/// Falls back to FastText if provider is unknown.
+pub fn create_from_config(
+    config: &crate::http_server::EmbeddingTomlConfig,
+) -> EmbeddingResult<EmbeddingManager> {
+    let mut manager = EmbeddingManager::with_cache(CacheConfig::default());
+
+    match config.provider.as_str() {
+        "ollama" => {
+            let base_url = config
+                .base_url
+                .as_deref()
+                .unwrap_or("http://localhost:11434");
+            let model = config.model.as_deref();
+
+            let mut http_config = HttpProviderConfig::ollama_batch(Some(base_url), model);
+
+            // Apply config overrides
+            http_config.timeout_secs = config.timeout_secs;
+            http_config.max_retries = config.max_retries;
+            http_config.retry_base_delay_ms = config.retry_base_delay_ms;
+            if let Some(batch_size) = config.batch_size {
+                http_config.max_batch_size = batch_size;
+            }
+
+            let provider = HttpEmbeddingProvider::new(http_config);
+            manager.register_provider("ollama", Arc::new(provider));
+            manager.default_provider = "ollama".to_string();
+
+            // Health check (non-blocking)
+            check_http_provider_available(base_url, model.unwrap_or("bge-m3"));
+        }
+        "vllm" => {
+            let base_url = config
+                .base_url
+                .as_deref()
+                .unwrap_or("http://localhost:8000");
+            let model = config.model.as_deref();
+
+            let mut http_config = HttpProviderConfig::vllm(base_url, model);
+
+            http_config.timeout_secs = config.timeout_secs;
+            http_config.max_retries = config.max_retries;
+            http_config.retry_base_delay_ms = config.retry_base_delay_ms;
+            if let Some(batch_size) = config.batch_size {
+                http_config.max_batch_size = batch_size;
+            }
+
+            // Apply API key if provided
+            if let Some(ref api_key) = config.api_key {
+                http_config.auth = http_provider::AuthMethod::Bearer {
+                    token: api_key.clone(),
+                };
+            }
+
+            let provider = HttpEmbeddingProvider::new(http_config);
+            manager.register_provider("vllm", Arc::new(provider));
+            manager.default_provider = "vllm".to_string();
+        }
+        "openai" => {
+            let api_key = config
+                .api_key
+                .clone()
+                .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+                .ok_or_else(|| {
+                    EmbeddingError::ConfigError(
+                        "OpenAI provider requires api_key in [embedding] or OPENAI_API_KEY env var"
+                            .to_string(),
+                    )
+                })?;
+            let model = config.model.as_deref();
+
+            let mut http_config = HttpProviderConfig::openai(&api_key, model);
+            // Override preprocessing_version if provided
+
+            http_config.timeout_secs = config.timeout_secs;
+            http_config.max_retries = config.max_retries;
+            http_config.retry_base_delay_ms = config.retry_base_delay_ms;
+
+            let provider = HttpEmbeddingProvider::new(http_config);
+            manager.register_provider("openai", Arc::new(provider));
+            manager.default_provider = "openai".to_string();
+        }
+        "fasttext" => {
+            // Use model_path from [embedding] section, or fall back to env var
+            let model_path = config
+                .model_path
+                .clone()
+                .or_else(|| std::env::var("IRONBASE_FASTTEXT_MODEL").ok());
+
+            if let Some(path) = model_path {
+                if !path.is_empty() {
+                    match FastTextProvider::load(Path::new(&path)) {
+                        Ok(provider) => {
+                            manager.register_provider("fasttext", Arc::new(provider));
+                            manager.default_provider = "fasttext".to_string();
+                        }
+                        Err(e) => {
+                            log::warn!("Failed to load FastText model '{}': {}", path, e);
+                        }
+                    }
+                }
+            }
+        }
+        other => {
+            return Err(EmbeddingError::ConfigError(format!(
+                "Unknown embedding provider '{}'. Supported: fasttext, ollama, vllm, openai",
+                other
+            )));
+        }
+    }
+
+    Ok(manager)
+}
+
+/// Non-blocking health check for HTTP-based embedding providers.
+/// Logs warnings if provider is unavailable but does NOT block startup.
+fn check_http_provider_available(base_url: &str, model: &str) {
+    match ureq::get(base_url)
+        .timeout(std::time::Duration::from_secs(2))
+        .call()
+    {
+        Ok(_) => {
+            log::info!("Embedding provider at {} is reachable", base_url);
+            // Try a probe embedding to verify model is available
+            let probe_url = format!(
+                "{}/api/embed",
+                base_url.trim_end_matches('/')
+            );
+            match ureq::post(&probe_url)
+                .set("Content-Type", "application/json")
+                .timeout(std::time::Duration::from_secs(10))
+                .send_json(serde_json::json!({
+                    "model": model,
+                    "input": "test"
+                })) {
+                Ok(_) => {
+                    log::info!("Embedding model '{}' is available", model);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Embedding model '{}' may not be available: {}. Run 'ollama pull {}' if needed.",
+                        model, e, model
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!(
+                "Embedding provider at {} is not reachable: {}. Embeddings will fail until provider is available.",
+                base_url, e
+            );
+        }
+    }
+}
+
 impl Default for EmbeddingManager {
     fn default() -> Self {
         Self::new()

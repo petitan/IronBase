@@ -31,7 +31,8 @@ pub use acl::{AclConfig, AclManager, CallerContext, InterfaceType, RequiredPermi
 pub use adapter::{FindOptions, IronBaseAdapter, UpdateResult};
 pub use api_keys::ApiKeyCache;
 pub use embedding::{
-    EmbeddingCache, EmbeddingError, EmbeddingManager, EmbeddingProvider, ModelInfo,
+    create_from_config as create_embedding_from_config, EmbeddingCache, EmbeddingError,
+    EmbeddingManager, EmbeddingProvider, ModelInfo,
 };
 pub use engine::{IronBaseService, ServiceContext, ToolRequest, ToolResult};
 pub use error::{ErrorCode, McpError, OperationContext, Result};

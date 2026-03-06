@@ -349,48 +349,85 @@ fn run_stdio_server(cli: &Cli) {
         elapsed.as_secs_f64()
     );
 
-    // Initialize embedding manager if FastText model is configured
-    // Priority: IRONBASE_FASTTEXT_MODEL env var > config.toml [rag].fasttext_model
-    let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL").ok().or_else(|| {
-        // Try reading from config.toml [rag].fasttext_model
+    // Initialize embedding manager
+    // Priority: [embedding] config section > IRONBASE_FASTTEXT_MODEL env > [rag].fasttext_model
+    let embedding_manager: Option<Arc<mcp_ironbase::EmbeddingManager>> = {
+        // Parse config.toml for [embedding] and [rag] sections
         let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
         let config_file = std::path::Path::new(&config_path);
-        if config_file.exists() {
-            if let Ok(content) = std::fs::read_to_string(config_file) {
-                if let Ok(toml_val) = content.replace("\r\n", "\n").parse::<toml::Table>() {
-                    return toml_val
-                        .get("rag")
-                        .and_then(|r| r.get("fasttext_model"))
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
+        let toml_table: Option<toml::Table> = if config_file.exists() {
+            std::fs::read_to_string(config_file)
+                .ok()
+                .and_then(|c| c.replace("\r\n", "\n").parse().ok())
+        } else {
+            None
+        };
+
+        // Try [embedding] section first (new config-driven path)
+        let embedding_config: Option<mcp_ironbase::http_server::EmbeddingTomlConfig> = toml_table
+            .as_ref()
+            .and_then(|t| t.get("embedding"))
+            .and_then(|v| v.clone().try_into().ok());
+
+        // Set configured batch size for backfill jobs
+        if let Some(ref emb_config) = embedding_config {
+            if let Some(batch_size) = emb_config.batch_size {
+                mcp_ironbase::tools::defaults::set_configured_batch_size(batch_size);
+            }
+        }
+
+        if let Some(ref emb_config) = embedding_config {
+            match mcp_ironbase::create_embedding_from_config(emb_config) {
+                Ok(manager) if manager.has_providers() => {
+                    eprintln!(
+                        "Embedding manager initialized from [embedding] config: provider={}",
+                        emb_config.provider
+                    );
+                    Some(Arc::new(manager))
+                }
+                Ok(_) => {
+                    eprintln!("Warning: Embedding provider '{}' configured but no providers loaded", emb_config.provider);
+                    None
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to initialize embedding from config: {}", e);
+                    None
                 }
             }
-        }
-        None
-    });
-    let embedding_manager: Option<Arc<mcp_ironbase::EmbeddingManager>> = if let Some(model_path) =
-        fasttext_path
-    {
-        match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
-            Ok(manager) if manager.has_providers() => {
-                eprintln!(
-                    "Embedding manager initialized with FastText model: {}",
-                    model_path
-                );
-                Some(Arc::new(manager))
-            }
-            Ok(_) => {
-                eprintln!("Warning: FastText model configured but failed to load");
+        } else {
+            // Legacy: FastText-only path
+            let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL").ok().or_else(|| {
+                toml_table
+                    .as_ref()
+                    .and_then(|t| t.get("rag"))
+                    .and_then(|r| r.get("fasttext_model"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            });
+
+            if let Some(model_path) = fasttext_path {
+                match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+                    Ok(manager) if manager.has_providers() => {
+                        eprintln!(
+                            "Embedding manager initialized with FastText model: {}",
+                            model_path
+                        );
+                        Some(Arc::new(manager))
+                    }
+                    Ok(_) => {
+                        eprintln!("Warning: FastText model configured but failed to load");
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to initialize embedding manager: {}", e);
+                        None
+                    }
+                }
+            } else {
+                eprintln!("No embedding provider configured, embeddings disabled");
                 None
             }
-            Err(e) => {
-                eprintln!("Warning: Failed to initialize embedding manager: {}", e);
-                None
-            }
         }
-    } else {
-        eprintln!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
-        None
     };
 
     // Initialize job manager for async operations

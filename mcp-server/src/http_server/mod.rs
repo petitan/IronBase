@@ -13,7 +13,7 @@ mod state;
 mod tls;
 
 pub(crate) use client::{client_identity, is_client_initialized, mark_client_initialized};
-pub use config::{load_config, Config};
+pub use config::{load_config, Config, EmbeddingTomlConfig};
 pub(crate) use handler::handle_request;
 pub(crate) use instructions::get_server_instructions;
 pub(crate) use logging::SyncFileWriter;
@@ -273,34 +273,63 @@ async fn run_http_server_internal(
     // Create dynamic limits manager (calculates limits based on available memory)
     let limits_manager = crate::LimitsManager::new();
 
-    // Initialize embedding manager if FastText model is configured
-    // Priority: IRONBASE_FASTTEXT_MODEL env var > config.toml [rag].fasttext_model
-    let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
-        .ok()
-        .or_else(|| config.fasttext_model.clone());
-    let embedding_manager: Option<Arc<crate::EmbeddingManager>> = if let Some(model_path) =
-        fasttext_path
+    // Set configured batch size for backfill jobs (before embedding init)
+    if let Some(ref embedding_config) = config.embedding {
+        if let Some(batch_size) = embedding_config.batch_size {
+            crate::tools::defaults::set_configured_batch_size(batch_size);
+        }
+    }
+
+    // Initialize embedding manager
+    // Priority: [embedding] config section > IRONBASE_FASTTEXT_MODEL env > [rag].fasttext_model
+    let embedding_manager: Option<Arc<crate::EmbeddingManager>> = if let Some(ref embedding_config) =
+        config.embedding
     {
-        match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+        // New config-driven init
+        match crate::create_embedding_from_config(embedding_config) {
             Ok(manager) if manager.has_providers() => {
                 info!(
-                    "Embedding manager initialized with FastText model: {}",
-                    model_path
+                    "Embedding manager initialized from [embedding] config: provider={}",
+                    embedding_config.provider
                 );
                 Some(Arc::new(manager))
             }
             Ok(_) => {
-                warn!("FastText model configured but failed to load, embeddings disabled");
+                warn!("Embedding provider '{}' configured but no providers loaded", embedding_config.provider);
                 None
             }
             Err(e) => {
-                warn!("Failed to initialize embedding manager: {}", e);
+                warn!("Failed to initialize embedding from config: {}", e);
                 None
             }
         }
     } else {
-        info!("No FastText model configured (env IRONBASE_FASTTEXT_MODEL or config [rag].fasttext_model), embeddings disabled");
-        None
+        // Legacy: FastText-only path
+        let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
+            .ok()
+            .or_else(|| config.fasttext_model.clone());
+        if let Some(model_path) = fasttext_path {
+            match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+                Ok(manager) if manager.has_providers() => {
+                    info!(
+                        "Embedding manager initialized with FastText model: {}",
+                        model_path
+                    );
+                    Some(Arc::new(manager))
+                }
+                Ok(_) => {
+                    warn!("FastText model configured but failed to load, embeddings disabled");
+                    None
+                }
+                Err(e) => {
+                    warn!("Failed to initialize embedding manager: {}", e);
+                    None
+                }
+            }
+        } else {
+            info!("No embedding provider configured, embeddings disabled");
+            None
+        }
     };
 
     // Initialize job manager for async operations (embedding backfill, etc.)

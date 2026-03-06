@@ -148,6 +148,26 @@ pub struct HttpProviderConfig {
     /// Extra fields to include in request body (e.g., Cohere's input_type)
     #[serde(default)]
     pub extra_body_fields: HashMap<String, serde_json::Value>,
+
+    /// Preprocessing pipeline version (triggers re-embed on change)
+    #[serde(default)]
+    pub preprocessing_version: Option<String>,
+
+    /// Max retries for transient errors (connection refused, timeout, 5xx)
+    #[serde(default = "default_max_retries")]
+    pub max_retries: usize,
+
+    /// Base delay for exponential backoff in ms
+    #[serde(default = "default_retry_base_delay")]
+    pub retry_base_delay_ms: u64,
+}
+
+fn default_max_retries() -> usize {
+    3
+}
+
+fn default_retry_base_delay() -> u64 {
+    500
 }
 
 fn default_max_batch() -> usize {
@@ -391,7 +411,15 @@ impl HttpEmbeddingProvider {
         }
     }
 
-    /// Make HTTP request and parse response
+    /// Check if an error is retryable (connection refused, timeout, 5xx)
+    fn is_retryable(err: &ureq::Error) -> bool {
+        match err {
+            ureq::Error::Status(status, _) => *status >= 500,
+            ureq::Error::Transport(_) => true,
+        }
+    }
+
+    /// Make HTTP request and parse response (with retry + exponential backoff)
     fn call_api(&self, texts: &[&str]) -> EmbeddingResult<Vec<Vec<f32>>> {
         let url = self.build_url();
 
@@ -401,41 +429,75 @@ impl HttpEmbeddingProvider {
             self.build_batch_body(texts)
         };
 
-        let request = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .timeout(Duration::from_secs(self.config.timeout_secs));
+        let max_retries = self.config.max_retries;
+        let base_delay = Duration::from_millis(self.config.retry_base_delay_ms);
+        let max_delay = Duration::from_secs(30); // Cap backoff at 30s
 
-        let request = self.apply_auth(request);
+        let mut last_error = None;
 
-        let response = request.send_json(&body).map_err(|e| {
-            EmbeddingError::HttpError(format!("{} API call failed: {}", self.config.name, e))
-        })?;
+        for attempt in 0..=max_retries {
+            let request = ureq::post(&url)
+                .set("Content-Type", "application/json")
+                .timeout(Duration::from_secs(self.config.timeout_secs));
 
-        let json: serde_json::Value = response.into_json().map_err(|e| {
-            EmbeddingError::ApiError(format!(
-                "Failed to parse {} response: {}",
-                self.config.name, e
-            ))
-        })?;
+            let request = self.apply_auth(request);
 
-        let vectors = self.extract_vectors(&json)?;
+            match request.send_json(&body) {
+                Ok(response) => {
+                    let json: serde_json::Value = response.into_json().map_err(|e| {
+                        EmbeddingError::ApiError(format!(
+                            "Failed to parse {} response: {}",
+                            self.config.name, e
+                        ))
+                    })?;
 
-        // Cache dimension from first result
-        if !vectors.is_empty() {
-            match self.cached_dimension.lock() {
-                Ok(mut dim_guard) => {
-                    if dim_guard.is_none() {
-                        *dim_guard = Some(vectors[0].len());
+                    let vectors = self.extract_vectors(&json)?;
+
+                    // Cache dimension from first result
+                    if !vectors.is_empty() {
+                        if let Ok(mut dim_guard) = self.cached_dimension.lock() {
+                            if dim_guard.is_none() {
+                                *dim_guard = Some(vectors[0].len());
+                            }
+                        }
                     }
+
+                    return Ok(vectors);
                 }
                 Err(e) => {
-                    // Mutex poisoned - log but don't fail
-                    tracing::warn!("Dimension cache mutex poisoned: {}", e);
+                    if attempt < max_retries && Self::is_retryable(&e) {
+                        let delay = base_delay
+                            .saturating_mul(1 << attempt.min(5))
+                            .min(max_delay);
+                        tracing::warn!(
+                            "{} embedding retry {}/{}: {} (backoff {:?})",
+                            self.config.name,
+                            attempt + 1,
+                            max_retries,
+                            e,
+                            delay
+                        );
+                        std::thread::sleep(delay);
+                        last_error = Some(e);
+                    } else {
+                        return Err(EmbeddingError::HttpError(format!(
+                            "{} API call failed: {}",
+                            self.config.name, e
+                        )));
+                    }
                 }
             }
         }
 
-        Ok(vectors)
+        // All retries exhausted
+        Err(EmbeddingError::HttpError(format!(
+            "{} API call failed after {} retries: {}",
+            self.config.name,
+            max_retries,
+            last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "unknown error".to_string())
+        )))
     }
 }
 
@@ -501,6 +563,13 @@ impl EmbeddingProvider for HttpEmbeddingProvider {
             .display_name
             .as_deref()
             .unwrap_or(&self.config.name)
+    }
+
+    fn preprocessing_version(&self) -> &str {
+        self.config
+            .preprocessing_version
+            .as_deref()
+            .unwrap_or("default")
     }
 }
 
@@ -607,6 +676,9 @@ mod tests {
             timeout_secs: 30,
             error_path: None,
             extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         };
 
         let provider = HttpEmbeddingProvider::new(config);
@@ -640,6 +712,9 @@ mod tests {
             timeout_secs: 30,
             error_path: None,
             extra_body_fields: extra,
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         };
 
         let provider = HttpEmbeddingProvider::new(config);

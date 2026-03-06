@@ -47,11 +47,27 @@ pub fn default_embedding_provider() -> String {
 // Batch Processing Defaults
 // ============================================================================
 
-/// Default batch size for backfill operations
+/// Default batch size for backfill operations (FastText in-process)
 pub const DEFAULT_BATCH_SIZE: usize = 100;
 
 /// Maximum batch size for embedding operations
 pub const MAX_EMBEDDING_BATCH_SIZE: usize = 100;
+
+/// Configurable batch size override (set from [embedding].batch_size config)
+static CONFIGURED_BATCH_SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+
+/// Set the batch size from config (call once at startup)
+pub fn set_configured_batch_size(size: usize) {
+    let _ = CONFIGURED_BATCH_SIZE.set(size);
+}
+
+/// Get the effective batch size (config override > default)
+pub fn effective_batch_size() -> usize {
+    CONFIGURED_BATCH_SIZE
+        .get()
+        .copied()
+        .unwrap_or(DEFAULT_BATCH_SIZE)
+}
 
 /// Default function for serde
 pub fn default_batch_size() -> usize {

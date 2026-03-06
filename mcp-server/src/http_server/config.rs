@@ -40,6 +40,8 @@ pub struct Config {
     pub fasttext_model: Option<String>,
     /// Auto-compaction configuration
     pub auto_compact: crate::compaction::AutoCompactConfig,
+    /// Embedding provider configuration (takes priority over fasttext_model)
+    pub embedding: Option<EmbeddingTomlConfig>,
 }
 
 /// Load configuration from environment or config file
@@ -96,6 +98,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             core_log_level: toml_config.logging.core_level,
             fasttext_model: toml_config.rag.fasttext_model,
             auto_compact: toml_config.compaction,
+            embedding: toml_config.embedding,
         }
     } else {
         // Check for IRONBASE_PATH env var
@@ -116,6 +119,7 @@ pub fn load_config() -> Result<Config, Box<dyn std::error::Error>> {
             core_log_level: None,
             fasttext_model: None,
             auto_compact: crate::compaction::AutoCompactConfig::default(),
+            embedding: None,
         }
     };
 
@@ -153,6 +157,8 @@ struct TomlConfig {
     rag: RagConfig,
     #[serde(default)]
     compaction: crate::compaction::AutoCompactConfig,
+    #[serde(default)]
+    embedding: Option<EmbeddingTomlConfig>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -220,4 +226,55 @@ struct RagConfig {
     /// Path to FastText embedding model (.bin or .ironbase.bin)
     #[serde(default)]
     fasttext_model: Option<String>,
+}
+
+/// Embedding provider configuration from [embedding] TOML section
+///
+/// When present, this section takes priority over [rag].fasttext_model.
+/// Supports: "fasttext", "ollama", "vllm", "openai"
+#[derive(Debug, Clone, serde::Deserialize, Default)]
+pub struct EmbeddingTomlConfig {
+    /// Provider type: "fasttext" | "ollama" | "vllm" | "openai"
+    #[serde(default = "default_embedding_provider")]
+    pub provider: String,
+    /// Base URL for HTTP-based providers (e.g., "http://localhost:11434")
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Model name (e.g., "bge-m3", "nomic-embed-text")
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Batch size for backfill jobs (default: 32 for HTTP, 100 for FastText)
+    #[serde(default)]
+    pub batch_size: Option<usize>,
+    /// Request timeout in seconds (default: 120)
+    #[serde(default = "default_embedding_timeout")]
+    pub timeout_secs: u64,
+    /// Max retries for transient errors (default: 3)
+    #[serde(default = "default_embedding_max_retries")]
+    pub max_retries: usize,
+    /// Base delay for exponential backoff in ms (default: 500)
+    #[serde(default = "default_retry_base_delay")]
+    pub retry_base_delay_ms: u64,
+    /// API key (for OpenAI/cloud providers)
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Path to FastText model (only used when provider = "fasttext")
+    #[serde(default)]
+    pub model_path: Option<String>,
+}
+
+fn default_embedding_provider() -> String {
+    "fasttext".to_string()
+}
+
+fn default_embedding_timeout() -> u64 {
+    120
+}
+
+fn default_embedding_max_retries() -> usize {
+    3
+}
+
+fn default_retry_base_delay() -> u64 {
+    500
 }

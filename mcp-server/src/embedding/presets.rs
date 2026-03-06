@@ -44,6 +44,9 @@ impl HttpProviderConfig {
             timeout_secs: 60,
             error_path: Some("error".to_string()),
             extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         }
     }
 
@@ -84,6 +87,9 @@ impl HttpProviderConfig {
             timeout_secs: 30,
             error_path: Some("error.message".to_string()),
             extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         }
     }
 
@@ -127,6 +133,9 @@ impl HttpProviderConfig {
                 extra.insert("input_type".to_string(), json!("search_document"));
                 extra
             },
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         }
     }
 
@@ -164,6 +173,9 @@ impl HttpProviderConfig {
             timeout_secs: 30,
             error_path: Some("message".to_string()),
             extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         }
     }
 
@@ -202,6 +214,9 @@ impl HttpProviderConfig {
             timeout_secs: 30,
             error_path: Some("error.message".to_string()),
             extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         }
     }
 
@@ -235,6 +250,88 @@ impl HttpProviderConfig {
             timeout_secs: 60,
             error_path: Some("error".to_string()),
             extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
+        }
+    }
+
+    /// Ollama batch embedding API (newer `/api/embed` endpoint)
+    ///
+    /// No authentication required. Ollama must be running locally.
+    /// Uses the batch-capable `/api/embed` endpoint (Ollama 0.4+).
+    ///
+    /// Models: bge-m3 (1024), nomic-embed-text (768), mxbai-embed-large (1024)
+    pub fn ollama_batch(base_url: Option<&str>, model: Option<&str>) -> Self {
+        let mut model_dimensions = HashMap::new();
+        model_dimensions.insert("nomic-embed-text".to_string(), 768);
+        model_dimensions.insert("mxbai-embed-large".to_string(), 1024);
+        model_dimensions.insert("snowflake-arctic-embed".to_string(), 1024);
+        model_dimensions.insert("all-minilm".to_string(), 384);
+        model_dimensions.insert("bge-m3".to_string(), 1024);
+
+        Self {
+            name: "ollama".to_string(),
+            display_name: Some("Ollama".to_string()),
+            base_url: base_url.unwrap_or("http://localhost:11434").to_string(),
+            endpoint: Some("/api/embed".to_string()),
+            default_model: model.unwrap_or("bge-m3").to_string(),
+            auth: AuthMethod::None,
+            request_format: RequestFormat::TextArray {
+                model_field: "model".to_string(),
+                texts_field: "input".to_string(),
+            },
+            response_format: ResponseFormat::DirectArray {
+                path: "embeddings".to_string(),
+            },
+            model_dimensions,
+            default_dimension: 1024,
+            supports_batch: true,
+            max_batch_size: 32,
+            timeout_secs: 120,
+            error_path: Some("error".to_string()),
+            extra_body_fields: HashMap::new(),
+            preprocessing_version: Some("bge_m3_v1".to_string()),
+            max_retries: 3,
+            retry_base_delay_ms: 500,
+        }
+    }
+
+    /// vLLM embedding API (OpenAI-compatible)
+    ///
+    /// No authentication required for local deployment.
+    /// Uses the standard `/v1/embeddings` endpoint.
+    pub fn vllm(base_url: &str, model: Option<&str>) -> Self {
+        let mut model_dimensions = HashMap::new();
+        model_dimensions.insert("bge-m3".to_string(), 1024);
+        model_dimensions.insert("BAAI/bge-m3".to_string(), 1024);
+
+        Self {
+            name: "vllm".to_string(),
+            display_name: Some("vLLM".to_string()),
+            base_url: base_url.to_string(),
+            endpoint: Some("/v1/embeddings".to_string()),
+            default_model: model.unwrap_or("bge-m3").to_string(),
+            auth: AuthMethod::None,
+            request_format: RequestFormat::TextArray {
+                model_field: "model".to_string(),
+                texts_field: "input".to_string(),
+            },
+            response_format: ResponseFormat::ObjectArray {
+                array_path: "data".to_string(),
+                embedding_field: "embedding".to_string(),
+                index_field: Some("index".to_string()),
+            },
+            model_dimensions,
+            default_dimension: 1024,
+            supports_batch: true,
+            max_batch_size: 64,
+            timeout_secs: 120,
+            error_path: Some("error.message".to_string()),
+            extra_body_fields: HashMap::new(),
+            preprocessing_version: Some("bge_m3_v1".to_string()),
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         }
     }
 
@@ -274,6 +371,9 @@ impl HttpProviderConfig {
             timeout_secs: 30,
             error_path: Some("detail".to_string()),
             extra_body_fields: HashMap::new(),
+            preprocessing_version: None,
+            max_retries: 3,
+            retry_base_delay_ms: 500,
         }
     }
 }

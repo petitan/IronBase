@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use super::defaults::{
-    default_chunk_mode, default_chunk_overlap, default_chunk_size, is_allowed_system_collection,
-    DEFAULT_BATCH_SIZE, MAX_EMPTY_BATCHES,
+    default_chunk_mode, default_chunk_overlap, default_chunk_size, effective_batch_size,
+    is_allowed_system_collection, MAX_EMPTY_BATCHES,
 };
 use super::params::ParseParams;
 
@@ -342,7 +342,7 @@ fn start_backfill_job(
     let manager_clone = embedding_manager.clone();
     let config_clone = config.clone();
     let collection_owned = collection.to_string();
-    let batch_size = DEFAULT_BATCH_SIZE;
+    let batch_size = effective_batch_size();
     let job_mgr_clone = job_mgr.clone();
     let job_id_clone = job_id.clone();
     let shutdown_flag = job_mgr.shutdown_flag();
@@ -371,6 +371,75 @@ fn start_backfill_job(
     );
 
     Some(job_id)
+}
+
+/// Handle dimension change: drop old HNSW index, $unset old vectors, create new index.
+///
+/// Crash-safe ordering:
+/// 1. Drop old HNSW → if crash: no vector index, collection scan works
+/// 2. $unset old vectors → if crash: no vector data, re-embed will fix
+/// 3. Create new HNSW → if crash: empty index, re-embed will populate
+fn handle_dimension_change(
+    adapter: &Arc<IronBaseAdapter>,
+    collection: &str,
+    target_field: &str,
+    new_dimension: usize,
+) -> std::result::Result<(), String> {
+    // 1. Find and drop existing vector indexes on target_field
+    let indexes = adapter
+        .list_vector_indexes(collection)
+        .map_err(|e| format!("Failed to list vector indexes: {}", e))?;
+
+    for idx in &indexes {
+        let field = idx.get("field").and_then(|v| v.as_str()).unwrap_or("");
+        if field == target_field {
+            let name = idx.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            if !name.is_empty() {
+                tracing::info!("Dropping old vector index '{}' on '{}'", name, collection);
+                adapter
+                    .drop_vector_index(collection, name)
+                    .map_err(|e| format!("Failed to drop vector index '{}': {}", name, e))?;
+            }
+        }
+    }
+
+    // 2. $unset old vectors (wrong dimension) — batch update to avoid OOM
+    tracing::info!(
+        "Clearing old embedding vectors from '{}' field '{}' (wrong dimension)",
+        collection,
+        target_field
+    );
+    let update = json!({ "$unset": { target_field: "" } });
+    let filter = json!({ target_field: { "$exists": true } });
+    if let Err(e) = adapter.update_many(collection, filter, update) {
+        tracing::warn!(
+            "Failed to $unset old vectors for '{}': {} (re-embed will overwrite anyway)",
+            collection,
+            e
+        );
+    }
+
+    // 3. Create new HNSW index with correct dimension
+    tracing::info!(
+        "Creating new vector index on '{}' field '{}' with dim={}",
+        collection,
+        target_field,
+        new_dimension
+    );
+    adapter
+        .create_vector_index(
+            collection,
+            target_field,
+            new_dimension,
+            "cosine",      // default metric
+            100_000,       // max_vectors
+            16,            // m
+            200,           // ef_construction
+            50,            // ef_search
+        )
+        .map_err(|e| format!("Failed to create vector index: {}", e))?;
+
+    Ok(())
 }
 
 /// Background job execution for async backfill.
@@ -630,8 +699,45 @@ pub fn check_model_changes_and_reembed(
         let saved_model = config.model.as_deref().unwrap_or("");
         let current_preproc = provider.preprocessing_version().to_string();
         let saved_preproc = config.preprocessing_version.as_deref().unwrap_or("");
+        let current_dim = provider.dimension();
 
-        if saved_model.is_empty() && saved_preproc.is_empty() && !force_reembed {
+        // Check dimension change (e.g., FastText 300 → BGE-M3 1024)
+        let saved_dim = adapter
+            .list_vector_indexes(collection)
+            .ok()
+            .and_then(|indexes| {
+                indexes.iter().find_map(|idx| {
+                    let field = idx.get("field")?.as_str()?;
+                    if field == config.target_field {
+                        idx.get("dim")?.as_u64().map(|d| d as usize)
+                    } else {
+                        None
+                    }
+                })
+            })
+            .unwrap_or(0);
+
+        let dimension_changed = saved_dim > 0 && saved_dim != current_dim;
+
+        if dimension_changed {
+            tracing::info!(
+                "Dimension change detected for '{}': {} → {} on field '{}', rebuilding HNSW index",
+                collection,
+                saved_dim,
+                current_dim,
+                config.target_field
+            );
+            if let Err(e) = handle_dimension_change(adapter, collection, &config.target_field, current_dim) {
+                tracing::error!(
+                    "Failed to handle dimension change for '{}': {}",
+                    collection,
+                    e
+                );
+                continue;
+            }
+        }
+
+        if saved_model.is_empty() && saved_preproc.is_empty() && !force_reembed && !dimension_changed {
             // Legacy config without model/preprocessing info — save current, don't re-embed
             tracing::info!(
                 "Collection '{}': saving model '{}' and preprocessing '{}' to config (first time)",
@@ -645,7 +751,7 @@ pub fn check_model_changes_and_reembed(
             if let Err(e) = adapter.set_auto_embedding_config(collection, Some(updated_config)) {
                 tracing::warn!("Failed to update config for '{}': {}", collection, e);
             }
-        } else if saved_model != current_model || saved_preproc != current_preproc || force_reembed
+        } else if saved_model != current_model || saved_preproc != current_preproc || force_reembed || dimension_changed
         {
             // Something changed or force requested — start re-embed
             let reason = if force_reembed {
