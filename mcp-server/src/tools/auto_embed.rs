@@ -547,24 +547,24 @@ fn run_backfill_job(
             .filter_map(|doc| doc.get(&config.source_field).and_then(|v| v.as_str()))
             .collect();
 
-        let batch_had_updates;
+        let batch_had_updates = if !texts.is_empty() {
+            // Generate embeddings — try batch first, fallback to individual on failure
+            let docs_with_source: Vec<_> = result
+                .documents
+                .iter()
+                .filter(|doc| {
+                    doc.get(&config.source_field)
+                        .and_then(|v| v.as_str())
+                        .is_some()
+                })
+                .collect();
 
-        if !texts.is_empty() {
-            // Generate embeddings
-            match provider.embed_batch(&texts) {
+            let embeddings_result = provider.embed_batch(&texts);
+
+            let mut batch_processed = 0;
+
+            match embeddings_result {
                 Ok(embeddings) => {
-                    // Update documents with embeddings
-                    let docs_with_source: Vec<_> = result
-                        .documents
-                        .iter()
-                        .filter(|doc| {
-                            doc.get(&config.source_field)
-                                .and_then(|v| v.as_str())
-                                .is_some()
-                        })
-                        .collect();
-
-                    let mut batch_processed = 0;
                     for (doc, embedding) in docs_with_source.iter().zip(embeddings.iter()) {
                         if let Some(id) = doc.get("_id") {
                             let filter = json!({ "_id": id });
@@ -584,14 +584,48 @@ fn run_backfill_job(
                             }
                         }
                     }
-                    batch_had_updates = batch_processed > 0;
                 }
                 Err(e) => {
-                    tracing::warn!("Batch embedding failed: {}", e);
-                    errors += texts.len();
-                    batch_had_updates = false;
+                    // Batch failed (e.g., NaN from problematic texts) — fallback to individual
+                    tracing::warn!(
+                        "Batch embedding failed ({}), falling back to individual embedding for {} texts",
+                        e, texts.len()
+                    );
+
+                    for (doc, text) in docs_with_source.iter().zip(texts.iter()) {
+                        if let Some(id) = doc.get("_id") {
+                            match provider.embed(text) {
+                                Ok(embedding) => {
+                                    let filter = json!({ "_id": id });
+                                    let update = json!({
+                                        "$set": { &config.target_field: embedding }
+                                    });
+
+                                    match adapter.update_one(collection, filter, update) {
+                                        Ok(_) => {
+                                            processed += 1;
+                                            batch_processed += 1;
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to update document {:?}: {}", id, e);
+                                            errors += 1;
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    // Individual text also fails (NaN) — skip it
+                                    tracing::debug!(
+                                        "Skipping document {:?}: embedding produces NaN (text len={})",
+                                        id, text.len()
+                                    );
+                                    errors += 1;
+                                }
+                            }
+                        }
+                    }
                 }
             }
+            batch_processed > 0
         } else {
             // All documents in batch are missing source field - they won't be processed
             // but they also won't be excluded by the filter, so we need to track this
@@ -600,8 +634,8 @@ fn run_backfill_job(
                 result.documents.len(),
                 config.source_field
             );
-            batch_had_updates = false;
-        }
+            false
+        };
 
         // Safety: if we're not making progress, avoid infinite loop
         if !batch_had_updates {
