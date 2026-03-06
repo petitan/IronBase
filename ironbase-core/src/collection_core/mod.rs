@@ -554,9 +554,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                                     )
                                                 {
                                                     if let Some(text) = value.as_str() {
+                                                        let pdid_field = ft_index
+                                                            .parent_doc_id_field()
+                                                            .to_string();
                                                         let parent_doc_id =
                                                             crate::value_utils::get_nested_value(
-                                                                &doc, "doc_id",
+                                                                &doc,
+                                                                &pdid_field,
                                                             )
                                                             .and_then(|v| {
                                                                 v.as_str().map(|s| s.to_string())
@@ -1896,8 +1900,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         // Then add new entry if it's a string
                         if let Some(new_val) = new_value {
                             if let Some(text) = new_val.as_str() {
+                                let pdid_field = fts_index.parent_doc_id_field().to_string();
                                 let parent_doc_id = updated_doc
-                                    .get("doc_id")
+                                    .get(&pdid_field)
                                     .and_then(|v| v.as_str().map(|s| s.to_string()));
                                 // Log error but continue - document already persisted
                                 let update_result = if let Some(ref pdid) = parent_doc_id {

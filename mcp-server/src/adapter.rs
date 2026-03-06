@@ -153,6 +153,17 @@ pub struct FulltextSearchOptions {
     pub target_doc_ids: Option<std::collections::HashSet<String>>,
 }
 
+/// Result of document-level AND qualification for group_by_document.
+#[derive(Debug)]
+pub enum QualificationResult {
+    /// Single token: no intersection needed, skip qualification.
+    NotRequired,
+    /// Documents qualified via chunk_doc_mapping (fast path).
+    Qualified(Vec<String>),
+    /// Legacy index without chunk_doc_mapping — caller should use find-based fallback.
+    LegacyFallback,
+}
+
 /// Full-text search result with optional highlights
 #[derive(Debug)]
 pub struct FulltextSearchResult {
@@ -1822,29 +1833,24 @@ impl IronBaseAdapter {
     /// For each token, gets the posting list chunk_ids from the fulltext index,
     /// resolves them to doc_ids via the chunk_doc_mapping, then intersects.
     /// Returns the set of doc_ids that contain ALL query tokens (across any chunks).
-    ///
-    /// Returns None if:
-    /// - Single token (no intersection needed)
-    /// - chunk_doc_mapping not populated (legacy index, caller should fall back)
-    /// - Any token has 0 postings (empty result)
     pub fn fulltext_qualify_documents_fast(
         &self,
         collection: &str,
         field: &str,
         query: &str,
-    ) -> Result<Option<Vec<String>>> {
+    ) -> Result<QualificationResult> {
         let db = self.db.read();
         let coll = db.get_collection(collection)?;
 
         // Tokenize
         let tokens = coll.fulltext_tokenize_query(field, query)?;
         if tokens.len() <= 1 {
-            return Ok(None); // Single token: no intersection needed
+            return Ok(QualificationResult::NotRequired);
         }
 
         // Check if mapping is available
         if !coll.fulltext_has_chunk_doc_mapping(field)? {
-            return Ok(None); // No mapping → caller should use fallback
+            return Ok(QualificationResult::LegacyFallback);
         }
 
         // Get posting counts for rarity ordering
@@ -1852,7 +1858,7 @@ impl IronBaseAdapter {
         token_counts.sort_by_key(|(_, count)| *count);
 
         if token_counts[0].1 == 0 {
-            return Ok(Some(Vec::new())); // Rarest token has 0 postings → empty result
+            return Ok(QualificationResult::Qualified(Vec::new()));
         }
 
         // Intersect at doc_id level using chunk_doc_mapping
@@ -1870,11 +1876,15 @@ impl IronBaseAdapter {
             });
 
             if qualified.as_ref().is_some_and(|q| q.is_empty()) {
-                return Ok(Some(Vec::new())); // Early termination
+                return Ok(QualificationResult::Qualified(Vec::new()));
             }
         }
 
-        Ok(qualified.map(|q| q.into_iter().collect()))
+        Ok(QualificationResult::Qualified(
+            qualified
+                .map(|q| q.into_iter().collect())
+                .unwrap_or_default(),
+        ))
     }
 
     // ============================================================

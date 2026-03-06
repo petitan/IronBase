@@ -658,6 +658,8 @@ struct FulltextIndexMetadataForSave {
     total_doc_length: u64,
     #[serde(default)]
     chunk_doc_mapping: Vec<(DocumentId, String)>,
+    #[serde(default)]
+    parent_doc_id_field: Option<String>,
 }
 
 // ============================================================================
@@ -778,6 +780,10 @@ pub struct FulltextIndex {
     /// for document-level AND qualification.
     chunk_doc_mapping: HashMap<DocumentId, String>,
 
+    /// The field name used to extract parent doc_id from documents.
+    /// Default: "doc_id". Configurable per-index for non-standard RAG layouts.
+    parent_doc_id_field: Option<String>,
+
     // === Two-Phase Flush Support ===
     /// Frozen inverted index snapshot during background flush.
     /// When a flush is in progress, inverted_index is moved here (via Arc) so that
@@ -822,6 +828,8 @@ pub(crate) struct FulltextFlushSnapshot {
     pub total_doc_length: u64,
     /// Chunk → parent doc_id mapping (for RAG collections)
     pub chunk_doc_mapping: HashMap<DocumentId, String>,
+    /// Parent doc_id field name
+    pub parent_doc_id_field: Option<String>,
 }
 
 /// Result of a two-phase flush, to be committed under write lock.
@@ -863,6 +871,49 @@ impl Ord for OrderedScore {
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => unreachable!(),
             })
+    }
+}
+
+/// BM25 scoring context — shared across all fulltext search methods.
+///
+/// Created once per search from index-level statistics, then passed to
+/// `term_score()` for each (doc_id, tf) pair.
+struct Bm25Context {
+    k1: f64,
+    b: f64,
+    avg_dl: f64,
+    has_doc_lengths: bool,
+}
+
+impl Bm25Context {
+    /// Create a BM25 context from index statistics.
+    fn new(total_doc_length: u64, total_docs: f64, doc_lengths_empty: bool) -> Self {
+        Self {
+            k1: 1.2,
+            b: 0.75,
+            avg_dl: if total_docs > 0.0 && total_doc_length > 0 {
+                total_doc_length as f64 / total_docs
+            } else {
+                0.0
+            },
+            has_doc_lengths: !doc_lengths_empty,
+        }
+    }
+
+    /// Compute BM25 term score for a single (doc, tf) pair.
+    ///
+    /// Returns `IDF * tf_saturation` where tf_saturation accounts for document
+    /// length normalization when doc_lengths data is available.
+    #[inline]
+    fn term_score(&self, tf: f64, idf: f64, doc_length: Option<u32>) -> f64 {
+        let tf_sat = if self.has_doc_lengths && self.avg_dl > 0.0 {
+            let dl = doc_length.unwrap_or(0) as f64;
+            let norm = 1.0 - self.b + self.b * (dl / self.avg_dl);
+            ((self.k1 + 1.0) * tf) / (self.k1 * norm + tf)
+        } else {
+            ((self.k1 + 1.0) * tf) / (self.k1 + tf)
+        };
+        tf_sat * idf
     }
 }
 
@@ -1408,6 +1459,7 @@ impl FulltextIndex {
             doc_lengths: HashMap::new(),
             total_doc_length: 0,
             chunk_doc_mapping: HashMap::new(),
+            parent_doc_id_field: None,
         }
     }
 
@@ -1437,6 +1489,7 @@ impl FulltextIndex {
             doc_lengths: HashMap::new(),
             total_doc_length: 0,
             chunk_doc_mapping: HashMap::new(),
+            parent_doc_id_field: None,
         };
 
         // Create and initialize the file with header
@@ -1944,36 +1997,23 @@ impl FulltextIndex {
         // - Calculate IDF and accumulate scores directly
         // - NO read_doc_tokens_from_disk calls needed!
 
-        // BM25 parameters
-        const BM25_K1: f64 = 1.2;
-        const BM25_B: f64 = 0.75;
-        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
-            self.total_doc_length as f64 / total_docs
-        } else {
-            0.0
-        };
-        let has_bm25_data = !self.doc_lengths.is_empty();
+        let bm25 = Bm25Context::new(
+            self.total_doc_length,
+            total_docs,
+            self.doc_lengths.is_empty(),
+        );
 
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
         let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
 
         for token in &query_tokens {
             if let Some(entries) = self.get_token_entries_merged(token) {
-                // IDF = log(1 + total_docs / docs_with_token)
                 let idf = (1.0 + total_docs / entries.len() as f64).ln();
 
                 for (doc_id, tf) in entries {
-                    let tf_f = tf as f64;
-                    let bm25_score = if has_bm25_data && avg_dl > 0.0 {
-                        // Full BM25: score = IDF * ((k1+1)*tf) / (k1*(1-b+b*dl/avgdl) + tf)
-                        let dl = *self.doc_lengths.get(&doc_id).unwrap_or(&0) as f64;
-                        let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
-                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
-                    } else {
-                        // Fallback: no doc length data (legacy index) → TF saturation only
-                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
-                    };
-                    *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
+                    let dl = self.doc_lengths.get(&doc_id).copied();
+                    *doc_scores.entry(doc_id.clone()).or_default() +=
+                        bm25.term_score(tf as f64, idf, dl);
 
                     matched
                         .entry(doc_id.clone())
@@ -2051,46 +2091,35 @@ impl FulltextIndex {
             return Ok(Vec::new());
         }
 
-        // BM25 parameters
-        const BM25_K1: f64 = 1.2;
-        const BM25_B: f64 = 0.75;
-        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
-            self.total_doc_length as f64 / total_docs
-        } else {
-            0.0
-        };
-        let has_bm25_data = !self.doc_lengths.is_empty();
+        let bm25 = Bm25Context::new(
+            self.total_doc_length,
+            total_docs,
+            self.doc_lengths.is_empty(),
+        );
 
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
         let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
-        let mut iteration: usize = 0;
+        let mut ops: usize = 0;
 
         for token in &query_tokens {
-            // Check cancellation before loading token entries (disk I/O)
             if let Some(exec_ctx) = ctx {
-                exec_ctx.maybe_check(iteration)?;
+                exec_ctx.maybe_check(ops)?;
             }
-            iteration += 1;
 
             if let Some(entries) = self.get_token_entries_merged(token) {
                 let idf = (1.0 + total_docs / entries.len() as f64).ln();
 
                 for (doc_id, tf) in entries {
-                    // Check cancellation periodically during iteration
-                    if let Some(exec_ctx) = ctx {
-                        exec_ctx.maybe_check(iteration)?;
+                    ops += 1;
+                    if ops % 1000 == 0 {
+                        if let Some(exec_ctx) = ctx {
+                            exec_ctx.maybe_check(ops)?;
+                        }
                     }
-                    iteration += 1;
 
-                    let tf_f = tf as f64;
-                    let bm25_score = if has_bm25_data && avg_dl > 0.0 {
-                        let dl = *self.doc_lengths.get(&doc_id).unwrap_or(&0) as f64;
-                        let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
-                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
-                    } else {
-                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
-                    };
-                    *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
+                    let dl = self.doc_lengths.get(&doc_id).copied();
+                    *doc_scores.entry(doc_id.clone()).or_default() +=
+                        bm25.term_score(tf as f64, idf, dl);
                     matched
                         .entry(doc_id.clone())
                         .or_default()
@@ -2158,25 +2187,20 @@ impl FulltextIndex {
             return Ok(Vec::new());
         }
 
-        // BM25 parameters
-        const BM25_K1: f64 = 1.2;
-        const BM25_B: f64 = 0.75;
-        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
-            self.total_doc_length as f64 / total_docs
-        } else {
-            0.0
-        };
-        let has_bm25_data = !self.doc_lengths.is_empty();
+        let bm25 = Bm25Context::new(
+            self.total_doc_length,
+            total_docs,
+            self.doc_lengths.is_empty(),
+        );
 
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
         let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
-        let mut iteration: usize = 0;
+        let mut ops: usize = 0;
 
         for token in &query_tokens {
             if let Some(exec_ctx) = ctx {
-                exec_ctx.maybe_check(iteration)?;
+                exec_ctx.maybe_check(ops)?;
             }
-            iteration += 1;
 
             if let Some(entries) = self.get_token_entries_merged(token) {
                 let idf = (1.0 + total_docs / entries.len() as f64).ln();
@@ -2191,20 +2215,16 @@ impl FulltextIndex {
                         continue; // No mapping → skip (shouldn't happen for RAG chunks)
                     }
 
-                    if let Some(exec_ctx) = ctx {
-                        exec_ctx.maybe_check(iteration)?;
+                    ops += 1;
+                    if ops % 1000 == 0 {
+                        if let Some(exec_ctx) = ctx {
+                            exec_ctx.maybe_check(ops)?;
+                        }
                     }
-                    iteration += 1;
 
-                    let tf_f = tf as f64;
-                    let bm25_score = if has_bm25_data && avg_dl > 0.0 {
-                        let dl = *self.doc_lengths.get(&doc_id).unwrap_or(&0) as f64;
-                        let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
-                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
-                    } else {
-                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
-                    };
-                    *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
+                    let dl = self.doc_lengths.get(&doc_id).copied();
+                    *doc_scores.entry(doc_id.clone()).or_default() +=
+                        bm25.term_score(tf as f64, idf, dl);
                     matched
                         .entry(doc_id.clone())
                         .or_default()
@@ -2297,17 +2317,14 @@ impl FulltextIndex {
         }
 
         // Phase 3: BM25 scoring only for intersection candidates
-        const BM25_K1: f64 = 1.2;
-        const BM25_B: f64 = 0.75;
-        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
-            self.total_doc_length as f64 / total_docs
-        } else {
-            0.0
-        };
-        let has_bm25_data = !self.doc_lengths.is_empty();
+        let bm25 = Bm25Context::new(
+            self.total_doc_length,
+            total_docs,
+            self.doc_lengths.is_empty(),
+        );
 
         let mut doc_scores: HashMap<DocumentId, f64> = HashMap::with_capacity(candidates.len());
-        let mut iteration: usize = 0;
+        let mut ops: usize = 0;
 
         for (_token, entries) in &all_postings {
             let idf = (1.0 + total_docs / entries.len() as f64).ln();
@@ -2316,20 +2333,16 @@ impl FulltextIndex {
                 if !candidates.contains(doc_id) {
                     continue;
                 }
-                if let Some(ctx) = ctx {
-                    ctx.maybe_check(iteration)?;
+                ops += 1;
+                if ops % 1000 == 0 {
+                    if let Some(ctx) = ctx {
+                        ctx.maybe_check(ops)?;
+                    }
                 }
-                iteration += 1;
 
-                let tf_f = *tf as f64;
-                let bm25_score = if has_bm25_data && avg_dl > 0.0 {
-                    let dl = *self.doc_lengths.get(doc_id).unwrap_or(&0) as f64;
-                    let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
-                    ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
-                } else {
-                    ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
-                };
-                *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
+                let dl = self.doc_lengths.get(doc_id).copied();
+                *doc_scores.entry(doc_id.clone()).or_default() +=
+                    bm25.term_score(*tf as f64, idf, dl);
             }
         }
 
@@ -2576,6 +2589,7 @@ impl FulltextIndex {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            parent_doc_id_field: self.parent_doc_id_field.clone(),
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         {
@@ -2670,6 +2684,7 @@ impl FulltextIndex {
             doc_lengths: self.doc_lengths.clone(),
             total_doc_length: self.total_doc_length,
             chunk_doc_mapping: self.chunk_doc_mapping.clone(),
+            parent_doc_id_field: self.parent_doc_id_field.clone(),
         })
     }
 
@@ -2772,6 +2787,7 @@ impl FulltextIndex {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            parent_doc_id_field: snapshot.parent_doc_id_field.clone(),
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         file.write_all(&metadata_bytes)?;
@@ -3002,6 +3018,7 @@ impl FulltextIndex {
                 doc_lengths: metadata.doc_lengths.into_iter().collect(),
                 total_doc_length: metadata.total_doc_length,
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
+                parent_doc_id_field: metadata.parent_doc_id_field,
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
@@ -3064,6 +3081,7 @@ impl FulltextIndex {
                 doc_lengths: metadata.doc_lengths.into_iter().collect(),
                 total_doc_length: metadata.total_doc_length,
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
+                parent_doc_id_field: metadata.parent_doc_id_field,
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
@@ -3113,6 +3131,16 @@ impl FulltextIndex {
             entries = count,
             "Populated chunk_doc_mapping from catalog (startup migration)"
         );
+    }
+
+    /// Get the parent doc_id field name (default: "doc_id").
+    pub fn parent_doc_id_field(&self) -> &str {
+        self.parent_doc_id_field.as_deref().unwrap_or("doc_id")
+    }
+
+    /// Set the parent doc_id field name.
+    pub fn set_parent_doc_id_field(&mut self, field: String) {
+        self.parent_doc_id_field = Some(field);
     }
 
     /// Get storage path

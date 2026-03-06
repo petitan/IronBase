@@ -576,10 +576,14 @@ fn qualify_documents(
     text_field: &str,
     query: &str,
 ) -> Result<Option<Value>> {
-    // Fast path: use in-memory chunk→doc_id mapping (zero find() calls)
+    use crate::adapter::QualificationResult;
+
     let qualify_start = std::time::Instant::now();
     match adapter.fulltext_qualify_documents_fast(collection, text_field, query)? {
-        Some(doc_ids) => {
+        QualificationResult::NotRequired => {
+            return Ok(None);
+        }
+        QualificationResult::Qualified(doc_ids) => {
             let count = doc_ids.len();
             let qualified_vec: Vec<Value> = doc_ids.into_iter().map(|s| json!(s)).collect();
             tracing::info!(
@@ -590,24 +594,20 @@ fn qualify_documents(
             );
             return Ok(Some(json!({"doc_id": {"$in": qualified_vec}})));
         }
-        None => {
-            // Check if it's because single token (no qualification needed)
-            let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
-            if tokens.len() <= 1 {
-                return Ok(None);
-            }
-            // chunk_doc_mapping not available → fall back to find-based qualification
+        QualificationResult::LegacyFallback => {
             tracing::warn!(
                 collection = collection,
-                "qualify_documents: chunk_doc_mapping not available, using fallback"
+                "qualify_documents: chunk_doc_mapping not available, using find-based fallback"
             );
         }
     }
 
     // Fallback: find-based qualification (for legacy indexes without chunk_doc_mapping)
     let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
+    if tokens.len() <= 1 {
+        return Ok(None);
+    }
 
-    // Get posting list sizes → sort by rarity (smallest first for early termination)
     let mut token_counts =
         adapter.fulltext_token_posting_counts(collection, text_field, &tokens)?;
     token_counts.sort_by_key(|(_, count)| *count);
@@ -616,7 +616,6 @@ fn qualify_documents(
         return Ok(Some(json!({"doc_id": {"$in": []}})));
     }
 
-    // Per-token resolution: for each token, get posting list chunk_ids → find → doc_ids
     let mut qualified: Option<HashSet<String>> = None;
 
     for (token, _) in &token_counts {

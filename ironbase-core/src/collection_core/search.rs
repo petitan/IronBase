@@ -452,7 +452,8 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     for (doc_id, doc) in &batch_docs {
                         if let Some(value) = get_nested_value(doc, &field_clone) {
                             if let Some(s) = value.as_str() {
-                                let parent_doc_id = get_nested_value(doc, "doc_id")
+                                let pdid_field = index.parent_doc_id_field().to_string();
+                                let parent_doc_id = get_nested_value(doc, &pdid_field)
                                     .and_then(|v| v.as_str().map(|x| x.to_string()));
                                 let insert_result = if let Some(ref pdid) = parent_doc_id {
                                     index.insert_with_parent_doc_id(doc_id, s, pdid)

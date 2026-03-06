@@ -1417,7 +1417,8 @@ impl IndexManager {
                 if let Some(value) = get_nested_value(doc, &index.field) {
                     if let Some(s) = value.as_str() {
                         // Extract parent doc_id for chunk→document mapping (RAG collections)
-                        let parent_doc_id = get_nested_value(doc, "doc_id")
+                        let pdid_field = index.parent_doc_id_field().to_string();
+                        let parent_doc_id = get_nested_value(doc, &pdid_field)
                             .and_then(|v| v.as_str().map(|s| s.to_string()));
                         // Log error but continue - document already persisted
                         let insert_result = if let Some(ref pdid) = parent_doc_id {
