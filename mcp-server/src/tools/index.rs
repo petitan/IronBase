@@ -249,6 +249,7 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         highlight: p.highlight,
         highlight_context: p.highlight_context,
         highlight_max_snippets: p.highlight_max_snippets,
+        target_doc_ids: None,
     };
     // Multi-field search if `fields` is provided, otherwise single-field
     let results = if let Some(ref fields) = p.fields {

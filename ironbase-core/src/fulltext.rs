@@ -19,7 +19,7 @@ use crate::error::{IronBaseError, Result};
 use crate::log_error;
 use rust_stemmers::{Algorithm, Stemmer};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -656,6 +656,8 @@ struct FulltextIndexMetadataForSave {
     doc_lengths: Vec<(DocumentId, u32)>,
     #[serde(default)]
     total_doc_length: u64,
+    #[serde(default)]
+    chunk_doc_mapping: Vec<(DocumentId, String)>,
 }
 
 // ============================================================================
@@ -769,6 +771,13 @@ pub struct FulltextIndex {
     /// Sum of all document lengths for computing average doc length (avgdl = total / doc_count)
     total_doc_length: u64,
 
+    // === Chunk → Document ID Mapping (for RAG collections) ===
+    /// Maps chunk _id (DocumentId) → parent document's doc_id field value.
+    /// Populated at insert time when the caller provides a parent doc_id.
+    /// Used by hybrid_search group_by_document to avoid expensive find() calls
+    /// for document-level AND qualification.
+    chunk_doc_mapping: HashMap<DocumentId, String>,
+
     // === Two-Phase Flush Support ===
     /// Frozen inverted index snapshot during background flush.
     /// When a flush is in progress, inverted_index is moved here (via Arc) so that
@@ -811,6 +820,8 @@ pub(crate) struct FulltextFlushSnapshot {
     pub doc_lengths: HashMap<DocumentId, u32>,
     /// BM25 sum of all document lengths
     pub total_doc_length: u64,
+    /// Chunk → parent doc_id mapping (for RAG collections)
+    pub chunk_doc_mapping: HashMap<DocumentId, String>,
 }
 
 /// Result of a two-phase flush, to be committed under write lock.
@@ -827,6 +838,32 @@ pub struct FtsSearchResult {
     pub doc_id: DocumentId,
     pub score: f64,
     pub matched_tokens: Vec<String>,
+}
+
+/// Wrapper for f64 scores that implements Ord (required for BinaryHeap).
+/// NaN is treated as less than any valid score.
+#[derive(Clone, Debug, PartialEq)]
+struct OrderedScore(f64);
+
+impl Eq for OrderedScore {}
+
+impl PartialOrd for OrderedScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderedScore {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .partial_cmp(&other.0)
+            .unwrap_or_else(|| match (self.0.is_nan(), other.0.is_nan()) {
+                (true, true) => std::cmp::Ordering::Equal,
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => unreachable!(),
+            })
+    }
 }
 
 // ============================================================================
@@ -908,6 +945,10 @@ pub struct FulltextSearchOptions {
     pub cancel_flag: Option<Arc<AtomicBool>>,
     /// Deadline for timeout support
     pub deadline: Option<Instant>,
+    /// Pre-filter: only return chunks belonging to these parent doc_ids.
+    /// Uses chunk_doc_mapping for O(1) lookup per posting entry, avoiding disk I/O.
+    /// When None, no pre-filtering is applied (default behavior).
+    pub target_doc_ids: Option<HashSet<String>>,
 }
 
 impl FulltextSearchOptions {
@@ -1366,6 +1407,7 @@ impl FulltextIndex {
             frozen_inverted: None,
             doc_lengths: HashMap::new(),
             total_doc_length: 0,
+            chunk_doc_mapping: HashMap::new(),
         }
     }
 
@@ -1394,6 +1436,7 @@ impl FulltextIndex {
             frozen_inverted: None,
             doc_lengths: HashMap::new(),
             total_doc_length: 0,
+            chunk_doc_mapping: HashMap::new(),
         };
 
         // Create and initialize the file with header
@@ -1725,6 +1768,27 @@ impl FulltextIndex {
 
     /// Insert a document's field value into the index
     pub fn insert(&mut self, doc_id: &DocumentId, text: &str) -> Result<()> {
+        self.insert_impl(doc_id, text, None)
+    }
+
+    /// Insert a document with its parent doc_id (for RAG chunk → document mapping).
+    /// The `parent_doc_id` is stored in `chunk_doc_mapping` for efficient
+    /// document-level AND qualification in hybrid search.
+    pub fn insert_with_parent_doc_id(
+        &mut self,
+        doc_id: &DocumentId,
+        text: &str,
+        parent_doc_id: &str,
+    ) -> Result<()> {
+        self.insert_impl(doc_id, text, Some(parent_doc_id))
+    }
+
+    fn insert_impl(
+        &mut self,
+        doc_id: &DocumentId,
+        text: &str,
+        parent_doc_id: Option<&str>,
+    ) -> Result<()> {
         let tokens = tokenize(text, &self.options);
         if tokens.is_empty() {
             return Ok(());
@@ -1748,6 +1812,12 @@ impl FulltextIndex {
         let doc_len: u32 = token_counts.values().sum();
         self.doc_lengths.insert(doc_id.clone(), doc_len);
         self.total_doc_length += doc_len as u64;
+
+        // Track chunk → parent doc_id mapping (for RAG collections)
+        if let Some(pdid) = parent_doc_id {
+            self.chunk_doc_mapping
+                .insert(doc_id.clone(), pdid.to_string());
+        }
 
         // Store token frequencies - disk or memory
         if self.storage_path.is_some() && self.file_handle.is_some() {
@@ -1784,6 +1854,9 @@ impl FulltextIndex {
             self.total_doc_length -= old_len as u64;
         }
 
+        // Remove from chunk → doc_id mapping
+        self.chunk_doc_mapping.remove(doc_id);
+
         // Remove from offsets
         self.doc_tokens_offsets.remove(doc_id);
 
@@ -1819,6 +1892,17 @@ impl FulltextIndex {
     pub fn update(&mut self, doc_id: &DocumentId, text: &str) -> Result<()> {
         self.remove(doc_id)?;
         self.insert(doc_id, text)
+    }
+
+    /// Update a document in the index, preserving the chunk→doc_id mapping.
+    pub fn update_with_parent_doc_id(
+        &mut self,
+        doc_id: &DocumentId,
+        text: &str,
+        parent_doc_id: &str,
+    ) -> Result<()> {
+        self.remove(doc_id)?;
+        self.insert_with_parent_doc_id(doc_id, text, parent_doc_id)
     }
 
     /// Search for documents matching the query using TF-IDF scoring
@@ -2036,6 +2120,267 @@ impl FulltextIndex {
         Ok(results.into_iter().skip(skip).take(limit).collect())
     }
 
+    /// Fulltext search pre-filtered by target doc_ids using chunk_doc_mapping.
+    ///
+    /// Only scores and returns chunks belonging to the specified parent doc_ids.
+    /// The filtering happens at the posting list level BEFORE scoring, avoiding
+    /// unnecessary BM25 computation and disk I/O for irrelevant chunks.
+    ///
+    /// Used by hybrid_search Phase 2 (group_by_document) to efficiently retrieve
+    /// all relevant chunks for the top N documents.
+    ///
+    /// Falls back to `search_with_ctx` if chunk_doc_mapping is empty.
+    pub fn search_for_doc_ids_with_ctx(
+        &self,
+        query: &str,
+        target_doc_ids: &HashSet<String>,
+        limit: usize,
+        skip: usize,
+        min_score: Option<f64>,
+        ctx: Option<&crate::execution::ExecutionContext>,
+    ) -> Result<Vec<FtsSearchResult>> {
+        if target_doc_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Fallback if no mapping available
+        if self.chunk_doc_mapping.is_empty() {
+            return self.search_with_ctx(query, limit, skip, min_score, ctx);
+        }
+
+        let query_tokens = tokenize(query, &self.options);
+        if query_tokens.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let total_docs = self.doc_tokens_offsets.len() as f64;
+        if total_docs == 0.0 {
+            return Ok(Vec::new());
+        }
+
+        // BM25 parameters
+        const BM25_K1: f64 = 1.2;
+        const BM25_B: f64 = 0.75;
+        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
+            self.total_doc_length as f64 / total_docs
+        } else {
+            0.0
+        };
+        let has_bm25_data = !self.doc_lengths.is_empty();
+
+        let mut doc_scores: HashMap<DocumentId, f64> = HashMap::new();
+        let mut matched: HashMap<DocumentId, Vec<String>> = HashMap::new();
+        let mut iteration: usize = 0;
+
+        for token in &query_tokens {
+            if let Some(exec_ctx) = ctx {
+                exec_ctx.maybe_check(iteration)?;
+            }
+            iteration += 1;
+
+            if let Some(entries) = self.get_token_entries_merged(token) {
+                let idf = (1.0 + total_docs / entries.len() as f64).ln();
+
+                for (doc_id, tf) in entries {
+                    // Pre-filter: skip chunks not belonging to target doc_ids
+                    if let Some(parent_doc_id) = self.chunk_doc_mapping.get(&doc_id) {
+                        if !target_doc_ids.contains(parent_doc_id) {
+                            continue;
+                        }
+                    } else {
+                        continue; // No mapping → skip (shouldn't happen for RAG chunks)
+                    }
+
+                    if let Some(exec_ctx) = ctx {
+                        exec_ctx.maybe_check(iteration)?;
+                    }
+                    iteration += 1;
+
+                    let tf_f = tf as f64;
+                    let bm25_score = if has_bm25_data && avg_dl > 0.0 {
+                        let dl = *self.doc_lengths.get(&doc_id).unwrap_or(&0) as f64;
+                        let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
+                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
+                    } else {
+                        ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
+                    };
+                    *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
+                    matched
+                        .entry(doc_id.clone())
+                        .or_default()
+                        .push(token.clone());
+                }
+            }
+        }
+
+        if doc_scores.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let min = min_score.unwrap_or(0.0);
+
+        let mut results: Vec<_> = doc_scores
+            .into_iter()
+            .filter(|(_, score)| *score >= min)
+            .map(|(doc_id, score)| FtsSearchResult {
+                matched_tokens: matched.remove(&doc_id).unwrap_or_default(),
+                doc_id,
+                score,
+            })
+            .collect();
+
+        results.sort_unstable_by(Self::compare_search_results);
+
+        Ok(results.into_iter().skip(skip).take(limit).collect())
+    }
+
+    /// AND-optimized fulltext search: intersects posting lists before scoring.
+    ///
+    /// When all query tokens must appear in a document (AND mode), this method
+    /// first finds the intersection of posting lists (starting from the rarest
+    /// token), then scores only those documents. This reduces work from
+    /// O(sum_posting_sizes) to O(min_posting_size * num_tokens) for the
+    /// intersection phase, plus O(intersection_size * num_tokens) for scoring.
+    ///
+    /// Uses a Top-K binary heap instead of full sort for O(N log k) vs O(N log N).
+    ///
+    /// Falls back to `search_with_ctx` for single-token queries.
+    pub fn search_and_with_ctx(
+        &self,
+        query: &str,
+        limit: usize,
+        skip: usize,
+        min_score: Option<f64>,
+        ctx: Option<&crate::execution::ExecutionContext>,
+    ) -> Result<Vec<FtsSearchResult>> {
+        let query_tokens = tokenize(query, &self.options);
+
+        // Single token or empty: no intersection possible, use standard path
+        if query_tokens.len() <= 1 {
+            return self.search_with_ctx(query, limit, skip, min_score, ctx);
+        }
+
+        let total_docs = self.doc_tokens_offsets.len() as f64;
+        if total_docs == 0.0 {
+            return Ok(Vec::new());
+        }
+
+        // Phase 1: Load all posting lists, sorted by size (rarest first)
+        let mut all_postings: Vec<(String, Vec<TokenEntry>)> =
+            Vec::with_capacity(query_tokens.len());
+        for token in &query_tokens {
+            if let Some(ctx) = ctx {
+                ctx.maybe_check(0)?;
+            }
+            match self.get_token_entries_merged(token) {
+                Some(entries) if !entries.is_empty() => {
+                    all_postings.push((token.clone(), entries));
+                }
+                _ => return Ok(Vec::new()), // AND: missing token → empty result
+            }
+        }
+        all_postings.sort_by_key(|(_, entries)| entries.len());
+
+        // Phase 2: Intersect posting lists (rarest token seed → intersect with rest)
+        let mut candidates: HashSet<DocumentId> =
+            all_postings[0].1.iter().map(|(id, _)| id.clone()).collect();
+
+        for (_, entries) in &all_postings[1..] {
+            if let Some(ctx) = ctx {
+                ctx.maybe_check(0)?;
+            }
+            let token_docs: HashSet<&DocumentId> = entries.iter().map(|(id, _)| id).collect();
+            candidates.retain(|id| token_docs.contains(id));
+            if candidates.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+
+        // Phase 3: BM25 scoring only for intersection candidates
+        const BM25_K1: f64 = 1.2;
+        const BM25_B: f64 = 0.75;
+        let avg_dl = if total_docs > 0.0 && self.total_doc_length > 0 {
+            self.total_doc_length as f64 / total_docs
+        } else {
+            0.0
+        };
+        let has_bm25_data = !self.doc_lengths.is_empty();
+
+        let mut doc_scores: HashMap<DocumentId, f64> = HashMap::with_capacity(candidates.len());
+        let mut iteration: usize = 0;
+
+        for (_token, entries) in &all_postings {
+            let idf = (1.0 + total_docs / entries.len() as f64).ln();
+
+            for (doc_id, tf) in entries {
+                if !candidates.contains(doc_id) {
+                    continue;
+                }
+                if let Some(ctx) = ctx {
+                    ctx.maybe_check(iteration)?;
+                }
+                iteration += 1;
+
+                let tf_f = *tf as f64;
+                let bm25_score = if has_bm25_data && avg_dl > 0.0 {
+                    let dl = *self.doc_lengths.get(doc_id).unwrap_or(&0) as f64;
+                    let norm = 1.0 - BM25_B + BM25_B * (dl / avg_dl);
+                    ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 * norm + tf_f)
+                } else {
+                    ((BM25_K1 + 1.0) * tf_f) / (BM25_K1 + tf_f)
+                };
+                *doc_scores.entry(doc_id.clone()).or_default() += bm25_score * idf;
+            }
+        }
+
+        if doc_scores.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let min = min_score.unwrap_or(0.0);
+        let all_tokens: Vec<String> = query_tokens;
+        let effective_limit = skip + limit;
+
+        // Phase 4: Top-K selection with BinaryHeap (O(N log k) instead of O(N log N))
+        // Heap stores (Reverse(score), doc_id) — min-heap by score so we can evict smallest
+        let mut heap: BinaryHeap<std::cmp::Reverse<(OrderedScore, DocumentId)>> =
+            BinaryHeap::with_capacity(effective_limit + 1);
+
+        for (doc_id, score) in &doc_scores {
+            if *score < min {
+                continue;
+            }
+            let ordered = OrderedScore(*score);
+            if heap.len() < effective_limit {
+                heap.push(std::cmp::Reverse((ordered, doc_id.clone())));
+            } else if let Some(&std::cmp::Reverse((ref min_in_heap, _))) = heap.peek() {
+                if ordered > *min_in_heap {
+                    heap.pop();
+                    heap.push(std::cmp::Reverse((ordered, doc_id.clone())));
+                }
+            }
+        }
+
+        // Extract results from heap in descending score order
+        let mut results: Vec<FtsSearchResult> = heap
+            .into_sorted_vec()
+            .into_iter()
+            .map(
+                |std::cmp::Reverse((ordered_score, doc_id))| FtsSearchResult {
+                    matched_tokens: all_tokens.clone(),
+                    doc_id,
+                    score: ordered_score.0,
+                },
+            )
+            .collect();
+
+        // Reverse because into_sorted_vec gives ascending order
+        results.reverse();
+
+        // Apply skip
+        Ok(results.into_iter().skip(skip).take(limit).collect())
+    }
+
     /// Compare two search results for sorting (score descending, doc_id ascending)
     ///
     /// Handles NaN scores by treating them as lowest relevance (sorted to end).
@@ -2077,6 +2422,11 @@ impl FulltextIndex {
     /// Get number of indexed documents
     pub fn doc_count(&self) -> usize {
         self.doc_tokens_offsets.len()
+    }
+
+    /// Get all indexed document IDs (keys of doc_tokens_offsets).
+    pub fn doc_tokens_offsets_keys(&self) -> Vec<DocumentId> {
+        self.doc_tokens_offsets.keys().cloned().collect()
     }
 
     /// Check if a document is already indexed
@@ -2209,7 +2559,7 @@ impl FulltextIndex {
             file.write_all(&token_offsets_bytes)?;
         }
 
-        // Write metadata (name, field, options, doc_lengths, total_doc_length)
+        // Write metadata (name, field, options, doc_lengths, total_doc_length, chunk_doc_mapping)
         let metadata_offset = token_offsets_offset + token_offsets_bytes.len() as u64;
         let metadata = FulltextIndexMetadataForSave {
             name: self.name.clone(),
@@ -2221,6 +2571,11 @@ impl FulltextIndex {
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
             total_doc_length: self.total_doc_length,
+            chunk_doc_mapping: self
+                .chunk_doc_mapping
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         {
@@ -2314,6 +2669,7 @@ impl FulltextIndex {
             storage_path,
             doc_lengths: self.doc_lengths.clone(),
             total_doc_length: self.total_doc_length,
+            chunk_doc_mapping: self.chunk_doc_mapping.clone(),
         })
     }
 
@@ -2411,6 +2767,11 @@ impl FulltextIndex {
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
             total_doc_length: snapshot.total_doc_length,
+            chunk_doc_mapping: snapshot
+                .chunk_doc_mapping
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         file.write_all(&metadata_bytes)?;
@@ -2640,6 +3001,7 @@ impl FulltextIndex {
                 frozen_inverted: None,
                 doc_lengths: metadata.doc_lengths.into_iter().collect(),
                 total_doc_length: metadata.total_doc_length,
+                chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
@@ -2701,10 +3063,56 @@ impl FulltextIndex {
                 frozen_inverted: None,
                 doc_lengths: metadata.doc_lengths.into_iter().collect(),
                 total_doc_length: metadata.total_doc_length,
+                chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
         }
+    }
+
+    /// Look up the parent doc_id for a given chunk _id.
+    /// Returns None if the chunk has no mapping (non-RAG collection or legacy index).
+    pub fn get_chunk_doc_id(&self, chunk_id: &DocumentId) -> Option<&str> {
+        self.chunk_doc_mapping.get(chunk_id).map(|s| s.as_str())
+    }
+
+    /// Resolve multiple chunk _ids to their parent doc_ids.
+    /// Only returns entries that have a mapping (skips unknown chunks).
+    pub fn resolve_chunk_doc_ids(&self, chunk_ids: &[DocumentId]) -> HashMap<DocumentId, String> {
+        let mut result = HashMap::with_capacity(chunk_ids.len());
+        for cid in chunk_ids {
+            if let Some(did) = self.chunk_doc_mapping.get(cid) {
+                result.insert(cid.clone(), did.clone());
+            }
+        }
+        result
+    }
+
+    /// Check if chunk_doc_mapping is populated.
+    pub fn has_chunk_doc_mapping(&self) -> bool {
+        !self.chunk_doc_mapping.is_empty()
+    }
+
+    /// Get the number of entries in chunk_doc_mapping.
+    pub fn chunk_doc_mapping_len(&self) -> usize {
+        self.chunk_doc_mapping.len()
+    }
+
+    /// Populate chunk_doc_mapping from external data (startup migration for legacy indexes).
+    ///
+    /// Called when loading an index that was saved before chunk_doc_mapping existed.
+    /// Only populates if the mapping is currently empty and entries are provided.
+    pub fn populate_chunk_doc_mapping(&mut self, entries: Vec<(DocumentId, String)>) {
+        if !self.chunk_doc_mapping.is_empty() || entries.is_empty() {
+            return;
+        }
+        let count = entries.len();
+        self.chunk_doc_mapping = entries.into_iter().collect();
+        tracing::info!(
+            index = %self.name,
+            entries = count,
+            "Populated chunk_doc_mapping from catalog (startup migration)"
+        );
     }
 
     /// Get storage path

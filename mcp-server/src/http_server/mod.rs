@@ -453,8 +453,7 @@ async fn run_http_server_internal(
         tokio::spawn(async move {
             // Use 60s tick interval; should_check() gates actual checks to check_interval_secs
             let tick_secs = check_interval_secs.min(60);
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(tick_secs));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(tick_secs));
             // Skip the first immediate tick (let server warm up)
             interval.tick().await;
             let shutdown = shutdown::shutdown_signal();

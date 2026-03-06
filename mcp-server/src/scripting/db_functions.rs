@@ -855,6 +855,7 @@ fn register_search_functions(
                 highlight,
                 highlight_context,
                 highlight_max_snippets,
+                target_doc_ids: None,
             };
 
             match adapter_ftsrch.fulltext_search(collection, field, query, options) {
@@ -1405,6 +1406,7 @@ fn hybrid_search_impl(
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
+        target_doc_ids: None,
     };
 
     let text_results = if let Some(ref fields) = text_fields_opt {

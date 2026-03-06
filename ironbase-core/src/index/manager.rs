@@ -1416,8 +1416,16 @@ impl IndexManager {
                 // Get field value - only index string values
                 if let Some(value) = get_nested_value(doc, &index.field) {
                     if let Some(s) = value.as_str() {
+                        // Extract parent doc_id for chunk→document mapping (RAG collections)
+                        let parent_doc_id = get_nested_value(doc, "doc_id")
+                            .and_then(|v| v.as_str().map(|s| s.to_string()));
                         // Log error but continue - document already persisted
-                        if let Err(e) = index.insert(doc_id, s) {
+                        let insert_result = if let Some(ref pdid) = parent_doc_id {
+                            index.insert_with_parent_doc_id(doc_id, s, pdid)
+                        } else {
+                            index.insert(doc_id, s)
+                        };
+                        if let Err(e) = insert_result {
                             log_error!(
                                 "Failed to insert into fulltext index '{}': {:?}",
                                 index_name,

@@ -554,7 +554,21 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                                     )
                                                 {
                                                     if let Some(text) = value.as_str() {
-                                                        let _ = ft_index.insert(&doc_id, text);
+                                                        let parent_doc_id =
+                                                            crate::value_utils::get_nested_value(
+                                                                &doc, "doc_id",
+                                                            )
+                                                            .and_then(|v| {
+                                                                v.as_str().map(|s| s.to_string())
+                                                            });
+                                                        let _ =
+                                                            if let Some(ref pdid) = parent_doc_id {
+                                                                ft_index.insert_with_parent_doc_id(
+                                                                    &doc_id, text, pdid,
+                                                                )
+                                                            } else {
+                                                                ft_index.insert(&doc_id, text)
+                                                            };
                                                     }
                                                 }
                                             }
@@ -1882,8 +1896,16 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         // Then add new entry if it's a string
                         if let Some(new_val) = new_value {
                             if let Some(text) = new_val.as_str() {
+                                let parent_doc_id = updated_doc
+                                    .get("doc_id")
+                                    .and_then(|v| v.as_str().map(|s| s.to_string()));
                                 // Log error but continue - document already persisted
-                                if let Err(e) = fts_index.update(&updated_doc.id, text) {
+                                let update_result = if let Some(ref pdid) = parent_doc_id {
+                                    fts_index.update_with_parent_doc_id(&updated_doc.id, text, pdid)
+                                } else {
+                                    fts_index.update(&updated_doc.id, text)
+                                };
+                                if let Err(e) = update_result {
                                     log_error!(
                                         "Failed to update fulltext index '{}' for doc {:?}: {:?}",
                                         fts_name,

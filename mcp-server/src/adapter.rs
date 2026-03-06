@@ -148,6 +148,9 @@ pub struct FulltextSearchOptions {
     pub highlight_context: Option<usize>,
     /// Maximum snippets per field (default: 3)
     pub highlight_max_snippets: Option<usize>,
+    /// Pre-filter: only return chunks belonging to these parent doc_ids.
+    /// Uses chunk_doc_mapping for O(1) lookup per posting entry.
+    pub target_doc_ids: Option<std::collections::HashSet<String>>,
 }
 
 /// Full-text search result with optional highlights
@@ -1632,6 +1635,7 @@ impl IronBaseAdapter {
             },
             cancel_flag: ctx.cancel_flag().cloned(),
             deadline: ctx.deadline(),
+            target_doc_ids: options.target_doc_ids,
         };
 
         // Call the unified core API - all logic (filter, highlight) handled there
@@ -1694,6 +1698,7 @@ impl IronBaseAdapter {
             },
             cancel_flag: ctx.cancel_flag().cloned(),
             deadline: ctx.deadline(),
+            target_doc_ids: options.target_doc_ids,
         };
 
         let results = coll.fulltext_search_multi_ext(fields, query_str, core_options)?;
@@ -1790,6 +1795,86 @@ impl IronBaseAdapter {
             .into_iter()
             .filter_map(|id| serde_json::to_value(id).ok())
             .collect())
+    }
+
+    /// Resolve chunk _ids to parent doc_id values using the fulltext index's in-memory mapping.
+    /// Returns chunk_id (as DocumentId) → doc_id (String) for all mapped chunks.
+    pub fn fulltext_resolve_chunk_doc_ids(
+        &self,
+        collection: &str,
+        field: &str,
+        chunk_ids: &[ironbase_core::document::DocumentId],
+    ) -> Result<std::collections::HashMap<ironbase_core::document::DocumentId, String>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_resolve_chunk_doc_ids(field, chunk_ids)?)
+    }
+
+    /// Check if the fulltext index has a chunk→doc_id mapping populated.
+    pub fn fulltext_has_chunk_doc_mapping(&self, collection: &str, field: &str) -> Result<bool> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+        Ok(coll.fulltext_has_chunk_doc_mapping(field)?)
+    }
+
+    /// Qualify documents for document-level AND mode using in-memory chunk→doc_id mapping.
+    ///
+    /// For each token, gets the posting list chunk_ids from the fulltext index,
+    /// resolves them to doc_ids via the chunk_doc_mapping, then intersects.
+    /// Returns the set of doc_ids that contain ALL query tokens (across any chunks).
+    ///
+    /// Returns None if:
+    /// - Single token (no intersection needed)
+    /// - chunk_doc_mapping not populated (legacy index, caller should fall back)
+    /// - Any token has 0 postings (empty result)
+    pub fn fulltext_qualify_documents_fast(
+        &self,
+        collection: &str,
+        field: &str,
+        query: &str,
+    ) -> Result<Option<Vec<String>>> {
+        let db = self.db.read();
+        let coll = db.get_collection(collection)?;
+
+        // Tokenize
+        let tokens = coll.fulltext_tokenize_query(field, query)?;
+        if tokens.len() <= 1 {
+            return Ok(None); // Single token: no intersection needed
+        }
+
+        // Check if mapping is available
+        if !coll.fulltext_has_chunk_doc_mapping(field)? {
+            return Ok(None); // No mapping → caller should use fallback
+        }
+
+        // Get posting counts for rarity ordering
+        let mut token_counts = coll.fulltext_token_posting_counts(field, &tokens)?;
+        token_counts.sort_by_key(|(_, count)| *count);
+
+        if token_counts[0].1 == 0 {
+            return Ok(Some(Vec::new())); // Rarest token has 0 postings → empty result
+        }
+
+        // Intersect at doc_id level using chunk_doc_mapping
+        let mut qualified: Option<std::collections::HashSet<String>> = None;
+
+        for (token, _) in &token_counts {
+            let chunk_ids = coll.fulltext_token_chunk_ids(field, token)?;
+            let chunk_doc_ids = coll.fulltext_resolve_chunk_doc_ids(field, &chunk_ids)?;
+
+            let doc_ids: std::collections::HashSet<String> = chunk_doc_ids.into_values().collect();
+
+            qualified = Some(match qualified {
+                None => doc_ids,
+                Some(prev) => prev.intersection(&doc_ids).cloned().collect(),
+            });
+
+            if qualified.as_ref().is_some_and(|q| q.is_empty()) {
+                return Ok(Some(Vec::new())); // Early termination
+            }
+        }
+
+        Ok(qualified.map(|q| q.into_iter().collect()))
     }
 
     // ============================================================

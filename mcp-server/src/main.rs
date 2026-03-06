@@ -409,17 +409,13 @@ fn run_stdio_server(cli: &Cli) {
 
     // Load auto-compact config from config.toml [compaction] section (same pattern as [rag])
     let auto_compact_config: mcp_ironbase::compaction::AutoCompactConfig = {
-        let config_path =
-            std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
+        let config_path = std::env::var("MCP_CONFIG").unwrap_or_else(|_| "config.toml".to_string());
         let config_file = std::path::Path::new(&config_path);
         if config_file.exists() {
             if let Ok(content) = std::fs::read_to_string(config_file) {
                 if let Ok(toml_val) = content.replace("\r\n", "\n").parse::<toml::Table>() {
                     if let Some(compaction_val) = toml_val.get("compaction") {
-                        compaction_val
-                            .clone()
-                            .try_into()
-                            .unwrap_or_default()
+                        compaction_val.clone().try_into().unwrap_or_default()
                     } else {
                         Default::default()
                     }

@@ -467,7 +467,10 @@ mod tests {
     fn test_strip_markdown_table_basic() {
         let input = "| Me. | Megnevezés | Nettó Ft/db |\n|---|---|---|\n| 1 | PEF-35 fékerőmérő | 1 750 000 Ft |";
         let result = strip_markdown_tables(input);
-        assert_eq!(result, "Me., Megnevezés, Nettó Ft/db\n1, PEF-35 fékerőmérő, 1 750 000 Ft");
+        assert_eq!(
+            result,
+            "Me., Megnevezés, Nettó Ft/db\n1, PEF-35 fékerőmérő, 1 750 000 Ft"
+        );
     }
 
     #[test]

@@ -452,8 +452,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     for (doc_id, doc) in &batch_docs {
                         if let Some(value) = get_nested_value(doc, &field_clone) {
                             if let Some(s) = value.as_str() {
-                                // Log error but continue indexing other documents
-                                if let Err(e) = index.insert(doc_id, s) {
+                                let parent_doc_id = get_nested_value(doc, "doc_id")
+                                    .and_then(|v| v.as_str().map(|x| x.to_string()));
+                                let insert_result = if let Some(ref pdid) = parent_doc_id {
+                                    index.insert_with_parent_doc_id(doc_id, s, pdid)
+                                } else {
+                                    index.insert(doc_id, s)
+                                };
+                                if let Err(e) = insert_result {
                                     log_error!(
                                         "Failed to index doc {:?} in fulltext index '{}': {:?}",
                                         doc_id,
@@ -850,16 +856,43 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         );
 
         // Perform TF-IDF search
-        let search_results = if !parsed.has_phrases() {
-            // Fast path: no phrases
-            fulltext_index.search_with_ctx(
+        let search_results = if let Some(ref target_ids) = options.target_doc_ids {
+            // Pre-filtered path: only score chunks belonging to target doc_ids
+            fulltext_index.search_for_doc_ids_with_ctx(
                 query,
+                target_ids,
                 candidate_limit,
-                if parsed_filter.is_none() && !and_mode {
+                if parsed_filter.is_none() {
                     effective_skip
                 } else {
                     0
-                }, // Skip in TF-IDF only if no filter/and
+                },
+                options.min_score,
+                ctx.as_ref(),
+            )?
+        } else if !parsed.has_phrases() && and_mode {
+            // AND-optimized path: intersect posting lists before scoring
+            fulltext_index.search_and_with_ctx(
+                query,
+                candidate_limit,
+                if parsed_filter.is_none() {
+                    effective_skip
+                } else {
+                    0
+                },
+                options.min_score,
+                ctx.as_ref(),
+            )?
+        } else if !parsed.has_phrases() {
+            // Fast path: no phrases, OR mode
+            fulltext_index.search_with_ctx(
+                query,
+                candidate_limit,
+                if parsed_filter.is_none() {
+                    effective_skip
+                } else {
+                    0
+                }, // Skip in TF-IDF only if no filter
                 options.min_score,
                 ctx.as_ref(),
             )?
@@ -1099,7 +1132,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 };
 
                 // Search this field's index
-                let search_results = if !parsed.has_phrases() {
+                let search_results = if let Some(ref target_ids) = options.target_doc_ids {
+                    fulltext_index.search_for_doc_ids_with_ctx(
+                        query,
+                        target_ids,
+                        candidate_limit,
+                        0,
+                        options.min_score,
+                        ctx.as_ref(),
+                    )?
+                } else if !parsed.has_phrases() && and_mode {
+                    fulltext_index.search_and_with_ctx(
+                        query,
+                        candidate_limit,
+                        0,
+                        options.min_score,
+                        ctx.as_ref(),
+                    )?
+                } else if !parsed.has_phrases() {
                     fulltext_index.search_with_ctx(
                         query,
                         candidate_limit,
@@ -1349,5 +1399,34 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
         })?;
         Ok(index.token_chunk_ids(token))
+    }
+
+    /// Resolve chunk _ids to parent doc_id values using the fulltext index's chunk_doc_mapping.
+    /// Returns a HashMap of chunk_id → doc_id for all chunks that have a mapping.
+    pub fn fulltext_resolve_chunk_doc_ids(
+        &self,
+        field: &str,
+        chunk_ids: &[crate::document::DocumentId],
+    ) -> Result<std::collections::HashMap<crate::document::DocumentId, String>> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+        })?;
+        Ok(index
+            .resolve_chunk_doc_ids(chunk_ids)
+            .into_iter()
+            .map(|(k, v)| (k.clone(), v.to_string()))
+            .collect())
+    }
+
+    /// Check if the fulltext index has a chunk→doc_id mapping populated.
+    pub fn fulltext_has_chunk_doc_mapping(&self, field: &str) -> Result<bool> {
+        self.check_not_closed()?;
+        let indexes = self.indexes.read();
+        let index = indexes.get_fulltext_index_for_field(field).ok_or_else(|| {
+            IronBaseError::IndexError(format!("No fulltext index for field '{}'", field))
+        })?;
+        Ok(index.has_chunk_doc_mapping())
     }
 }

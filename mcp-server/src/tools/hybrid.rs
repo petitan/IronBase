@@ -266,6 +266,7 @@ fn handle_hybrid_search(
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
+        target_doc_ids: None,
     };
 
     // Multi-field search if `text_fields` is provided, otherwise single-field
@@ -297,8 +298,8 @@ fn handle_hybrid_search(
         let t_rank = text_ranks.get(&id).copied().unwrap_or(default_rank);
         let t_score = text_docs.remove(&id).map(|(_, s)| s);
 
-        let rrf_score = vector_weight / (p.rrf_k + v_rank as f64)
-            + fulltext_weight / (p.rrf_k + t_rank as f64);
+        let rrf_score =
+            vector_weight / (p.rrf_k + v_rank as f64) + fulltext_weight / (p.rrf_k + t_rank as f64);
 
         fused.push(FusedResult {
             id,
@@ -366,12 +367,7 @@ fn handle_hybrid_search(
     //         at document level in STEP 7)
     // ========================================================================
     let dedup_removed = if p.deduplicate && !p.group_by_document {
-        mmr_reorder(
-            &mut fused,
-            &effective_vector_field,
-            p.mmr_lambda,
-            p.limit,
-        )
+        mmr_reorder(&mut fused, &effective_vector_field, p.mmr_lambda, p.limit)
     } else if !p.group_by_document {
         // Flat mode: truncate to limit here
         fused.truncate(p.limit);
@@ -453,12 +449,8 @@ fn handle_hybrid_search(
         }
 
         // Phase 2: Single fulltext OR search for top doc_ids' chunks
-        let top_doc_ids: Vec<Value> = doc_order.iter().map(|id| json!(id)).collect();
-        let doc_filter = json!({"doc_id": {"$in": top_doc_ids}});
-        let phase2_filter = match &p.filter {
-            Some(user_filter) => Some(json!({"$and": [user_filter, doc_filter]})),
-            None => Some(doc_filter),
-        };
+        // Use target_doc_ids for in-memory pre-filtering (no disk I/O for irrelevant chunks)
+        let target_doc_id_set: HashSet<String> = doc_order.iter().cloned().collect();
 
         let phase2_limit = (p.limit * 100).min(MAX_INTERNAL_LIMIT);
         let phase2_options = FulltextSearchOptions {
@@ -466,21 +458,17 @@ fn handle_hybrid_search(
             skip: None,
             min_score: None,
             projection: None,
-            filter: phase2_filter,
-            and_mode: false, // OR mode: any query word → relevant chunk
+            filter: p.filter.clone(), // Only user filter, doc_id filtering via target_doc_ids
+            and_mode: false,          // OR mode: any query word → relevant chunk
             highlight: false,
             highlight_context: None,
             highlight_max_snippets: None,
+            target_doc_ids: Some(target_doc_id_set),
         };
 
         let phase2_results = if let Some(ref fields) = p.text_fields {
             let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-            adapter.fulltext_search_multi(
-                &p.collection,
-                &field_refs,
-                &p.query,
-                phase2_options,
-            )?
+            adapter.fulltext_search_multi(&p.collection, &field_refs, &p.query, phase2_options)?
         } else {
             adapter.fulltext_search(
                 &p.collection,
@@ -491,14 +479,15 @@ fn handle_hybrid_search(
         };
 
         // Group Phase 2 chunks by doc_id
-        let mut doc_groups: HashMap<String, Vec<Value>> =
-            HashMap::with_capacity(doc_order.len());
+        let mut doc_groups: HashMap<String, Vec<Value>> = HashMap::with_capacity(doc_order.len());
         for res in phase2_results {
             let doc_id = match res.document.get("doc_id").and_then(|v| v.as_str()) {
                 Some(did) => did.to_string(),
                 None => {
-                    tracing::warn!("Phase 2 chunk without doc_id, skipping: {:?}",
-                        res.document.get("_id"));
+                    tracing::warn!(
+                        "Phase 2 chunk without doc_id, skipping: {:?}",
+                        res.document.get("_id")
+                    );
                     continue;
                 }
             };
@@ -525,22 +514,20 @@ fn handle_hybrid_search(
                 e
             ))
         })?;
-        grouped_results.extend(doc_order
-            .into_iter()
-            .filter_map(|doc_id| {
-                let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
-                let chunks = doc_groups.remove(&doc_id).unwrap_or_default();
-                if chunks.is_empty() {
-                    return None;
-                }
-                total_chunks += chunks.len();
-                Some(json!({
-                    "doc_id": doc_id,
-                    "best_score": best_score,
-                    "chunk_count": chunks.len(),
-                    "chunks": chunks
-                }))
-            }));
+        grouped_results.extend(doc_order.into_iter().filter_map(|doc_id| {
+            let best_score = doc_best_scores.get(&doc_id).copied().unwrap_or(0.0);
+            let chunks = doc_groups.remove(&doc_id).unwrap_or_default();
+            if chunks.is_empty() {
+                return None;
+            }
+            total_chunks += chunks.len();
+            Some(json!({
+                "doc_id": doc_id,
+                "best_score": best_score,
+                "chunk_count": chunks.len(),
+                "chunks": chunks
+            }))
+        }));
 
         let doc_count = grouped_results.len();
         response.insert("results".into(), json!(grouped_results));
@@ -589,108 +576,86 @@ fn qualify_documents(
     text_field: &str,
     query: &str,
 ) -> Result<Option<Value>> {
-    // 1. Tokenize using the index's config (accent folding + stop words + stemming)
-    let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
-    if tokens.len() <= 1 {
-        // Single token: chunk-level AND = document-level AND, no qualification needed
-        return Ok(None);
+    // Fast path: use in-memory chunk→doc_id mapping (zero find() calls)
+    let qualify_start = std::time::Instant::now();
+    match adapter.fulltext_qualify_documents_fast(collection, text_field, query)? {
+        Some(doc_ids) => {
+            let count = doc_ids.len();
+            let qualified_vec: Vec<Value> = doc_ids.into_iter().map(|s| json!(s)).collect();
+            tracing::info!(
+                collection = collection,
+                qualified = count,
+                elapsed_ms = qualify_start.elapsed().as_millis() as u64,
+                "qualify_documents: fast path (chunk_doc_mapping)"
+            );
+            return Ok(Some(json!({"doc_id": {"$in": qualified_vec}})));
+        }
+        None => {
+            // Check if it's because single token (no qualification needed)
+            let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
+            if tokens.len() <= 1 {
+                return Ok(None);
+            }
+            // chunk_doc_mapping not available → fall back to find-based qualification
+            tracing::warn!(
+                collection = collection,
+                "qualify_documents: chunk_doc_mapping not available, using fallback"
+            );
+        }
     }
 
-    // 2. Get posting list sizes → sort by rarity (smallest first for early termination)
+    // Fallback: find-based qualification (for legacy indexes without chunk_doc_mapping)
+    let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
+
+    // Get posting list sizes → sort by rarity (smallest first for early termination)
     let mut token_counts =
         adapter.fulltext_token_posting_counts(collection, text_field, &tokens)?;
     token_counts.sort_by_key(|(_, count)| *count);
 
-    // If rarest token has 0 postings → no documents can match all tokens
     if token_counts[0].1 == 0 {
         return Ok(Some(json!({"doc_id": {"$in": []}})));
     }
 
-    // 3. Rarest token → chunk _ids → batch find → doc_ids
-    let rarest_chunk_ids =
-        adapter.fulltext_token_chunk_ids(collection, text_field, &token_counts[0].0)?;
+    // Per-token resolution: for each token, get posting list chunk_ids → find → doc_ids
+    let mut qualified: Option<HashSet<String>> = None;
 
-    let find_result = adapter.find(
-        collection,
-        json!({"_id": {"$in": rarest_chunk_ids}}),
-        FindOptions {
-            projection: Some(json!({"doc_id": 1, "_id": 1})),
-            ..Default::default()
-        },
-    )?;
+    for (token, _) in &token_counts {
+        let chunk_ids = adapter.fulltext_token_chunk_ids(collection, text_field, token)?;
 
-    // Build qualified doc_id set from rarest token's chunks
-    let mut qualified: HashSet<String> = HashSet::new();
-    for doc in &find_result.documents {
-        if let Some(did) = doc.get("doc_id").and_then(|v| v.as_str()) {
-            qualified.insert(did.to_string());
-        }
-    }
+        let find_result = adapter.find(
+            collection,
+            json!({"_id": {"$in": chunk_ids}}),
+            FindOptions {
+                projection: Some(json!({"doc_id": 1, "_id": 0})),
+                ..Default::default()
+            },
+        )?;
 
-    if qualified.is_empty() {
-        // No doc_id field found → not a RAG collection, can't qualify
-        return Ok(Some(json!({"doc_id": {"$in": []}})));
-    }
-
-    // 4. Load ALL chunks for qualified docs → build chunk_to_doc map
-    let qualified_vec: Vec<Value> = qualified.iter().map(|s| json!(s)).collect();
-    let all_chunks_result = adapter.find(
-        collection,
-        json!({"doc_id": {"$in": qualified_vec}}),
-        FindOptions {
-            projection: Some(json!({"_id": 1, "doc_id": 1})),
-            ..Default::default()
-        },
-    )?;
-
-    let mut chunk_to_doc: HashMap<String, String> =
-        HashMap::with_capacity(all_chunks_result.documents.len());
-    for doc in &all_chunks_result.documents {
-        if let (Some(cid), Some(did)) = (
-            doc.get("_id").and_then(id_to_string),
-            doc.get("doc_id").and_then(|v| v.as_str()),
-        ) {
-            chunk_to_doc.insert(cid, did.to_string());
-        }
-    }
-
-    // 5. Remaining tokens → posting list intersection at document level
-    for (token, _) in token_counts.iter().skip(1) {
-        let posting_ids = adapter.fulltext_token_chunk_ids(collection, text_field, token)?;
-        let posting_set: HashSet<String> = posting_ids
-            .into_iter()
-            .filter_map(|v| {
-                if let Value::String(s) = v {
-                    Some(s)
-                } else if let Value::Number(n) = v {
-                    Some(n.to_string())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        // Find which qualified docs have at least one chunk in this token's posting list
-        let docs_with_token: HashSet<String> = chunk_to_doc
+        let doc_ids: HashSet<String> = find_result
+            .documents
             .iter()
-            .filter(|(cid, did)| {
-                posting_set.contains(cid.as_str()) && qualified.contains(did.as_str())
+            .filter_map(|d| {
+                d.get("doc_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
             })
-            .map(|(_, did)| did.clone())
             .collect();
 
-        qualified = qualified.intersection(&docs_with_token).cloned().collect();
+        qualified = Some(match qualified {
+            None => doc_ids,
+            Some(prev) => prev.intersection(&doc_ids).cloned().collect(),
+        });
 
-        if qualified.is_empty() {
-            break;
+        if qualified.as_ref().is_some_and(|q| q.is_empty()) {
+            return Ok(Some(json!({"doc_id": {"$in": []}})));
         }
-
-        // Shrink chunk_to_doc to only keep qualified docs' chunks
-        chunk_to_doc.retain(|_, did| qualified.contains(did.as_str()));
     }
 
-    // 6. Return filter
-    let qualified_vec: Vec<Value> = qualified.into_iter().map(|s| json!(s)).collect();
+    let qualified_vec: Vec<Value> = qualified
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| json!(s))
+        .collect();
     Ok(Some(json!({"doc_id": {"$in": qualified_vec}})))
 }
 
@@ -1014,7 +979,10 @@ mod tests {
         });
 
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
-        assert!(p.filter.is_none(), "Empty filter {{}} should be normalized to None");
+        assert!(
+            p.filter.is_none(),
+            "Empty filter {{}} should be normalized to None"
+        );
     }
 
     #[test]

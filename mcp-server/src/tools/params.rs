@@ -21,7 +21,9 @@ fn empty_object() -> Value {
 /// MongoDB semantics: `{}` = "match all" = no filter.
 /// Sending an empty filter to vector_search_with_filter or fulltext post-filter
 /// triggers a full collection scan (69K+ docs) for no benefit.
-fn deserialize_nonempty_filter<'de, D>(deserializer: D) -> std::result::Result<Option<Value>, D::Error>
+fn deserialize_nonempty_filter<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<Value>, D::Error>
 where
     D: Deserializer<'de>,
 {

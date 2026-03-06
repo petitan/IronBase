@@ -442,11 +442,17 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 }
 
                 // Rebuild fulltext indexes (using pre-collected info from outside the loop)
+                let parent_doc_id = crate::value_utils::get_nested_value(doc, "doc_id")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
                 for (index_name, field) in &fulltext_info {
                     if let Some(value) = crate::value_utils::get_nested_value(doc, field) {
                         if let Some(s) = value.as_str() {
                             if let Some(index) = index_manager.get_fulltext_index_mut(index_name) {
-                                let _ = index.insert(doc_id, s);
+                                let _ = if let Some(ref pdid) = parent_doc_id {
+                                    index.insert_with_parent_doc_id(doc_id, s, pdid)
+                                } else {
+                                    index.insert(doc_id, s)
+                                };
                                 rebuilt_count += 1;
                             }
                         }
@@ -820,6 +826,66 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 "Index rebuild completed - {} index entries rebuilt",
                 rebuilt_count
             );
+        }
+
+        // Startup migration: populate chunk_doc_mapping for legacy fulltext indexes
+        // that were saved before chunk_doc_mapping existed.
+        // This is a no-op if the mapping is already populated.
+        {
+            let fts_needing_migration: Vec<(String, String)> = index_manager
+                .list_fulltext_indexes()
+                .iter()
+                .filter(|idx| idx.doc_count() > 0 && !idx.has_chunk_doc_mapping())
+                .map(|idx| (idx.name.clone(), idx.field.clone()))
+                .collect();
+
+            if !fts_needing_migration.is_empty() {
+                let storage_guard = self.storage.read();
+                let cat = storage_guard
+                    .get_collection_meta(name)
+                    .map(|m| m.document_catalog.clone());
+                drop(storage_guard);
+
+                if let Some(cat) = cat {
+                    for (index_name, _field) in &fts_needing_migration {
+                        // Collect doc_ids that are in this fulltext index
+                        let indexed_doc_ids: std::collections::HashSet<crate::DocumentId> =
+                            if let Some(fts) = index_manager.get_fulltext_index(index_name) {
+                                fts.doc_tokens_offsets_keys().into_iter().collect()
+                            } else {
+                                continue;
+                            };
+
+                        let mut entries: Vec<(crate::DocumentId, String)> = Vec::new();
+                        let mut storage_guard = self.storage.write();
+
+                        for (doc_id, offset) in &cat {
+                            if !indexed_doc_ids.contains(doc_id) {
+                                continue;
+                            }
+                            if let Ok(bytes) = storage_guard.read_document_at(name, *offset) {
+                                if let Ok(doc) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                                {
+                                    if let Some(parent_doc_id) =
+                                        crate::value_utils::get_nested_value(&doc, "doc_id")
+                                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                                    {
+                                        entries.push((doc_id.clone(), parent_doc_id));
+                                    }
+                                }
+                            }
+                        }
+
+                        drop(storage_guard);
+
+                        if !entries.is_empty() {
+                            if let Some(fts) = index_manager.get_fulltext_index_mut(index_name) {
+                                fts.populate_chunk_doc_mapping(entries);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Ok(index_manager)
