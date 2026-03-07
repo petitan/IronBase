@@ -1343,20 +1343,18 @@ fn hybrid_search_impl(
         resolve_search_mode_weights(&opts, search_mode.as_deref());
 
     // Get RAG config or use defaults
+    let auto_provider = adapter
+        .get_auto_embedding_config(collection)
+        .ok()
+        .flatten()
+        .map(|c| c.provider);
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
-        Some((ef, tf, prov, _)) => (ef, tf, prov),
-        None => {
-            let auto_provider = adapter
-                .get_auto_embedding_config(collection)
-                .ok()
-                .flatten()
-                .map(|c| c.provider);
-            (
-                DEFAULT_EMBEDDING_FIELD.to_string(),
-                DEFAULT_TEXT_FIELD.to_string(),
-                auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
-            )
-        }
+        Some((ef, tf, prov, _)) => (ef, tf, auto_provider.unwrap_or(prov)),
+        None => (
+            DEFAULT_EMBEDDING_FIELD.to_string(),
+            DEFAULT_TEXT_FIELD.to_string(),
+            auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
+        ),
     };
 
     // Embed query
@@ -1589,20 +1587,18 @@ fn rag_import_impl(
     let mode_str = get_string_option_or(&options, "mode", "auto");
 
     // Get RAG config or use defaults
+    let auto_provider = adapter
+        .get_auto_embedding_config(collection)
+        .ok()
+        .flatten()
+        .map(|c| c.provider);
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
-        Some((ef, tf, prov, _)) => (ef, tf, prov),
-        None => {
-            let auto_provider = adapter
-                .get_auto_embedding_config(collection)
-                .ok()
-                .flatten()
-                .map(|c| c.provider);
-            (
-                DEFAULT_EMBEDDING_FIELD.to_string(),
-                DEFAULT_TEXT_FIELD.to_string(),
-                auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
-            )
-        }
+        Some((ef, tf, prov, _)) => (ef, tf, auto_provider.unwrap_or(prov)),
+        None => (
+            DEFAULT_EMBEDDING_FIELD.to_string(),
+            DEFAULT_TEXT_FIELD.to_string(),
+            auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
+        ),
     };
 
     // Get provider

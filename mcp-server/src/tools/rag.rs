@@ -257,11 +257,20 @@ fn handle_rag_document_import(
     // Get RAG config or use defaults
     let rag_config = get_rag_config(adapter, &p.collection)?;
     let (embedding_field, text_field, provider_name) = match &rag_config {
-        Some(cfg) => (
-            cfg.embedding_field.clone(),
-            cfg.text_field.clone(),
-            p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
-        ),
+        Some(cfg) => {
+            let auto_provider = adapter
+                .get_auto_embedding_config(&p.collection)
+                .ok()
+                .flatten()
+                .map(|c| c.provider);
+            (
+                cfg.embedding_field.clone(),
+                cfg.text_field.clone(),
+                p.provider.clone()
+                    .or(auto_provider)
+                    .unwrap_or_else(|| cfg.provider.clone()),
+            )
+        }
         None => {
             let auto_provider = adapter
                 .get_auto_embedding_config(&p.collection)

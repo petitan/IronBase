@@ -127,11 +127,22 @@ fn handle_hybrid_search(
                 // Get RAG config or use defaults
                 let rag_config = get_rag_config(adapter, &p.collection)?;
                 let (emb_field, txt_field, prov_name) = match &rag_config {
-                    Some(cfg) => (
-                        cfg.embedding_field.clone(),
-                        cfg.text_field.clone(),
-                        p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
-                    ),
+                    Some(cfg) => {
+                        // AutoEmbeddingConfig provider takes priority over RAG config
+                        // (auto_embed_enable is more recent than rag_collection_create)
+                        let auto_provider = adapter
+                            .get_auto_embedding_config(&p.collection)
+                            .ok()
+                            .flatten()
+                            .map(|c| c.provider);
+                        (
+                            cfg.embedding_field.clone(),
+                            cfg.text_field.clone(),
+                            p.provider.clone()
+                                .or(auto_provider)
+                                .unwrap_or_else(|| cfg.provider.clone()),
+                        )
+                    }
                     None => {
                         // Try AutoEmbeddingConfig (set by auto_embed_enable)
                         if let Ok(Some(auto_cfg)) = adapter.get_auto_embedding_config(&p.collection) {
