@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD};
+use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD};
 use super::helpers::validate_collection_name;
 use super::params::{
     ParseParams, RagCollectionCreateParams, RagCollectionStatsParams, RagDocumentImportParams,
@@ -262,13 +262,21 @@ fn handle_rag_document_import(
             cfg.text_field.clone(),
             p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
         ),
-        None => (
-            DEFAULT_EMBEDDING_FIELD.to_string(),
-            DEFAULT_TEXT_FIELD.to_string(),
-            p.provider
-                .clone()
-                .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string()),
-        ),
+        None => {
+            let auto_provider = adapter
+                .get_auto_embedding_config(&p.collection)
+                .ok()
+                .flatten()
+                .map(|c| c.provider);
+            (
+                DEFAULT_EMBEDDING_FIELD.to_string(),
+                DEFAULT_TEXT_FIELD.to_string(),
+                p.provider
+                    .clone()
+                    .or(auto_provider)
+                    .unwrap_or_else(|| manager.default_provider_name().to_string()),
+            )
+        }
     };
 
     // Get provider

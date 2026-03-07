@@ -1345,11 +1345,18 @@ fn hybrid_search_impl(
     // Get RAG config or use defaults
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
         Some((ef, tf, prov, _)) => (ef, tf, prov),
-        None => (
-            DEFAULT_EMBEDDING_FIELD.to_string(),
-            DEFAULT_TEXT_FIELD.to_string(),
-            DEFAULT_EMBEDDING_PROVIDER.to_string(),
-        ),
+        None => {
+            let auto_provider = adapter
+                .get_auto_embedding_config(collection)
+                .ok()
+                .flatten()
+                .map(|c| c.provider);
+            (
+                DEFAULT_EMBEDDING_FIELD.to_string(),
+                DEFAULT_TEXT_FIELD.to_string(),
+                auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
+            )
+        }
     };
 
     // Embed query
@@ -1584,11 +1591,18 @@ fn rag_import_impl(
     // Get RAG config or use defaults
     let (embedding_field, text_field, provider_name) = match get_rag_config(adapter, collection) {
         Some((ef, tf, prov, _)) => (ef, tf, prov),
-        None => (
-            DEFAULT_EMBEDDING_FIELD.to_string(),
-            DEFAULT_TEXT_FIELD.to_string(),
-            DEFAULT_EMBEDDING_PROVIDER.to_string(),
-        ),
+        None => {
+            let auto_provider = adapter
+                .get_auto_embedding_config(collection)
+                .ok()
+                .flatten()
+                .map(|c| c.provider);
+            (
+                DEFAULT_EMBEDDING_FIELD.to_string(),
+                DEFAULT_TEXT_FIELD.to_string(),
+                auto_provider.unwrap_or_else(|| manager.default_provider_name().to_string()),
+            )
+        }
     };
 
     // Get provider
@@ -1740,7 +1754,7 @@ fn rag_create_impl(
     let language = get_string_option_or(&opts, "language", "none");
     let embedding_field = get_string_option_or(&opts, "embedding_field", DEFAULT_EMBEDDING_FIELD);
     let text_field = get_string_option_or(&opts, "text_field", DEFAULT_TEXT_FIELD);
-    let provider_name = get_string_option_or(&opts, "provider", DEFAULT_EMBEDDING_PROVIDER);
+    let provider_name = get_string_option_or(&opts, "provider", manager.default_provider_name());
 
     // Get provider
     let provider = match manager.get_provider(&provider_name) {

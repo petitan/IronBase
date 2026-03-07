@@ -19,7 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use super::defaults::{
-    DEFAULT_EMBEDDING_FIELD, DEFAULT_EMBEDDING_PROVIDER, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
+    DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
 };
 use super::fusion::{
     apply_projection, id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results, FusedResult,
@@ -133,27 +133,42 @@ fn handle_hybrid_search(
                         p.provider.clone().unwrap_or_else(|| cfg.provider.clone()),
                     ),
                     None => {
-                        // Auto-detect fulltext indexed field from collection metadata
-                        let detected_text_field = adapter
-                            .get_fulltext_field_names(&p.collection)
-                            .ok()
-                            .and_then(|fields| fields.into_iter().next())
-                            .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+                        // Try AutoEmbeddingConfig (set by auto_embed_enable)
+                        if let Ok(Some(auto_cfg)) = adapter.get_auto_embedding_config(&p.collection) {
+                            let detected_text_field = adapter
+                                .get_fulltext_field_names(&p.collection)
+                                .ok()
+                                .and_then(|fields| fields.into_iter().next())
+                                .unwrap_or(auto_cfg.source_field.clone());
 
-                        if detected_text_field != DEFAULT_TEXT_FIELD {
-                            tracing::info!(
-                                "hybrid_search: auto-detected fulltext field '{}' for collection '{}' (no RAG config)",
-                                detected_text_field, p.collection
-                            );
+                            (
+                                auto_cfg.target_field,
+                                detected_text_field,
+                                p.provider.clone().unwrap_or(auto_cfg.provider),
+                            )
+                        } else {
+                            // Fallback: auto-detect fields + manager default provider
+                            let detected_text_field = adapter
+                                .get_fulltext_field_names(&p.collection)
+                                .ok()
+                                .and_then(|fields| fields.into_iter().next())
+                                .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+
+                            if detected_text_field != DEFAULT_TEXT_FIELD {
+                                tracing::info!(
+                                    "hybrid_search: auto-detected fulltext field '{}' for collection '{}' (no RAG config)",
+                                    detected_text_field, p.collection
+                                );
+                            }
+
+                            (
+                                DEFAULT_EMBEDDING_FIELD.to_string(),
+                                detected_text_field,
+                                p.provider
+                                    .clone()
+                                    .unwrap_or_else(|| manager.default_provider_name().to_string()),
+                            )
                         }
-
-                        (
-                            DEFAULT_EMBEDDING_FIELD.to_string(),
-                            detected_text_field,
-                            p.provider
-                                .clone()
-                                .unwrap_or_else(|| DEFAULT_EMBEDDING_PROVIDER.to_string()),
-                        )
                     }
                 };
 
