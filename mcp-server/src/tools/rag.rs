@@ -254,38 +254,30 @@ fn handle_rag_document_import(
         )
     })?;
 
-    // Get RAG config or use defaults
+    // Resolve provider: user explicit > AutoEmbeddingConfig > RAG config > manager default
+    let auto_provider = adapter
+        .get_auto_embedding_config(&p.collection)
+        .ok()
+        .flatten()
+        .map(|c| c.provider);
+
     let rag_config = get_rag_config(adapter, &p.collection)?;
     let (embedding_field, text_field, provider_name) = match &rag_config {
-        Some(cfg) => {
-            let auto_provider = adapter
-                .get_auto_embedding_config(&p.collection)
-                .ok()
-                .flatten()
-                .map(|c| c.provider);
-            (
-                cfg.embedding_field.clone(),
-                cfg.text_field.clone(),
-                p.provider.clone()
-                    .or(auto_provider)
-                    .unwrap_or_else(|| cfg.provider.clone()),
-            )
-        }
-        None => {
-            let auto_provider = adapter
-                .get_auto_embedding_config(&p.collection)
-                .ok()
-                .flatten()
-                .map(|c| c.provider);
-            (
-                DEFAULT_EMBEDDING_FIELD.to_string(),
-                DEFAULT_TEXT_FIELD.to_string(),
-                p.provider
-                    .clone()
-                    .or(auto_provider)
-                    .unwrap_or_else(|| manager.default_provider_name().to_string()),
-            )
-        }
+        Some(cfg) => (
+            cfg.embedding_field.clone(),
+            cfg.text_field.clone(),
+            p.provider.clone()
+                .or(auto_provider)
+                .unwrap_or_else(|| cfg.provider.clone()),
+        ),
+        None => (
+            DEFAULT_EMBEDDING_FIELD.to_string(),
+            DEFAULT_TEXT_FIELD.to_string(),
+            p.provider
+                .clone()
+                .or(auto_provider)
+                .unwrap_or_else(|| manager.default_provider_name().to_string()),
+        ),
     };
 
     // Get provider

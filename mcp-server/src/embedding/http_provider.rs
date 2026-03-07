@@ -427,32 +427,31 @@ impl HttpEmbeddingProvider {
         }
     }
 
-    /// Apply prefix to texts (document_prefix or query_prefix)
-    fn apply_prefix(&self, texts: &[&str], is_query: bool) -> Vec<String> {
+    /// Make HTTP request and parse response (with retry + exponential backoff)
+    fn call_api(&self, texts: &[&str], is_query: bool) -> EmbeddingResult<Vec<Vec<f32>>> {
+        let url = self.build_url();
+
+        // Apply prefix only when configured (avoids allocation when no prefix)
         let prefix = if is_query {
             self.config.query_prefix.as_deref()
         } else {
             self.config.document_prefix.as_deref()
         };
 
-        match prefix {
-            Some(p) => texts.iter().map(|t| format!("{}{}", p, t)).collect(),
-            None => texts.iter().map(|t| t.to_string()).collect(),
-        }
-    }
-
-    /// Make HTTP request and parse response (with retry + exponential backoff)
-    fn call_api(&self, texts: &[&str], is_query: bool) -> EmbeddingResult<Vec<Vec<f32>>> {
-        let url = self.build_url();
-
-        // Apply prefix (e.g., "passage: " for documents, "query: " for queries)
-        let prefixed = self.apply_prefix(texts, is_query);
-        let prefixed_refs: Vec<&str> = prefixed.iter().map(|s| s.as_str()).collect();
-
-        let body = if prefixed_refs.len() == 1 {
-            self.build_single_body(prefixed_refs[0])
+        let prefixed;
+        let prefixed_refs;
+        let effective_texts = if let Some(p) = prefix {
+            prefixed = texts.iter().map(|t| format!("{}{}", p, t)).collect::<Vec<_>>();
+            prefixed_refs = prefixed.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+            &prefixed_refs[..]
         } else {
-            self.build_batch_body(&prefixed_refs)
+            texts
+        };
+
+        let body = if effective_texts.len() == 1 {
+            self.build_single_body(effective_texts[0])
+        } else {
+            self.build_batch_body(effective_texts)
         };
 
         let max_retries = self.config.max_retries;

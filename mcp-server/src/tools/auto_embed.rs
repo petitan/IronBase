@@ -563,24 +563,30 @@ fn run_backfill_job(
 
             let mut batch_processed = 0;
 
+            // Store embedding into document via update_one
+            let store_one = |id: &Value, embedding: &[f32]| -> bool {
+                let filter = json!({ "_id": id });
+                let update = json!({
+                    "$set": { &config.target_field: embedding }
+                });
+                match adapter.update_one(collection, filter, update) {
+                    Ok(_) => true,
+                    Err(e) => {
+                        tracing::warn!("Failed to update document {:?}: {}", id, e);
+                        false
+                    }
+                }
+            };
+
             match embeddings_result {
                 Ok(embeddings) => {
                     for (doc, embedding) in docs_with_source.iter().zip(embeddings.iter()) {
                         if let Some(id) = doc.get("_id") {
-                            let filter = json!({ "_id": id });
-                            let update = json!({
-                                "$set": { &config.target_field: embedding }
-                            });
-
-                            match adapter.update_one(collection, filter, update) {
-                                Ok(_) => {
-                                    processed += 1;
-                                    batch_processed += 1;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to update document {:?}: {}", id, e);
-                                    errors += 1;
-                                }
+                            if store_one(id, embedding) {
+                                processed += 1;
+                                batch_processed += 1;
+                            } else {
+                                errors += 1;
                             }
                         }
                     }
@@ -596,20 +602,11 @@ fn run_backfill_job(
                         if let Some(id) = doc.get("_id") {
                             match provider.embed(text) {
                                 Ok(embedding) => {
-                                    let filter = json!({ "_id": id });
-                                    let update = json!({
-                                        "$set": { &config.target_field: embedding }
-                                    });
-
-                                    match adapter.update_one(collection, filter, update) {
-                                        Ok(_) => {
-                                            processed += 1;
-                                            batch_processed += 1;
-                                        }
-                                        Err(e) => {
-                                            tracing::warn!("Failed to update document {:?}: {}", id, e);
-                                            errors += 1;
-                                        }
+                                    if store_one(id, &embedding) {
+                                        processed += 1;
+                                        batch_processed += 1;
+                                    } else {
+                                        errors += 1;
                                     }
                                 }
                                 Err(_) => {
