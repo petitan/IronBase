@@ -108,9 +108,9 @@ pub fn tools() -> Vec<Value> {
                 },
                 "match_scope": {
                     "type": "string",
-                    "description": "Match scope for AND mode: 'chunk' (default) = all words in single chunk, 'document' = all words across document's chunks. Only effective with mode='and' on RAG collections with doc_id field.",
+                    "description": "Match scope for AND mode: 'document' (default) = all words across document's chunks, 'chunk' = all words in single chunk. Only effective with mode='and' on RAG collections with doc_id field.",
                     "enum": ["chunk", "document"],
-                    "default": "chunk"
+                    "default": "document"
                 },
                 "text_fields": {
                     "type": "array",

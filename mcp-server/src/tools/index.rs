@@ -238,7 +238,7 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
     let projection = parse_projection_value(p.projection)?;
 
-    let and_mode = p.mode.as_deref() == Some("and");
+    let and_mode = p.mode.as_deref() != Some("or");
     let options = FulltextSearchOptions {
         limit: p.limit,
         skip: p.skip,

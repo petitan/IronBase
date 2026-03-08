@@ -192,10 +192,11 @@ fn handle_hybrid_search(
     // STEP 1.5: Document-level AND qualification (match_scope="document")
     // ========================================================================
     let and_mode = p.mode.as_deref() != Some("or");
-    // group_by_document implies document-level AND: select docs where ALL words appear,
-    // then use OR mode to find all relevant chunks within those docs
+    // Default: document-level AND — qualify docs where ALL words appear (across chunks),
+    // then use OR mode to find relevant chunks within those docs.
+    // Only chunk-level AND when explicitly requested via match_scope="chunk".
     let is_doc_scope =
-        and_mode && (p.match_scope.as_deref() == Some("document") || p.group_by_document);
+        and_mode && p.match_scope.as_deref() != Some("chunk");
 
     let doc_qualification_filter = if is_doc_scope {
         qualify_documents(adapter, &p.collection, &effective_text_field, &p.query)?

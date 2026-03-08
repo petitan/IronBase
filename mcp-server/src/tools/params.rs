@@ -247,7 +247,7 @@ pub struct FulltextSearchParams {
     pub skip: Option<usize>,
     pub min_score: Option<f64>,
     pub projection: Option<Value>,
-    /// Search mode: "or" (default) = any word matches, "and" = ALL words must match
+    /// Search mode: "and" (default) = ALL words must match, "or" = any word matches
     pub mode: Option<String>,
     /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering).
     /// Use this to combine fulltext search with other query operators (e.g., $regex, $eq)

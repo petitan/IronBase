@@ -1407,7 +1407,7 @@ fn hybrid_search_impl(
         min_score: None,
         projection: None,
         filter: filter_val.clone(),
-        and_mode: mode.as_deref() == Some("and"),
+        and_mode: mode.as_deref() != Some("or"),
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
