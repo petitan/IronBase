@@ -521,6 +521,7 @@ let top10 = topk_documents(docs.into_iter(), 0, 10, &sort_spec);
 | **HNSW orphan accumulation** | 512990a6, #53 | `vector_count` 2x a valós után delete+reimport; növekvő memória | `batch_update_indexes()` nem kezelte HNSW-t + `remove()` lazy (orphan node marad) + `len()` orphan-okat is számolta | HNSW kezelés `batch_update_indexes`-ben + `len()` = `id_to_index.len()` + orphan rebuild checkpoint/compact-ban |
 | **Fulltext flush dirty flag** | ed9016d3, #54 | fulltext_search dokumentumok nagy része nem kereshető restart után | `commit_fulltext_flush()` feltétel nélkül törölte a dirty flag-et → Phase 2 alatti concurrent insert-ek elvesztek | `has_pending_entries()` check: dirty flag csak akkor törlődik ha `inverted_index` üres |
 | **HNSW rebuild duplicate ID** | d83885bf, #55 | `db_compact` "ID already exists in vector index" hiba | `rebuild()` `nodes` Vec-ből iterált — remove+reinsert után orphan+aktív node ugyanazzal az ID-vel, mindkettő átment a `contains_key` filter-en | `id_to_index` HashMap-ből iterálás (egyedi kulcsok, mindig a helyes node) |
+| **BM25 fails on 4+ words** | cd70eae4, #61 | `hybrid_search` text_score=0 multi-word query-knél | `fulltext_search` OR default vs `hybrid_search` AND default inkonzisztencia + chunk-level AND túl szigorú (1 chunk ritkán tartalmaz 4+ stemelt tokent) | Konzisztens AND default mindkettőnél + `match_scope` default "document" (dok szintű AND kvalifikáció, chunk szintű OR retrieval) |
 
 **Részletes bug elemzések:** Lásd `memory/critical-bugs.md` (Lazy Index, read_data boundary, Fulltext candidate limit, Fulltext flush dirty flag, Btree delete not dirty, Workaround-ok)
 
@@ -845,9 +846,9 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 }
 ```
 
-**Fulltext mode paraméter (45f74bf7, #47):**
+**Fulltext mode paraméter (45f74bf7, #47, cd70eae4 #61):**
 - `mode`: `"and"` (default) = MINDEN szó kell a dokumentumban, `"or"` = bármely szó elég (deprecated)
-- Elérhető: `hybrid_search`, `fulltext_search`
+- Elérhető: `hybrid_search`, `fulltext_search` — **mindkettő AND default** (v1.0.389+, korábban fulltext_search OR volt)
 - AND mód szűkíti a fulltext komponenst; vektor keresés változatlan → RRF fusion vektor-only eredményeket is ad
 - `mode` hiánya = `"and"` (v1.0.375+)
 
@@ -855,12 +856,15 @@ let results = db_hybrid_search("kb", "keresett szöveg", #{
 |------|----------|
 | `params.rs` | `pub mode: Option<String>` mindkét struct-ban |
 | `definitions/hybrid.rs` | `"mode"` schema entry (default: "and", "or" deprecated) |
+| `definitions/index.rs` | `"mode"` schema entry (default: "and", v1.0.389+) |
 | `hybrid.rs` | `and_mode: p.mode.as_deref() != Some("or")` |
+| `index.rs` | `and_mode: p.mode.as_deref() != Some("or")` (v1.0.389+) |
 
-**Document-level AND mode (0f208d41, #56):**
-- `match_scope`: `"chunk"` (default) = minden szó egyetlen chunkban, `"document"` = szavak a dokumentum különböző chunkjaiban is lehetnek
-- Aktiválódik: `mode="and"` + (`match_scope="document"` VAGY `group_by_document=true`) + RAG collection (doc_id mező)
-- `group_by_document=true` automatikusan bekapcsolja a document-level qualification-t (nem kell explicit `match_scope="document"`)
+**Document-level AND mode (0f208d41, #56, cd70eae4 #61):**
+- `match_scope`: `"document"` (default, v1.0.389+) = szavak a dokumentum különböző chunkjaiban is lehetnek, `"chunk"` = minden szó egyetlen chunkban
+- **Keresési logika:** kvalifikáció (AND) → minden query token megjelenik a dokumentumban; chunk retrieval (OR) → bármely tokent tartalmazó chunk visszajön
+- Korábban default "chunk" volt, de 3+ szavas query-knél túl szigorú (egyetlen chunk ritkán tartalmaz minden tokent)
+- Aktiválódik: `mode="and"` + `match_scope` != `"chunk"` (v1.0.389+, korábban csak explicit `match_scope="document"` vagy `group_by_document=true`)
 - Algoritmus: posting list interszekcióval kvalifikálja a dokumentumokat, majd OR módban keres a kvalifikált doc_id-kre szűrve
 - Vektor keresés NEM szűrt (RRF természetesen kezeli)
 - Response: `"match_scope": "document"/"chunk"`, `"qualified_doc_ids": N`
