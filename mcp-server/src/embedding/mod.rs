@@ -1,12 +1,10 @@
 //! Embedding generation module for MCP server
 //!
-//! Supports multiple providers:
-//! - FastText (default, offline, Hungarian support)
-//! - Any HTTP API via config-driven HttpEmbeddingProvider
-//!   - Ollama (local LLM server)
-//!   - OpenAI (cloud API)
-//!   - Cohere (cloud API)
-//!   - Mistral, Azure OpenAI, HuggingFace, etc.
+//! Supports multiple providers via [embedding] config section:
+//! - Ollama (default, local LLM server — BGE-M3, nomic-embed-text, etc.)
+//! - vLLM (OpenAI-compatible local server)
+//! - OpenAI (cloud API)
+//! - FastText (legacy, offline, Hungarian support)
 //!
 //! Features:
 //! - LRU cache for embedding results (10K entries, 1 hour TTL)
@@ -164,109 +162,12 @@ impl EmbeddingManager {
         Ok(manager)
     }
 
-    /// Initialize with auto-detection of available providers
-    ///
-    /// Checks environment variables for API keys and local services.
-    /// FastText is used as default if IRONBASE_FASTTEXT_MODEL is set.
-    /// Cache is enabled by default with 10K entries and 1 hour TTL.
-    pub fn auto_detect() -> Self {
-        let mut manager = Self::with_cache(CacheConfig::default());
-
-        // 1. Try FastText first (highest priority as default)
-        if let Ok(model_path) = std::env::var("IRONBASE_FASTTEXT_MODEL") {
-            if let Ok(provider) = FastTextProvider::load(Path::new(&model_path)) {
-                log::info!("FastText provider auto-detected: {}", model_path);
-                manager.register_provider("fasttext", Arc::new(provider));
-            }
-        }
-
-        // 2. Try Ollama (local, no key needed)
-        if Self::check_ollama_available("http://localhost:11434") {
-            let config = HttpProviderConfig::ollama(None, None);
-            manager.register_provider("ollama", Arc::new(HttpEmbeddingProvider::new(config)));
-            log::info!("Ollama provider auto-detected");
-        }
-
-        // 3. OpenAI (if key present)
-        if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
-            let config = HttpProviderConfig::openai(&api_key, None);
-            manager.register_provider("openai", Arc::new(HttpEmbeddingProvider::new(config)));
-            log::info!("OpenAI provider auto-detected from OPENAI_API_KEY");
-        }
-
-        // 4. Cohere (if key present)
-        if let Ok(api_key) = std::env::var("COHERE_API_KEY") {
-            let config = HttpProviderConfig::cohere(&api_key, None);
-            manager.register_provider("cohere", Arc::new(HttpEmbeddingProvider::new(config)));
-            log::info!("Cohere provider auto-detected from COHERE_API_KEY");
-        }
-
-        // 5. Mistral (if key present)
-        if let Ok(api_key) = std::env::var("MISTRAL_API_KEY") {
-            let config = HttpProviderConfig::mistral(&api_key, None);
-            manager.register_provider("mistral", Arc::new(HttpEmbeddingProvider::new(config)));
-            log::info!("Mistral provider auto-detected from MISTRAL_API_KEY");
-        }
-
-        // 6. Azure OpenAI (if all required vars present)
-        if let (Ok(endpoint), Ok(api_key), Ok(deployment)) = (
-            std::env::var("AZURE_OPENAI_ENDPOINT"),
-            std::env::var("AZURE_OPENAI_API_KEY"),
-            std::env::var("AZURE_OPENAI_DEPLOYMENT"),
-        ) {
-            let config = HttpProviderConfig::azure_openai(&endpoint, &api_key, &deployment);
-            manager.register_provider("azure-openai", Arc::new(HttpEmbeddingProvider::new(config)));
-            log::info!("Azure OpenAI provider auto-detected");
-        }
-
-        // 7. Voyage AI (if key present)
-        if let Ok(api_key) = std::env::var("VOYAGE_API_KEY") {
-            let config = HttpProviderConfig::voyage(&api_key, None);
-            manager.register_provider("voyage", Arc::new(HttpEmbeddingProvider::new(config)));
-            log::info!("Voyage AI provider auto-detected from VOYAGE_API_KEY");
-        }
-
-        manager
-    }
-
-    /// Check if Ollama is available at the given URL
-    fn check_ollama_available(base_url: &str) -> bool {
-        ureq::get(base_url)
-            .timeout(std::time::Duration::from_secs(1))
-            .call()
-            .is_ok()
-    }
-
     /// Register a provider
     pub fn register_provider(&mut self, name: &str, provider: Arc<dyn EmbeddingProvider>) {
         if self.default_provider.is_empty() {
             self.default_provider = name.to_string();
         }
         self.providers.insert(name.to_string(), provider);
-    }
-
-    /// Add Ollama provider (convenience method)
-    pub fn add_ollama(&mut self, base_url: Option<&str>, model: Option<&str>) {
-        let config = HttpProviderConfig::ollama(base_url, model);
-        self.register_provider("ollama", Arc::new(HttpEmbeddingProvider::new(config)));
-    }
-
-    /// Add OpenAI provider (convenience method)
-    pub fn add_openai(&mut self, api_key: &str, model: Option<&str>) {
-        let config = HttpProviderConfig::openai(api_key, model);
-        self.register_provider("openai", Arc::new(HttpEmbeddingProvider::new(config)));
-    }
-
-    /// Add Cohere provider (convenience method)
-    pub fn add_cohere(&mut self, api_key: &str, model: Option<&str>) {
-        let config = HttpProviderConfig::cohere(api_key, model);
-        self.register_provider("cohere", Arc::new(HttpEmbeddingProvider::new(config)));
-    }
-
-    /// Add a custom HTTP provider from config
-    pub fn add_http_provider(&mut self, config: HttpProviderConfig) {
-        let name = config.name.clone();
-        self.register_provider(&name, Arc::new(HttpEmbeddingProvider::new(config)));
     }
 
     /// Get the default provider
@@ -657,10 +558,11 @@ mod tests {
     }
 
     #[test]
-    fn test_add_http_provider() {
+    fn test_register_http_provider() {
         let mut manager = EmbeddingManager::new();
         let config = HttpProviderConfig::ollama(Some("http://test:11434"), None);
-        manager.add_http_provider(config);
+        let provider = Arc::new(HttpEmbeddingProvider::new(config));
+        manager.register_provider("ollama", provider);
 
         assert!(manager.get_provider("ollama").is_some());
     }

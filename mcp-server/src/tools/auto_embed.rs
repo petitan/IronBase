@@ -167,7 +167,7 @@ fn handle_auto_embed_enable(
     // Validate provider exists
     let manager = embedding_manager.as_ref().ok_or_else(|| {
         McpError::internal(
-            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+            "Embedding not available. Configure [embedding] section in config.toml.",
         )
     })?;
 
@@ -718,8 +718,12 @@ pub fn check_model_changes_and_reembed(
             Some(p) => p,
             None => {
                 tracing::warn!(
-                    "Collection '{}': auto-embed provider '{}' not available, skipping model check",
+                    "Collection '{}': auto-embed provider '{}' not available (configured provider: {}). \
+                     To fix: either reconfigure with auto_embed_enable using the current provider, \
+                     or add the '{}' provider to [embedding] config.",
                     collection,
+                    config.provider,
+                    manager.default_provider_name(),
                     config.provider
                 );
                 continue;

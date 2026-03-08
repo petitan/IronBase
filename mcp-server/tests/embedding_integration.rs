@@ -55,10 +55,9 @@ fn test_embedding_manager_auto_detect() {
         return;
     }
 
-    std::env::set_var("IRONBASE_FASTTEXT_MODEL", model_path);
-
-    println!("Testing EmbeddingManager::auto_detect()...");
-    let manager = EmbeddingManager::auto_detect();
+    println!("Testing EmbeddingManager::with_fasttext()...");
+    let manager = EmbeddingManager::with_fasttext(Path::new(model_path))
+        .expect("Failed to load FastText model");
 
     println!("Has providers: {}", manager.has_providers());
     assert!(manager.has_providers());
@@ -93,8 +92,8 @@ fn test_display_name_in_list_models() {
         return;
     }
 
-    std::env::set_var("IRONBASE_FASTTEXT_MODEL", model_path);
-    let manager = EmbeddingManager::auto_detect();
+    let manager = EmbeddingManager::with_fasttext(Path::new(model_path))
+        .expect("Failed to load FastText model");
 
     let models = manager.list_models();
     for m in &models {

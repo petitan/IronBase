@@ -264,7 +264,7 @@ pub struct EmbeddingTomlConfig {
 }
 
 fn default_embedding_provider() -> String {
-    "fasttext".to_string()
+    "ollama".to_string()
 }
 
 fn default_embedding_timeout() -> u64 {
