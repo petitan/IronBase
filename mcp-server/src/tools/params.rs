@@ -249,6 +249,10 @@ pub struct FulltextSearchParams {
     pub projection: Option<Value>,
     /// Search mode: "and" (default) = ALL words must match, "or" = any word matches
     pub mode: Option<String>,
+    /// Match scope: "document" (default) = all words must appear across the document's chunks,
+    /// "chunk" = all words must appear in a single chunk. Only relevant for RAG collections
+    /// with chunked documents. Has no effect in "or" mode.
+    pub match_scope: Option<String>,
     /// MongoDB-style filter applied AFTER TF-IDF scoring (core-level filtering).
     /// Use this to combine fulltext search with other query operators (e.g., $regex, $eq)
     /// Example: {"from.email": {"$regex": "@scania.com$"}}
@@ -737,10 +741,14 @@ pub fn resolve_weights(
 ) -> Result<(f64, f64)> {
     // Explicit weights take priority (either one triggers explicit mode)
     if explicit_vector_weight.is_some() || explicit_fulltext_weight.is_some() {
-        return Ok((
-            explicit_vector_weight.unwrap_or(0.5),
-            explicit_fulltext_weight.unwrap_or(0.5),
-        ));
+        let vw = explicit_vector_weight.unwrap_or(0.5);
+        let fw = explicit_fulltext_weight.unwrap_or(0.5);
+        if vw.abs() < f64::EPSILON && fw.abs() < f64::EPSILON {
+            return Err(McpError::invalid_params(
+                "At least one of vector_weight or fulltext_weight must be positive.",
+            ));
+        }
+        return Ok((vw, fw));
     }
 
     // Search mode presets

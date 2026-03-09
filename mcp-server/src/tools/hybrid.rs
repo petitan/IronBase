@@ -11,7 +11,7 @@
 //! - Reranking: phrase match, keyword density, title boost
 //! - MMR diversity reranking: embedding cosine similarity based
 
-use crate::adapter::{FindOptions, FulltextSearchOptions, IronBaseAdapter};
+use crate::adapter::{FulltextSearchOptions, IronBaseAdapter};
 use crate::embedding::EmbeddingManager;
 use crate::error::{McpError, Result};
 use serde_json::{json, Value};
@@ -22,7 +22,8 @@ use super::defaults::{
     DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
 };
 use super::fusion::{
-    apply_projection, id_to_string, merge_adjacent_chunks, mmr_reorder, rerank_results, FusedResult,
+    apply_document_qualification, apply_projection, id_to_string, merge_adjacent_chunks,
+    mmr_reorder, rerank_results, FusedResult,
 };
 use super::helpers::{parse_projection_value, validate_collection_name};
 use super::params::{resolve_weights, HybridSearchParams, ParseParams};
@@ -98,89 +99,115 @@ fn handle_hybrid_search(
 
     // ========================================================================
     // STEP 1: Resolve vector + field names (explicit vs auto-embed mode)
+    //         If vector_weight == 0.0 and no explicit vector → skip embedding
+    //         entirely (BM25-only mode)
     // ========================================================================
+    let skip_vector = vector_weight == 0.0 && p.vector.is_none();
+
     let (query_vector, effective_vector_field, effective_text_field, auto_embedded, provider_name) =
-        match p.vector {
-            Some(ref v) => {
-                // Explicit mode: client provided the vector
-                let qv: Vec<f32> = v.iter().map(|&x| x as f32).collect();
-                (
-                    qv,
-                    p.vector_field.clone(),
-                    p.text_field.clone(),
-                    false,
-                    None,
-                )
+        if skip_vector {
+            // BM25-only mode: resolve text field without requiring embedding
+            if p.query.is_empty() {
+                return Err(McpError::invalid_params("Query cannot be empty"));
             }
-            None => {
-                // Auto-embed mode: server embeds the query
-                if p.query.is_empty() {
-                    return Err(McpError::invalid_params("Query cannot be empty"));
+
+            let rag_config = get_rag_config(adapter, &p.collection)?;
+            let txt_field = match &rag_config {
+                Some(cfg) => cfg.text_field.clone(),
+                None => {
+                    adapter
+                        .get_fulltext_field_names(&p.collection)
+                        .ok()
+                        .and_then(|fields| fields.into_iter().next())
+                        .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string())
                 }
+            };
 
-                let manager = embedding_manager.as_ref().ok_or_else(|| {
-                    McpError::internal(
-                        "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+            let eff_tf = if p.text_field != DEFAULT_TEXT_FIELD {
+                p.text_field.clone()
+            } else {
+                txt_field
+            };
+
+            (vec![], p.vector_field.clone(), eff_tf, false, None)
+        } else {
+            match p.vector {
+                Some(ref v) => {
+                    // Explicit mode: client provided the vector
+                    let qv: Vec<f32> = v.iter().map(|&x| x as f32).collect();
+                    (
+                        qv,
+                        p.vector_field.clone(),
+                        p.text_field.clone(),
+                        false,
+                        None,
                     )
-                })?;
-
-                // Resolve provider: user explicit > AutoEmbeddingConfig > RAG config > manager default
-                // Single DB lookup for auto config (no duplication across match arms)
-                let auto_provider = adapter
-                    .get_auto_embedding_config(&p.collection)
-                    .ok()
-                    .flatten()
-                    .map(|c| c.provider);
-
-                let rag_config = get_rag_config(adapter, &p.collection)?;
-                let (emb_field, txt_field, prov_name) = match &rag_config {
-                    Some(cfg) => (
-                        cfg.embedding_field.clone(),
-                        cfg.text_field.clone(),
-                        p.provider.clone()
-                            .or(auto_provider)
-                            .unwrap_or_else(|| cfg.provider.clone()),
-                    ),
-                    None => {
-                        let detected_text_field = adapter
-                            .get_fulltext_field_names(&p.collection)
-                            .ok()
-                            .and_then(|fields| fields.into_iter().next())
-                            .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
-
-                        (
-                            DEFAULT_EMBEDDING_FIELD.to_string(),
-                            detected_text_field,
-                            p.provider
-                                .clone()
-                                .or(auto_provider)
-                                .unwrap_or_else(|| manager.default_provider_name().to_string()),
-                        )
+                }
+                None => {
+                    // Auto-embed mode: server embeds the query
+                    if p.query.is_empty() {
+                        return Err(McpError::invalid_params("Query cannot be empty"));
                     }
-                };
 
-                // Embed the query
-                let qv = manager
-                    .embed_query(&p.query, Some(&prov_name))
-                    .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
+                    let manager = embedding_manager.as_ref().ok_or_else(|| {
+                        McpError::internal(
+                            "Embedding not available. Set IRONBASE_FASTTEXT_MODEL environment variable.",
+                        )
+                    })?;
 
-                // Use user-specified fields if provided, otherwise use resolved defaults.
-                // NOTE: detection is heuristic — if user explicitly passes the default value
-                // (e.g. vector_field="embedding"), it is treated as "not set" and RAG config
-                // takes priority. This is acceptable because explicitly passing the default
-                // value has no practical difference from not passing it.
-                let eff_vf = if p.vector_field != "embedding" {
-                    p.vector_field.clone()
-                } else {
-                    emb_field
-                };
-                let eff_tf = if p.text_field != "content" {
-                    p.text_field.clone()
-                } else {
-                    txt_field
-                };
+                    // Resolve provider: user explicit > AutoEmbeddingConfig > RAG config > manager default
+                    // Single DB lookup for auto config (no duplication across match arms)
+                    let auto_provider = adapter
+                        .get_auto_embedding_config(&p.collection)
+                        .ok()
+                        .flatten()
+                        .map(|c| c.provider);
 
-                (qv, eff_vf, eff_tf, true, Some(prov_name))
+                    let rag_config = get_rag_config(adapter, &p.collection)?;
+                    let (emb_field, txt_field, prov_name) = match &rag_config {
+                        Some(cfg) => (
+                            cfg.embedding_field.clone(),
+                            cfg.text_field.clone(),
+                            p.provider.clone()
+                                .or(auto_provider)
+                                .unwrap_or_else(|| cfg.provider.clone()),
+                        ),
+                        None => {
+                            let detected_text_field = adapter
+                                .get_fulltext_field_names(&p.collection)
+                                .ok()
+                                .and_then(|fields| fields.into_iter().next())
+                                .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string());
+
+                            (
+                                DEFAULT_EMBEDDING_FIELD.to_string(),
+                                detected_text_field,
+                                p.provider
+                                    .clone()
+                                    .or(auto_provider)
+                                    .unwrap_or_else(|| manager.default_provider_name().to_string()),
+                            )
+                        }
+                    };
+
+                    // Embed the query
+                    let qv = manager
+                        .embed_query(&p.query, Some(&prov_name))
+                        .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
+
+                    let eff_vf = if p.vector_field != DEFAULT_EMBEDDING_FIELD {
+                        p.vector_field.clone()
+                    } else {
+                        emb_field
+                    };
+                    let eff_tf = if p.text_field != DEFAULT_TEXT_FIELD {
+                        p.text_field.clone()
+                    } else {
+                        txt_field
+                    };
+
+                    (qv, eff_vf, eff_tf, true, Some(prov_name))
+                }
             }
         };
 
@@ -190,82 +217,70 @@ fn handle_hybrid_search(
 
     // ========================================================================
     // STEP 1.5: Document-level AND qualification (match_scope="document")
+    //           Uses shared orchestration from fusion.rs
     // ========================================================================
-    let and_mode = p.mode.as_deref() != Some("or");
-    // Default: document-level AND — qualify docs where ALL words appear (across chunks),
-    // then use OR mode to find relevant chunks within those docs.
-    // Only chunk-level AND when explicitly requested via match_scope="chunk".
-    let is_doc_scope =
-        and_mode && p.match_scope.as_deref() != Some("chunk");
-
-    let doc_qualification_filter = if is_doc_scope {
-        qualify_documents(adapter, &p.collection, &effective_text_field, &p.query)?
+    let qual_fields: Vec<&str> = if let Some(ref fields) = p.text_fields {
+        fields.iter().map(|s| s.as_str()).collect()
     } else {
-        None
+        vec![&effective_text_field]
     };
 
-    let qualified_doc_count = doc_qualification_filter.as_ref().and_then(|f| {
-        f.get("doc_id")
-            .and_then(|v| v.get("$in"))
-            .and_then(|v| v.as_array())
-            .map(|a| a.len())
-    });
+    let qual = apply_document_qualification(
+        adapter,
+        &p.collection,
+        &qual_fields,
+        &p.query,
+        p.mode.as_deref(),
+        p.match_scope.as_deref(),
+        p.filter.clone(),
+    )?;
 
     // ========================================================================
     // STEP 2: Vector search → ranks + docs (single pass)
+    //         Skipped when vector_weight == 0.0 (BM25-only mode)
     // ========================================================================
-    let vector_results = if let Some(ref filter) = p.filter {
-        adapter.vector_search_with_filter(
-            &p.collection,
-            &effective_vector_field,
-            &query_vector,
-            filter,
-            internal_limit,
-        )?
-    } else {
-        adapter.vector_search(
-            &p.collection,
-            &effective_vector_field,
-            &query_vector,
-            internal_limit,
-        )?
-    };
+    let mut vector_ranks: HashMap<String, usize> = HashMap::new();
+    let mut vector_docs: HashMap<String, (Value, f32)> = HashMap::new();
 
-    let mut vector_ranks: HashMap<String, usize> = HashMap::with_capacity(vector_results.len());
-    let mut vector_docs: HashMap<String, (Value, f32)> =
-        HashMap::with_capacity(vector_results.len());
-    for (rank, (doc, score)) in vector_results.into_iter().enumerate() {
-        if let Some(id) = doc.get("_id").and_then(id_to_string) {
-            vector_ranks.insert(id.clone(), rank + 1);
-            vector_docs.insert(id, (doc, score));
+    if !skip_vector {
+        let vector_results = if let Some(ref filter) = p.filter {
+            adapter.vector_search_with_filter(
+                &p.collection,
+                &effective_vector_field,
+                &query_vector,
+                filter,
+                internal_limit,
+            )?
+        } else {
+            adapter.vector_search(
+                &p.collection,
+                &effective_vector_field,
+                &query_vector,
+                internal_limit,
+            )?
+        };
+
+        vector_ranks.reserve(vector_results.len());
+        vector_docs.reserve(vector_results.len());
+        for (rank, (doc, score)) in vector_results.into_iter().enumerate() {
+            if let Some(id) = doc.get("_id").and_then(id_to_string) {
+                vector_ranks.insert(id.clone(), rank + 1);
+                vector_docs.insert(id, (doc, score));
+            }
         }
     }
 
     // ========================================================================
     // STEP 3: Fulltext search → ranks + docs (single pass)
+    //         Uses qualification outcome from STEP 1.5 (and_mode, filter)
     // ========================================================================
-
-    // If document-level AND is active, switch fulltext to OR mode (doc qualification
-    // already ensures all tokens appear across the document's chunks) and merge filters.
-    let (fulltext_and_mode, fulltext_filter) =
-        if let Some(ref qual_filter) = doc_qualification_filter {
-            // Merge user filter + doc_id qualification filter with $and
-            let merged = match &p.filter {
-                Some(user_filter) => Some(json!({"$and": [user_filter, qual_filter]})),
-                None => Some(qual_filter.clone()),
-            };
-            (false, merged) // OR mode — doc-level AND already satisfied
-        } else {
-            (and_mode, p.filter.clone())
-        };
-
     let text_options = FulltextSearchOptions {
         limit: Some(internal_limit),
         skip: None,
         min_score: None,
         projection: None, // Get full docs for merging
-        filter: fulltext_filter,
-        and_mode: fulltext_and_mode,
+        filter: qual.effective_filter.clone(),
+        and_mode: qual.effective_and_mode,
         highlight: false,
         highlight_context: None,
         highlight_max_snippets: None,
@@ -384,7 +399,7 @@ fn handle_hybrid_search(
     // STEP 7: Projection + response
     // ========================================================================
     let projection = parse_projection_value(p.projection)?;
-    let match_scope = if is_doc_scope { "document" } else { "chunk" };
+    let match_scope = if qual.is_doc_scope { "document" } else { "chunk" };
 
     // Common response metadata (shared between flat and grouped modes)
     let mut response = serde_json::Map::new();
@@ -407,7 +422,7 @@ fn handle_hybrid_search(
     response.insert("dedup_removed".into(), json!(dedup_removed));
     response.insert("chunks_merged".into(), json!(chunks_merged));
     response.insert("match_scope".into(), json!(match_scope));
-    if let Some(count) = qualified_doc_count {
+    if let Some(count) = qual.qualified_doc_count {
         response.insert("qualified_doc_ids".into(), json!(count));
     }
 
@@ -562,104 +577,7 @@ fn handle_hybrid_search(
     Ok(Value::Object(response))
 }
 
-/// Document-level AND qualification for RAG collections.
-///
-/// When `match_scope="document"` + `mode="and"`, we need all query tokens to appear
-/// across a document's chunks (not necessarily in one chunk). This function:
-/// 1. Tokenizes the query using the fulltext index config
-/// 2. Gets posting lists ordered by rarity (smallest first for early termination)
-/// 3. Intersects posting lists at document level using chunk→doc mapping
-/// 4. Returns a filter that restricts fulltext search to qualified doc_ids
-///
-/// Returns `Ok(None)` if qualification is not needed (1 token, or no restriction).
-/// Returns `Ok(Some(filter))` with `{"doc_id": {"$in": [...]}}` when docs are qualified.
-fn qualify_documents(
-    adapter: &Arc<IronBaseAdapter>,
-    collection: &str,
-    text_field: &str,
-    query: &str,
-) -> Result<Option<Value>> {
-    use crate::adapter::QualificationResult;
-
-    let qualify_start = std::time::Instant::now();
-    match adapter.fulltext_qualify_documents_fast(collection, text_field, query)? {
-        QualificationResult::NotRequired => {
-            return Ok(None);
-        }
-        QualificationResult::Qualified(doc_ids) => {
-            let count = doc_ids.len();
-            let qualified_vec: Vec<Value> = doc_ids.into_iter().map(|s| json!(s)).collect();
-            tracing::info!(
-                collection = collection,
-                qualified = count,
-                elapsed_ms = qualify_start.elapsed().as_millis() as u64,
-                "qualify_documents: fast path (chunk_doc_mapping)"
-            );
-            return Ok(Some(json!({"doc_id": {"$in": qualified_vec}})));
-        }
-        QualificationResult::LegacyFallback => {
-            tracing::warn!(
-                collection = collection,
-                "qualify_documents: chunk_doc_mapping not available, using find-based fallback"
-            );
-        }
-    }
-
-    // Fallback: find-based qualification (for legacy indexes without chunk_doc_mapping)
-    let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
-    if tokens.len() <= 1 {
-        return Ok(None);
-    }
-
-    let mut token_counts =
-        adapter.fulltext_token_posting_counts(collection, text_field, &tokens)?;
-    token_counts.sort_by_key(|(_, count)| *count);
-
-    if token_counts[0].1 == 0 {
-        return Ok(Some(json!({"doc_id": {"$in": []}})));
-    }
-
-    let mut qualified: Option<HashSet<String>> = None;
-
-    for (token, _) in &token_counts {
-        let chunk_ids = adapter.fulltext_token_chunk_ids(collection, text_field, token)?;
-
-        let find_result = adapter.find(
-            collection,
-            json!({"_id": {"$in": chunk_ids}}),
-            FindOptions {
-                projection: Some(json!({"doc_id": 1, "_id": 0})),
-                ..Default::default()
-            },
-        )?;
-
-        let doc_ids: HashSet<String> = find_result
-            .documents
-            .iter()
-            .filter_map(|d| {
-                d.get("doc_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .collect();
-
-        qualified = Some(match qualified {
-            None => doc_ids,
-            Some(prev) => prev.intersection(&doc_ids).cloned().collect(),
-        });
-
-        if qualified.as_ref().is_some_and(|q| q.is_empty()) {
-            return Ok(Some(json!({"doc_id": {"$in": []}})));
-        }
-    }
-
-    let qualified_vec: Vec<Value> = qualified
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| json!(s))
-        .collect();
-    Ok(Some(json!({"doc_id": {"$in": qualified_vec}})))
-}
+// qualify_documents moved to fusion.rs (shared between hybrid and fulltext search)
 
 /// Calculate RRF score for given ranks and weights
 /// Exposed for testing
@@ -813,7 +731,7 @@ mod tests {
         });
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.mode.as_deref(), Some("and"));
-        assert!(p.match_scope.is_none()); // default: None (= "chunk")
+        assert!(p.match_scope.is_none()); // default: None (= "document" — doc-level AND)
     }
 
     #[test]
@@ -845,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_params_match_scope_without_mode_and() {
-        // match_scope without mode="and" — should parse but won't activate doc qualification
+        // match_scope="document" with mode=None (default AND) — doc qualification WILL activate
         let params = json!({
             "collection": "test",
             "vector": [0.1, 0.2],
@@ -854,7 +772,7 @@ mod tests {
         });
         let p: HybridSearchParams = HybridSearchParams::parse(params).unwrap();
         assert_eq!(p.match_scope.as_deref(), Some("document"));
-        assert!(p.mode.is_none()); // no "and" → doc qualification won't activate
+        assert!(p.mode.is_none()); // None = AND default → doc qualification activates
     }
 
     #[test]

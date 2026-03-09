@@ -96,6 +96,12 @@ pub fn tools() -> Vec<Value> {
                         "enum": ["and", "or"],
                         "default": "and"
                     },
+                    "match_scope": {
+                        "type": "string",
+                        "description": "Match scope for AND mode: 'document' (default) = all words must appear across the document's chunks (ideal for RAG), 'chunk' = all words in a single chunk. No effect in 'or' mode.",
+                        "enum": ["document", "chunk"],
+                        "default": "document"
+                    },
                     "limit": fields::limit_results(10),
                     "skip": fields::skip_results(),
                     "min_score": fields::min_score(),

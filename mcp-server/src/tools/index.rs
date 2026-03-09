@@ -7,6 +7,7 @@ use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
+use super::fusion::apply_document_qualification;
 use super::helpers::{
     parse_projection_value, parse_sort_value, validate_collection_name, DEFAULT_QUERY_LIMIT,
 };
@@ -238,14 +239,31 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
 
     let projection = parse_projection_value(p.projection)?;
 
-    let and_mode = p.mode.as_deref() != Some("or");
+    // Collect qualification fields: all fields to qualify across (multi-field union)
+    let qual_fields: Vec<&str> = if let Some(ref fields) = p.fields {
+        fields.iter().map(|s| s.as_str()).collect()
+    } else {
+        vec![&p.field]
+    };
+
+    // Shared qualification: match_scope validation, multi-field union, filter merge
+    let qual = apply_document_qualification(
+        adapter,
+        &p.collection,
+        &qual_fields,
+        &p.query,
+        p.mode.as_deref(),
+        p.match_scope.as_deref(),
+        p.filter,
+    )?;
+
     let options = FulltextSearchOptions {
         limit: p.limit,
         skip: p.skip,
         min_score: p.min_score,
         projection,
-        filter: p.filter,
-        and_mode,
+        filter: qual.effective_filter,
+        and_mode: qual.effective_and_mode,
         highlight: p.highlight,
         highlight_context: p.highlight_context,
         highlight_max_snippets: p.highlight_max_snippets,
@@ -276,7 +294,17 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         })
         .collect();
 
-    Ok(json!({"results": documents, "count": documents.len()}))
+    // #4: Always include match_scope in response (consistent with hybrid_search)
+    let match_scope = if qual.is_doc_scope { "document" } else { "chunk" };
+    let mut response = json!({
+        "results": documents,
+        "count": documents.len(),
+        "match_scope": match_scope
+    });
+    if let Some(count) = qual.qualified_doc_count {
+        response["qualified_doc_ids"] = json!(count);
+    }
+    Ok(response)
 }
 
 /// Handle fulltext_analyze - debug tokenization process

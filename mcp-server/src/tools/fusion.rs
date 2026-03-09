@@ -5,8 +5,11 @@
 //!
 //! Extracted from duplicated code in hybrid.rs and rag.rs (2026-02-18).
 
+use crate::adapter::{FindOptions, IronBaseAdapter, QualificationResult};
+use crate::error::{McpError, Result};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 // ============================================================================
 // Types
@@ -511,6 +514,246 @@ pub(crate) fn mmr_reorder(
 
     *results = reordered;
     original_len - results.len()
+}
+
+// ============================================================================
+// Document-level AND qualification
+// ============================================================================
+
+/// Document-level AND qualification for RAG collections.
+///
+/// When `match_scope="document"` + `mode="and"`, we need all query tokens to appear
+/// across a document's chunks (not necessarily in one chunk). This function:
+/// 1. Tokenizes the query using the fulltext index config
+/// 2. Gets posting lists ordered by rarity (smallest first for early termination)
+/// 3. Intersects posting lists at document level using chunk→doc mapping
+/// 4. Returns a filter that restricts fulltext search to qualified doc_ids
+///
+/// Returns `Ok(None)` if qualification is not needed (1 token, or no restriction).
+/// Returns `Ok(Some(filter))` with `{"doc_id": {"$in": [...]}}` when docs are qualified.
+pub(crate) fn qualify_documents(
+    adapter: &Arc<IronBaseAdapter>,
+    collection: &str,
+    text_field: &str,
+    query: &str,
+) -> Result<Option<Value>> {
+    let qualify_start = std::time::Instant::now();
+    match adapter.fulltext_qualify_documents_fast(collection, text_field, query)? {
+        QualificationResult::NotRequired => {
+            return Ok(None);
+        }
+        QualificationResult::Qualified(doc_ids) => {
+            let count = doc_ids.len();
+            let qualified_vec: Vec<Value> = doc_ids.into_iter().map(|s| json!(s)).collect();
+            tracing::info!(
+                collection = collection,
+                qualified = count,
+                elapsed_ms = qualify_start.elapsed().as_millis() as u64,
+                "qualify_documents: fast path (chunk_doc_mapping)"
+            );
+            return Ok(Some(json!({"doc_id": {"$in": qualified_vec}})));
+        }
+        QualificationResult::LegacyFallback => {
+            tracing::warn!(
+                collection = collection,
+                "qualify_documents: chunk_doc_mapping not available, using find-based fallback"
+            );
+        }
+    }
+
+    // Fallback: find-based qualification (for legacy indexes without chunk_doc_mapping)
+    let tokens = adapter.fulltext_tokenize_query(collection, text_field, query)?;
+    if tokens.len() <= 1 {
+        return Ok(None);
+    }
+
+    let mut token_counts =
+        adapter.fulltext_token_posting_counts(collection, text_field, &tokens)?;
+    token_counts.sort_by_key(|(_, count)| *count);
+
+    if token_counts[0].1 == 0 {
+        return Ok(Some(json!({"doc_id": {"$in": []}})));
+    }
+
+    let mut qualified: Option<HashSet<String>> = None;
+
+    for (token, _) in &token_counts {
+        let chunk_ids = adapter.fulltext_token_chunk_ids(collection, text_field, token)?;
+
+        let find_result = adapter.find(
+            collection,
+            json!({"_id": {"$in": chunk_ids}}),
+            FindOptions {
+                projection: Some(json!({"doc_id": 1, "_id": 0})),
+                ..Default::default()
+            },
+        )?;
+
+        let doc_ids: HashSet<String> = find_result
+            .documents
+            .iter()
+            .filter_map(|d| {
+                d.get("doc_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .collect();
+
+        qualified = Some(match qualified {
+            None => doc_ids,
+            Some(prev) => prev.intersection(&doc_ids).cloned().collect(),
+        });
+
+        if qualified.as_ref().is_some_and(|q| q.is_empty()) {
+            return Ok(Some(json!({"doc_id": {"$in": []}})));
+        }
+    }
+
+    let qualified_vec: Vec<Value> = qualified
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| json!(s))
+        .collect();
+    Ok(Some(json!({"doc_id": {"$in": qualified_vec}})))
+}
+
+// ============================================================================
+// Document qualification orchestration (shared between hybrid & fulltext)
+// ============================================================================
+
+/// Validate `match_scope` parameter value.
+/// Returns error for invalid values; None and valid values pass through.
+pub(crate) fn validate_match_scope(match_scope: Option<&str>) -> Result<()> {
+    if let Some(scope) = match_scope {
+        match scope {
+            "document" | "chunk" => Ok(()),
+            other => Err(McpError::invalid_params(format!(
+                "Invalid match_scope '{}'. Use: 'document' or 'chunk'",
+                other
+            ))),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Result of document qualification orchestration
+#[derive(Debug)]
+pub(crate) struct QualificationOutcome {
+    /// Whether document-level scope is active
+    pub is_doc_scope: bool,
+    /// Effective AND mode (false if doc qualification switched to OR)
+    pub effective_and_mode: bool,
+    /// Effective filter (merged user filter + doc qualification filter)
+    pub effective_filter: Option<Value>,
+    /// Number of qualified documents (if doc scope active)
+    pub qualified_doc_count: Option<usize>,
+}
+
+/// Apply document-level AND qualification if needed.
+///
+/// Shared orchestration logic used by both `hybrid_search` and `fulltext_search`.
+/// Handles: match_scope validation, multi-field qualification (union), filter merge,
+/// and OR mode switch.
+///
+/// `fields`: all text fields to qualify across (union of doc_ids).
+/// For single-field, pass a slice with one element.
+pub(crate) fn apply_document_qualification(
+    adapter: &Arc<IronBaseAdapter>,
+    collection: &str,
+    fields: &[&str],
+    query: &str,
+    mode: Option<&str>,
+    match_scope: Option<&str>,
+    user_filter: Option<Value>,
+) -> Result<QualificationOutcome> {
+    validate_match_scope(match_scope)?;
+
+    let and_mode = mode != Some("or");
+    let is_doc_scope = and_mode && match_scope != Some("chunk");
+
+    if !is_doc_scope || fields.is_empty() {
+        return Ok(QualificationOutcome {
+            is_doc_scope,
+            effective_and_mode: and_mode,
+            effective_filter: user_filter,
+            qualified_doc_count: None,
+        });
+    }
+
+    // Multi-field qualification: qualify on each field, union the doc_ids.
+    // A document qualifies if ALL query tokens appear across its chunks in ANY of the fields.
+    let doc_qualification_filter = if fields.len() == 1 {
+        // Single field: direct qualification
+        qualify_documents(adapter, collection, fields[0], query)?
+    } else {
+        // Multi-field: union of qualified doc_ids across all fields
+        let mut union_doc_ids: HashSet<String> = HashSet::new();
+        let mut any_field_had_restriction = false;
+
+        for field in fields {
+            match qualify_documents(adapter, collection, field, query)? {
+                None => {
+                    // NotRequired for this field (e.g. single token) — no restriction needed
+                    return Ok(QualificationOutcome {
+                        is_doc_scope,
+                        effective_and_mode: and_mode,
+                        effective_filter: user_filter,
+                        qualified_doc_count: None,
+                    });
+                }
+                Some(filter) => {
+                    any_field_had_restriction = true;
+                    if let Some(ids) = filter
+                        .get("doc_id")
+                        .and_then(|v| v.get("$in"))
+                        .and_then(|v| v.as_array())
+                    {
+                        for id in ids {
+                            if let Some(s) = id.as_str() {
+                                union_doc_ids.insert(s.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if any_field_had_restriction {
+            let qualified_vec: Vec<Value> =
+                union_doc_ids.into_iter().map(|s| json!(s)).collect();
+            Some(json!({"doc_id": {"$in": qualified_vec}}))
+        } else {
+            None
+        }
+    };
+
+    let qualified_doc_count = doc_qualification_filter.as_ref().and_then(|f| {
+        f.get("doc_id")
+            .and_then(|v| v.get("$in"))
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+    });
+
+    // If document-level AND is active, switch to OR mode (doc qualification
+    // already ensures all tokens appear across the document's chunks) and merge filters.
+    let (effective_and_mode, effective_filter) =
+        if let Some(ref qual_filter) = doc_qualification_filter {
+            let merged = match user_filter {
+                Some(user_f) => Some(json!({"$and": [user_f, qual_filter]})),
+                None => Some(qual_filter.clone()),
+            };
+            (false, merged) // OR mode — doc-level AND already satisfied
+        } else {
+            (and_mode, user_filter)
+        };
+
+    Ok(QualificationOutcome {
+        is_doc_scope,
+        effective_and_mode,
+        effective_filter,
+        qualified_doc_count,
+    })
 }
 
 // ============================================================================
