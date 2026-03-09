@@ -7,6 +7,7 @@
 
 use crate::adapter::{FindOptions, IronBaseAdapter, QualificationResult};
 use crate::error::{McpError, Result};
+use crate::tools::defaults::MAX_INTERNAL_LIMIT;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -585,6 +586,7 @@ pub(crate) fn qualify_documents(
             json!({"_id": {"$in": chunk_ids}}),
             FindOptions {
                 projection: Some(json!({"doc_id": 1, "_id": 0})),
+                limit: Some(MAX_INTERNAL_LIMIT),
                 ..Default::default()
             },
         )?;
@@ -675,6 +677,19 @@ pub(crate) fn apply_document_qualification(
     if !is_doc_scope || fields.is_empty() {
         return Ok(QualificationOutcome {
             is_doc_scope,
+            effective_and_mode: and_mode,
+            effective_filter: user_filter,
+            qualified_doc_count: None,
+        });
+    }
+
+    // Skip qualification if the collection has no fulltext indexes (non-RAG collection)
+    let ft_fields = adapter
+        .get_fulltext_field_names(collection)
+        .unwrap_or_default();
+    if ft_fields.is_empty() {
+        return Ok(QualificationOutcome {
+            is_doc_scope: false,
             effective_and_mode: and_mode,
             effective_filter: user_filter,
             qualified_doc_count: None,

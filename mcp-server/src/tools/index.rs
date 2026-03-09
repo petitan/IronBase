@@ -237,6 +237,10 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
     let p: FulltextSearchParams = FulltextSearchParams::parse(params)?;
     validate_collection_name(&p.collection)?;
 
+    if p.query.is_empty() {
+        return Err(McpError::invalid_params("Query cannot be empty"));
+    }
+
     let projection = parse_projection_value(p.projection)?;
 
     // Collect qualification fields: all fields to qualify across (multi-field union)

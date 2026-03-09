@@ -819,6 +819,26 @@ fn register_search_functions(
                 }
             }
 
+            // Mode: "and" (default) or "or"
+            let mut and_mode = true; // AND default — consistent with MCP fulltext_search
+            if let Some(mode_val) = options.get("mode") {
+                if let Ok(mode_str) = mode_val.clone().into_string() {
+                    if mode_str == "or" {
+                        and_mode = false;
+                    }
+                }
+            }
+
+            // match_scope: "document" (default) or "chunk"
+            let mut match_scope = "document";
+            if let Some(scope_val) = options.get("match_scope") {
+                if let Ok(scope_str) = scope_val.clone().into_string() {
+                    if scope_str == "chunk" {
+                        match_scope = "chunk";
+                    }
+                }
+            }
+
             // Highlight options
             if let Some(hl_val) = options.get("highlight") {
                 if let Ok(hl) = hl_val.as_bool() {
@@ -845,13 +865,35 @@ fn register_search_functions(
             let effective_limit = requested_limit
                 .min(max_find_documents)
                 .min(ABSOLUTE_MAX_FIND_DOCUMENTS);
+
+            // Document-level AND qualification: if and_mode + document scope,
+            // qualify doc_ids first, then switch to OR retrieval
+            let (effective_and_mode, effective_filter) =
+                if and_mode && match_scope == "document" {
+                    match adapter_ftsrch
+                        .fulltext_qualify_documents_fast(collection, field, query)
+                    {
+                        Ok(crate::adapter::QualificationResult::Qualified(doc_ids)) => {
+                            let qualified_vec: Vec<serde_json::Value> =
+                                doc_ids.into_iter().map(|s| serde_json::json!(s)).collect();
+                            (
+                                false,
+                                Some(serde_json::json!({"doc_id": {"$in": qualified_vec}})),
+                            )
+                        }
+                        _ => (and_mode, None), // fallback: no qualification available
+                    }
+                } else {
+                    (and_mode, None)
+                };
+
             let options = FulltextSearchOptions {
                 limit: Some(effective_limit),
                 skip,
                 min_score,
                 projection,
-                filter: None, // Scripting doesn't support filter yet
-                and_mode: false,
+                filter: effective_filter,
+                and_mode: effective_and_mode,
                 highlight,
                 highlight_context,
                 highlight_max_snippets,

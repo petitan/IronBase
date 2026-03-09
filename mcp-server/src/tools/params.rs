@@ -748,7 +748,9 @@ pub fn resolve_weights(
                 "At least one of vector_weight or fulltext_weight must be positive.",
             ));
         }
-        return Ok((vw, fw));
+        // Normalize so weights sum to 1.0
+        let total = vw + fw;
+        return Ok((vw / total, fw / total));
     }
 
     // Search mode presets
