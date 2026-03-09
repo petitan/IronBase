@@ -12,10 +12,10 @@ pub fn render(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) 
 
     // Split into sections
     let chunks = Layout::vertical([
-        Constraint::Length(2),  // Help text
-        Constraint::Length(8),  // Query editor (fixed)
-        Constraint::Min(10),    // Results list (grows)
-        Constraint::Length(1),  // Status/error
+        Constraint::Length(2), // Help text
+        Constraint::Length(8), // Query editor (fixed)
+        Constraint::Min(10),   // Results list (grows)
+        Constraint::Length(1), // Status/error
     ])
     .split(inner);
 
@@ -254,12 +254,10 @@ fn render_status(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Them
 
 /// Render query explain panel
 fn render_explain(frame: &mut Frame, area: Rect, state: &QueryState, theme: &Theme) {
-    let mut lines: Vec<Line> = vec![
-        Line::from(Span::styled(
-            "┌─ Query Plan ─────────────────────────────────┐",
-            Style::default().fg(theme.accent).bold(),
-        )),
-    ];
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        "┌─ Query Plan ─────────────────────────────────┐",
+        Style::default().fg(theme.accent).bold(),
+    ))];
 
     if let Some(ref explain) = state.explain_result {
         // Extract plan details

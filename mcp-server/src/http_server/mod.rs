@@ -282,55 +282,57 @@ async fn run_http_server_internal(
 
     // Initialize embedding manager
     // Priority: [embedding] config section > IRONBASE_FASTTEXT_MODEL env > [rag].fasttext_model
-    let embedding_manager: Option<Arc<crate::EmbeddingManager>> = if let Some(ref embedding_config) =
-        config.embedding
-    {
-        // New config-driven init
-        match crate::create_embedding_from_config(embedding_config) {
-            Ok(manager) if manager.has_providers() => {
-                info!(
-                    "Embedding manager initialized from [embedding] config: provider={}",
-                    embedding_config.provider
-                );
-                Some(Arc::new(manager))
-            }
-            Ok(_) => {
-                warn!("Embedding provider '{}' configured but no providers loaded", embedding_config.provider);
-                None
-            }
-            Err(e) => {
-                warn!("Failed to initialize embedding from config: {}", e);
-                None
-            }
-        }
-    } else {
-        // Legacy: FastText-only path
-        let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
-            .ok()
-            .or_else(|| config.fasttext_model.clone());
-        if let Some(model_path) = fasttext_path {
-            match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+    let embedding_manager: Option<Arc<crate::EmbeddingManager>> =
+        if let Some(ref embedding_config) = config.embedding {
+            // New config-driven init
+            match crate::create_embedding_from_config(embedding_config) {
                 Ok(manager) if manager.has_providers() => {
                     info!(
-                        "Embedding manager initialized with FastText model: {}",
-                        model_path
+                        "Embedding manager initialized from [embedding] config: provider={}",
+                        embedding_config.provider
                     );
                     Some(Arc::new(manager))
                 }
                 Ok(_) => {
-                    warn!("FastText model configured but failed to load, embeddings disabled");
+                    warn!(
+                        "Embedding provider '{}' configured but no providers loaded",
+                        embedding_config.provider
+                    );
                     None
                 }
                 Err(e) => {
-                    warn!("Failed to initialize embedding manager: {}", e);
+                    warn!("Failed to initialize embedding from config: {}", e);
                     None
                 }
             }
         } else {
-            info!("No embedding provider configured, embeddings disabled");
-            None
-        }
-    };
+            // Legacy: FastText-only path
+            let fasttext_path = std::env::var("IRONBASE_FASTTEXT_MODEL")
+                .ok()
+                .or_else(|| config.fasttext_model.clone());
+            if let Some(model_path) = fasttext_path {
+                match crate::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+                    Ok(manager) if manager.has_providers() => {
+                        info!(
+                            "Embedding manager initialized with FastText model: {}",
+                            model_path
+                        );
+                        Some(Arc::new(manager))
+                    }
+                    Ok(_) => {
+                        warn!("FastText model configured but failed to load, embeddings disabled");
+                        None
+                    }
+                    Err(e) => {
+                        warn!("Failed to initialize embedding manager: {}", e);
+                        None
+                    }
+                }
+            } else {
+                info!("No embedding provider configured, embeddings disabled");
+                None
+            }
+        };
 
     // Initialize job manager for async operations (embedding backfill, etc.)
     let job_manager = Arc::new(crate::JobManager::new());

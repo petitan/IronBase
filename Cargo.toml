@@ -6,16 +6,13 @@ members = [
     "ironbase-backup",
     "bindings/python",
     "bindings/csharp",
-]
-exclude = [
     "mcp-server",
     "ironbase-tui",
     "ironbase-bridge",
-    "gaploader",
 ]
 
 [workspace.package]
-version = "0.3.198"
+version = "0.3.199"
 edition = "2021"
 authors = ["Petitan"]
 repository = "https://github.com/petitan/IronBase"
@@ -32,14 +29,27 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 memmap2 = "0.9"
 parking_lot = "0.12"
 ahash = "0.8"
-dashmap = "5.5"
+dashmap = "6"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1.0"
+thiserror2 = { version = "2.0", package = "thiserror" }
 anyhow = "1.0"
 crossbeam = "0.8"
 bincode = "1.3"
 tempfile = "3.8"
 lazy_static = "1.4"
+tokio = { version = "1", features = ["full", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.7"
+rhai = { version = "1.19", features = ["sync"] }
+lru = "0.12"
+rayon = "1.10"
+log = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+async-trait = "0.1"
+url = "2"
 
 [profile.release]
 opt-level = 3

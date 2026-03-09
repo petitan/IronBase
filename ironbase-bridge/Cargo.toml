@@ -1,36 +1,23 @@
 [package]
 name = "ironbase-bridge"
-version = "0.1.6"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
 description = "STDIO to HTTP/HTTPS bridge for MCP IronBase Server"
-license = "MIT"
-authors = ["Petitan"]
-repository = "https://github.com/petitan/IronBase"
 
 [[bin]]
 name = "ironbase-bridge"
 path = "src/main.rs"
 
 [dependencies]
-# Async runtime
-tokio = { version = "1", features = ["rt-multi-thread", "io-std", "io-util", "macros", "signal"] }
-
-# HTTP client with TLS
-reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
-
-# Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# CLI argument parsing
-clap = { version = "4", features = ["derive", "env"] }
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Error handling
-anyhow = "1"
-
-# URL parsing (BUG #7 fix)
-url = "2"
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+url = { workspace = true }

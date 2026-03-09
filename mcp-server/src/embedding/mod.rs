@@ -454,10 +454,7 @@ fn check_http_provider_available(base_url: &str, model: &str) {
         Ok(_) => {
             log::info!("Embedding provider at {} is reachable", base_url);
             // Try a probe embedding to verify model is available
-            let probe_url = format!(
-                "{}/api/embed",
-                base_url.trim_end_matches('/')
-            );
+            let probe_url = format!("{}/api/embed", base_url.trim_end_matches('/'));
             match ureq::post(&probe_url)
                 .set("Content-Type", "application/json")
                 .timeout(std::time::Duration::from_secs(10))

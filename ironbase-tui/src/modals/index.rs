@@ -93,14 +93,18 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
 
             // Build markers
             let mut markers = String::new();
-            if idx.contains("unique") { markers.push_str(" [U]"); }
-            if idx.contains("sparse") { markers.push_str(" [S]"); }
+            if idx.contains("unique") {
+                markers.push_str(" [U]");
+            }
+            if idx.contains("sparse") {
+                markers.push_str(" [S]");
+            }
 
             // Add staleness indicator
             let staleness_icon = match stats.map(|s| s.staleness_hint()) {
-                Some("green") => " ●",   // Good
-                Some("yellow") => " ◐",  // Partial stats
-                Some("red") => " ○",     // Needs refresh
+                Some("green") => " ●",  // Good
+                Some("yellow") => " ◐", // Partial stats
+                Some("red") => " ○",    // Needs refresh
                 _ => "",
             };
 
@@ -146,8 +150,8 @@ fn render_statistics(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
     if let Some(stats) = state.selected_statistics() {
         render_stats_content(frame, inner, stats, theme);
     } else if state.indexes.is_empty() {
-        let msg = Paragraph::new("Nincs kivalasztott index")
-            .style(Style::default().fg(theme.muted));
+        let msg =
+            Paragraph::new("Nincs kivalasztott index").style(Style::default().fg(theme.muted));
         frame.render_widget(msg, inner);
     } else {
         let msg = Paragraph::new("Statisztikak betoltese: [a] Analyze")
@@ -157,11 +161,7 @@ fn render_statistics(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
 }
 
 fn render_stats_content(frame: &mut Frame, area: Rect, stats: &IndexStatistics, theme: &Theme) {
-    let chunks = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
 
     // Row 1: Keys and distinct count
     let staleness_color = match stats.staleness_hint() {
@@ -180,9 +180,15 @@ fn render_stats_content(frame: &mut Frame, area: Rect, stats: &IndexStatistics, 
 
     let row1 = Line::from(vec![
         Span::raw(" Keys: "),
-        Span::styled(format!("{}", stats.num_keys), Style::default().fg(theme.accent)),
+        Span::styled(
+            format!("{}", stats.num_keys),
+            Style::default().fg(theme.accent),
+        ),
         Span::raw("  Distinct: "),
-        Span::styled(format!("{}", stats.distinct_count), Style::default().fg(theme.accent)),
+        Span::styled(
+            format!("{}", stats.distinct_count),
+            Style::default().fg(theme.accent),
+        ),
         Span::raw("  Status: "),
         Span::styled(staleness_text, Style::default().fg(staleness_color)),
     ]);
@@ -192,8 +198,16 @@ fn render_stats_content(frame: &mut Frame, area: Rect, stats: &IndexStatistics, 
     let histogram_status = if stats.has_histogram { "Yes" } else { "No" };
     let mcv_status = if stats.has_mcv { "Yes" } else { "No" };
 
-    let histogram_color = if stats.has_histogram { theme.accent } else { theme.muted };
-    let mcv_color = if stats.has_mcv { theme.accent } else { theme.muted };
+    let histogram_color = if stats.has_histogram {
+        theme.accent
+    } else {
+        theme.muted
+    };
+    let mcv_color = if stats.has_mcv {
+        theme.accent
+    } else {
+        theme.muted
+    };
 
     let row2 = Line::from(vec![
         Span::raw(" Histogram: "),

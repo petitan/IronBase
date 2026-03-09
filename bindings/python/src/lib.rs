@@ -49,25 +49,83 @@ fn ironbase_error_to_pyerr(e: IronBaseError) -> PyErr {
         }
         IronBaseError::Serialization(_) => PyErr::new::<SerializationError, _>(e.to_string()),
         IronBaseError::Deserialization(_) => PyErr::new::<SerializationError, _>(e.to_string()),
+        IronBaseError::Bincode(_) => PyErr::new::<SerializationError, _>(e.to_string()),
         IronBaseError::CollectionNotFound(_) => {
             PyErr::new::<CollectionNotFoundError, _>(e.to_string())
         }
         IronBaseError::CollectionExists(_) => PyErr::new::<CollectionExistsError, _>(e.to_string()),
-        IronBaseError::DocumentNotFound => PyErr::new::<DocumentNotFoundError, _>(e.to_string()),
-        IronBaseError::InvalidQuery(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
-        IronBaseError::Corruption(_) => PyErr::new::<CorruptionError, _>(e.to_string()),
-        IronBaseError::IndexError(_) => PyErr::new::<IndexError, _>(e.to_string()),
-        IronBaseError::AggregationError(_) => PyErr::new::<AggregationError, _>(e.to_string()),
-        IronBaseError::SchemaError(_) => PyErr::new::<SchemaValidationError, _>(e.to_string()),
-        IronBaseError::TransactionCommitted => PyErr::new::<TransactionError, _>(e.to_string()),
-        IronBaseError::TransactionAborted(_) => PyErr::new::<TransactionError, _>(e.to_string()),
-        IronBaseError::WALCorruption => PyErr::new::<CorruptionError, _>(e.to_string()),
-        IronBaseError::DatabaseLocked(_) => PyErr::new::<DatabaseLockedError, _>(e.to_string()),
-        IronBaseError::DatabaseClosed => PyErr::new::<DatabaseClosedError, _>(e.to_string()),
-        IronBaseError::OperationNotAllowed(_) => {
+        IronBaseError::InvalidCollectionName(_) => {
+            PyErr::new::<InvalidQueryError, _>(e.to_string())
+        }
+        IronBaseError::SystemCollectionError(_) => {
             PyErr::new::<OperationNotAllowedError, _>(e.to_string())
         }
-        IronBaseError::Unknown(_) => {
+        IronBaseError::DocumentNotFound => PyErr::new::<DocumentNotFoundError, _>(e.to_string()),
+        IronBaseError::InvalidDocumentId(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
+        IronBaseError::DocumentValidationFailed(_) => {
+            PyErr::new::<SchemaValidationError, _>(e.to_string())
+        }
+        IronBaseError::DuplicateKey(_, _) => {
+            PyErr::new::<OperationNotAllowedError, _>(e.to_string())
+        }
+        IronBaseError::InvalidQuery(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
+        IronBaseError::UnsupportedOperator(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
+        IronBaseError::QuerySyntaxError(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
+        IronBaseError::QueryExecutionError(_) => PyErr::new::<IronBaseException, _>(e.to_string()),
+        IronBaseError::InvalidProjection(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
+        IronBaseError::InvalidSort(_) => PyErr::new::<InvalidQueryError, _>(e.to_string()),
+        IronBaseError::Corruption(_) => PyErr::new::<CorruptionError, _>(e.to_string()),
+        IronBaseError::IndexError(_)
+        | IronBaseError::IndexNotFound(_)
+        | IronBaseError::IndexExists(_)
+        | IronBaseError::ProtectedFieldIndex(_)
+        | IronBaseError::CompoundIndexPrefixMismatch { .. } => {
+            PyErr::new::<IndexError, _>(e.to_string())
+        }
+        IronBaseError::FuzzyIndexError(_) | IronBaseError::FulltextIndexError(_) => {
+            PyErr::new::<IndexError, _>(e.to_string())
+        }
+        IronBaseError::VectorIndexError(_) | IronBaseError::VectorDimensionMismatch { .. } => {
+            PyErr::new::<IndexError, _>(e.to_string())
+        }
+        IronBaseError::AggregationError(_)
+        | IronBaseError::InvalidPipelineStage(_)
+        | IronBaseError::InvalidAccumulator(_) => PyErr::new::<AggregationError, _>(e.to_string()),
+        IronBaseError::AggregationMemoryLimit(_) => {
+            PyErr::new::<OutOfMemoryError, _>(e.to_string())
+        }
+        IronBaseError::AggregationTimeout => PyErr::new::<TimeoutError, _>(e.to_string()),
+        IronBaseError::SchemaError(_)
+        | IronBaseError::SchemaNotFound(_)
+        | IronBaseError::InvalidSchema(_) => PyErr::new::<SchemaValidationError, _>(e.to_string()),
+        IronBaseError::TransactionCommitted
+        | IronBaseError::TransactionAborted(_)
+        | IronBaseError::TransactionNotActive
+        | IronBaseError::TransactionConflict(_)
+        | IronBaseError::TransactionDeadlock
+        | IronBaseError::NestedTransactionNotAllowed => {
+            PyErr::new::<TransactionError, _>(e.to_string())
+        }
+        IronBaseError::WALCorruption
+        | IronBaseError::WALWriteError(_)
+        | IronBaseError::WALReadError(_)
+        | IronBaseError::WALRecoveryFailed(_)
+        | IronBaseError::CheckpointFailed(_) => PyErr::new::<CorruptionError, _>(e.to_string()),
+        IronBaseError::StorageError(_)
+        | IronBaseError::FileSystemError(_)
+        | IronBaseError::CompactionFailed(_) => PyErr::new::<IronBaseException, _>(e.to_string()),
+        IronBaseError::DatabaseLocked(_) => PyErr::new::<DatabaseLockedError, _>(e.to_string()),
+        IronBaseError::DatabaseClosed => PyErr::new::<DatabaseClosedError, _>(e.to_string()),
+        IronBaseError::OperationNotAllowed(_) | IronBaseError::ReadOnlyViolation(_) => {
+            PyErr::new::<OperationNotAllowedError, _>(e.to_string())
+        }
+        IronBaseError::ResourceExhausted(_) => PyErr::new::<OutOfMemoryError, _>(e.to_string()),
+        IronBaseError::InvalidConfiguration(_)
+        | IronBaseError::ConfigFileError(_)
+        | IronBaseError::InvalidDurabilityMode(_) => {
+            PyErr::new::<InvalidQueryError, _>(e.to_string())
+        }
+        IronBaseError::Unknown(_) | IronBaseError::InternalError(_) => {
             PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string())
         }
         IronBaseError::OutOfMemory(_) => PyErr::new::<OutOfMemoryError, _>(e.to_string()),

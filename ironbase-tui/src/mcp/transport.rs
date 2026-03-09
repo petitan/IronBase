@@ -47,8 +47,7 @@ impl HttpTransport {
         api_key: Option<String>,
         insecure: bool,
     ) -> McpResult<Self> {
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120)); // Longer timeout for large collections
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(120)); // Longer timeout for large collections
 
         // Accept self-signed certificates if insecure mode is enabled
         if insecure {
@@ -81,7 +80,7 @@ impl HttpTransport {
 #[async_trait]
 impl Transport for HttpTransport {
     async fn send(&self, request: &JsonRpcRequest) -> McpResult<JsonRpcResponse> {
-        let mut req = self.client.post(&self.mcp_url()).json(request);
+        let mut req = self.client.post(self.mcp_url()).json(request);
 
         // Add Authorization header if API key is set
         if let Some(key) = &self.api_key {
@@ -182,7 +181,8 @@ impl Transport for StdioTransport {
         let mut line = String::new();
         {
             let mut stdout = self.stdout.lock().await;
-            let read_result = tokio::time::timeout(STDIO_TIMEOUT, stdout.read_line(&mut line)).await;
+            let read_result =
+                tokio::time::timeout(STDIO_TIMEOUT, stdout.read_line(&mut line)).await;
 
             match read_result {
                 Ok(Ok(_)) => {}

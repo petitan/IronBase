@@ -52,21 +52,40 @@ impl ServerInfoState {
         self.db_stats = Some(db_stats);
 
         // Parse tools
-        self.tools = tools.into_iter().map(|t| {
-            ToolInfo {
-                name: t.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                title: t.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                description: t.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            }
-        }).collect();
+        self.tools = tools
+            .into_iter()
+            .map(|t| ToolInfo {
+                name: t
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string(),
+                title: t
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                description: t
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            })
+            .collect();
 
         // Parse prompts
-        self.prompts = prompts.into_iter().map(|p| {
-            PromptInfo {
-                name: p.get("name").and_then(|v| v.as_str()).unwrap_or("?").to_string(),
-                description: p.get("description").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            }
-        }).collect();
+        self.prompts = prompts
+            .into_iter()
+            .map(|p| PromptInfo {
+                name: p
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
+                    .to_string(),
+                description: p
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            })
+            .collect();
 
         // Calculate total lines
         self.total_lines = self.calculate_total_lines();
@@ -102,19 +121,31 @@ impl ServerInfoState {
 }
 
 /// Render the server info modal
-pub fn render(frame: &mut Frame, area: Rect, state: &ServerInfoState, scroll: usize, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Szerver Info [j/k gorgetes, Esc bezar]", theme, 70, 80);
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ServerInfoState,
+    scroll: usize,
+    theme: &Theme,
+) {
+    let inner = render_modal_frame(
+        frame,
+        area,
+        "Szerver Info [j/k gorgetes, Esc bezar]",
+        theme,
+        70,
+        80,
+    );
 
     if state.loading {
-        let loading = Paragraph::new("Betoltes...")
-            .style(Style::default().fg(theme.fg));
+        let loading = Paragraph::new("Betoltes...").style(Style::default().fg(theme.fg));
         frame.render_widget(loading, inner);
         return;
     }
 
     if let Some(ref error) = state.error {
-        let error_text = Paragraph::new(format!("Hiba: {}", error))
-            .style(Style::default().fg(theme.error));
+        let error_text =
+            Paragraph::new(format!("Hiba: {}", error)).style(Style::default().fg(theme.error));
         frame.render_widget(error_text, inner);
         return;
     }
@@ -142,7 +173,11 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ServerInfoState, scroll: us
             if let Some(require_key) = server.get("require_api_key").and_then(|v| v.as_bool()) {
                 lines.push(Line::from(vec![
                     Span::styled("API kulcs:          ", Style::default().fg(theme.accent)),
-                    Span::raw(if require_key { "Kotelezo" } else { "Nem szukseges" }),
+                    Span::raw(if require_key {
+                        "Kotelezo"
+                    } else {
+                        "Nem szukseges"
+                    }),
                 ]));
             }
         }
@@ -229,7 +264,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ServerInfoState, scroll: us
     let mut shown_tools: std::collections::HashSet<&str> = std::collections::HashSet::new();
 
     for (prefix, category_name) in &categories {
-        let category_tools: Vec<&ToolInfo> = state.tools
+        let category_tools: Vec<&ToolInfo> = state
+            .tools
             .iter()
             .filter(|t| t.name.starts_with(prefix))
             .collect();
@@ -254,7 +290,8 @@ pub fn render(frame: &mut Frame, area: Rect, state: &ServerInfoState, scroll: us
     }
 
     // Show remaining (uncategorized) tools
-    let remaining: Vec<&ToolInfo> = state.tools
+    let remaining: Vec<&ToolInfo> = state
+        .tools
         .iter()
         .filter(|t| !shown_tools.contains(t.name.as_str()))
         .collect();

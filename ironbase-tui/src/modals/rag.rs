@@ -44,7 +44,11 @@ fn render_tabs(frame: &mut Frame, area: Rect, state: &RagState, theme: &Theme) {
         .block(Block::default().borders(Borders::BOTTOM))
         .select(selected)
         .style(Style::default().fg(theme.muted))
-        .highlight_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        );
 
     frame.render_widget(tabs, area);
 }
@@ -89,13 +93,14 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     } else {
         format!("{}|", state.search_query)
     };
-    let query_text = Paragraph::new(query_preview)
-        .block(query_block)
-        .style(if state.search_query.is_empty() {
-            Style::default().fg(theme.muted)
-        } else {
-            Style::default().fg(theme.fg)
-        });
+    let query_text =
+        Paragraph::new(query_preview)
+            .block(query_block)
+            .style(if state.search_query.is_empty() {
+                Style::default().fg(theme.muted)
+            } else {
+                Style::default().fg(theme.fg)
+            });
     frame.render_widget(query_text, chunks[1]);
 
     // Options row: limit | mode | rrf_k
@@ -175,14 +180,8 @@ fn render_search_results(frame: &mut Frame, area: Rect, state: &RagState, theme:
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
 
-            let content_preview = r
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let title_str = r
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let content_preview = r.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let title_str = r.get("title").and_then(|v| v.as_str()).unwrap_or("");
 
             let preview = if !title_str.is_empty() {
                 format!("[{}] {}", title_str, truncate_str(content_preview, 60))
@@ -306,7 +305,10 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 
     // Result
     if let Some(ref result) = state.import_result {
-        let chunks_created = result.get("chunks_created").and_then(|v| v.as_u64()).unwrap_or(0);
+        let chunks_created = result
+            .get("chunks_created")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let msg = format!("Imported: {} chunks created", chunks_created);
         let result_text = Paragraph::new(msg)
             .style(Style::default().fg(theme.success))
@@ -397,10 +399,7 @@ fn render_collections_tab(frame: &mut Frame, area: Rect, state: &RagState, theme
                 .or_else(|| c.get("total_documents"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0);
-            let provider = c
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let provider = c.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
 
             let text = format!("  {} | {} chunks | {}", name, chunks_count, provider);
             ListItem::new(text).style(style)
@@ -450,7 +449,11 @@ fn render_create_collection_form(frame: &mut Frame, area: Rect, state: &RagState
         } else {
             Style::default().fg(theme.muted)
         };
-        let cursor = if state.create_form_field == *field_idx { "|" } else { "" };
+        let cursor = if state.create_form_field == *field_idx {
+            "|"
+        } else {
+            ""
+        };
         let block = Block::default()
             .title(format!(" {} ", label))
             .borders(Borders::ALL)
@@ -504,8 +507,7 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     frame.render_widget(block, chunks[1]);
 
     if state.models.is_empty() {
-        let empty = Paragraph::new("Loading models...")
-            .style(Style::default().fg(theme.muted));
+        let empty = Paragraph::new("Loading models...").style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
     } else {
         let items: Vec<ListItem> = state
@@ -521,7 +523,10 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
 
                 let provider = m.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
                 let dim = m.get("dimension").and_then(|v| v.as_u64()).unwrap_or(0);
-                let available = m.get("available").and_then(|v| v.as_bool()).unwrap_or(false);
+                let available = m
+                    .get("available")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let status = if available { "OK" } else { "N/A" };
 
                 let text = format!("  {} | dim:{} | {}", provider, dim, status);
@@ -534,11 +539,8 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
     }
 
     // Auto-embed & cache info
-    let info_chunks = Layout::horizontal([
-        Constraint::Percentage(50),
-        Constraint::Percentage(50),
-    ])
-    .split(chunks[2]);
+    let info_chunks = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[2]);
 
     // Auto-embed status
     let ae_block = Block::default()
@@ -546,9 +548,18 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let ae_text = if let Some(ref config) = state.auto_embed_config {
-        let enabled = config.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
-        let source = config.get("source_field").and_then(|v| v.as_str()).unwrap_or("-");
-        let provider = config.get("provider").and_then(|v| v.as_str()).unwrap_or("-");
+        let enabled = config
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let source = config
+            .get("source_field")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let provider = config
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
         if enabled {
             format!("Enabled: {} -> {}", source, provider)
         } else {
@@ -569,7 +580,10 @@ fn render_models_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .border_style(Style::default().fg(theme.muted));
     let cache_text = if let Some(ref stats) = state.cache_stats {
         let entries = stats.get("entries").and_then(|v| v.as_u64()).unwrap_or(0);
-        let hit_rate = stats.get("hit_rate").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let hit_rate = stats
+            .get("hit_rate")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         format!("{} entries | {:.1}% hit rate", entries, hit_rate * 100.0)
     } else {
         "Press [c] to load".to_string()
@@ -619,13 +633,23 @@ fn render_embed_test(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.muted));
     let result_text = if let Some(ref result) = state.embed_test_result {
-        let dim = result.get("dimension").and_then(|v| v.as_u64()).unwrap_or(0);
-        let provider = result.get("provider").and_then(|v| v.as_str()).unwrap_or("?");
+        let dim = result
+            .get("dimension")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let provider = result
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
         let vector_preview = result
             .get("embedding")
             .and_then(|v| v.as_array())
             .map(|arr| {
-                let preview: Vec<String> = arr.iter().take(5).map(|v| format!("{:.4}", v.as_f64().unwrap_or(0.0))).collect();
+                let preview: Vec<String> = arr
+                    .iter()
+                    .take(5)
+                    .map(|v| format!("{:.4}", v.as_f64().unwrap_or(0.0)))
+                    .collect();
                 format!("[{}...]", preview.join(", "))
             })
             .unwrap_or_else(|| "N/A".to_string());

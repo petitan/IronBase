@@ -735,8 +735,7 @@ pub(crate) fn apply_document_qualification(
         }
 
         if any_field_had_restriction {
-            let qualified_vec: Vec<Value> =
-                union_doc_ids.into_iter().map(|s| json!(s)).collect();
+            let qualified_vec: Vec<Value> = union_doc_ids.into_iter().map(|s| json!(s)).collect();
             Some(json!({"doc_id": {"$in": qualified_vec}}))
         } else {
             None

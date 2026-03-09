@@ -266,7 +266,8 @@ fn handle_rag_document_import(
         Some(cfg) => (
             cfg.embedding_field.clone(),
             cfg.text_field.clone(),
-            p.provider.clone()
+            p.provider
+                .clone()
                 .or(auto_provider)
                 .unwrap_or_else(|| cfg.provider.clone()),
         ),

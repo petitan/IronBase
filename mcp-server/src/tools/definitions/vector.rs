@@ -103,7 +103,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "field": {
                         "type": "string",
-                        "description": "Field with vector index (default: 'embedding' - gaploader compatible)",
+                        "description": "Field with vector index (default: 'embedding')",
                         "default": "embedding"
                     },
                     "vector": {
@@ -134,7 +134,7 @@ pub fn tools() -> Vec<Value> {
                     },
                     "field": {
                         "type": "string",
-                        "description": "Field with vector index (default: 'embedding' - gaploader compatible)",
+                        "description": "Field with vector index (default: 'embedding')",
                         "default": "embedding"
                     },
                     "vector": {

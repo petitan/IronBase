@@ -299,7 +299,11 @@ fn handle_fulltext_search(params: Value, adapter: &Arc<IronBaseAdapter>) -> Resu
         .collect();
 
     // #4: Always include match_scope in response (consistent with hybrid_search)
-    let match_scope = if qual.is_doc_scope { "document" } else { "chunk" };
+    let match_scope = if qual.is_doc_scope {
+        "document"
+    } else {
+        "chunk"
+    };
     let mut response = json!({
         "results": documents,
         "count": documents.len(),

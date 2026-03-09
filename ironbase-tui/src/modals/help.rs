@@ -145,9 +145,9 @@ pub fn render(frame: &mut Frame, area: Rect, scroll: usize, theme: &Theme) {
             Span::raw("Kulcs torlese"),
         ]),
         Line::from(""),
-        Line::from(vec![
-            Span::raw("Uj kulcs: <config_dir>/ironbase-tui/new_key.txt"),
-        ]),
+        Line::from(vec![Span::raw(
+            "Uj kulcs: <config_dir>/ironbase-tui/new_key.txt",
+        )]),
     ];
 
     let help = Paragraph::new(help_text)

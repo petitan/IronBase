@@ -19,13 +19,25 @@ pub struct ListenerInfo {
 impl ListenerInfo {
     pub fn from_value(value: &serde_json::Value) -> Option<Self> {
         Some(Self {
-            id: value.get("_id").or_else(|| value.get("id"))
-                .and_then(|v| v.as_str())?.to_string(),
+            id: value
+                .get("_id")
+                .or_else(|| value.get("id"))
+                .and_then(|v| v.as_str())?
+                .to_string(),
             bind: value.get("bind").and_then(|v| v.as_str())?.to_string(),
             tls: value.get("tls").and_then(|v| v.as_bool()).unwrap_or(false),
-            enabled: value.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
-            cert_path: value.get("cert_path").and_then(|v| v.as_str()).map(String::from),
-            key_path: value.get("key_path").and_then(|v| v.as_str()).map(String::from),
+            enabled: value
+                .get("enabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            cert_path: value
+                .get("cert_path")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            key_path: value
+                .get("key_path")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         })
     }
 }
@@ -118,7 +130,10 @@ impl ListenerState {
 
     pub fn select_prev(&mut self) {
         if !self.listeners.is_empty() {
-            self.selected = self.selected.checked_sub(1).unwrap_or(self.listeners.len() - 1);
+            self.selected = self
+                .selected
+                .checked_sub(1)
+                .unwrap_or(self.listeners.len() - 1);
         }
     }
 
@@ -274,7 +289,8 @@ fn render_listeners_list(frame: &mut Frame, area: Rect, state: &ListenerState, t
     }
 
     if state.listeners.is_empty() {
-        let empty = Paragraph::new("No listeners configured").style(Style::default().fg(theme.muted));
+        let empty =
+            Paragraph::new("No listeners configured").style(Style::default().fg(theme.muted));
         frame.render_widget(empty, inner);
         return;
     }
@@ -300,8 +316,16 @@ fn render_listeners_list(frame: &mut Frame, area: Rect, state: &ListenerState, t
         .enumerate()
         .map(|(i, listener)| {
             let is_selected = i == state.selected;
-            let status = if listener.enabled { "Active" } else { "Disabled" };
-            let status_color = if listener.enabled { theme.success } else { theme.error };
+            let status = if listener.enabled {
+                "Active"
+            } else {
+                "Disabled"
+            };
+            let status_color = if listener.enabled {
+                theme.success
+            } else {
+                theme.error
+            };
             let tls_str = if listener.tls { "Yes" } else { "No" };
 
             let line = Line::from(vec![
@@ -395,9 +419,20 @@ fn render_add_mode(frame: &mut Frame, area: Rect, state: &ListenerState, theme: 
         .border_style(tls_style);
     let tls_inner = tls_block.inner(chunks[3]);
     frame.render_widget(tls_block, chunks[3]);
-    let tls_text = if state.add_tls { "[x] Enabled" } else { "[ ] Disabled" };
-    let tls_hint = if state.add_field == AddField::Tls { " (Space to toggle)" } else { "" };
-    frame.render_widget(Paragraph::new(format!("{}{}", tls_text, tls_hint)), tls_inner);
+    let tls_text = if state.add_tls {
+        "[x] Enabled"
+    } else {
+        "[ ] Disabled"
+    };
+    let tls_hint = if state.add_field == AddField::Tls {
+        " (Space to toggle)"
+    } else {
+        ""
+    };
+    frame.render_widget(
+        Paragraph::new(format!("{}{}", tls_text, tls_hint)),
+        tls_inner,
+    );
 
     // Buttons
     let buttons = Paragraph::new(Line::from(vec![
@@ -430,10 +465,7 @@ fn render_confirm_mode(frame: &mut Frame, area: Rect, state: &ListenerState, the
         None => "???",
     };
 
-    let listener_id = state
-        .get_selected()
-        .map(|l| l.id.as_str())
-        .unwrap_or("?");
+    let listener_id = state.get_selected().map(|l| l.id.as_str()).unwrap_or("?");
 
     let message = Paragraph::new(format!(
         "Are you sure you want to {} the listener '{}'?",

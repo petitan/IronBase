@@ -69,10 +69,22 @@ pub struct VectorIndexInfo {
 impl VectorIndexInfo {
     pub fn from_value(v: &Value) -> Self {
         Self {
-            name: v.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            field: v.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            name: v
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            field: v
+                .get("field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             dimension: v.get("dimension").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
-            metric: v.get("metric").and_then(|v| v.as_str()).unwrap_or("cosine").to_string(),
+            metric: v
+                .get("metric")
+                .and_then(|v| v.as_str())
+                .unwrap_or("cosine")
+                .to_string(),
             vector_count: v.get("vector_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize,
         }
     }

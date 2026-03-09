@@ -77,6 +77,12 @@ pub enum IronBaseErrorCode {
     /// Operation timed out
     Timeout = -20,
 
+    /// Database is closed
+    DatabaseClosed = -21,
+
+    /// Duplicate key error
+    DuplicateKey = -22,
+
     /// Unknown/internal error
     Unknown = -99,
 }
@@ -85,26 +91,71 @@ impl From<&IronBaseError> for IronBaseErrorCode {
     fn from(err: &IronBaseError) -> Self {
         match err {
             IronBaseError::Io(_) => IronBaseErrorCode::IoError,
-            IronBaseError::Serialization(_) => IronBaseErrorCode::SerializationError,
-            IronBaseError::Deserialization(_) => IronBaseErrorCode::SerializationError,
+            IronBaseError::Serialization(_)
+            | IronBaseError::Deserialization(_)
+            | IronBaseError::Bincode(_) => IronBaseErrorCode::SerializationError,
             IronBaseError::CollectionNotFound(_) => IronBaseErrorCode::CollectionNotFound,
             IronBaseError::CollectionExists(_) => IronBaseErrorCode::CollectionExists,
+            IronBaseError::InvalidCollectionName(_) => IronBaseErrorCode::InvalidQuery,
+            IronBaseError::SystemCollectionError(_) => IronBaseErrorCode::OperationNotAllowed,
             IronBaseError::DocumentNotFound => IronBaseErrorCode::DocumentNotFound,
-            IronBaseError::InvalidQuery(_) => IronBaseErrorCode::InvalidQuery,
+            IronBaseError::InvalidDocumentId(_) | IronBaseError::DocumentValidationFailed(_) => {
+                IronBaseErrorCode::InvalidQuery
+            }
+            IronBaseError::DuplicateKey(_, _) => IronBaseErrorCode::DuplicateKey,
+            IronBaseError::InvalidQuery(_)
+            | IronBaseError::UnsupportedOperator(_)
+            | IronBaseError::QuerySyntaxError(_)
+            | IronBaseError::QueryExecutionError(_)
+            | IronBaseError::InvalidProjection(_)
+            | IronBaseError::InvalidSort(_) => IronBaseErrorCode::InvalidQuery,
             IronBaseError::Corruption(_) => IronBaseErrorCode::Corruption,
-            IronBaseError::IndexError(_) => IronBaseErrorCode::IndexError,
-            IronBaseError::AggregationError(_) => IronBaseErrorCode::AggregationError,
-            IronBaseError::SchemaError(_) => IronBaseErrorCode::SchemaError,
-            IronBaseError::TransactionCommitted => IronBaseErrorCode::TransactionCommitted,
-            IronBaseError::TransactionAborted(_) => IronBaseErrorCode::TransactionAborted,
-            IronBaseError::WALCorruption => IronBaseErrorCode::WalCorruption,
+            IronBaseError::IndexError(_)
+            | IronBaseError::IndexNotFound(_)
+            | IronBaseError::IndexExists(_)
+            | IronBaseError::ProtectedFieldIndex(_)
+            | IronBaseError::CompoundIndexPrefixMismatch { .. }
+            | IronBaseError::FuzzyIndexError(_)
+            | IronBaseError::FulltextIndexError(_)
+            | IronBaseError::VectorIndexError(_)
+            | IronBaseError::VectorDimensionMismatch { .. } => IronBaseErrorCode::IndexError,
+            IronBaseError::AggregationError(_)
+            | IronBaseError::InvalidPipelineStage(_)
+            | IronBaseError::InvalidAccumulator(_) => IronBaseErrorCode::AggregationError,
+            IronBaseError::AggregationMemoryLimit(_) => IronBaseErrorCode::OutOfMemory,
+            IronBaseError::AggregationTimeout => IronBaseErrorCode::Timeout,
+            IronBaseError::SchemaError(_)
+            | IronBaseError::SchemaNotFound(_)
+            | IronBaseError::InvalidSchema(_) => IronBaseErrorCode::SchemaError,
+            IronBaseError::TransactionCommitted
+            | IronBaseError::TransactionAborted(_)
+            | IronBaseError::TransactionNotActive
+            | IronBaseError::TransactionConflict(_)
+            | IronBaseError::TransactionDeadlock
+            | IronBaseError::NestedTransactionNotAllowed => IronBaseErrorCode::TransactionCommitted,
+            IronBaseError::WALCorruption
+            | IronBaseError::WALWriteError(_)
+            | IronBaseError::WALReadError(_)
+            | IronBaseError::WALRecoveryFailed(_)
+            | IronBaseError::CheckpointFailed(_) => IronBaseErrorCode::WalCorruption,
+            IronBaseError::StorageError(_)
+            | IronBaseError::FileSystemError(_)
+            | IronBaseError::CompactionFailed(_) => IronBaseErrorCode::Corruption,
             IronBaseError::DatabaseLocked(_) => IronBaseErrorCode::DatabaseLocked,
-            IronBaseError::OperationNotAllowed(_) => IronBaseErrorCode::OperationNotAllowed,
-            IronBaseError::DatabaseClosed => IronBaseErrorCode::OperationNotAllowed,
+            IronBaseError::DatabaseClosed => IronBaseErrorCode::DatabaseClosed,
+            IronBaseError::OperationNotAllowed(_) | IronBaseError::ReadOnlyViolation(_) => {
+                IronBaseErrorCode::OperationNotAllowed
+            }
+            IronBaseError::ResourceExhausted(_) => IronBaseErrorCode::OutOfMemory,
+            IronBaseError::InvalidConfiguration(_)
+            | IronBaseError::ConfigFileError(_)
+            | IronBaseError::InvalidDurabilityMode(_) => IronBaseErrorCode::InvalidQuery,
             IronBaseError::OutOfMemory(_) => IronBaseErrorCode::OutOfMemory,
             IronBaseError::Cancelled(_) => IronBaseErrorCode::Cancelled,
             IronBaseError::Timeout(_) => IronBaseErrorCode::Timeout,
-            IronBaseError::Unknown(_) => IronBaseErrorCode::Unknown,
+            IronBaseError::Unknown(_) | IronBaseError::InternalError(_) => {
+                IronBaseErrorCode::Unknown
+            }
         }
     }
 }

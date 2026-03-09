@@ -18,9 +18,7 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use super::defaults::{
-    DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT,
-};
+use super::defaults::{DEFAULT_EMBEDDING_FIELD, DEFAULT_TEXT_FIELD, MAX_INTERNAL_LIMIT};
 use super::fusion::{
     apply_document_qualification, apply_projection, id_to_string, merge_adjacent_chunks,
     mmr_reorder, rerank_results, FusedResult,
@@ -114,13 +112,11 @@ fn handle_hybrid_search(
             let rag_config = get_rag_config(adapter, &p.collection)?;
             let txt_field = match &rag_config {
                 Some(cfg) => cfg.text_field.clone(),
-                None => {
-                    adapter
-                        .get_fulltext_field_names(&p.collection)
-                        .ok()
-                        .and_then(|fields| fields.into_iter().next())
-                        .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string())
-                }
+                None => adapter
+                    .get_fulltext_field_names(&p.collection)
+                    .ok()
+                    .and_then(|fields| fields.into_iter().next())
+                    .unwrap_or_else(|| DEFAULT_TEXT_FIELD.to_string()),
             };
 
             let eff_tf = if p.text_field != DEFAULT_TEXT_FIELD {
@@ -168,7 +164,8 @@ fn handle_hybrid_search(
                         Some(cfg) => (
                             cfg.embedding_field.clone(),
                             cfg.text_field.clone(),
-                            p.provider.clone()
+                            p.provider
+                                .clone()
                                 .or(auto_provider)
                                 .unwrap_or_else(|| cfg.provider.clone()),
                         ),
@@ -193,7 +190,9 @@ fn handle_hybrid_search(
                     // Embed the query
                     let qv = manager
                         .embed_query(&p.query, Some(&prov_name))
-                        .map_err(|e| McpError::internal(format!("Query embedding failed: {}", e)))?;
+                        .map_err(|e| {
+                            McpError::internal(format!("Query embedding failed: {}", e))
+                        })?;
 
                     let eff_vf = if p.vector_field != DEFAULT_EMBEDDING_FIELD {
                         p.vector_field.clone()
@@ -399,7 +398,11 @@ fn handle_hybrid_search(
     // STEP 7: Projection + response
     // ========================================================================
     let projection = parse_projection_value(p.projection)?;
-    let match_scope = if qual.is_doc_scope { "document" } else { "chunk" };
+    let match_scope = if qual.is_doc_scope {
+        "document"
+    } else {
+        "chunk"
+    };
 
     // Common response metadata (shared between flat and grouped modes)
     let mut response = serde_json::Map::new();

@@ -441,7 +441,10 @@ impl HttpEmbeddingProvider {
         let prefixed;
         let prefixed_refs;
         let effective_texts = if let Some(p) = prefix {
-            prefixed = texts.iter().map(|t| format!("{}{}", p, t)).collect::<Vec<_>>();
+            prefixed = texts
+                .iter()
+                .map(|t| format!("{}{}", p, t))
+                .collect::<Vec<_>>();
             prefixed_refs = prefixed.iter().map(|s| s.as_str()).collect::<Vec<_>>();
             &prefixed_refs[..]
         } else {

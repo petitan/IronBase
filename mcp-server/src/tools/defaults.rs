@@ -78,10 +78,10 @@ pub fn default_batch_size() -> usize {
 // Vector Index Defaults
 // ============================================================================
 
-/// Default embedding field name (gaploader compatible)
+/// Default embedding field name (RAG schema default)
 pub const DEFAULT_EMBEDDING_FIELD: &str = "embedding";
 
-/// Default text/content field name (gaploader compatible)
+/// Default text/content field name (RAG schema default)
 pub const DEFAULT_TEXT_FIELD: &str = "content";
 
 /// Default vector search limit

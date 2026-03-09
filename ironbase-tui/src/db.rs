@@ -128,7 +128,10 @@ impl DbWrapper {
 
     /// Get database statistics
     pub async fn db_stats(&self) -> Result<Value> {
-        self.client.db_stats().await.map_err(|e| anyhow::anyhow!("{}", e))
+        self.client
+            .db_stats()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     /// Open or create a database file (switches the current database)
@@ -142,18 +145,29 @@ impl DbWrapper {
 
     /// Get list of available MCP tools
     pub async fn tools_list(&self) -> Result<Vec<Value>> {
-        self.client.tools_list().await.map_err(|e| anyhow::anyhow!("{}", e))
+        self.client
+            .tools_list()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     /// Get list of available MCP prompts
     pub async fn prompts_list(&self) -> Result<Vec<Value>> {
-        self.client.prompts_list().await.map_err(|e| anyhow::anyhow!("{}", e))
+        self.client
+            .prompts_list()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     /// Get server version from MCP server info
     pub async fn get_server_version(&self) -> Result<String> {
-        let info = self.client.server_info().await.map_err(|e| anyhow::anyhow!("{}", e))?;
-        let version = info.get("version")
+        let info = self
+            .client
+            .server_info()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let version = info
+            .get("version")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown")
             .to_string();
@@ -405,7 +419,10 @@ impl DbWrapper {
         description: Option<&str>,
         tags: Option<&[String]>,
     ) -> Result<Value> {
-        let result = self.client.script_save(name, code, description, tags).await?;
+        let result = self
+            .client
+            .script_save(name, code, description, tags)
+            .await?;
         Ok(result)
     }
 
@@ -544,7 +561,10 @@ impl DbWrapper {
         cert_path: Option<&str>,
         key_path: Option<&str>,
     ) -> Result<bool> {
-        let success = self.client.listener_add(id, bind, tls, cert_path, key_path).await?;
+        let success = self
+            .client
+            .listener_add(id, bind, tls, cert_path, key_path)
+            .await?;
         Ok(success)
     }
 
@@ -576,7 +596,10 @@ impl DbWrapper {
         dimension: usize,
         metric: &str,
     ) -> Result<String> {
-        let name = self.client.create_vector_index(collection, field, dimension, metric).await?;
+        let name = self
+            .client
+            .create_vector_index(collection, field, dimension, metric)
+            .await?;
         Ok(name)
     }
 
@@ -588,7 +611,9 @@ impl DbWrapper {
 
     /// Drop a vector index
     pub async fn drop_vector_index(&self, collection: &str, index_name: &str) -> Result<()> {
-        self.client.drop_vector_index(collection, index_name).await?;
+        self.client
+            .drop_vector_index(collection, index_name)
+            .await?;
         Ok(())
     }
 
@@ -600,7 +625,10 @@ impl DbWrapper {
         vector: &[f64],
         limit: usize,
     ) -> Result<Vec<Value>> {
-        let results = self.client.vector_search(collection, field, vector, limit).await?;
+        let results = self
+            .client
+            .vector_search(collection, field, vector, limit)
+            .await?;
         Ok(results)
     }
 
@@ -613,7 +641,10 @@ impl DbWrapper {
         filter: &Value,
         limit: usize,
     ) -> Result<Vec<Value>> {
-        let results = self.client.vector_search_filter(collection, field, vector, filter, limit).await?;
+        let results = self
+            .client
+            .vector_search_filter(collection, field, vector, filter, limit)
+            .await?;
         Ok(results)
     }
 
@@ -627,7 +658,10 @@ impl DbWrapper {
         provider: &str,
         language: &str,
     ) -> Result<Value> {
-        let result = self.client.rag_collection_create(collection, embedding_field, text_field, provider, language).await?;
+        let result = self
+            .client
+            .rag_collection_create(collection, embedding_field, text_field, provider, language)
+            .await?;
         Ok(result)
     }
 
@@ -640,7 +674,10 @@ impl DbWrapper {
         overlap: usize,
         mode: &str,
     ) -> Result<Value> {
-        let result = self.client.rag_document_import(collection, content, title, chunk_size, overlap, mode).await?;
+        let result = self
+            .client
+            .rag_document_import(collection, content, title, chunk_size, overlap, mode)
+            .await?;
         Ok(result)
     }
 
@@ -652,7 +689,10 @@ impl DbWrapper {
         search_mode: &str,
         rrf_k: f64,
     ) -> Result<Value> {
-        let result = self.client.rag_search(collection, query, limit, search_mode, rrf_k).await?;
+        let result = self
+            .client
+            .rag_search(collection, query, limit, search_mode, rrf_k)
+            .await?;
         Ok(result)
     }
 
@@ -675,7 +715,19 @@ impl DbWrapper {
         search_mode: &str,
         rrf_k: f64,
     ) -> Result<Value> {
-        let result = self.client.hybrid_search(collection, vector_field, text_field, vector, query, limit, search_mode, rrf_k).await?;
+        let result = self
+            .client
+            .hybrid_search(
+                collection,
+                vector_field,
+                text_field,
+                vector,
+                query,
+                limit,
+                search_mode,
+                rrf_k,
+            )
+            .await?;
         Ok(result)
     }
 
@@ -697,7 +749,12 @@ impl DbWrapper {
         mode: &str,
         provider: &str,
     ) -> Result<Value> {
-        let result = self.client.embed_document(collection, content, title, chunk_size, overlap, mode, provider).await?;
+        let result = self
+            .client
+            .embed_document(
+                collection, content, title, chunk_size, overlap, mode, provider,
+            )
+            .await?;
         Ok(result)
     }
 
@@ -725,7 +782,10 @@ impl DbWrapper {
         target_field: &str,
         provider: &str,
     ) -> Result<Value> {
-        let result = self.client.auto_embed_enable(collection, source_field, target_field, provider).await?;
+        let result = self
+            .client
+            .auto_embed_enable(collection, source_field, target_field, provider)
+            .await?;
         Ok(result)
     }
 

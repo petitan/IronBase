@@ -22,7 +22,7 @@ pub fn is_likely_base64(input: &str) -> bool {
     }
 
     // 2. Hossz 4 többszöröse
-    if input.len() % 4 != 0 {
+    if !input.len().is_multiple_of(4) {
         return false;
     }
 

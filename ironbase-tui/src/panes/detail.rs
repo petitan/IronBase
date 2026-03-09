@@ -56,7 +56,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     };
 
     // Pretty print JSON with syntax highlighting and search highlighting
-    let formatted = format_json_pretty(&doc, theme, highlight_query.as_deref());
+    let formatted = format_json_pretty(doc, theme, highlight_query.as_deref());
 
     let paragraph = Paragraph::new(formatted)
         .scroll((app.detail_scroll as u16, 0))

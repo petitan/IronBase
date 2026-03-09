@@ -232,7 +232,10 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
             Span::raw(" Nav  "),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
             Span::raw(" Close  "),
-            Span::styled("(Admin ops require localhost connection)", Style::default().fg(theme.warning)),
+            Span::styled(
+                "(Admin ops require localhost connection)",
+                Style::default().fg(theme.warning),
+            ),
         ]
     } else {
         // Localhost but no admin key
@@ -241,7 +244,10 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
             Span::raw(" Nav  "),
             Span::styled("[Esc]", Style::default().fg(theme.accent)),
             Span::raw(" Close  "),
-            Span::styled("(Set IRONBASE_ADMIN_KEY for admin ops)", Style::default().fg(theme.warning)),
+            Span::styled(
+                "(Set IRONBASE_ADMIN_KEY for admin ops)",
+                Style::default().fg(theme.warning),
+            ),
         ]
     };
 
@@ -256,7 +262,10 @@ fn render_list_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme: &
         let new_key_text = Paragraph::new(Line::from(vec![
             Span::styled("New key: ", Style::default().fg(theme.success)),
             Span::styled(key, Style::default().fg(theme.accent).bold()),
-            Span::styled(" (copy now, won't be shown again!)", Style::default().fg(theme.warning)),
+            Span::styled(
+                " (copy now, won't be shown again!)",
+                Style::default().fg(theme.warning),
+            ),
         ]));
         frame.render_widget(new_key_text, chunks[2]);
     }
@@ -353,8 +362,8 @@ fn render_create_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme:
     .split(area);
 
     // Instructions
-    let instructions = Paragraph::new("Enter a name for the new API key:")
-        .style(Style::default().fg(theme.fg));
+    let instructions =
+        Paragraph::new("Enter a name for the new API key:").style(Style::default().fg(theme.fg));
     frame.render_widget(instructions, chunks[0]);
 
     // Input field
@@ -366,8 +375,8 @@ fn render_create_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme:
     let input_inner = input_block.inner(chunks[1]);
     frame.render_widget(input_block, chunks[1]);
 
-    let input_text = Paragraph::new(format!("{}_", state.input))
-        .style(Style::default().fg(theme.fg));
+    let input_text =
+        Paragraph::new(format!("{}_", state.input)).style(Style::default().fg(theme.fg));
     frame.render_widget(input_text, input_inner);
 
     // Buttons
@@ -399,10 +408,7 @@ fn render_confirm_mode(frame: &mut Frame, area: Rect, state: &ApiKeyState, theme
         None => "???",
     };
 
-    let key_name = state
-        .get_selected()
-        .map(|k| k.name.as_str())
-        .unwrap_or("?");
+    let key_name = state.get_selected().map(|k| k.name.as_str()).unwrap_or("?");
 
     let message = Paragraph::new(format!(
         "Are you sure you want to {} the API key '{}'?",

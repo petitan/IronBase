@@ -59,7 +59,9 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     // Info text
     let info_text = match state.mode {
         DatabaseMode::Open => "Add meg egy letezo adatbazis fajl utvonalat.".to_string(),
-        DatabaseMode::Create => "Add meg az uj adatbazis fajl utvonalat.\nA fajl nem letezhet meg!".to_string(),
+        DatabaseMode::Create => {
+            "Add meg az uj adatbazis fajl utvonalat.\nA fajl nem letezhet meg!".to_string()
+        }
     };
     let info = Paragraph::new(info_text).style(Style::default().fg(theme.fg));
     frame.render_widget(info, chunks[2]);
@@ -71,7 +73,12 @@ pub fn render(frame: &mut Frame, area: Rect, state: &DatabaseState, theme: &Them
     let path_line = Line::from(vec![
         Span::styled(" Utvonal: ", Style::default().fg(theme.accent)),
         Span::styled(before, Style::default().fg(theme.fg)),
-        Span::styled("|", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "|",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled(after, Style::default().fg(theme.fg)),
     ]);
     frame.render_widget(Paragraph::new(path_line), chunks[3]);

@@ -16,9 +16,14 @@ impl AclRuleInfo {
     pub fn from_value(value: &serde_json::Value) -> Option<Self> {
         let principal = if let Some(p) = value.get("principal") {
             if let Some(ptype) = p.get("type").and_then(|v| v.as_str()) {
-                let pvalue = p.get("value").and_then(|v| {
-                    v.as_str().map(|s| s.to_string()).or_else(|| Some(v.to_string()))
-                }).unwrap_or_default();
+                let pvalue = p
+                    .get("value")
+                    .and_then(|v| {
+                        v.as_str()
+                            .map(|s| s.to_string())
+                            .or_else(|| Some(v.to_string()))
+                    })
+                    .unwrap_or_default();
                 format!("{}:{}", ptype, pvalue)
             } else {
                 p.to_string()
@@ -32,10 +37,18 @@ impl AclRuleInfo {
             if perms.get("read").and_then(|v| v.as_bool()).unwrap_or(false) {
                 perm_list.push("read");
             }
-            if perms.get("write").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if perms
+                .get("write")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 perm_list.push("write");
             }
-            if perms.get("admin").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if perms
+                .get("admin")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 perm_list.push("admin");
             }
             perm_list.join(",")
@@ -43,7 +56,10 @@ impl AclRuleInfo {
             String::new()
         };
 
-        Some(Self { principal, permissions })
+        Some(Self {
+            principal,
+            permissions,
+        })
     }
 }
 
@@ -57,7 +73,10 @@ pub struct CollectionAclInfo {
 
 impl CollectionAclInfo {
     pub fn from_value(value: &serde_json::Value) -> Option<Self> {
-        let collection = value.get("collection").and_then(|v| v.as_str())?.to_string();
+        let collection = value
+            .get("collection")
+            .and_then(|v| v.as_str())?
+            .to_string();
 
         let rules: Vec<AclRuleInfo> = value
             .get("rules")
@@ -68,7 +87,11 @@ impl CollectionAclInfo {
         // Consider builtin if collection starts with _system or is "*"
         let is_builtin = collection.starts_with("_system") || collection == "*";
 
-        Some(Self { collection, rules, is_builtin })
+        Some(Self {
+            collection,
+            rules,
+            is_builtin,
+        })
     }
 }
 
@@ -160,10 +183,20 @@ impl EditRule {
 
     pub fn permissions_string(&self) -> String {
         let mut perms = Vec::new();
-        if self.read { perms.push("read"); }
-        if self.write { perms.push("write"); }
-        if self.admin { perms.push("admin"); }
-        if perms.is_empty() { "none".to_string() } else { perms.join(",") }
+        if self.read {
+            perms.push("read");
+        }
+        if self.write {
+            perms.push("write");
+        }
+        if self.admin {
+            perms.push("admin");
+        }
+        if perms.is_empty() {
+            "none".to_string()
+        } else {
+            perms.join(",")
+        }
     }
 
     pub fn display_principal(&self) -> String {
@@ -313,13 +346,19 @@ impl AclState {
             AclModalMode::ViewCollection => {
                 if let Some(acl) = self.acls.get(self.selected) {
                     if !acl.rules.is_empty() {
-                        self.selected_rule = self.selected_rule.checked_sub(1).unwrap_or(acl.rules.len() - 1);
+                        self.selected_rule = self
+                            .selected_rule
+                            .checked_sub(1)
+                            .unwrap_or(acl.rules.len() - 1);
                     }
                 }
             }
             AclModalMode::Edit if !self.is_adding_rule => {
                 if !self.edit_rules.is_empty() {
-                    self.edit_selected_rule = self.edit_selected_rule.checked_sub(1).unwrap_or(self.edit_rules.len() - 1);
+                    self.edit_selected_rule = self
+                        .edit_selected_rule
+                        .checked_sub(1)
+                        .unwrap_or(self.edit_rules.len() - 1);
                 }
             }
             _ => {}
@@ -382,17 +421,20 @@ impl AclState {
 
         self.edit_collection = collection;
         // Convert existing rules to EditRule
-        self.edit_rules = rules.iter().map(|r| {
-            let (ptype, pvalue) = parse_principal(&r.principal);
-            let (read, write, admin) = parse_permissions(&r.permissions);
-            EditRule {
-                principal_type: ptype,
-                principal_value: pvalue,
-                read,
-                write,
-                admin,
-            }
-        }).collect();
+        self.edit_rules = rules
+            .iter()
+            .map(|r| {
+                let (ptype, pvalue) = parse_principal(&r.principal);
+                let (read, write, admin) = parse_permissions(&r.permissions);
+                EditRule {
+                    principal_type: ptype,
+                    principal_value: pvalue,
+                    read,
+                    write,
+                    admin,
+                }
+            })
+            .collect();
         self.edit_selected_rule = 0;
         self.current_rule = EditRule::default();
         self.edit_field = EditField::PrincipalType;
@@ -469,7 +511,8 @@ impl AclState {
                 self.current_rule.principal_type.prev()
             };
             // Update default value for new type
-            self.current_rule.principal_value = self.current_rule.principal_type.default_value().to_string();
+            self.current_rule.principal_value =
+                self.current_rule.principal_type.default_value().to_string();
         }
     }
 
@@ -636,7 +679,10 @@ fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Them
     let header_chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
 
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(format!("{:<24}", "Collection"), Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<24}", "Collection"),
+            Style::default().fg(theme.muted),
+        ),
         Span::raw("  "),
         Span::styled(format!("{:<12}", "Rules"), Style::default().fg(theme.muted)),
         Span::raw("  "),
@@ -652,7 +698,11 @@ fn render_acl_list(frame: &mut Frame, area: Rect, state: &AclState, theme: &Them
         .map(|(i, acl)| {
             let is_selected = i == state.selected;
             let type_str = if acl.is_builtin { "builtin" } else { "custom" };
-            let type_color = if acl.is_builtin { theme.muted } else { theme.accent };
+            let type_color = if acl.is_builtin {
+                theme.muted
+            } else {
+                theme.accent
+            };
 
             let line = Line::from(vec![
                 Span::raw(format!("{:<24}", truncate(&acl.collection, 24))),
@@ -714,10 +764,14 @@ fn render_collection_mode(frame: &mut Frame, area: Rect, state: &AclState, theme
         frame.render_widget(empty, inner);
     } else {
         // Header
-        let header_chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+        let header_chunks =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
 
         let header = Paragraph::new(Line::from(vec![
-            Span::styled(format!("{:<28}", "Principal"), Style::default().fg(theme.muted)),
+            Span::styled(
+                format!("{:<28}", "Principal"),
+                Style::default().fg(theme.muted),
+            ),
             Span::raw("  "),
             Span::styled("Permissions", Style::default().fg(theme.muted)),
         ]));
@@ -756,10 +810,10 @@ fn render_collection_mode(frame: &mut Frame, area: Rect, state: &AclState, theme
 
 fn render_edit_mode(frame: &mut Frame, area: Rect, state: &AclState, theme: &Theme) {
     let chunks = Layout::vertical([
-        Constraint::Length(2),  // Help text
-        Constraint::Min(6),     // Rules list
-        Constraint::Length(9),  // Add rule form
-        Constraint::Length(1),  // Status
+        Constraint::Length(2), // Help text
+        Constraint::Min(6),    // Rules list
+        Constraint::Length(9), // Add rule form
+        Constraint::Length(1), // Status
     ])
     .split(area);
 
@@ -827,7 +881,10 @@ fn render_edit_rules_list(frame: &mut Frame, area: Rect, state: &AclState, theme
     let list_chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
 
     let header = Paragraph::new(Line::from(vec![
-        Span::styled(format!("{:<28}", "Principal"), Style::default().fg(theme.muted)),
+        Span::styled(
+            format!("{:<28}", "Principal"),
+            Style::default().fg(theme.muted),
+        ),
         Span::raw("  "),
         Span::styled("Permissions", Style::default().fg(theme.muted)),
     ]));
@@ -843,7 +900,10 @@ fn render_edit_rules_list(frame: &mut Frame, area: Rect, state: &AclState, theme
             let line = Line::from(vec![
                 Span::raw(format!("{:<28}", truncate(&rule.display_principal(), 28))),
                 Span::raw("  "),
-                Span::styled(rule.permissions_string(), Style::default().fg(theme.success)),
+                Span::styled(
+                    rule.permissions_string(),
+                    Style::default().fg(theme.success),
+                ),
             ]);
 
             let style = if is_selected {
@@ -892,7 +952,11 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     } else {
         Style::default().fg(if is_active { theme.fg } else { theme.muted })
     };
-    let type_indicator = if is_active && state.edit_field == EditField::PrincipalType { ">" } else { " " };
+    let type_indicator = if is_active && state.edit_field == EditField::PrincipalType {
+        ">"
+    } else {
+        " "
+    };
     let type_line = Line::from(vec![
         Span::raw(type_indicator),
         Span::styled(" Type: ", type_style),
@@ -910,8 +974,16 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     } else {
         Style::default().fg(if is_active { theme.fg } else { theme.muted })
     };
-    let value_indicator = if is_active && state.edit_field == EditField::PrincipalValue { ">" } else { " " };
-    let cursor = if is_active && state.edit_field == EditField::PrincipalValue { "_" } else { "" };
+    let value_indicator = if is_active && state.edit_field == EditField::PrincipalValue {
+        ">"
+    } else {
+        " "
+    };
+    let cursor = if is_active && state.edit_field == EditField::PrincipalValue {
+        "_"
+    } else {
+        ""
+    };
     let value_line = Line::from(vec![
         Span::raw(value_indicator),
         Span::styled(" Value: ", value_style),
@@ -935,8 +1007,16 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     } else {
         Style::default().fg(if is_active { theme.fg } else { theme.muted })
     };
-    let read_check = if state.current_rule.read { "[x]" } else { "[ ]" };
-    let read_indicator = if is_active && state.edit_field == EditField::PermRead { ">" } else { " " };
+    let read_check = if state.current_rule.read {
+        "[x]"
+    } else {
+        "[ ]"
+    };
+    let read_indicator = if is_active && state.edit_field == EditField::PermRead {
+        ">"
+    } else {
+        " "
+    };
     frame.render_widget(
         Paragraph::new(format!("{} {} Read", read_indicator, read_check)).style(read_style),
         perm_chunks[0],
@@ -947,8 +1027,16 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     } else {
         Style::default().fg(if is_active { theme.fg } else { theme.muted })
     };
-    let write_check = if state.current_rule.write { "[x]" } else { "[ ]" };
-    let write_indicator = if is_active && state.edit_field == EditField::PermWrite { ">" } else { " " };
+    let write_check = if state.current_rule.write {
+        "[x]"
+    } else {
+        "[ ]"
+    };
+    let write_indicator = if is_active && state.edit_field == EditField::PermWrite {
+        ">"
+    } else {
+        " "
+    };
     frame.render_widget(
         Paragraph::new(format!("{} {} Write", write_indicator, write_check)).style(write_style),
         perm_chunks[1],
@@ -959,8 +1047,16 @@ fn render_add_rule_form(frame: &mut Frame, area: Rect, state: &AclState, theme: 
     } else {
         Style::default().fg(if is_active { theme.fg } else { theme.muted })
     };
-    let admin_check = if state.current_rule.admin { "[x]" } else { "[ ]" };
-    let admin_indicator = if is_active && state.edit_field == EditField::PermAdmin { ">" } else { " " };
+    let admin_check = if state.current_rule.admin {
+        "[x]"
+    } else {
+        "[ ]"
+    };
+    let admin_indicator = if is_active && state.edit_field == EditField::PermAdmin {
+        ">"
+    } else {
+        " "
+    };
     frame.render_widget(
         Paragraph::new(format!("{} {} Admin", admin_indicator, admin_check)).style(admin_style),
         perm_chunks[2],

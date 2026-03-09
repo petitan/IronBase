@@ -87,7 +87,13 @@ pub fn render_ui(frame: &mut Frame, app: &App) {
                 modals::script::render(frame, frame.area(), &app.script_state, &theme);
             }
             Modal::ServerInfo => {
-                modals::server_info::render(frame, frame.area(), &app.server_info_state, app.server_info_scroll, &theme);
+                modals::server_info::render(
+                    frame,
+                    frame.area(),
+                    &app.server_info_state,
+                    app.server_info_scroll,
+                    &theme,
+                );
             }
             Modal::Update => {
                 modals::update::render(frame, frame.area(), &app.update_state, &theme);
@@ -153,7 +159,10 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::raw(" | "),
         Span::styled(pane_name, Style::default().fg(theme.fg)),
         Span::raw(" | "),
-        Span::styled(format!("[{}]", conn_text), Style::default().fg(conn_color).bold()),
+        Span::styled(
+            format!("[{}]", conn_text),
+            Style::default().fg(conn_color).bold(),
+        ),
     ];
 
     let line = Line::from(spans).patch_style(header_style);

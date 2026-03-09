@@ -397,29 +397,99 @@ impl From<ironbase_core::IronBaseError> for McpError {
             IronBaseError::CollectionExists(name) => {
                 McpError::validation(format!("Collection '{}' already exists", name))
             }
+            IronBaseError::InvalidCollectionName(name) => {
+                McpError::validation(format!("Invalid collection name: {}", name))
+            }
+            IronBaseError::SystemCollectionError(msg) => McpError::validation(msg),
 
             // Document errors
             IronBaseError::DocumentNotFound => McpError::document_not_found("unknown"),
+            IronBaseError::InvalidDocumentId(msg) => McpError::validation(msg),
+            IronBaseError::DocumentValidationFailed(msg) => McpError::validation(msg),
+            IronBaseError::DuplicateKey(field, value) => McpError::validation(format!(
+                "Duplicate key on field '{}': value '{}' already exists",
+                field, value
+            )),
 
             // Query/validation errors
             IronBaseError::InvalidQuery(msg) => McpError::invalid_params(msg),
+            IronBaseError::UnsupportedOperator(op) => {
+                McpError::invalid_params(format!("Unsupported operator: {}", op))
+            }
+            IronBaseError::QuerySyntaxError(msg) => McpError::invalid_params(msg),
+            IronBaseError::QueryExecutionError(msg) => McpError::internal(msg),
+            IronBaseError::InvalidProjection(msg) => McpError::invalid_params(msg),
+            IronBaseError::InvalidSort(msg) => McpError::invalid_params(msg),
             IronBaseError::SchemaError(msg) => McpError::validation(msg),
+            IronBaseError::SchemaNotFound(name) => {
+                McpError::validation(format!("Schema not found for collection: {}", name))
+            }
+            IronBaseError::InvalidSchema(msg) => McpError::validation(msg),
             IronBaseError::OperationNotAllowed(msg) => McpError::invalid_params(msg),
+            IronBaseError::ReadOnlyViolation(msg) => McpError::invalid_params(msg),
 
             // Index errors
             IronBaseError::IndexError(msg) => McpError::index_error(msg),
+            IronBaseError::IndexNotFound(name) => {
+                McpError::index_error(format!("Index '{}' not found", name))
+            }
+            IronBaseError::IndexExists(name) => {
+                McpError::validation(format!("Index '{}' already exists", name))
+            }
+            IronBaseError::ProtectedFieldIndex(field) => {
+                McpError::validation(format!("Cannot create index on protected field: {}", field))
+            }
+            IronBaseError::CompoundIndexPrefixMismatch { expected, actual } => {
+                McpError::validation(format!(
+                    "Compound index prefix mismatch: expected {} fields, got {}",
+                    expected, actual
+                ))
+            }
+            IronBaseError::FuzzyIndexError(msg) => McpError::index_error(msg),
+            IronBaseError::FulltextIndexError(msg) => McpError::index_error(msg),
+            IronBaseError::VectorIndexError(msg) => McpError::index_error(msg),
+            IronBaseError::VectorDimensionMismatch { expected, actual } => {
+                McpError::validation(format!(
+                    "Vector dimension mismatch: expected {}, got {}",
+                    expected, actual
+                ))
+            }
 
             // Aggregation errors
             IronBaseError::AggregationError(msg) => McpError::aggregation(msg),
+            IronBaseError::InvalidPipelineStage(stage) => {
+                McpError::invalid_params(format!("Invalid pipeline stage: {}", stage))
+            }
+            IronBaseError::InvalidAccumulator(acc) => {
+                McpError::invalid_params(format!("Invalid accumulator: {}", acc))
+            }
+            IronBaseError::AggregationMemoryLimit(msg) => McpError::resource_exhausted(msg, None),
+            IronBaseError::AggregationTimeout => McpError::timeout("Aggregation timed out"),
 
             // Transaction errors
             IronBaseError::TransactionCommitted => {
                 McpError::transaction("Transaction already committed or aborted")
             }
             IronBaseError::TransactionAborted(msg) => McpError::transaction(msg),
+            IronBaseError::TransactionNotActive => {
+                McpError::transaction("Transaction is not active")
+            }
+            IronBaseError::TransactionConflict(msg) => McpError::transaction(msg),
+            IronBaseError::TransactionDeadlock => McpError::transaction("Deadlock detected"),
+            IronBaseError::NestedTransactionNotAllowed => {
+                McpError::transaction("Nested transactions are not allowed")
+            }
+
+            // WAL errors
+            IronBaseError::WALCorruption => McpError::storage("WAL corruption detected"),
+            IronBaseError::WALWriteError(msg) => McpError::storage(msg),
+            IronBaseError::WALReadError(msg) => McpError::storage(msg),
+            IronBaseError::WALRecoveryFailed(msg) => McpError::storage(msg),
+            IronBaseError::CheckpointFailed(msg) => McpError::storage(msg),
 
             // Resource errors
             IronBaseError::OutOfMemory(msg) => McpError::resource_exhausted(msg, None),
+            IronBaseError::ResourceExhausted(msg) => McpError::resource_exhausted(msg, None),
             IronBaseError::DatabaseLocked(path) => {
                 McpError::resource_exhausted(format!("Database '{}' is locked", path), None)
             }
@@ -432,10 +502,21 @@ impl From<ironbase_core::IronBaseError> for McpError {
             IronBaseError::Io(e) => McpError::storage(e.to_string()),
             IronBaseError::Serialization(msg) => McpError::serialization(msg),
             IronBaseError::Deserialization(e) => McpError::serialization(e.to_string()),
+            IronBaseError::Bincode(e) => McpError::serialization(e.to_string()),
             IronBaseError::Corruption(msg) => McpError::storage(format!("Corruption: {}", msg)),
-            IronBaseError::WALCorruption => McpError::storage("WAL corruption detected"),
+            IronBaseError::StorageError(msg) => McpError::storage(msg),
+            IronBaseError::FileSystemError(msg) => McpError::storage(msg),
+            IronBaseError::CompactionFailed(msg) => McpError::storage(msg),
             IronBaseError::DatabaseClosed => McpError::storage("Database is closed"),
+
+            // Configuration errors
+            IronBaseError::InvalidConfiguration(msg) => McpError::validation(msg),
+            IronBaseError::ConfigFileError(msg) => McpError::validation(msg),
+            IronBaseError::InvalidDurabilityMode(msg) => McpError::validation(msg),
+
+            // Unknown/internal errors
             IronBaseError::Unknown(msg) => McpError::storage(msg),
+            IronBaseError::InternalError(msg) => McpError::internal(msg),
         }
     }
 }

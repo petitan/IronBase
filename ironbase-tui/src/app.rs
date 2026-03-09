@@ -13,29 +13,48 @@ use std::path::PathBuf;
 // Import and re-export state types
 pub use crate::state::{
     // Types
-    ConnectionType, DatabaseMode, EditorMode, Modal, Pane, SearchMode,
+    ConnectionType,
+    DatabaseMode,
+    // Database
+    DatabaseState,
     // Search
-    DocSearchMatch, SearchResult, SearchState,
-    // Filter
-    FilterCondition, FilterFocus, FilterOperator, FilterState, SortDirection,
-    // Insert
-    InsertState,
+    DocSearchMatch,
+    EditorMode,
     // Export
     ExportState,
-    // Database
-    DatabaseState, NewCollectionState,
-    // Index
-    IndexState,
+    // Filter
+    FilterCondition,
+    FilterFocus,
+    FilterOperator,
+    FilterState,
     // Fulltext
     FulltextState,
+    // Index
+    IndexState,
+    // Insert
+    InsertState,
+    Modal,
+    NewCollectionState,
+    Pane,
     // Query
-    QueryState, QUERY_TEMPLATES,
-    // Script
-    ScriptConfirmAction, ScriptFocus, ScriptInfo, ScriptMode, ScriptResult, ScriptState, ScriptVersion,
-    // Vector
-    VectorSearchState,
+    QueryState,
     // RAG & Embedding
     RagState,
+    // Script
+    ScriptConfirmAction,
+    ScriptFocus,
+    ScriptInfo,
+    ScriptMode,
+    ScriptResult,
+    ScriptState,
+    ScriptVersion,
+    SearchMode,
+    SearchResult,
+    SearchState,
+    SortDirection,
+    // Vector
+    VectorSearchState,
+    QUERY_TEMPLATES,
 };
 
 // === UI Layout Constants ===
@@ -275,7 +294,7 @@ impl App {
             return (0, 0);
         }
         let current_page = (self.doc_scroll_offset / self.page_size) + 1;
-        let total_pages = (self.total_docs + self.page_size - 1) / self.page_size;
+        let total_pages = self.total_docs.div_ceil(self.page_size);
         (current_page, total_pages)
     }
 
@@ -357,7 +376,12 @@ impl App {
     }
 
     /// Update server info state with data from MCP server
-    pub fn update_server_info(&mut self, db_stats: serde_json::Value, tools: Vec<serde_json::Value>, prompts: Vec<serde_json::Value>) {
+    pub fn update_server_info(
+        &mut self,
+        db_stats: serde_json::Value,
+        tools: Vec<serde_json::Value>,
+        prompts: Vec<serde_json::Value>,
+    ) {
         self.server_info_state.update(db_stats, tools, prompts);
     }
 
@@ -373,8 +397,14 @@ impl App {
     }
 
     /// Update the update state with GitHub data
-    pub fn update_update_state(&mut self, latest_version: String, download_url: String, release_notes: Option<String>) {
-        self.update_state.update_from_github(latest_version, download_url, release_notes);
+    pub fn update_update_state(
+        &mut self,
+        latest_version: String,
+        download_url: String,
+        release_notes: Option<String>,
+    ) {
+        self.update_state
+            .update_from_github(latest_version, download_url, release_notes);
     }
 
     /// Set update check error
@@ -632,14 +662,28 @@ impl App {
                     .iter()
                     .filter_map(|v| {
                         let name = v.get("name")?.as_str()?.to_string();
-                        let description = v.get("description").and_then(|d| d.as_str()).map(String::from);
+                        let description = v
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .map(String::from);
                         let version = v.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-                        let tags = v.get("tags")
+                        let tags = v
+                            .get("tags")
                             .and_then(|t| t.as_array())
-                            .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|s| s.as_str().map(String::from))
+                                    .collect()
+                            })
                             .unwrap_or_default();
-                        let execution_count = v.get("execution_count").and_then(|e| e.as_u64()).unwrap_or(0);
-                        let last_run_at = v.get("last_run_at").and_then(|l| l.as_str()).map(String::from);
+                        let execution_count = v
+                            .get("execution_count")
+                            .and_then(|e| e.as_u64())
+                            .unwrap_or(0);
+                        let last_run_at = v
+                            .get("last_run_at")
+                            .and_then(|l| l.as_str())
+                            .map(String::from);
                         Some(ScriptInfo {
                             name,
                             description,
@@ -662,7 +706,11 @@ impl App {
 
     /// Load a script for editing by name
     pub async fn load_script_for_edit_async(&mut self) {
-        let Some(script_info) = self.script_state.scripts.get(self.script_state.selected_script) else {
+        let Some(script_info) = self
+            .script_state
+            .scripts
+            .get(self.script_state.selected_script)
+        else {
             return;
         };
         let script_name = script_info.name.clone();
@@ -674,15 +722,31 @@ impl App {
 
         match db.script_get(&script_name).await {
             Ok(script_json) => {
-                let code = script_json.get("code").and_then(|c| c.as_str()).unwrap_or("").to_string();
-                let description = script_json.get("description").and_then(|d| d.as_str()).map(String::from);
-                let version = script_json.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
-                let tags = script_json.get("tags")
+                let code = script_json
+                    .get("code")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let description = script_json
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .map(String::from);
+                let version = script_json
+                    .get("version")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1) as u32;
+                let tags = script_json
+                    .get("tags")
                     .and_then(|t| t.as_array())
-                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
-                self.script_state.load_script(script_name, code, description, tags, version);
+                self.script_state
+                    .load_script(script_name, code, description, tags, version);
             }
             Err(e) => {
                 self.script_state.error = Some(format!("Script betöltése sikertelen: {}", e));
@@ -714,9 +778,13 @@ impl App {
             Some(self.script_state.tags.as_slice())
         };
 
-        match db.script_save(&self.script_state.name, &code, description, tags).await {
+        match db
+            .script_save(&self.script_state.name, &code, description, tags)
+            .await
+        {
             Ok(result) => {
-                let new_version = result.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
+                let new_version =
+                    result.get("version").and_then(|v| v.as_u64()).unwrap_or(1) as u32;
                 self.script_state.version = new_version;
                 self.script_state.dirty = false;
                 self.script_state.message = Some(format!("Script mentve (v{})", new_version));
@@ -732,7 +800,11 @@ impl App {
 
     /// Delete selected script
     pub async fn delete_script_async(&mut self) {
-        let Some(script_info) = self.script_state.scripts.get(self.script_state.selected_script) else {
+        let Some(script_info) = self
+            .script_state
+            .scripts
+            .get(self.script_state.selected_script)
+        else {
             return;
         };
         let script_name = script_info.name.clone();
@@ -787,13 +859,27 @@ impl App {
 
         match result {
             Ok(result_json) => {
-                let success = result_json.get("success").and_then(|s| s.as_bool()).unwrap_or(true);
-                let output = result_json.get("result").cloned().unwrap_or(serde_json::Value::Null);
-                let logs = result_json.get("logs")
+                let success = result_json
+                    .get("success")
+                    .and_then(|s| s.as_bool())
+                    .unwrap_or(true);
+                let output = result_json
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let logs = result_json
+                    .get("logs")
                     .and_then(|l| l.as_array())
-                    .map(|arr| arr.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|s| s.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
-                let error_msg = result_json.get("error").and_then(|e| e.as_str()).map(String::from);
+                let error_msg = result_json
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .map(String::from);
 
                 self.script_state.result = Some(ScriptResult {
                     success,
@@ -836,8 +922,15 @@ impl App {
                     .filter_map(|v| {
                         let version = v.get("version").and_then(|n| n.as_u64())? as u32;
                         let code = v.get("code").and_then(|c| c.as_str())?.to_string();
-                        let description = v.get("description").and_then(|d| d.as_str()).map(String::from);
-                        let created_at = v.get("created_at").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                        let description = v
+                            .get("description")
+                            .and_then(|d| d.as_str())
+                            .map(String::from);
+                        let created_at = v
+                            .get("created_at")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         Some(ScriptVersion {
                             version,
                             code,
@@ -858,7 +951,11 @@ impl App {
 
     /// Rollback script to a specific version
     pub async fn rollback_script_async(&mut self) {
-        let Some(version_info) = self.script_state.versions.get(self.script_state.selected_version) else {
+        let Some(version_info) = self
+            .script_state
+            .versions
+            .get(self.script_state.selected_version)
+        else {
             self.script_state.error = Some("Nincs kiválasztva verzió".to_string());
             return;
         };
@@ -872,7 +969,8 @@ impl App {
 
         match db.script_rollback(&script_name, target_version).await {
             Ok(new_version) => {
-                self.script_state.message = Some(format!("Rollback sikeres, új verzió: v{}", new_version));
+                self.script_state.message =
+                    Some(format!("Rollback sikeres, új verzió: v{}", new_version));
                 // Reload the script into editor
                 self.load_script_for_edit_async().await;
             }

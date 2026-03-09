@@ -4,7 +4,7 @@ use crate::app::App;
 use crate::base64_detect::sanitize_base64_values;
 use crate::theme::Theme;
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Paragraph, Row, Table, Cell};
+use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
 use std::collections::HashSet;
 
 /// Render the documents pane (center panel) as a table
@@ -69,16 +69,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     let available_width = inner.width as usize;
     let id_width = 8; // Fixed width for _id
     let remaining = available_width.saturating_sub(id_width + 1);
-    let col_width = if col_count > 0 {
+    let col_width = (if col_count > 0 {
         remaining / col_count
     } else {
         10
-    }.max(6).min(20);
+    })
+    .clamp(6, 20);
 
     // Build header row
     let mut header_cells = vec![Cell::from("_id").style(Style::default().fg(theme.accent).bold())];
     for col in &columns {
-        header_cells.push(Cell::from(truncate_str(col, col_width)).style(Style::default().fg(theme.accent).bold()));
+        header_cells.push(
+            Cell::from(truncate_str(col, col_width))
+                .style(Style::default().fg(theme.accent).bold()),
+        );
     }
     let header = Row::new(header_cells).height(1);
 

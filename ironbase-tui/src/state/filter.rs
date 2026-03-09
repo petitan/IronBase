@@ -49,6 +49,7 @@ impl FilterOperator {
         }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_query(&self, field: &str, value: &str) -> Value {
         use serde_json::json;
 
@@ -176,6 +177,7 @@ impl SortDirection {
         }
     }
 
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_value(&self) -> i32 {
         match self {
             SortDirection::Asc => 1,

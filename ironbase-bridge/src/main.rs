@@ -218,12 +218,11 @@ fn parse_input(line: &str) -> Result<JsonRpcInput, ParseInputError> {
             });
         }
 
-        let request: JsonRpcRequest = serde_json::from_value(value.clone()).map_err(|e| {
-            ParseInputError::InvalidRequest {
+        let request: JsonRpcRequest =
+            serde_json::from_value(value.clone()).map_err(|e| ParseInputError::InvalidRequest {
                 id: extract_valid_id(value),
                 message: format!("Invalid request: {}", e),
-            }
-        })?;
+            })?;
 
         if let Some(serde_json::Value::Null) = &request.id {
             return Err(ParseInputError::InvalidRequest {
@@ -268,7 +267,9 @@ fn parse_input(line: &str) -> Result<JsonRpcInput, ParseInputError> {
             for value in values {
                 match parse_request(&value) {
                     Ok(req) => requests.push(req),
-                    Err(err) => errors.push(make_error_response(err.id(), err.code(), &err.message())),
+                    Err(err) => {
+                        errors.push(make_error_response(err.id(), err.code(), &err.message()))
+                    }
                 }
             }
 
@@ -697,7 +698,10 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
                 }
             }
         }
-        Ok(JsonRpcInput::Batch { requests, mut errors }) => {
+        Ok(JsonRpcInput::Batch {
+            requests,
+            mut errors,
+        }) => {
             tracing::debug!("Processing batch of {} requests", requests.len());
 
             let mut responses = process_batch(client, args, requests).await;
@@ -709,11 +713,7 @@ async fn process_line(client: &reqwest::Client, args: &Args, line: &str) -> bool
         }
         Err(e) => {
             tracing::error!("Parse error: {}", e.message());
-            serialize_response(&make_error_response(
-                e.id(),
-                e.code(),
-                &e.message(),
-            ))
+            serialize_response(&make_error_response(e.id(), e.code(), &e.message()))
         }
     };
 

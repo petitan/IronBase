@@ -15,12 +15,12 @@ pub mod insert;
 pub mod listener;
 pub mod new_collection;
 pub mod query;
+pub mod rag;
 pub mod script;
 pub mod search;
 pub mod server_info;
 pub mod update;
 pub mod vector;
-pub mod rag;
 
 use crate::theme::Theme;
 use ratatui::prelude::*;

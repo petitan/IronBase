@@ -34,7 +34,12 @@ impl UpdateState {
     }
 
     /// Update with data from GitHub API
-    pub fn update_from_github(&mut self, latest_version: String, download_url: String, release_notes: Option<String>) {
+    pub fn update_from_github(
+        &mut self,
+        latest_version: String,
+        download_url: String,
+        release_notes: Option<String>,
+    ) {
         self.latest_version = Some(latest_version.clone());
         self.download_url = Some(download_url);
         self.release_notes = release_notes;
@@ -57,18 +62,25 @@ impl UpdateState {
 
 /// Render the update modal
 pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme) {
-    let inner = render_modal_frame(frame, area, "Frissites Ellenorzes [Esc bezar]", theme, 60, 50);
+    let inner = render_modal_frame(
+        frame,
+        area,
+        "Frissites Ellenorzes [Esc bezar]",
+        theme,
+        60,
+        50,
+    );
 
     if state.loading {
-        let loading = Paragraph::new("Frissites ellenorzese...")
-            .style(Style::default().fg(theme.fg));
+        let loading =
+            Paragraph::new("Frissites ellenorzese...").style(Style::default().fg(theme.fg));
         frame.render_widget(loading, inner);
         return;
     }
 
     if let Some(ref error) = state.error {
-        let error_text = Paragraph::new(format!("Hiba: {}", error))
-            .style(Style::default().fg(theme.error));
+        let error_text =
+            Paragraph::new(format!("Hiba: {}", error)).style(Style::default().fg(theme.error));
         frame.render_widget(error_text, inner);
         return;
     }
@@ -131,8 +143,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &UpdateState, theme: &Theme)
         )));
     }
 
-    let content = Paragraph::new(lines)
-        .style(Style::default().fg(theme.fg));
+    let content = Paragraph::new(lines).style(Style::default().fg(theme.fg));
 
     frame.render_widget(content, inner);
 }

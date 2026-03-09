@@ -1,18 +1,18 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.392"
-edition = "2021"
-authors = ["PeTitan Kft."]
+version = "1.0.393"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
 description = "MCP server for IronBase document database"
-license = "MIT"
 
 [dependencies]
 # Core dependencies
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-tokio = { version = "1", features = ["full", "signal"] }
-parking_lot = "0.12"
-dashmap = "6"  # Thread-safe HashMap for request tracking
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
 
 # ACL / IP handling
 ipnet = { version = "2", features = ["serde"] }
@@ -28,27 +28,27 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 
 # Configuration
-toml = "0.7"
+toml = { workspace = true }
 
 # CLI argument parsing
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true }
 
 # Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 tracing-appender = "0.2"
 
 # Error handling
-thiserror = "1.0"
+thiserror = { workspace = true }
 
 # Time handling
-chrono = "0.4"
+chrono = { workspace = true }
 
 # UUID generation
-uuid = { version = "1.10", features = ["v4"] }
+uuid = { workspace = true }
 
 # Scripting engine
-rhai = { version = "1.19", features = ["sync"] }
+rhai = { workspace = true }
 
 # Base64 encoding for scripts
 base64 = "0.22"
@@ -60,18 +60,18 @@ sysinfo = { version = "0.37", default-features = false, features = ["system"] }
 ironbase-core = { path = "../ironbase-core" }
 
 # Embedding support
-memmap2 = "0.9"                    # Memory-mapped files for FastText
-ureq = { version = "2.9", features = ["json"] }  # Blocking HTTP client for Ollama/OpenAI
-rayon = "1.10"                     # Parallel processing for batch embeddings
-log = "0.4"                        # Logging
+memmap2 = { workspace = true }
+ureq = { version = "2.9", features = ["json"] }
+rayon = { workspace = true }
+log = { workspace = true }
 
 # Text chunking for embed_document
 text-splitter = { version = "0.18", features = ["markdown"] }
 
 # Embedding cache
-lru = "0.12"                       # LRU cache for embedding results
-sha2 = "0.10"                      # Hash for cache keys
-hex = "0.4"                        # Hex encoding for cache keys
+lru = { workspace = true }
+sha2 = "0.10"
+hex = "0.4"
 
 # Platform-specific service support
 [target.'cfg(windows)'.dependencies]

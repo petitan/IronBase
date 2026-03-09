@@ -276,7 +276,11 @@ impl McpClient {
     }
 
     /// Insert multiple documents
-    pub async fn insert_many(&self, collection: &str, documents: &[Value]) -> McpResult<Vec<Value>> {
+    pub async fn insert_many(
+        &self,
+        collection: &str,
+        documents: &[Value],
+    ) -> McpResult<Vec<Value>> {
         let args = serde_json::json!({
             "collection": collection,
             "documents": documents
@@ -371,7 +375,10 @@ impl McpClient {
         });
 
         let result = self.call_tool("explain", args).await?;
-        Ok(result.get("plan").cloned().unwrap_or(serde_json::json!(null)))
+        Ok(result
+            .get("plan")
+            .cloned()
+            .unwrap_or(serde_json::json!(null)))
     }
 
     /// Run aggregation pipeline
@@ -676,7 +683,10 @@ impl McpClient {
         });
         let result = self.call_tool("script_rollback", args).await?;
         // Result is {"success": true, "name": "...", "new_version": N}
-        let new_version = result.get("new_version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+        let new_version = result
+            .get("new_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
         Ok(new_version)
     }
 
@@ -714,7 +724,10 @@ impl McpClient {
             "id": id
         });
         let result = self.call_tool("admin_apikey_revoke", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -725,7 +738,10 @@ impl McpClient {
             "id": id
         });
         let result = self.call_tool("admin_apikey_delete", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -770,7 +786,10 @@ impl McpClient {
             "rules": rules
         });
         let result = self.call_tool("acl_set", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -780,7 +799,10 @@ impl McpClient {
             "collection": collection
         });
         let result = self.call_tool("acl_delete", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -788,7 +810,9 @@ impl McpClient {
 
     /// List all listeners
     pub async fn listener_list(&self) -> McpResult<Vec<Value>> {
-        let result = self.call_tool("listener_list", serde_json::json!({})).await?;
+        let result = self
+            .call_tool("listener_list", serde_json::json!({}))
+            .await?;
         // Result is {"listeners": [...]}
         let listeners: Vec<Value> = result
             .get("listeners")
@@ -831,7 +855,10 @@ impl McpClient {
             args["key_path"] = serde_json::json!(key);
         }
         let result = self.call_tool("listener_add", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -841,7 +868,10 @@ impl McpClient {
             "id": id
         });
         let result = self.call_tool("listener_delete", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -851,7 +881,10 @@ impl McpClient {
             "id": id
         });
         let result = self.call_tool("listener_enable", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -861,7 +894,10 @@ impl McpClient {
             "id": id
         });
         let result = self.call_tool("listener_disable", args).await?;
-        let success = result.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+        let success = result
+            .get("success")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         Ok(success)
     }
 
@@ -954,7 +990,8 @@ impl McpClient {
             "metric": metric
         });
         let result = self.call_tool("index_create_vector", args).await?;
-        let name = result.get("index_name")
+        let name = result
+            .get("index_name")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
@@ -1189,17 +1226,20 @@ impl McpClient {
 
     /// List available embedding models
     pub async fn embed_list_models(&self) -> McpResult<Value> {
-        self.call_tool("embed_list_models", serde_json::json!({})).await
+        self.call_tool("embed_list_models", serde_json::json!({}))
+            .await
     }
 
     /// Get embedding cache statistics
     pub async fn embed_cache_stats(&self) -> McpResult<Value> {
-        self.call_tool("embed_cache_stats", serde_json::json!({})).await
+        self.call_tool("embed_cache_stats", serde_json::json!({}))
+            .await
     }
 
     /// Clear embedding cache
     pub async fn embed_cache_clear(&self) -> McpResult<Value> {
-        self.call_tool("embed_cache_clear", serde_json::json!({})).await
+        self.call_tool("embed_cache_clear", serde_json::json!({}))
+            .await
     }
 
     // === Auto-embed operations ===

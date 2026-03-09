@@ -166,9 +166,7 @@ fn handle_auto_embed_enable(
 
     // Validate provider exists
     let manager = embedding_manager.as_ref().ok_or_else(|| {
-        McpError::internal(
-            "Embedding not available. Configure [embedding] section in config.toml.",
-        )
+        McpError::internal("Embedding not available. Configure [embedding] section in config.toml.")
     })?;
 
     // Check if provider is available
@@ -431,11 +429,11 @@ fn handle_dimension_change(
             collection,
             target_field,
             new_dimension,
-            "cosine",      // default metric
-            100_000,       // max_vectors
-            16,            // m
-            200,           // ef_construction
-            50,            // ef_search
+            "cosine", // default metric
+            100_000,  // max_vectors
+            16,       // m
+            200,      // ef_construction
+            50,       // ef_search
         )
         .map_err(|e| format!("Failed to create vector index: {}", e))?;
 
@@ -762,7 +760,9 @@ pub fn check_model_changes_and_reembed(
                 current_dim,
                 config.target_field
             );
-            if let Err(e) = handle_dimension_change(adapter, collection, &config.target_field, current_dim) {
+            if let Err(e) =
+                handle_dimension_change(adapter, collection, &config.target_field, current_dim)
+            {
                 tracing::error!(
                     "Failed to handle dimension change for '{}': {}",
                     collection,
@@ -772,7 +772,11 @@ pub fn check_model_changes_and_reembed(
             }
         }
 
-        if saved_model.is_empty() && saved_preproc.is_empty() && !force_reembed && !dimension_changed {
+        if saved_model.is_empty()
+            && saved_preproc.is_empty()
+            && !force_reembed
+            && !dimension_changed
+        {
             // Legacy config without model/preprocessing info — save current, don't re-embed
             tracing::info!(
                 "Collection '{}': saving model '{}' and preprocessing '{}' to config (first time)",
@@ -786,7 +790,10 @@ pub fn check_model_changes_and_reembed(
             if let Err(e) = adapter.set_auto_embedding_config(collection, Some(updated_config)) {
                 tracing::warn!("Failed to update config for '{}': {}", collection, e);
             }
-        } else if saved_model != current_model || saved_preproc != current_preproc || force_reembed || dimension_changed
+        } else if saved_model != current_model
+            || saved_preproc != current_preproc
+            || force_reembed
+            || dimension_changed
         {
             // Something changed or force requested — start re-embed
             let reason = if force_reembed {

@@ -1,47 +1,43 @@
 [package]
 name = "tuti-tui"
-version = "0.2.22"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
 description = "TUTI-TUI - Intelligent TUI for IronBase NoSQL database"
-license = "MIT"
-authors = ["Petitan"]
-repository = "https://github.com/petitan/IronBase"
 
 [[bin]]
 name = "tuti-tui"
 path = "src/main.rs"
 
 [dependencies]
-# IronBase core - DEPRECATED: using MCP protocol instead
-# ironbase-core = { path = "../ironbase-core" }
-# ironbase-backup = { path = "../ironbase-backup" }
-
 # TUI framework
 ratatui = "0.28"
 crossterm = "0.28"
 
 # CLI
-clap = { version = "4", features = ["derive", "env"] }
+clap = { workspace = true }
 
 # Serialization
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Error handling
-anyhow = "1.0"
-thiserror = "1.0"
+anyhow = { workspace = true }
+thiserror = { workspace = true }
 
 # Config & paths
 dirs = "5.0"
 toml = "0.8"
 
 # Scripting (Rhai)
-rhai = { version = "1.18", features = ["sync"] }
+rhai = { workspace = true }
 
 # Async HTTP & MCP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "sync"] }
-async-trait = "0.1"
+reqwest = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
 
 # Clipboard
 arboard = "3.4"

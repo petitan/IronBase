@@ -386,7 +386,10 @@ fn run_stdio_server(cli: &Cli) {
                     Some(Arc::new(manager))
                 }
                 Ok(_) => {
-                    eprintln!("Warning: Embedding provider '{}' configured but no providers loaded", emb_config.provider);
+                    eprintln!(
+                        "Warning: Embedding provider '{}' configured but no providers loaded",
+                        emb_config.provider
+                    );
                     None
                 }
                 Err(e) => {
@@ -406,7 +409,9 @@ fn run_stdio_server(cli: &Cli) {
             });
 
             if let Some(model_path) = fasttext_path {
-                match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(&model_path)) {
+                match mcp_ironbase::EmbeddingManager::with_fasttext(std::path::Path::new(
+                    &model_path,
+                )) {
                     Ok(manager) if manager.has_providers() => {
                         eprintln!(
                             "Embedding manager initialized with FastText model: {}",

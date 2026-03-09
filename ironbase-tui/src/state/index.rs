@@ -21,11 +21,25 @@ impl IndexStatistics {
     /// Parse from JSON value returned by MCP
     pub fn from_value(v: &serde_json::Value) -> Self {
         Self {
-            name: v.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            field: v.get("field").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            name: v
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            field: v
+                .get("field")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
             num_keys: v.get("num_keys").and_then(|v| v.as_u64()).unwrap_or(0),
-            distinct_count: v.get("distinct_count").and_then(|v| v.as_u64()).unwrap_or(0),
-            has_histogram: v.get("has_histogram").and_then(|v| v.as_bool()).unwrap_or(false),
+            distinct_count: v
+                .get("distinct_count")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0),
+            has_histogram: v
+                .get("has_histogram")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             has_mcv: v.get("has_mcv").and_then(|v| v.as_bool()).unwrap_or(false),
         }
     }
@@ -114,7 +128,10 @@ impl IndexState {
 
     /// Count stale indexes
     pub fn stale_index_count(&self) -> usize {
-        self.statistics.iter().filter(|s| s.staleness_hint() == "red").count()
+        self.statistics
+            .iter()
+            .filter(|s| s.staleness_hint() == "red")
+            .count()
     }
 
     pub fn select_up(&mut self) {

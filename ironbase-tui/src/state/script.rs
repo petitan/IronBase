@@ -182,7 +182,14 @@ impl ScriptState {
     }
 
     /// Load script for editing
-    pub fn load_script(&mut self, name: String, code: String, desc: Option<String>, tags: Vec<String>, version: u32) {
+    pub fn load_script(
+        &mut self,
+        name: String,
+        code: String,
+        desc: Option<String>,
+        tags: Vec<String>,
+        version: u32,
+    ) {
         self.mode = ScriptMode::Edit;
         self.focus = ScriptFocus::Editor;
         self.lines = code.lines().map(String::from).collect();
@@ -236,13 +243,23 @@ impl ScriptState {
     pub fn insert_char(&mut self, c: char) {
         match self.focus {
             ScriptFocus::Name => {
-                let byte_pos = self.name.char_indices().nth(self.name_cursor).map(|(i, _)| i).unwrap_or(self.name.len());
+                let byte_pos = self
+                    .name
+                    .char_indices()
+                    .nth(self.name_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.name.len());
                 self.name.insert(byte_pos, c);
                 self.name_cursor += 1;
                 self.dirty = true;
             }
             ScriptFocus::Description => {
-                let byte_pos = self.description.char_indices().nth(self.desc_cursor).map(|(i, _)| i).unwrap_or(self.description.len());
+                let byte_pos = self
+                    .description
+                    .char_indices()
+                    .nth(self.desc_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.description.len());
                 self.description.insert(byte_pos, c);
                 self.desc_cursor += 1;
                 self.dirty = true;
@@ -254,7 +271,11 @@ impl ScriptState {
                 if let Some(line) = self.lines.get_mut(self.cursor_line) {
                     let char_count = line.chars().count();
                     if self.cursor_col <= char_count {
-                        let byte_pos = line.char_indices().nth(self.cursor_col).map(|(i, _)| i).unwrap_or(line.len());
+                        let byte_pos = line
+                            .char_indices()
+                            .nth(self.cursor_col)
+                            .map(|(i, _)| i)
+                            .unwrap_or(line.len());
                         line.insert(byte_pos, c);
                         self.cursor_col += 1;
                         self.dirty = true;
@@ -262,7 +283,12 @@ impl ScriptState {
                 }
             }
             ScriptFocus::Params => {
-                let byte_pos = self.params_input.char_indices().nth(self.params_cursor).map(|(i, _)| i).unwrap_or(self.params_input.len());
+                let byte_pos = self
+                    .params_input
+                    .char_indices()
+                    .nth(self.params_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.params_input.len());
                 self.params_input.insert(byte_pos, c);
                 self.params_cursor += 1;
             }
@@ -274,13 +300,23 @@ impl ScriptState {
     pub fn backspace(&mut self) {
         match self.focus {
             ScriptFocus::Name if self.name_cursor > 0 => {
-                let byte_pos = self.name.char_indices().nth(self.name_cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                let byte_pos = self
+                    .name
+                    .char_indices()
+                    .nth(self.name_cursor - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 self.name.remove(byte_pos);
                 self.name_cursor -= 1;
                 self.dirty = true;
             }
             ScriptFocus::Description if self.desc_cursor > 0 => {
-                let byte_pos = self.description.char_indices().nth(self.desc_cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                let byte_pos = self
+                    .description
+                    .char_indices()
+                    .nth(self.desc_cursor - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 self.description.remove(byte_pos);
                 self.desc_cursor -= 1;
                 self.dirty = true;
@@ -291,7 +327,11 @@ impl ScriptState {
             ScriptFocus::Editor => {
                 if self.cursor_col > 0 {
                     if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                        let byte_pos = line.char_indices().nth(self.cursor_col - 1).map(|(i, _)| i).unwrap_or(0);
+                        let byte_pos = line
+                            .char_indices()
+                            .nth(self.cursor_col - 1)
+                            .map(|(i, _)| i)
+                            .unwrap_or(0);
                         line.remove(byte_pos);
                         self.cursor_col -= 1;
                         self.dirty = true;
@@ -307,7 +347,12 @@ impl ScriptState {
                 }
             }
             ScriptFocus::Params if self.params_cursor > 0 => {
-                let byte_pos = self.params_input.char_indices().nth(self.params_cursor - 1).map(|(i, _)| i).unwrap_or(0);
+                let byte_pos = self
+                    .params_input
+                    .char_indices()
+                    .nth(self.params_cursor - 1)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
                 self.params_input.remove(byte_pos);
                 self.params_cursor -= 1;
             }
@@ -319,7 +364,11 @@ impl ScriptState {
     pub fn insert_newline(&mut self) {
         if self.focus == ScriptFocus::Editor {
             if let Some(line) = self.lines.get_mut(self.cursor_line) {
-                let byte_pos = line.char_indices().nth(self.cursor_col).map(|(i, _)| i).unwrap_or(line.len());
+                let byte_pos = line
+                    .char_indices()
+                    .nth(self.cursor_col)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
                 let rest = line.split_off(byte_pos);
                 self.cursor_line += 1;
                 self.lines.insert(self.cursor_line, rest);
@@ -348,7 +397,11 @@ impl ScriptState {
                     self.cursor_col -= 1;
                 } else if self.cursor_line > 0 {
                     self.cursor_line -= 1;
-                    self.cursor_col = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                    self.cursor_col = self
+                        .lines
+                        .get(self.cursor_line)
+                        .map(|l| l.chars().count())
+                        .unwrap_or(0);
                 }
             }
             ScriptFocus::Params if self.params_cursor > 0 => self.params_cursor -= 1,
@@ -358,10 +411,18 @@ impl ScriptState {
 
     pub fn cursor_right(&mut self) {
         match self.focus {
-            ScriptFocus::Name if self.name_cursor < self.name.chars().count() => self.name_cursor += 1,
-            ScriptFocus::Description if self.desc_cursor < self.description.chars().count() => self.desc_cursor += 1,
+            ScriptFocus::Name if self.name_cursor < self.name.chars().count() => {
+                self.name_cursor += 1
+            }
+            ScriptFocus::Description if self.desc_cursor < self.description.chars().count() => {
+                self.desc_cursor += 1
+            }
             ScriptFocus::Editor => {
-                let char_count = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                let char_count = self
+                    .lines
+                    .get(self.cursor_line)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
                 if self.cursor_col < char_count {
                     self.cursor_col += 1;
                 } else if self.cursor_line + 1 < self.lines.len() {
@@ -369,7 +430,9 @@ impl ScriptState {
                     self.cursor_col = 0;
                 }
             }
-            ScriptFocus::Params if self.params_cursor < self.params_input.chars().count() => self.params_cursor += 1,
+            ScriptFocus::Params if self.params_cursor < self.params_input.chars().count() => {
+                self.params_cursor += 1
+            }
             _ => {}
         }
     }
@@ -378,7 +441,11 @@ impl ScriptState {
         match self.focus {
             ScriptFocus::Editor if self.cursor_line > 0 => {
                 self.cursor_line -= 1;
-                let char_count = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                let char_count = self
+                    .lines
+                    .get(self.cursor_line)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
                 self.cursor_col = self.cursor_col.min(char_count);
             }
             ScriptFocus::List if self.selected_script > 0 => self.selected_script -= 1,
@@ -391,11 +458,19 @@ impl ScriptState {
         match self.focus {
             ScriptFocus::Editor if self.cursor_line + 1 < self.lines.len() => {
                 self.cursor_line += 1;
-                let char_count = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                let char_count = self
+                    .lines
+                    .get(self.cursor_line)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
                 self.cursor_col = self.cursor_col.min(char_count);
             }
-            ScriptFocus::List if self.selected_script + 1 < self.scripts.len() => self.selected_script += 1,
-            ScriptFocus::History if self.selected_version + 1 < self.versions.len() => self.selected_version += 1,
+            ScriptFocus::List if self.selected_script + 1 < self.scripts.len() => {
+                self.selected_script += 1
+            }
+            ScriptFocus::History if self.selected_version + 1 < self.versions.len() => {
+                self.selected_version += 1
+            }
             _ => {}
         }
     }
@@ -441,7 +516,11 @@ impl ScriptState {
             ScriptFocus::Name => self.name_cursor = self.name.chars().count(),
             ScriptFocus::Description => self.desc_cursor = self.description.chars().count(),
             ScriptFocus::Editor => {
-                self.cursor_col = self.lines.get(self.cursor_line).map(|l| l.chars().count()).unwrap_or(0);
+                self.cursor_col = self
+                    .lines
+                    .get(self.cursor_line)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
             }
             ScriptFocus::Params => self.params_cursor = self.params_input.chars().count(),
             _ => {}
@@ -453,8 +532,16 @@ impl ScriptState {
             if let Some(line) = self.lines.get_mut(self.cursor_line) {
                 let char_count = line.chars().count();
                 if self.cursor_col < char_count {
-                    let byte_pos = line.char_indices().nth(self.cursor_col).map(|(i, _)| i).unwrap_or(line.len());
-                    let next_byte_pos = line.char_indices().nth(self.cursor_col + 1).map(|(i, _)| i).unwrap_or(line.len());
+                    let byte_pos = line
+                        .char_indices()
+                        .nth(self.cursor_col)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
+                    let next_byte_pos = line
+                        .char_indices()
+                        .nth(self.cursor_col + 1)
+                        .map(|(i, _)| i)
+                        .unwrap_or(line.len());
                     line.replace_range(byte_pos..next_byte_pos, "");
                     self.dirty = true;
                 } else if self.cursor_line + 1 < self.lines.len() {

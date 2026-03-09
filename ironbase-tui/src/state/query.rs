@@ -78,7 +78,10 @@ impl QueryState {
 
     /// Check if we have results to navigate
     pub fn has_results(&self) -> bool {
-        self.results.as_ref().map(|r| !r.is_empty()).unwrap_or(false)
+        self.results
+            .as_ref()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false)
     }
 
     /// Navigate to next result

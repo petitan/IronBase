@@ -41,7 +41,9 @@ fn parse_bool_flexible(s: &str) -> Result<bool, String> {
     }
 }
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -131,7 +133,13 @@ async fn main() -> anyhow::Result<()> {
         TransportMode::Http => {
             // HTTP transport - connect to external MCP server
             let api_key = config.get_mcp_api_key();
-            match DbWrapper::connect_http_with_options(&config.mcp_url, api_key, config.mcp_insecure).await {
+            match DbWrapper::connect_http_with_options(
+                &config.mcp_url,
+                api_key,
+                config.mcp_insecure,
+            )
+            .await
+            {
                 Ok(db) => {
                     app.db = Some(db);
                     // Set connection type based on URL
@@ -150,7 +158,10 @@ async fn main() -> anyhow::Result<()> {
         TransportMode::Stdio => {
             // Stdio transport - spawn MCP server
             if let Some(ref path) = db_path {
-                let server_path = cli.server.clone().unwrap_or_else(|| config.get_mcp_server_path());
+                let server_path = cli
+                    .server
+                    .clone()
+                    .unwrap_or_else(|| config.get_mcp_server_path());
                 match DbWrapper::connect_stdio(&server_path, path).await {
                     Ok(db) => {
                         app.db = Some(db);
@@ -170,7 +181,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-
 
     // Run app
     let result = run_app(&mut terminal, &mut app).await;
@@ -326,7 +336,6 @@ fn handle_error_modal_key(app: &mut App, key: KeyCode) {
         _ => {}
     }
 }
-
 
 // === Async key handlers ===
 // These wrap the sync handlers and add async db operations where needed
@@ -486,7 +495,7 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                 if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
                     if let Some(ref db) = app.db {
                         app.api_key_state.loading = true;
-                        match db.list_api_keys(&admin_key).await {
+                        match db.list_api_keys(admin_key).await {
                             Ok(keys) => {
                                 let infos: Vec<_> = keys
                                     .iter()
@@ -496,7 +505,8 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                                 app.api_key_state.loading = false;
                             }
                             Err(e) => {
-                                app.api_key_state.set_error(format!("Failed to load keys: {}", e));
+                                app.api_key_state
+                                    .set_error(format!("Failed to load keys: {}", e));
                                 app.api_key_state.loading = false;
                             }
                         }
@@ -523,7 +533,8 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                         app.acl_state.loading = false;
                     }
                     Err(e) => {
-                        app.acl_state.set_error(format!("Failed to load ACL: {}", e));
+                        app.acl_state
+                            .set_error(format!("Failed to load ACL: {}", e));
                         app.acl_state.loading = false;
                     }
                 }
@@ -548,7 +559,8 @@ async fn handle_global_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                         app.listener_state.loading = false;
                     }
                     Err(e) => {
-                        app.listener_state.set_error(format!("Failed to load listeners: {}", e));
+                        app.listener_state
+                            .set_error(format!("Failed to load listeners: {}", e));
                         app.listener_state.loading = false;
                     }
                 }
@@ -653,11 +665,8 @@ async fn handle_server_info_open(app: &mut App) {
     // Load data from MCP server
     if let Some(ref db) = app.db {
         // Fetch all three in parallel
-        let (stats_result, tools_result, prompts_result) = tokio::join!(
-            db.db_stats(),
-            db.tools_list(),
-            db.prompts_list()
-        );
+        let (stats_result, tools_result, prompts_result) =
+            tokio::join!(db.db_stats(), db.tools_list(), db.prompts_list());
 
         match (stats_result, tools_result, prompts_result) {
             (Ok(stats), Ok(tools), Ok(prompts)) => {
@@ -722,32 +731,28 @@ async fn fetch_github_latest_release() -> Result<(String, String, Option<String>
         .build()
         .map_err(|e| e.to_string())?;
 
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+    let response = client.get(url).send().await.map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
         return Err(format!("HTTP {}", response.status()));
     }
 
-    let json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
+    let json: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
 
-    let tag_name = json.get("tag_name")
+    let tag_name = json
+        .get("tag_name")
         .and_then(|v| v.as_str())
         .unwrap_or("unknown")
         .to_string();
 
-    let html_url = json.get("html_url")
+    let html_url = json
+        .get("html_url")
         .and_then(|v| v.as_str())
         .unwrap_or("https://github.com/petitan/IronBase/releases")
         .to_string();
 
-    let body = json.get("body")
+    let body = json
+        .get("body")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
@@ -824,13 +829,15 @@ async fn handle_database_key_async(app: &mut App, key: KeyCode) {
             match app.database_state.mode {
                 DatabaseMode::Open => {
                     if !file_exists {
-                        app.database_state.error = Some("A fajl nem letezik! Hasznald a 'Letrehozas' modot.".to_string());
+                        app.database_state.error =
+                            Some("A fajl nem letezik! Hasznald a 'Letrehozas' modot.".to_string());
                         return;
                     }
                 }
                 DatabaseMode::Create => {
                     if file_exists {
-                        app.database_state.error = Some("A fajl mar letezik! Hasznald a 'Megnyitas' modot.".to_string());
+                        app.database_state.error =
+                            Some("A fajl mar letezik! Hasznald a 'Megnyitas' modot.".to_string());
                         return;
                     }
                 }
@@ -930,7 +937,8 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                 if let Some(ref key) = app.api_key_state.new_key {
                     if let Ok(mut clipboard) = arboard::Clipboard::new() {
                         if clipboard.set_text(key.clone()).is_ok() {
-                            app.api_key_state.set_success("Key copied to clipboard!".to_string());
+                            app.api_key_state
+                                .set_success("Key copied to clipboard!".to_string());
                         }
                     }
                 }
@@ -944,13 +952,14 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
             KeyCode::Enter => {
                 let name = app.api_key_state.input.trim().to_string();
                 if name.is_empty() {
-                    app.api_key_state.set_error("Name cannot be empty".to_string());
+                    app.api_key_state
+                        .set_error("Name cannot be empty".to_string());
                     return;
                 }
 
                 if let Some(ref admin_key) = app.api_key_state.admin_key.clone() {
                     if let Some(ref db) = app.db {
-                        match db.create_api_key(&admin_key, &name).await {
+                        match db.create_api_key(admin_key, &name).await {
                             Ok(result) => {
                                 // Extract the full key from the result
                                 let mut saved_path: Option<String> = None;
@@ -975,7 +984,9 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                                     .truncate(true)
                                                     .mode(0o600)
                                                     .open(&key_file)
-                                                    .and_then(|mut f| f.write_all(format!("{}\n", key).as_bytes()))
+                                                    .and_then(|mut f| {
+                                                        f.write_all(format!("{}\n", key).as_bytes())
+                                                    })
                                             }
                                             #[cfg(not(unix))]
                                             {
@@ -991,7 +1002,8 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                                 // Use icacls to set owner-only permissions
                                                 use std::os::windows::process::CommandExt;
                                                 if let Some(path_str) = key_file.to_str() {
-                                                    if let Ok(username) = std::env::var("USERNAME") {
+                                                    if let Ok(username) = std::env::var("USERNAME")
+                                                    {
                                                         // Quote the path for spaces
                                                         let _ = std::process::Command::new("icacls")
                                                             .args([
@@ -1009,7 +1021,9 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                     }
                                 }
                                 let msg = match saved_path {
-                                    Some(path) => format!("API key '{}' created! Saved to {}", name, path),
+                                    Some(path) => {
+                                        format!("API key '{}' created! Saved to {}", name, path)
+                                    }
                                     None => format!("API key '{}' created!", name),
                                 };
                                 app.api_key_state.set_success(msg);
@@ -1017,7 +1031,7 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                 app.api_key_state.input.clear();
 
                                 // Refresh the keys list
-                                if let Ok(keys) = db.list_api_keys(&admin_key).await {
+                                if let Ok(keys) = db.list_api_keys(admin_key).await {
                                     let infos: Vec<_> = keys
                                         .iter()
                                         .filter_map(modals::api_key::ApiKeyInfo::from_value)
@@ -1026,7 +1040,8 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                 }
                             }
                             Err(e) => {
-                                app.api_key_state.set_error(format!("Failed to create: {}", e));
+                                app.api_key_state
+                                    .set_error(format!("Failed to create: {}", e));
                             }
                         }
                     }
@@ -1053,10 +1068,10 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                         if let Some(ref db) = app.db {
                             let result = match app.api_key_state.confirm_action {
                                 Some(ConfirmAction::Revoke) => {
-                                    db.revoke_api_key(&admin_key, id).await
+                                    db.revoke_api_key(admin_key, id).await
                                 }
                                 Some(ConfirmAction::Delete) => {
-                                    db.delete_api_key(&admin_key, id).await
+                                    db.delete_api_key(admin_key, id).await
                                 }
                                 None => Ok(false),
                             };
@@ -1068,12 +1083,13 @@ async fn handle_api_key_key_async(app: &mut App, key: KeyCode) {
                                         Some(ConfirmAction::Delete) => "deleted",
                                         None => "modified",
                                     };
-                                    app.api_key_state.set_success(format!("Key '{}' {}!", name, action));
+                                    app.api_key_state
+                                        .set_success(format!("Key '{}' {}!", name, action));
                                     app.api_key_state.mode = ApiKeyModalMode::List;
                                     app.api_key_state.confirm_action = None;
 
                                     // Refresh the keys list
-                                    if let Ok(keys) = db.list_api_keys(&admin_key).await {
+                                    if let Ok(keys) = db.list_api_keys(admin_key).await {
                                         let infos: Vec<_> = keys
                                             .iter()
                                             .filter_map(modals::api_key::ApiKeyInfo::from_value)
@@ -1147,7 +1163,8 @@ async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
                     if let Some(ref db) = app.db {
                         match db.acl_delete(&collection).await {
                             Ok(true) => {
-                                app.acl_state.set_success(format!("ACL for '{}' deleted!", collection));
+                                app.acl_state
+                                    .set_success(format!("ACL for '{}' deleted!", collection));
                                 app.acl_state.mode = AclModalMode::List;
 
                                 // Refresh ACL list
@@ -1195,17 +1212,15 @@ async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
                     KeyCode::Right if app.acl_state.edit_field == EditField::PrincipalType => {
                         app.acl_state.cycle_principal_type(true);
                     }
-                    KeyCode::Char(' ') => {
-                        match app.acl_state.edit_field {
-                            EditField::PermRead | EditField::PermWrite | EditField::PermAdmin => {
-                                app.acl_state.toggle_permission();
-                            }
-                            EditField::PrincipalType => {
-                                app.acl_state.cycle_principal_type(true);
-                            }
-                            _ => {}
+                    KeyCode::Char(' ') => match app.acl_state.edit_field {
+                        EditField::PermRead | EditField::PermWrite | EditField::PermAdmin => {
+                            app.acl_state.toggle_permission();
                         }
-                    }
+                        EditField::PrincipalType => {
+                            app.acl_state.cycle_principal_type(true);
+                        }
+                        _ => {}
+                    },
                     KeyCode::Char(c) if app.acl_state.edit_field == EditField::PrincipalValue => {
                         app.acl_state.current_rule.principal_value.push(c);
                     }
@@ -1250,7 +1265,8 @@ async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
                 if let Some(ref db) = app.db {
                     match db.acl_set(&collection, &rules).await {
                         Ok(true) => {
-                            app.acl_state.set_success(format!("ACL for '{}' saved!", collection));
+                            app.acl_state
+                                .set_success(format!("ACL for '{}' saved!", collection));
                             app.acl_state.mode = AclModalMode::List;
                             app.acl_state.edit_rules.clear();
                             app.acl_state.edit_collection.clear();
@@ -1282,7 +1298,7 @@ async fn handle_acl_key_async(app: &mut App, key: KeyCode) {
 
 /// Listener modal key handler
 async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
-    use crate::modals::listener::{ListenerModalMode, ListenerAction, AddField};
+    use crate::modals::listener::{AddField, ListenerAction, ListenerModalMode};
 
     match app.listener_state.mode {
         ListenerModalMode::List => match key {
@@ -1325,18 +1341,21 @@ async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                 let tls = app.listener_state.add_tls;
 
                 if id.is_empty() {
-                    app.listener_state.set_error("ID cannot be empty".to_string());
+                    app.listener_state
+                        .set_error("ID cannot be empty".to_string());
                     return;
                 }
                 if bind.is_empty() {
-                    app.listener_state.set_error("Bind address cannot be empty".to_string());
+                    app.listener_state
+                        .set_error("Bind address cannot be empty".to_string());
                     return;
                 }
 
                 if let Some(ref db) = app.db {
                     match db.listener_add(&id, &bind, tls, None, None).await {
                         Ok(true) => {
-                            app.listener_state.set_success(format!("Listener '{}' added!", id));
+                            app.listener_state
+                                .set_success(format!("Listener '{}' added!", id));
                             app.listener_state.mode = ListenerModalMode::List;
                             app.listener_state.add_id.clear();
                             app.listener_state.add_bind.clear();
@@ -1351,7 +1370,8 @@ async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                             }
                         }
                         Ok(false) => {
-                            app.listener_state.set_error("Failed to add listener".to_string());
+                            app.listener_state
+                                .set_error("Failed to add listener".to_string());
                         }
                         Err(e) => {
                             app.listener_state.set_error(format!("Failed: {}", e));
@@ -1359,20 +1379,20 @@ async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                     }
                 }
             }
-            KeyCode::Char(c) => {
-                match app.listener_state.add_field {
-                    AddField::Id => app.listener_state.add_id.push(c),
-                    AddField::Bind => app.listener_state.add_bind.push(c),
-                    AddField::Tls => {}
+            KeyCode::Char(c) => match app.listener_state.add_field {
+                AddField::Id => app.listener_state.add_id.push(c),
+                AddField::Bind => app.listener_state.add_bind.push(c),
+                AddField::Tls => {}
+            },
+            KeyCode::Backspace => match app.listener_state.add_field {
+                AddField::Id => {
+                    app.listener_state.add_id.pop();
                 }
-            }
-            KeyCode::Backspace => {
-                match app.listener_state.add_field {
-                    AddField::Id => { app.listener_state.add_id.pop(); }
-                    AddField::Bind => { app.listener_state.add_bind.pop(); }
-                    AddField::Tls => {}
+                AddField::Bind => {
+                    app.listener_state.add_bind.pop();
                 }
-            }
+                AddField::Tls => {}
+            },
             _ => {}
         },
         ListenerModalMode::Confirm => match key {
@@ -1399,7 +1419,8 @@ async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                                     Some(ListenerAction::Disable) => "disabled",
                                     None => "modified",
                                 };
-                                app.listener_state.set_success(format!("Listener '{}' {}!", id, action));
+                                app.listener_state
+                                    .set_success(format!("Listener '{}' {}!", id, action));
                                 app.listener_state.mode = ListenerModalMode::List;
                                 app.listener_state.confirm_action = None;
 
@@ -1413,7 +1434,8 @@ async fn handle_listener_key_async(app: &mut App, key: KeyCode) {
                                 }
                             }
                             Ok(false) => {
-                                app.listener_state.set_error("Listener not found".to_string());
+                                app.listener_state
+                                    .set_error("Listener not found".to_string());
                                 app.listener_state.cancel();
                             }
                             Err(e) => {
@@ -1445,7 +1467,7 @@ async fn handle_fulltext_open(app: &mut App) {
 
     // Get list of fulltext indexes for this collection
     let indexed_fields = if let Some(ref db) = app.db {
-        match db.list_indexes(&collection).await {
+        match db.list_indexes(collection).await {
             Ok(indexes) => {
                 // Filter to only fulltext indexes (format: "{collection}_{field}_fts")
                 let prefix = format!("{}_", collection);
@@ -1498,7 +1520,10 @@ async fn handle_fulltext_key_async(app: &mut App, key: KeyCode) {
                 let field = app.fulltext_state.field.clone();
                 let query = app.fulltext_state.query.clone();
 
-                match db.fulltext_search(&collection, &field, &query, Some(50)).await {
+                match db
+                    .fulltext_search(&collection, &field, &query, Some(50))
+                    .await
+                {
                     Ok(results) => {
                         app.fulltext_state.results = results;
                         app.fulltext_state.selected_result = 0;
@@ -2079,7 +2104,8 @@ async fn handle_script_browse_key(app: &mut App, key: KeyCode, modifiers: KeyMod
         (KeyCode::Char('d'), _) | (KeyCode::Delete, _) => {
             // Delete selected script (with confirmation)
             if !app.script_state.scripts.is_empty() {
-                app.script_state.confirm_action = Some(crate::app::ScriptConfirmAction::DeleteScript);
+                app.script_state.confirm_action =
+                    Some(crate::app::ScriptConfirmAction::DeleteScript);
             }
         }
         (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
@@ -2121,7 +2147,8 @@ async fn handle_script_edit_key(app: &mut App, key: KeyCode, modifiers: KeyModif
         (KeyCode::Esc, _) => {
             if app.script_state.dirty {
                 // Ask for confirmation before discarding changes
-                app.script_state.confirm_action = Some(crate::app::ScriptConfirmAction::DiscardChanges);
+                app.script_state.confirm_action =
+                    Some(crate::app::ScriptConfirmAction::DiscardChanges);
             } else {
                 app.script_state.reset_to_browse();
             }
@@ -2147,16 +2174,14 @@ async fn handle_script_edit_key(app: &mut App, key: KeyCode, modifiers: KeyModif
         }
 
         // Focus-specific handling
-        _ => {
-            match app.script_state.focus {
-                ScriptFocus::Name => handle_script_name_key(app, key, modifiers),
-                ScriptFocus::Description => handle_script_desc_key(app, key, modifiers),
-                ScriptFocus::Tags => handle_script_tags_key(app, key, modifiers),
-                ScriptFocus::Editor => handle_script_editor_key(app, key, modifiers),
-                ScriptFocus::Params => handle_script_params_key(app, key, modifiers),
-                _ => {}
-            }
-        }
+        _ => match app.script_state.focus {
+            ScriptFocus::Name => handle_script_name_key(app, key, modifiers),
+            ScriptFocus::Description => handle_script_desc_key(app, key, modifiers),
+            ScriptFocus::Tags => handle_script_tags_key(app, key, modifiers),
+            ScriptFocus::Editor => handle_script_editor_key(app, key, modifiers),
+            ScriptFocus::Params => handle_script_params_key(app, key, modifiers),
+            _ => {}
+        },
     }
 }
 
@@ -2180,7 +2205,11 @@ async fn handle_script_history_key(app: &mut App, key: KeyCode) {
         }
         KeyCode::Enter => {
             // Load selected version into editor (view mode)
-            if let Some(version) = app.script_state.versions.get(app.script_state.selected_version) {
+            if let Some(version) = app
+                .script_state
+                .versions
+                .get(app.script_state.selected_version)
+            {
                 app.script_state.lines = version.code.lines().map(String::from).collect();
                 if app.script_state.lines.is_empty() {
                     app.script_state.lines.push(String::new());
@@ -2190,7 +2219,8 @@ async fn handle_script_history_key(app: &mut App, key: KeyCode) {
                 app.script_state.scroll_offset = 0;
                 app.script_state.mode = crate::app::ScriptMode::Edit;
                 app.script_state.focus = crate::app::ScriptFocus::Editor;
-                app.script_state.message = Some(format!("Verzió v{} betöltve (readonly)", version.version));
+                app.script_state.message =
+                    Some(format!("Verzió v{} betöltve (readonly)", version.version));
                 app.script_state.dirty = true; // Mark as dirty so user knows it's not the current version
             }
         }
@@ -2390,7 +2420,10 @@ async fn handle_vector_open(app: &mut App) {
         return;
     }
 
-    let collection = app.current_collection_name().unwrap_or_default().to_string();
+    let collection = app
+        .current_collection_name()
+        .unwrap_or_default()
+        .to_string();
     if collection.is_empty() {
         app.set_error("Valassz ki egy kollekciot elobb!");
         return;
@@ -2473,7 +2506,8 @@ async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifiers: KeyMod
 
             if let Some(ref db) = app.db {
                 let result = if let Some(f) = filter {
-                    db.vector_search_filter(&collection, &field, &vector, &f, k).await
+                    db.vector_search_filter(&collection, &field, &vector, &f, k)
+                        .await
                 } else {
                     db.vector_search(&collection, &field, &vector, k).await
                 };
@@ -2481,7 +2515,8 @@ async fn handle_vector_search_key(app: &mut App, key: KeyCode, modifiers: KeyMod
                 match result {
                     Ok(results) => {
                         app.vector_state.update_results(results);
-                        app.vector_state.message = Some(format!("Found {} results", app.vector_state.results.len()));
+                        app.vector_state.message =
+                            Some(format!("Found {} results", app.vector_state.results.len()));
                     }
                     Err(e) => {
                         app.vector_state.is_loading = false;
@@ -2533,7 +2568,10 @@ async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifiers: KeyMod
             app.vector_state.error = None;
 
             if let Some(ref db) = app.db {
-                match db.create_vector_index(&collection, &field, dimension, &metric).await {
+                match db
+                    .create_vector_index(&collection, &field, dimension, &metric)
+                    .await
+                {
                     Ok(name) => {
                         app.vector_state.message = Some(format!("Index '{}' created!", name));
                         app.vector_state.clear_create_form();
@@ -2573,8 +2611,12 @@ async fn handle_vector_create_key(app: &mut App, key: KeyCode, modifiers: KeyMod
         }
         (KeyCode::Backspace, _) => {
             match app.vector_state.create_form_field {
-                0 => { app.vector_state.new_field.pop(); }
-                1 => { app.vector_state.dimension /= 10; }
+                0 => {
+                    app.vector_state.new_field.pop();
+                }
+                1 => {
+                    app.vector_state.dimension /= 10;
+                }
                 _ => {}
             }
             app.vector_state.error = None;
@@ -2598,7 +2640,9 @@ async fn handle_vector_list_key(app: &mut App, key: KeyCode) {
             }
 
             let collection = app.vector_state.collection.clone();
-            let index_name = app.vector_state.indexes[app.vector_state.selected_index].name.clone();
+            let index_name = app.vector_state.indexes[app.vector_state.selected_index]
+                .name
+                .clone();
 
             if let Some(ref db) = app.db {
                 match db.drop_vector_index(&collection, &index_name).await {
@@ -2608,8 +2652,11 @@ async fn handle_vector_list_key(app: &mut App, key: KeyCode) {
                         // Refresh index list
                         if let Ok(indexes) = db.list_vector_indexes(&collection).await {
                             app.vector_state.update_indexes(indexes);
-                            if app.vector_state.selected_index >= app.vector_state.indexes.len() && !app.vector_state.indexes.is_empty() {
-                                app.vector_state.selected_index = app.vector_state.indexes.len() - 1;
+                            if app.vector_state.selected_index >= app.vector_state.indexes.len()
+                                && !app.vector_state.indexes.is_empty()
+                            {
+                                app.vector_state.selected_index =
+                                    app.vector_state.indexes.len() - 1;
                             }
                         }
                     }
@@ -2633,7 +2680,10 @@ async fn handle_rag_open(app: &mut App) {
         return;
     }
 
-    let collection = app.current_collection_name().unwrap_or_default().to_string();
+    let collection = app
+        .current_collection_name()
+        .unwrap_or_default()
+        .to_string();
     if collection.is_empty() {
         app.set_error("Valassz ki egy kollekciot elobb!");
         return;
@@ -2683,21 +2733,17 @@ async fn handle_rag_key_async(app: &mut App, key: KeyCode, modifiers: KeyModifie
         {
             app.rag_state.next_tab();
         }
-        (KeyCode::BackTab, _)
-            if !app.rag_state.creating && app.rag_state.models_mode == 0 =>
-        {
+        (KeyCode::BackTab, _) if !app.rag_state.creating && app.rag_state.models_mode == 0 => {
             app.rag_state.prev_tab();
         }
 
-        _ => {
-            match app.rag_state.active_tab {
-                RagTab::Search => handle_rag_search_key(app, key, modifiers).await,
-                RagTab::Import => handle_rag_import_key(app, key, modifiers).await,
-                RagTab::Collections => handle_rag_collections_key(app, key, modifiers).await,
-                RagTab::Models => handle_rag_models_key(app, key, modifiers).await,
-                RagTab::Jobs => handle_rag_jobs_key(app, key).await,
-            }
-        }
+        _ => match app.rag_state.active_tab {
+            RagTab::Search => handle_rag_search_key(app, key, modifiers).await,
+            RagTab::Import => handle_rag_import_key(app, key, modifiers).await,
+            RagTab::Collections => handle_rag_collections_key(app, key, modifiers).await,
+            RagTab::Models => handle_rag_models_key(app, key, modifiers).await,
+            RagTab::Jobs => handle_rag_jobs_key(app, key).await,
+        },
     }
 }
 
@@ -2721,7 +2767,10 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
             app.rag_state.error = None;
 
             if let Some(ref db) = app.db {
-                match db.rag_search(&collection, &query, limit, &mode, rrf_k).await {
+                match db
+                    .rag_search(&collection, &query, limit, &mode, rrf_k)
+                    .await
+                {
                     Ok(result) => {
                         let results: Vec<serde_json::Value> = result
                             .get("results")
@@ -2757,33 +2806,57 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
         }
 
         // Navigate results
-        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() => {
+        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE)
+            if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() =>
+        {
             app.rag_state.search_result_up();
         }
-        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() => {
+        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE)
+            if app.rag_state.search_focus == 0 && !app.rag_state.search_results.is_empty() =>
+        {
             app.rag_state.search_result_down();
         }
 
         // Adjust option values with Up/Down when focus is on options
         (KeyCode::Up, _) if app.rag_state.search_focus == 1 => {
             match app.rag_state.search_option_idx {
-                0 => { if app.rag_state.search_limit < 100 { app.rag_state.search_limit += 1; } }
-                1 => { app.rag_state.toggle_search_mode(); }
-                2 => { app.rag_state.search_rrf_k += 5.0; }
+                0 => {
+                    if app.rag_state.search_limit < 100 {
+                        app.rag_state.search_limit += 1;
+                    }
+                }
+                1 => {
+                    app.rag_state.toggle_search_mode();
+                }
+                2 => {
+                    app.rag_state.search_rrf_k += 5.0;
+                }
                 _ => {}
             }
         }
         (KeyCode::Down, _) if app.rag_state.search_focus == 1 => {
             match app.rag_state.search_option_idx {
-                0 => { if app.rag_state.search_limit > 1 { app.rag_state.search_limit -= 1; } }
-                1 => { app.rag_state.toggle_search_mode(); }
-                2 => { if app.rag_state.search_rrf_k > 5.0 { app.rag_state.search_rrf_k -= 5.0; } }
+                0 => {
+                    if app.rag_state.search_limit > 1 {
+                        app.rag_state.search_limit -= 1;
+                    }
+                }
+                1 => {
+                    app.rag_state.toggle_search_mode();
+                }
+                2 => {
+                    if app.rag_state.search_rrf_k > 5.0 {
+                        app.rag_state.search_rrf_k -= 5.0;
+                    }
+                }
                 _ => {}
             }
         }
 
         // Text input for query (when query focused)
-        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT) if app.rag_state.search_focus == 0 => {
+        (KeyCode::Char(c), KeyModifiers::NONE) | (KeyCode::Char(c), KeyModifiers::SHIFT)
+            if app.rag_state.search_focus == 0 =>
+        {
             app.rag_state.search_query.push(c);
             app.rag_state.error = None;
         }
@@ -2821,12 +2894,19 @@ async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
             app.rag_state.error = None;
 
             if let Some(ref db) = app.db {
-                match db.rag_document_import(&collection, &content, title, chunk_size, overlap, &mode).await {
+                match db
+                    .rag_document_import(&collection, &content, title, chunk_size, overlap, &mode)
+                    .await
+                {
                     Ok(result) => {
                         app.rag_state.is_loading = false;
-                        let chunks_created = result.get("chunks_created").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let chunks_created = result
+                            .get("chunks_created")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
                         app.rag_state.import_result = Some(result);
-                        app.rag_state.message = Some(format!("Import OK: {} chunks", chunks_created));
+                        app.rag_state.message =
+                            Some(format!("Import OK: {} chunks", chunks_created));
                     }
                     Err(e) => {
                         app.rag_state.is_loading = false;
@@ -2865,10 +2945,18 @@ async fn handle_rag_import_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
         }
         (KeyCode::Backspace, _) => {
             match app.rag_state.import_form_field {
-                0 => { app.rag_state.import_content.pop(); }
-                1 => { app.rag_state.import_title.pop(); }
-                2 => { app.rag_state.import_chunk_size /= 10; }
-                3 => { app.rag_state.import_overlap /= 10; }
+                0 => {
+                    app.rag_state.import_content.pop();
+                }
+                1 => {
+                    app.rag_state.import_title.pop();
+                }
+                2 => {
+                    app.rag_state.import_chunk_size /= 10;
+                }
+                3 => {
+                    app.rag_state.import_overlap /= 10;
+                }
                 _ => {}
             }
             app.rag_state.error = None;
@@ -2900,7 +2988,10 @@ async fn handle_rag_collections_key(app: &mut App, key: KeyCode, modifiers: KeyM
                 app.rag_state.error = None;
 
                 if let Some(ref db) = app.db {
-                    match db.rag_collection_create(&name, &emb_field, &text_field, &provider, &language).await {
+                    match db
+                        .rag_collection_create(&name, &emb_field, &text_field, &provider, &language)
+                        .await
+                    {
                         Ok(_) => {
                             app.rag_state.is_loading = false;
                             app.rag_state.creating = false;
@@ -2939,9 +3030,15 @@ async fn handle_rag_collections_key(app: &mut App, key: KeyCode, modifiers: KeyM
             }
             (KeyCode::Backspace, _) => {
                 match app.rag_state.create_form_field {
-                    0 => { app.rag_state.create_collection_name.pop(); }
-                    1 => { app.rag_state.create_embedding_field.pop(); }
-                    2 => { app.rag_state.create_text_field.pop(); }
+                    0 => {
+                        app.rag_state.create_collection_name.pop();
+                    }
+                    1 => {
+                        app.rag_state.create_embedding_field.pop();
+                    }
+                    2 => {
+                        app.rag_state.create_text_field.pop();
+                    }
                     _ => {}
                 }
                 app.rag_state.error = None;
@@ -2967,7 +3064,11 @@ async fn handle_rag_collections_key(app: &mut App, key: KeyCode, modifiers: KeyM
 
         // Stats for selected collection
         (KeyCode::Enter, _) => {
-            if let Some(coll) = app.rag_state.rag_collections.get(app.rag_state.selected_collection) {
+            if let Some(coll) = app
+                .rag_state
+                .rag_collections
+                .get(app.rag_state.selected_collection)
+            {
                 let name = coll
                     .get("collection")
                     .or_else(|| coll.get("name"))
@@ -2978,8 +3079,14 @@ async fn handle_rag_collections_key(app: &mut App, key: KeyCode, modifiers: KeyM
                     if let Some(ref db) = app.db {
                         match db.rag_collection_stats(&name).await {
                             Ok(stats) => {
-                                let chunk_count = stats.get("chunk_count").and_then(|v| v.as_u64()).unwrap_or(0);
-                                let source_docs = stats.get("source_doc_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                                let chunk_count = stats
+                                    .get("chunk_count")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
+                                let source_docs = stats
+                                    .get("source_doc_count")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0);
                                 app.rag_state.message = Some(format!(
                                     "{}: {} chunks, {} source docs",
                                     name, chunk_count, source_docs
@@ -3071,7 +3178,10 @@ async fn handle_rag_models_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
         (KeyCode::Char('e'), _) => {
             let collection = app.rag_state.collection.clone();
             if let Some(ref db) = app.db {
-                match db.auto_embed_enable(&collection, "content", "embedding", "fasttext").await {
+                match db
+                    .auto_embed_enable(&collection, "content", "embedding", "fasttext")
+                    .await
+                {
                     Ok(_) => {
                         app.rag_state.message = Some("Auto-embed enabled!".to_string());
                         if let Ok(status) = db.auto_embed_status(&collection).await {

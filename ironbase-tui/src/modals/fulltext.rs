@@ -163,10 +163,7 @@ fn render_results(frame: &mut Frame, area: Rect, state: &FulltextState, theme: &
             };
 
             // Extract score and document preview
-            let score = result
-                .get("score")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0);
+            let score = result.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
 
             let doc = result.get("document").cloned().unwrap_or_default();
             let preview = format_doc_preview(&doc, 60);

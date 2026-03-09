@@ -1,7 +1,7 @@
 //! Vector search modal - create indexes and perform similarity search
 
 use super::render_modal_frame;
-use crate::state::vector::{VectorSearchState, VectorTab, DistanceMetric};
+use crate::state::vector::{DistanceMetric, VectorSearchState, VectorTab};
 use crate::theme::Theme;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Tabs};
@@ -44,7 +44,11 @@ fn render_tabs(frame: &mut Frame, area: Rect, state: &VectorSearchState, theme: 
         .block(Block::default().borders(Borders::BOTTOM))
         .select(selected)
         .style(Style::default().fg(theme.muted))
-        .highlight_style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD));
+        .highlight_style(
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        );
 
     frame.render_widget(tabs, area);
 }
@@ -74,11 +78,9 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
     frame.render_widget(help, chunks[0]);
 
     // Field and K
-    let field_k_chunks = Layout::horizontal([
-        Constraint::Percentage(70),
-        Constraint::Percentage(30),
-    ])
-    .split(chunks[1]);
+    let field_k_chunks =
+        Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(chunks[1]);
 
     let field_block = Block::default()
         .title(" Field ")
@@ -174,7 +176,8 @@ fn render_results(frame: &mut Frame, area: Rect, state: &VectorSearchState, them
             // Format: distance + document preview
             let doc_preview = match &r.document {
                 serde_json::Value::Object(obj) => {
-                    let id = obj.get("_id")
+                    let id = obj
+                        .get("_id")
                         .map(|v| format!("{}", v))
                         .unwrap_or_else(|| "?".to_string());
                     format!("id:{}", id)
@@ -225,7 +228,11 @@ fn render_create_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
         .title(" Field name ")
         .borders(Borders::ALL)
         .border_style(field_style);
-    let cursor = if state.create_form_field == 0 { "|" } else { "" };
+    let cursor = if state.create_form_field == 0 {
+        "|"
+    } else {
+        ""
+    };
     let field_text = Paragraph::new(format!("{}{}", state.new_field, cursor))
         .block(field_block)
         .style(Style::default().fg(theme.fg));

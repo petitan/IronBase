@@ -24,12 +24,12 @@ pub fn tools() -> Vec<Value> {
                 "collection": fields::collection(),
                 "vector_field": {
                     "type": "string",
-                    "description": "Field with vector index (default: 'embedding' - gaploader compatible)",
+                    "description": "Field with vector index (default: 'embedding')",
                     "default": "embedding"
                 },
                 "text_field": {
                     "type": "string",
-                    "description": "Field with fulltext index (default: 'content' - gaploader compatible)",
+                    "description": "Field with fulltext index (default: 'content')",
                     "default": "content"
                 },
                 "vector": {

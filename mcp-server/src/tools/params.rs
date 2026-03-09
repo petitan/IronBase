@@ -233,11 +233,11 @@ fn default_content_field() -> String {
 
 /// Parameters for `fulltext_search` tool
 ///
-/// Field default matches gaploader schema: "content"
+/// Field default matches RAG schema: "content"
 #[derive(Debug, Deserialize)]
 pub struct FulltextSearchParams {
     pub collection: String,
-    /// Field with fulltext index (default: "content" - gaploader compatible)
+    /// Field with fulltext index (default: "content")
     #[serde(default = "default_content_field")]
     pub field: String,
     /// Multiple fields to search across (overrides `field` if provided)
@@ -584,19 +584,19 @@ fn default_text_field() -> String {
 
 /// Parameters for `hybrid_search` tool (RRF-based fusion with reranking, dedup, auto-embed)
 ///
-/// Field defaults match gaploader schema for seamless integration:
-/// - vector_field: "embedding" (gaploader stores embeddings here)
-/// - text_field: "content" (gaploader stores chunk text here)
+/// Field defaults match RAG schema:
+/// - vector_field: "embedding"
+/// - text_field: "content"
 ///
 /// If `vector` is omitted, the query text is automatically embedded using the
 /// collection's RAG config or the specified `provider` (auto-embed mode).
 #[derive(Debug, Deserialize)]
 pub struct HybridSearchParams {
     pub collection: String,
-    /// Field with vector index (default: "embedding" - gaploader compatible)
+    /// Field with vector index (default: "embedding")
     #[serde(default = "default_vector_field")]
     pub vector_field: String,
-    /// Field with fulltext index (default: "content" - gaploader compatible)
+    /// Field with fulltext index (default: "content")
     #[serde(default = "default_text_field")]
     pub text_field: String,
     /// Query embedding vector. If omitted, the query is auto-embedded using the
@@ -1134,18 +1134,20 @@ mod tests {
 
     #[test]
     fn test_resolve_weights_partial_explicit() {
-        // Only one explicit weight → other defaults to 0.5
+        // Only one explicit weight → other defaults to 0.5, then normalized to sum=1.0
         let (vw, fw) = resolve_weights(None, Some(0.9), None).unwrap();
-        assert_eq!(vw, 0.9);
-        assert_eq!(fw, 0.5);
+        let total = 0.9 + 0.5;
+        assert!((vw - 0.9 / total).abs() < 1e-10);
+        assert!((fw - 0.5 / total).abs() < 1e-10);
     }
 
     #[test]
     fn test_resolve_weights_partial_explicit_overrides_mode() {
-        // One explicit weight triggers explicit mode (ignores search_mode)
+        // One explicit weight triggers explicit mode (ignores search_mode), normalized
         let (vw, fw) = resolve_weights(Some("keyword"), None, Some(0.9)).unwrap();
-        assert_eq!(vw, 0.5);
-        assert_eq!(fw, 0.9);
+        let total = 0.5 + 0.9;
+        assert!((vw - 0.5 / total).abs() < 1e-10);
+        assert!((fw - 0.9 / total).abs() < 1e-10);
     }
 
     #[test]

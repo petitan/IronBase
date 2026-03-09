@@ -154,12 +154,23 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
         };
 
         let mut lines: Vec<Line> = Vec::new();
-        for (idx, script) in state.scripts.iter().enumerate().skip(scroll_offset).take(visible_height) {
+        for (idx, script) in state
+            .scripts
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_height)
+        {
             let is_selected = idx == state.selected_script;
             let prefix = if is_selected { "> " } else { "  " };
 
             // Format: name  v3  [tag1][tag2]  12 runs
-            let tags_str: String = script.tags.iter().map(|t| format!("[{}]", t)).collect::<Vec<_>>().join("");
+            let tags_str: String = script
+                .tags
+                .iter()
+                .map(|t| format!("[{}]", t))
+                .collect::<Vec<_>>()
+                .join("");
 
             let line = Line::from(vec![
                 Span::styled(
@@ -170,10 +181,20 @@ fn render_browse(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
                     format!("{:<24}", script.name),
                     Style::default()
                         .fg(if is_selected { theme.accent } else { theme.fg })
-                        .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                        .add_modifier(if is_selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 ),
-                Span::styled(format!(" v{:<3}", script.version), Style::default().fg(theme.muted)),
-                Span::styled(format!(" {:<20}", tags_str), Style::default().fg(theme.secondary)),
+                Span::styled(
+                    format!(" v{:<3}", script.version),
+                    Style::default().fg(theme.muted),
+                ),
+                Span::styled(
+                    format!(" {:<20}", tags_str),
+                    Style::default().fg(theme.secondary),
+                ),
                 Span::styled(
                     format!("{:>5} futtas", script.execution_count),
                     Style::default().fg(theme.muted),
@@ -267,7 +288,11 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     } else {
         Style::default().fg(theme.fg)
     };
-    let name_cursor = if state.focus == ScriptFocus::Name { "|" } else { "" };
+    let name_cursor = if state.focus == ScriptFocus::Name {
+        "|"
+    } else {
+        ""
+    };
     let name_text = format!("Nev: {}{}", state.name, name_cursor);
     let name = Paragraph::new(name_text).style(name_style);
     frame.render_widget(name, chunks[0]);
@@ -278,7 +303,11 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
     } else {
         Style::default().fg(theme.fg)
     };
-    let desc_cursor = if state.focus == ScriptFocus::Description { "|" } else { "" };
+    let desc_cursor = if state.focus == ScriptFocus::Description {
+        "|"
+    } else {
+        ""
+    };
     let desc_text = format!("Leiras: {}{}", state.description, desc_cursor);
     let desc = Paragraph::new(desc_text).style(desc_style);
     frame.render_widget(desc, chunks[1]);
@@ -295,7 +324,9 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
         tag_spans.push(Span::styled(
             format!("[{}]", tag),
             if is_selected {
-                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.secondary)
             },
@@ -315,13 +346,23 @@ fn render_metadata(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &T
 
 fn render_code_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Theme) {
     let is_focused = state.focus == ScriptFocus::Editor;
-    let border_color = if is_focused { theme.accent } else { theme.muted };
+    let border_color = if is_focused {
+        theme.accent
+    } else {
+        theme.muted
+    };
 
     let visible_height = area.height.saturating_sub(2) as usize; // account for border
     let start_line = state.scroll_offset;
 
     let mut lines: Vec<Line> = Vec::new();
-    for (idx, line) in state.lines.iter().enumerate().skip(start_line).take(visible_height) {
+    for (idx, line) in state
+        .lines
+        .iter()
+        .enumerate()
+        .skip(start_line)
+        .take(visible_height)
+    {
         let line_num = format!("{:3}| ", idx + 1);
         let is_cursor_line = idx == state.cursor_line;
 
@@ -332,7 +373,12 @@ fn render_code_editor(frame: &mut Frame, area: Rect, state: &ScriptState, theme:
 
             let mut spans = vec![Span::styled(line_num, Style::default().fg(theme.muted))];
             spans.extend(highlight_rhai_spans(&before, theme));
-            spans.push(Span::styled("|", Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                "|",
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans.extend(highlight_rhai_spans(&after, theme));
 
             lines.push(Line::from(spans));
@@ -362,16 +408,25 @@ fn highlight_rhai_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
 
     // Keywords
     const KEYWORDS: &[&str] = &[
-        "let", "const", "fn", "if", "else", "for", "while", "loop", "break", "continue",
-        "return", "throw", "try", "catch", "in", "true", "false", "nil", "null",
-        "import", "export", "as", "private", "this", "switch", "case", "default",
+        "let", "const", "fn", "if", "else", "for", "while", "loop", "break", "continue", "return",
+        "throw", "try", "catch", "in", "true", "false", "nil", "null", "import", "export", "as",
+        "private", "this", "switch", "case", "default",
     ];
 
     // DB function names (IronRhai specific)
     const DB_FUNCS: &[&str] = &[
-        "db_find", "db_find_one", "db_insert_one", "db_update_one", "db_update_many",
-        "db_delete_one", "db_delete_many", "db_count", "db_aggregate",
-        "base64_encode", "base64_decode", "print",
+        "db_find",
+        "db_find_one",
+        "db_insert_one",
+        "db_update_one",
+        "db_update_many",
+        "db_delete_one",
+        "db_delete_many",
+        "db_count",
+        "db_aggregate",
+        "base64_encode",
+        "base64_decode",
+        "print",
     ];
 
     let keyword_color = Color::Magenta;
@@ -416,7 +471,9 @@ fn highlight_rhai_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
         }
 
         // Check for number
-        if chars[i].is_ascii_digit() || (chars[i] == '-' && i + 1 < len && chars[i + 1].is_ascii_digit()) {
+        if chars[i].is_ascii_digit()
+            || (chars[i] == '-' && i + 1 < len && chars[i + 1].is_ascii_digit())
+        {
             let mut j = i;
             if chars[j] == '-' {
                 j += 1;
@@ -439,7 +496,9 @@ fn highlight_rhai_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
             let word: String = chars[i..j].iter().collect();
 
             let style = if KEYWORDS.contains(&word.as_str()) {
-                Style::default().fg(keyword_color).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(keyword_color)
+                    .add_modifier(Modifier::BOLD)
             } else if DB_FUNCS.contains(&word.as_str()) {
                 Style::default().fg(func_color)
             } else {
@@ -452,7 +511,10 @@ fn highlight_rhai_spans(line: &str, theme: &Theme) -> Vec<Span<'static>> {
         }
 
         // Other character (operators, brackets, etc.)
-        spans.push(Span::styled(chars[i].to_string(), Style::default().fg(normal_color)));
+        spans.push(Span::styled(
+            chars[i].to_string(),
+            Style::default().fg(normal_color),
+        ));
         i += 1;
     }
 
@@ -494,7 +556,11 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
 
         let log_count = result.logs.len();
         let log_preview = if !result.logs.is_empty() {
-            format!(" | Logok: [{}] {}", log_count, result.logs.first().unwrap_or(&String::new()))
+            format!(
+                " | Logok: [{}] {}",
+                log_count,
+                result.logs.first().unwrap_or(&String::new())
+            )
         } else {
             String::new()
         };
@@ -505,9 +571,19 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
                     if result.success { "OK" } else { "HIBA" },
                     result_style.add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(format!(" ({}ms)", result.execution_time_ms), Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!(" ({}ms)", result.execution_time_ms),
+                    Style::default().fg(theme.muted),
+                ),
                 Span::raw(": "),
-                Span::styled(output_display, if result.success { Style::default().fg(theme.fg) } else { Style::default().fg(theme.error) }),
+                Span::styled(
+                    output_display,
+                    if result.success {
+                        Style::default().fg(theme.fg)
+                    } else {
+                        Style::default().fg(theme.error)
+                    },
+                ),
             ]),
             Line::from(Span::styled(log_preview, Style::default().fg(theme.muted))),
         ]);
@@ -526,7 +602,10 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
             Span::styled(err.clone(), Style::default().fg(theme.error)),
         ])
     } else if let Some(ref msg) = state.message {
-        Line::from(Span::styled(msg.clone(), Style::default().fg(theme.success)))
+        Line::from(Span::styled(
+            msg.clone(),
+            Style::default().fg(theme.success),
+        ))
     } else {
         let dirty_marker = if state.dirty { " [*]" } else { "" };
         Line::from(vec![
@@ -536,7 +615,11 @@ fn render_status(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
             ),
             Span::raw(" | "),
             Span::styled(
-                format!("Sor: {} Oszlop: {}", state.cursor_line + 1, state.cursor_col + 1),
+                format!(
+                    "Sor: {} Oszlop: {}",
+                    state.cursor_line + 1,
+                    state.cursor_col + 1
+                ),
                 Style::default().fg(theme.muted),
             ),
         ])
@@ -595,10 +678,17 @@ fn render_history(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &Th
                     format!("v{}", ver.version),
                     Style::default()
                         .fg(if is_selected { theme.accent } else { theme.fg })
-                        .add_modifier(if is_selected { Modifier::BOLD } else { Modifier::empty() }),
+                        .add_modifier(if is_selected {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
                 ),
                 Span::styled(current_marker, Style::default().fg(theme.success)),
-                Span::styled(format!("  {}", ver.created_at), Style::default().fg(theme.muted)),
+                Span::styled(
+                    format!("  {}", ver.created_at),
+                    Style::default().fg(theme.muted),
+                ),
                 Span::raw("  "),
                 Span::styled(desc, Style::default().fg(theme.fg)),
             ]);
