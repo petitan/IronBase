@@ -51,6 +51,9 @@ pub enum EmbeddingError {
     #[error("API error: {0}")]
     ApiError(String),
 
+    #[error("NaN in embedding response: {0}")]
+    NanResponse(String),
+
     #[error("Invalid configuration: {0}")]
     ConfigError(String),
 }
