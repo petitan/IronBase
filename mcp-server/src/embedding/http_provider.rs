@@ -716,8 +716,11 @@ fn is_nan_error_body(body: &str) -> bool {
     }
 
     // Fallback for non-JSON error bodies (plain text):
-    // Only match "NaN" preceded by a space/colon (word boundary)
-    body.contains(": NaN") || body.contains(" NaN")
+    // Match "NaN"/"nan" preceded by a space/colon (word boundary)
+    body.contains(": NaN")
+        || body.contains(" NaN")
+        || body.contains(": nan")
+        || body.contains(" nan")
 }
 
 /// Dangerous path components that could be used for prototype pollution attacks
@@ -814,18 +817,15 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_float_array_sanitizes_nan_and_infinity() {
-        // serde_json can't represent NaN/Infinity directly, so we build a
-        // JSON array with raw f64 values that become NaN/Inf after cast.
-        // Use serde_json::Number::from_f64 — it returns None for NaN,
-        // so we test the sanitization indirectly via the f32 path.
-        // This tests that normal values pass through unchanged.
+    fn test_parse_float_array_normal_values() {
+        // Verifies normal values pass through unchanged.
+        // Note: serde_json cannot represent NaN/Infinity in JSON, so the
+        // sanitization branch in parse_float_array is defense-in-depth
+        // for non-standard JSON parsers — it cannot be unit-tested here.
         let json = serde_json::json!([1.0, -0.5, 0.0, 1e38]);
         let result = parse_float_array(&json).unwrap();
         assert_eq!(result.len(), 4);
-        assert!(result.iter().all(|v| !v.is_nan()));
-        // 1e38 fits in f32 (max ~3.4e38)
-        assert!(result[3].is_finite());
+        assert!(result.iter().all(|v| v.is_finite()));
     }
 
     #[test]
@@ -843,28 +843,30 @@ mod tests {
     }
 
     #[test]
-    fn test_is_nan_error_body_false_positive_protection() {
-        // Should NOT match "NaN" in unrelated context
+    fn test_is_nan_error_body_edge_cases() {
+        // "NaN" substring inside a word in error field — still matches because
+        // the JSON error message contains "NaN". Acceptable: "NaN" in a 5xx
+        // error.message is virtually always a NaN serialization failure.
         let body = r#"{"error":"connection timeout to NaNjing server"}"#;
-        // This contains "NaN" in the word "NaNjing" — our structured check
-        // will still match because it's inside the error message field.
-        // This is acceptable: the word "NaN" in an error message field of a
-        // 5xx response is extremely unlikely to be anything other than a NaN error.
         assert!(is_nan_error_body(body));
 
-        // Non-error JSON (no "error" field) should NOT match
+        // Non-error JSON (no "error" field) — must NOT match
         let body = r#"{"status":"ok","data":"NaN"}"#;
         assert!(!is_nan_error_body(body));
 
-        // Plain text without NaN-like context should NOT match
+        // Plain text without NaN-like context — must NOT match
         let body = "Everything is fine";
         assert!(!is_nan_error_body(body));
     }
 
     #[test]
     fn test_is_nan_error_body_non_json() {
-        // Plain text error with NaN
+        // Plain text error with NaN (uppercase)
         let body = "Internal Server Error: NaN";
+        assert!(is_nan_error_body(body));
+
+        // Plain text error with nan (lowercase)
+        let body = "unsupported value: nan in response";
         assert!(is_nan_error_body(body));
 
         // Plain text without NaN
