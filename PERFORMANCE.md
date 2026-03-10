@@ -39,7 +39,7 @@ Benchmarks include:
 ### Storage Architecture
 - **RESERVED SPACE**: 256KB reserved for metadata
 - **Append-only writes**: Documents appended to end of file
-- **Memory-mapped I/O**: For files < 1GB
+- **Positioned reads**: `pread()` (Unix) / `seek_read()` (Windows) — no file size limit
 - **4KB pages**: Index nodes stored in 4KB pages
 
 ### Indexing
@@ -119,9 +119,9 @@ results = collection.find(
 ### Scalability
 
 - **Documents**: Tested up to 1M documents
-- **File size**: Efficient up to 1GB (memory-mapped I/O)
+- **File size**: Tested up to 3GB+ (positioned reads, no mmap limit)
 - **Query performance**: O(n) full scan, O(log n) with indexes
-- **Memory usage**: ~10MB + document cache
+- **Memory usage**: ~10MB + document cache + lazy-loaded indexes
 
 ## Profiling
 
@@ -160,24 +160,22 @@ print(f"File size: {stats['file_size']} bytes")
 ✅ Fast single-document operations
 ✅ Efficient range queries with indexes
 ✅ Low memory footprint
-✅ Memory-mapped I/O for large files
-✅ Atomic transactions (ACD)
+✅ Positioned reads (pread) — no file size limit
+✅ ACID transactions with WAL
 
 ### Limitations
 ⚠️ Full table scans for unindexed queries
 ⚠️ No distributed queries
 ⚠️ RESERVED SPACE limits compaction gains
-⚠️ Large result sets loaded into memory
-⚠️ No query planner/optimizer
+⚠️ Large result sets loaded into memory (mitigated by OOM protection)
 
 ## Future Optimizations
 
 - [ ] Query planner for index selection
 - [ ] Cursor-based pagination
 - [ ] Bloom filters for existence checks
-- [ ] WAL (Write-Ahead Log) for crash recovery
-- [ ] Connection pooling for concurrent access
-- [ ] Aggregation pipeline optimization
+- [x] WAL (Write-Ahead Log) for crash recovery ✅ Implemented
+- [x] Aggregation pipeline optimization ✅ Implemented (Top-K, OOM protection)
 
 ## Benchmarking Your Workload
 
@@ -212,4 +210,4 @@ A: Yes, by reducing file size and removing tombstones, compaction can improve se
 A: Use `insert_many()`, `update_many()`, `delete_many()` instead of loops with single-document operations.
 
 **Q: What's the largest database size IronBase can handle?**
-A: Tested up to 1GB files (memory-mapped I/O limit). Larger files work but with standard file I/O (slower).
+A: Tested up to 3GB+ files with 118K+ documents. Uses positioned reads (pread) with no file size limit. Performance depends on indexes, not file size.

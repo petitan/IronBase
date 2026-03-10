@@ -856,8 +856,11 @@ impl IndexTrait for HnswIndex {
     }
 
     fn fields(&self) -> Vec<&str> {
-        // HNSW indexes a vector field, but don't track the field name
-        vec![]
+        if self.config.field.is_empty() {
+            vec![]
+        } else {
+            vec![&self.config.field]
+        }
     }
 
     fn entry_count(&self) -> usize {

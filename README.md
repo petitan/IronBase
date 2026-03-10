@@ -39,7 +39,7 @@ Written in Rust. Single-file storage, zero-configuration, serverless. Bindings f
 | **Durability** | ACID transactions, WAL, crash recovery, 3 durability modes |
 | **OOM Protection** | Dynamic RAM-based limits, streaming, `try_reserve()`, Top-K heap |
 | **Languages** | Rust, Python (PyO3), C# (.NET 8 FFI) |
-| **Tooling** | MCP server (HTTP/stdio, 94 tools), TUI, backup CLI, STDIO bridge |
+| **Tooling** | MCP server (HTTP/stdio, 92 tools), TUI, backup CLI, STDIO bridge |
 | **Testing** | 2,000+ tests (unit, integration, property-based, fuzz) |
 
 ## Quick Start
@@ -329,7 +329,7 @@ db = IronBase.open_memory()  # ~200K inserts/sec, ~500K indexed finds/sec
 
 ## MCP Server
 
-IronBase includes an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server with **94 tools** for AI assistant integration.
+IronBase includes an [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) server with **92 tools** for AI assistant integration.
 
 ### Install
 
@@ -437,7 +437,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 </details>
 
 <details>
-<summary><strong>Vector & Hybrid Search (6)</strong></summary>
+<summary><strong>Vector & Hybrid Search (4)</strong></summary>
 
 | Tool | Description |
 |------|-------------|
@@ -445,6 +445,14 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `vector_search` | Vector similarity search |
 | `vector_search_filter` | Vector search with document filters |
 | `hybrid_search` | RRF fusion of vector + text results with reranking. Auto-embeds if vector omitted. Flat or grouped-by-document modes. |
+
+</details>
+
+<details>
+<summary><strong>Schema Validation (2)</strong></summary>
+
+| Tool | Description |
+|------|-------------|
 | `schema_set` | Define JSON Schema validation |
 | `schema_get` | Get collection schema |
 
@@ -521,7 +529,7 @@ mcp-ironbase-server install | uninstall | start | stop | status
 </details>
 
 <details>
-<summary><strong>Embeddings & RAG (17)</strong></summary>
+<summary><strong>Embeddings & RAG (15)</strong></summary>
 
 | Tool | Description |
 |------|-------------|
@@ -534,7 +542,6 @@ mcp-ironbase-server install | uninstall | start | stop | status
 | `auto_embed_enable` | Enable auto-embedding on insert |
 | `auto_embed_disable` | Disable auto-embedding |
 | `auto_embed_status` | Get auto-embedding configuration |
-| `auto_embed_backfill` | Generate embeddings for existing docs |
 | `embed_job_status` | Get background job status |
 | `embed_job_list` | List background jobs |
 | `embed_job_cancel` | Cancel running job |
@@ -707,7 +714,7 @@ ironbase-core/          Core database engine (Rust library)
 
 bindings/python/        PyO3 bindings (pip install ironbase)
 IronBase.NET/           C# / .NET 8 bindings (FFI)
-mcp-server/             MCP server (HTTP + stdio, 94 tools)
+mcp-server/             MCP server (HTTP + stdio, 92 tools)
 ironbase-bridge/        STDIO ↔ HTTP bridge for MCP clients
 ironbase-tui/           Terminal UI
 ironbase-backup/        Hot backup CLI (lock-free)

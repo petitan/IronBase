@@ -65,9 +65,8 @@ use super::legacy::{Index, IndexDefinition};
 
 /// Generate a `get_*_index_mut` method that auto-marks the index as dirty.
 ///
-/// The btree, fuzzy, and fulltext index types all follow the same pattern:
+/// All index types (btree, fuzzy, fulltext, vector) follow the same pattern:
 /// check if the key exists in the index map, insert into the dirty set, return mutable ref.
-/// Vector indexes are excluded because they track dirty state internally.
 macro_rules! impl_get_index_mut_dirty {
     ($method_name:ident, $index_map:ident, $dirty_set:ident, $index_type:ty) => {
         /// Get index (mutable), auto-marking it as dirty for checkpoint persistence.
@@ -82,8 +81,7 @@ macro_rules! impl_get_index_mut_dirty {
 
 /// Generate a `dirty_*_index_names` method that collects dirty index names.
 ///
-/// The btree, fulltext, and fuzzy types all use the same HashSet-based dirty tracking.
-/// Vector indexes are excluded because they use internal `is_dirty()` tracking.
+/// All index types use the same HashSet-based dirty tracking.
 macro_rules! impl_dirty_index_names {
     ($method_name:ident, $dirty_set:ident) => {
         /// Get names of dirty indexes for per-index flush.
@@ -121,6 +119,8 @@ pub struct IndexManager {
     dirty_fulltext_indexes: HashSet<String>,
     /// Dirty tracking for fuzzy indexes
     dirty_fuzzy_indexes: HashSet<String>,
+    /// Dirty tracking for vector indexes (consolidates HNSW internal dirty flag)
+    dirty_vector_indexes: HashSet<String>,
 }
 
 impl IndexManager {
@@ -147,6 +147,7 @@ impl IndexManager {
             dirty_btree_indexes: HashSet::new(),
             dirty_fulltext_indexes: HashSet::new(),
             dirty_fuzzy_indexes: HashSet::new(),
+            dirty_vector_indexes: HashSet::new(),
         }
     }
 
@@ -155,12 +156,13 @@ impl IndexManager {
         !self.dirty_btree_indexes.is_empty()
             || !self.dirty_fulltext_indexes.is_empty()
             || !self.dirty_fuzzy_indexes.is_empty()
-            || self.vector_indexes.values().any(|idx| idx.is_dirty())
+            || !self.dirty_vector_indexes.is_empty()
     }
 
     impl_mark_dirty!(mark_btree_dirty, dirty_btree_indexes);
     impl_mark_dirty!(mark_fulltext_dirty, dirty_fulltext_indexes);
     impl_mark_dirty!(mark_fuzzy_dirty, dirty_fuzzy_indexes);
+    impl_mark_dirty!(mark_vector_dirty, dirty_vector_indexes);
 
     /// Set file path for an index (required for two-phase commit)
     pub fn set_index_path(&mut self, index_name: &str, path: PathBuf) {
@@ -814,8 +816,11 @@ impl IndexManager {
         self.vector_indexes.get(name)
     }
 
-    /// Get vector index by name (mutable)
+    /// Get vector index by name (mutable), auto-marking as dirty
     pub fn get_vector_index_mut(&mut self, name: &str) -> Option<&mut HnswIndex> {
+        if self.vector_indexes.contains_key(name) {
+            self.dirty_vector_indexes.insert(name.to_string());
+        }
         self.vector_indexes.get_mut(name)
     }
 
@@ -840,6 +845,9 @@ impl IndexManager {
         field: &str,
     ) -> Option<&mut HnswIndex> {
         let expected_name = format!("{}_vec_{}", collection_name, field);
+        if self.vector_indexes.contains_key(&expected_name) {
+            self.dirty_vector_indexes.insert(expected_name.clone());
+        }
         self.vector_indexes.get_mut(&expected_name)
     }
 
@@ -857,6 +865,7 @@ impl IndexManager {
     pub fn drop_vector_index(&mut self, name: &str) -> Result<()> {
         if self.vector_indexes.remove(name).is_some() {
             self.index_file_paths.remove(name);
+            self.dirty_vector_indexes.remove(name);
             Ok(())
         } else {
             Err(IronBaseError::IndexError(format!(
@@ -874,10 +883,10 @@ impl IndexManager {
     /// Returns the number of indexes flushed.
     pub fn flush_vector_indexes(&mut self, db_path: &str) -> Result<usize> {
         let mut count = 0;
-        for (name, index) in self.vector_indexes.iter_mut() {
-            if index.is_dirty() {
-                // Build cache path: {db_dir}/{index_name}.hnsw
-                let cache_path = Self::build_vector_cache_path(db_path, name);
+        let dirty_names: Vec<String> = self.dirty_vector_indexes.iter().cloned().collect();
+        for name in dirty_names {
+            if let Some(index) = self.vector_indexes.get_mut(&name) {
+                let cache_path = Self::build_vector_cache_path(db_path, &name);
                 let bytes = index.to_bytes()?;
                 std::fs::write(&cache_path, &bytes).map_err(|e| {
                     IronBaseError::Io(std::io::Error::other(format!(
@@ -887,6 +896,7 @@ impl IndexManager {
                     )))
                 })?;
                 index.mark_clean();
+                self.dirty_vector_indexes.remove(&name);
                 crate::log_debug!(
                     "Flushed vector index '{}' to {}",
                     name,
@@ -903,17 +913,7 @@ impl IndexManager {
     impl_dirty_index_names!(dirty_btree_index_names, dirty_btree_indexes);
     impl_dirty_index_names!(dirty_fulltext_index_names, dirty_fulltext_indexes);
     impl_dirty_index_names!(dirty_fuzzy_index_names, dirty_fuzzy_indexes);
-
-    /// Get names of dirty vector indexes (for per-index flush)
-    ///
-    /// Vector indexes track dirty state internally via `is_dirty()`.
-    pub fn dirty_vector_index_names(&self) -> Vec<String> {
-        self.vector_indexes
-            .iter()
-            .filter(|(_, idx)| idx.is_dirty())
-            .map(|(name, _)| name.clone())
-            .collect()
-    }
+    impl_dirty_index_names!(dirty_vector_index_names, dirty_vector_indexes);
 
     /// Rebuild vector indexes that have excessive orphan nodes.
     ///
@@ -925,6 +925,7 @@ impl IndexManager {
         for name in names {
             if let Some(index) = self.vector_indexes.get_mut(&name) {
                 if index.rebuild_if_needed()? {
+                    self.dirty_vector_indexes.insert(name.clone());
                     rebuilt += 1;
                 }
             }
@@ -945,6 +946,7 @@ impl IndexManager {
                 if orphans > 0 {
                     let active = index.len();
                     index.rebuild()?;
+                    self.dirty_vector_indexes.insert(name.clone());
                     crate::log_info!(
                         "HNSW index '{}' compacted: removed {} orphan nodes, {} active vectors remain",
                         name,
@@ -1073,27 +1075,27 @@ impl IndexManager {
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
     /// On error, the index remains dirty for retry.
     pub fn flush_one_vector_index(&mut self, name: &str, db_path: &str) -> Result<bool> {
+        if !self.dirty_vector_indexes.contains(name) {
+            return Ok(false);
+        }
         if let Some(index) = self.vector_indexes.get_mut(name) {
-            if index.is_dirty() {
-                let cache_path = Self::build_vector_cache_path(db_path, name);
-                let bytes = index.to_bytes()?;
-                std::fs::write(&cache_path, &bytes).map_err(|e| {
-                    IronBaseError::Io(std::io::Error::other(format!(
-                        "Failed to write HNSW cache file '{}': {}",
-                        cache_path.display(),
-                        e
-                    )))
-                })?;
-                index.mark_clean();
-                crate::log_debug!(
-                    "Flushed vector index '{}' to {}",
-                    name,
-                    cache_path.display()
-                );
-                Ok(true)
-            } else {
-                Ok(false)
-            }
+            let cache_path = Self::build_vector_cache_path(db_path, name);
+            let bytes = index.to_bytes()?;
+            std::fs::write(&cache_path, &bytes).map_err(|e| {
+                IronBaseError::Io(std::io::Error::other(format!(
+                    "Failed to write HNSW cache file '{}': {}",
+                    cache_path.display(),
+                    e
+                )))
+            })?;
+            index.mark_clean();
+            self.dirty_vector_indexes.remove(name);
+            crate::log_debug!(
+                "Flushed vector index '{}' to {}",
+                name,
+                cache_path.display()
+            );
+            Ok(true)
         } else {
             Ok(false)
         }
@@ -1480,6 +1482,8 @@ impl IndexManager {
                                     index_name,
                                     e
                                 );
+                            } else {
+                                self.dirty_vector_indexes.insert(index_name.clone());
                             }
                         }
                     }
@@ -1606,6 +1610,7 @@ impl IndexManager {
                     DocumentId::ObjectId(oid) => oid.clone(),
                 };
                 index.remove(&id_str);
+                self.dirty_vector_indexes.insert(index_name.clone());
             }
         }
 
