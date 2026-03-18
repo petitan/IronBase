@@ -245,19 +245,12 @@ pub fn chunk_content(content: &str, options: &ChunkOptions) -> Result<Vec<Chunk>
         other => other,
     };
 
-    let mut chunks = match mode {
+    let chunks = match mode {
         ChunkMode::Markdown | ChunkMode::Auto => {
             markdown::split(content, options.chunk_size, options.overlap)?
         }
         ChunkMode::Text => text::split(content, options.chunk_size, options.overlap)?,
     };
-
-    // Strip markdown tables from each chunk's text for cleaner tokenization/embedding
-    for chunk in &mut chunks {
-        if chunk.text.contains('|') {
-            chunk.text = strip_markdown_tables(&chunk.text);
-        }
-    }
 
     Ok(chunks)
 }
