@@ -3,10 +3,10 @@
 
 use crate::document::Document;
 use crate::error::{IronBaseError, Result};
-use crate::query::operators::text_search::regex_match_with_options;
 use serde_json::Value;
 use std::collections::HashSet;
 
+use super::helpers::{parse_regex_filter, regex_matches_value};
 use super::traits::OperatorMatcher;
 use super::OPERATOR_REGISTRY;
 
@@ -250,41 +250,8 @@ impl ElemMatchOperator {
         value: Option<&Value>,
     ) -> Result<bool> {
         // Special handling for $regex + $options combination
-        let has_regex = condition_obj.contains_key("$regex");
-        let has_options = condition_obj.contains_key("$options");
-
-        if has_regex && has_options {
-            // Handle $regex with $options as a single operation
-            let pattern = condition_obj
-                .get("$regex")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    IronBaseError::InvalidQuery("$regex requires a string pattern".to_string())
-                })?;
-            let options = condition_obj
-                .get("$options")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            // Check regex match on the value
-            let regex_matches = match value {
-                Some(Value::String(s)) => regex_match_with_options(s, pattern, options)?,
-                Some(Value::Array(arr)) => {
-                    let mut found = false;
-                    for v in arr {
-                        if let Value::String(s) = v {
-                            if regex_match_with_options(s, pattern, options)? {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    found
-                }
-                _ => false,
-            };
-
-            if !regex_matches {
+        if let Some(parsed) = parse_regex_filter(condition_obj)? {
+            if !regex_matches_value(value, parsed.pattern, parsed.options)? {
                 return Ok(false);
             }
 
@@ -306,13 +273,8 @@ impl ElemMatchOperator {
                     }
                 }
             }
-        } else if has_options && !has_regex {
-            // $options without $regex is an error
-            return Err(IronBaseError::InvalidQuery(
-                "$options requires $regex".to_string(),
-            ));
         } else {
-            // Standard operator processing
+            // Standard operator processing (no $regex present)
             for (op_name, op_value) in condition_obj {
                 if op_name.starts_with('$') {
                     if let Some(operator) = OPERATOR_REGISTRY.get(op_name.as_str()) {

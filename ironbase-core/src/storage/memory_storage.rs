@@ -339,39 +339,7 @@ impl RawStorage for MemoryStorage {
 
     /// Read document bytes at specific offset
     fn read_document_at(&mut self, _collection: &str, offset: u64) -> Result<Vec<u8>> {
-        let start = offset as usize;
-
-        // Check bounds
-        if start + 4 > self.raw_data.len() {
-            return Err(IronBaseError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                format!(
-                    "Offset {} out of bounds (len={})",
-                    offset,
-                    self.raw_data.len()
-                ),
-            )));
-        }
-
-        // Read length prefix
-        let len_bytes: [u8; 4] = self.raw_data[start..start + 4].try_into().map_err(|_| {
-            IronBaseError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Failed to read length prefix",
-            ))
-        })?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        // Check data bounds
-        if start + 4 + len > self.raw_data.len() {
-            return Err(IronBaseError::Io(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                format!("Data extends beyond buffer: offset={}, len={}", offset, len),
-            )));
-        }
-
-        // Return raw bytes (without length prefix)
-        Ok(self.raw_data[start + 4..start + 4 + len].to_vec())
+        self.read_data_at(offset)
     }
 
     /// Write raw data without catalog tracking (for tombstones)

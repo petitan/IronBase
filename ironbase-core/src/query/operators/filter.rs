@@ -6,7 +6,7 @@ use crate::error::{IronBaseError, Result};
 use serde_json::Value;
 
 use super::comparison::EqOperator;
-use super::text_search::regex_match_with_options;
+use super::helpers::{parse_regex_filter, regex_matches_value};
 use super::traits::OperatorMatcher;
 use super::OPERATOR_REGISTRY;
 
@@ -54,41 +54,8 @@ pub fn matches_filter_value(
     if let Value::Object(filter_obj) = filter_value {
         // Special handling for $regex + $options combination
         // MongoDB allows: { $not: { $regex: "pattern", $options: "i" } }
-        let has_regex = filter_obj.contains_key("$regex");
-        let has_options = filter_obj.contains_key("$options");
-
-        if has_regex && has_options {
-            // Handle $regex with $options as a single operation
-            let pattern = filter_obj
-                .get("$regex")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    IronBaseError::InvalidQuery("$regex requires a string pattern".to_string())
-                })?;
-            let options = filter_obj
-                .get("$options")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            // Check regex match on the document value
-            let regex_matches = match doc_value {
-                Some(Value::String(s)) => regex_match_with_options(s, pattern, options)?,
-                Some(Value::Array(arr)) => {
-                    let mut found = false;
-                    for v in arr {
-                        if let Value::String(s) = v {
-                            if regex_match_with_options(s, pattern, options)? {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    found
-                }
-                _ => false,
-            };
-
-            if !regex_matches {
+        if let Some(parsed) = parse_regex_filter(filter_obj)? {
+            if !regex_matches_value(doc_value, parsed.pattern, parsed.options)? {
                 return Ok(false);
             }
 
@@ -111,11 +78,6 @@ pub fn matches_filter_value(
                 }
             }
             return Ok(true);
-        } else if has_options && !has_regex {
-            // $options without $regex is an error
-            return Err(IronBaseError::InvalidQuery(
-                "$options requires $regex".to_string(),
-            ));
         }
 
         // Standard operator processing
@@ -238,57 +200,19 @@ pub fn matches_filter(document: &Document, filter: &Value) -> Result<bool> {
             if let Value::Object(condition_obj) = value {
                 // Special handling for $regex + $options combination
                 // MongoDB allows: { field: { $regex: "pattern", $options: "i" } }
-                let has_regex = condition_obj.contains_key("$regex");
-                let has_options = condition_obj.contains_key("$options");
-
-                if has_regex && has_options {
-                    // Handle $regex with $options as a single operation
-                    let pattern = condition_obj
-                        .get("$regex")
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
-                            IronBaseError::InvalidQuery(
-                                "$regex requires a string pattern".to_string(),
-                            )
-                        })?;
-                    let options = condition_obj
-                        .get("$options")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-
-                    // Helper to check regex match on a single value
-                    let check_regex_match = |val: &Value| -> Result<bool> {
-                        match val {
-                            Value::String(s) => regex_match_with_options(s, pattern, options),
-                            Value::Array(arr) => {
-                                for v in arr {
-                                    if let Value::String(s) = v {
-                                        if regex_match_with_options(s, pattern, options)? {
-                                            return Ok(true);
-                                        }
-                                    }
-                                }
-                                Ok(false)
-                            }
-                            _ => Ok(false),
-                        }
-                    };
-
+                if let Some(parsed) = parse_regex_filter(condition_obj)? {
                     // MongoDB-style: if we have multiple values, ANY match is success
                     let matches = if use_multi_value_matching {
                         let mut found = false;
                         for dv in &doc_values {
-                            if check_regex_match(dv)? {
+                            if regex_matches_value(Some(dv), parsed.pattern, parsed.options)? {
                                 found = true;
                                 break;
                             }
                         }
                         found
                     } else {
-                        match doc_value {
-                            Some(v) => check_regex_match(v)?,
-                            None => false,
-                        }
+                        regex_matches_value(doc_value, parsed.pattern, parsed.options)?
                     };
 
                     if !matches {

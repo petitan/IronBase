@@ -275,6 +275,93 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         Ok(docs)
     }
 
+    /// Persist a B+ tree index to disk, mark it ready, and flush collection metadata.
+    ///
+    /// Shared finalization logic for `create_index`, `create_compound_index`,
+    /// and `create_ci_index`. Performs three steps:
+    /// 1. Save B+ tree to `.idx` file and capture `root_offset`
+    /// 2. `set_index_ready()` — clears `building` flag
+    /// 3. Push `IndexMetadata` into collection metadata and `flush()`
+    fn persist_and_finalize_btree_index(
+        &self,
+        index_name: &str,
+        field: &str,
+        fields: &[String],
+        unique: bool,
+        sparse: bool,
+        multikey_seen: bool,
+        case_insensitive: bool,
+    ) -> Result<()> {
+        // STEP 1: Persist .idx file to get correct root_offset
+        let root_offset = {
+            let storage = self.storage.read();
+            let db_file_path = storage.get_file_path().to_string();
+            drop(storage);
+
+            if !db_file_path.is_empty() {
+                let mut indexes = self.indexes.write();
+                if let Some(index) = indexes.get_btree_index_mut(index_name) {
+                    persist_index_to_disk(&db_file_path, index_name, |file| {
+                        index.save_to_file(file)
+                    })?;
+                    index.metadata.root_offset
+                } else {
+                    0
+                }
+            } else {
+                0
+            }
+        };
+
+        // STEP 2: Mark index as ready BEFORE persisting metadata
+        // This ensures the saved metadata has building=false
+        {
+            let mut indexes = self.indexes.write();
+            if let Err(e) = indexes.set_index_ready(index_name) {
+                tracing::warn!(
+                    index_name = %index_name,
+                    error = %e,
+                    "Failed to mark index as ready"
+                );
+            }
+        }
+
+        // STEP 3: Persist metadata with correct root_offset
+        {
+            let mut storage = self.storage.write();
+            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
+                let index_meta = self
+                    .indexes
+                    .read()
+                    .get_btree_index(index_name)
+                    .map(|index| {
+                        let mut meta = index.metadata.clone();
+                        meta.root_offset = root_offset;
+                        meta
+                    })
+                    .unwrap_or_else(|| IndexMetadata {
+                        name: index_name.to_string(),
+                        field: field.to_string(),
+                        fields: fields.to_vec(),
+                        unique,
+                        sparse,
+                        multikey: multikey_seen,
+                        case_insensitive,
+                        num_keys: 0,
+                        tree_height: 1,
+                        root_offset,
+                        stats: IndexStats::default(),
+                        building: false,
+                    });
+
+                meta.indexes.push(index_meta);
+                storage.flush()?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Create a compound B+ tree index on multiple fields
     ///
     /// Compound indexes allow efficient queries on multiple fields in order.
@@ -437,67 +524,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             "B+ tree built, persisting to disk"
         );
 
-        // PERSIST index data to .idx file FIRST (to get correct root_offset)
-        let root_offset = {
-            let storage = self.storage.read();
-            let db_file_path = storage.get_file_path().to_string();
-            drop(storage);
-
-            if !db_file_path.is_empty() {
-                let mut indexes = self.indexes.write();
-                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                    persist_index_to_disk(&db_file_path, &index_name, |file| {
-                        index.save_to_file(file)
-                    })?;
-                    index.metadata.root_offset
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
-
-        // Mark index as ready BEFORE persisting metadata
-        {
-            let mut indexes = self.indexes.write();
-            if let Err(e) = indexes.set_index_ready(&index_name) {
-                tracing::warn!(error = %e, "Failed to mark compound index as ready");
-            }
-        }
-
-        // THEN persist metadata with correct root_offset
-        {
-            let mut storage = self.storage.write();
-            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
-                let index_meta = self
-                    .indexes
-                    .read()
-                    .get_btree_index(&index_name)
-                    .map(|index| {
-                        let mut meta = index.metadata.clone();
-                        meta.root_offset = root_offset;
-                        meta
-                    })
-                    .unwrap_or_else(|| IndexMetadata {
-                        name: index_name.clone(),
-                        field: fields[0].clone(), // Primary field for backward compat
-                        fields: fields.clone(),
-                        unique,
-                        sparse,
-                        multikey: multikey_seen,
-                        case_insensitive: false,
-                        num_keys: 0,
-                        tree_height: 1,
-                        root_offset,
-                        stats: IndexStats::default(),
-                        building: false,
-                    });
-
-                meta.indexes.push(index_meta);
-                storage.flush()?;
-            }
-        }
+        self.persist_and_finalize_btree_index(
+            &index_name,
+            &fields[0], // Primary field for backward compat
+            &fields,
+            unique,
+            sparse,
+            multikey_seen,
+            false, // case_insensitive
+        )?;
 
         tracing::info!(
             collection = %self.name,
@@ -619,68 +654,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             "B+ tree built, persisting to disk"
         );
 
-        // PERSIST index data to .idx file FIRST (to get correct root_offset)
-        let root_offset = {
-            let storage = self.storage.read();
-            let db_file_path = storage.get_file_path().to_string();
-            drop(storage);
-
-            if !db_file_path.is_empty() {
-                let mut indexes = self.indexes.write();
-                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                    persist_index_to_disk(&db_file_path, &index_name, |file| {
-                        index.save_to_file(file)
-                    })?;
-                    index.metadata.root_offset
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
-
-        // Mark index as ready BEFORE persisting metadata
-        // This ensures the saved metadata has building=false
-        {
-            let mut indexes = self.indexes.write();
-            if let Err(e) = indexes.set_index_ready(&index_name) {
-                tracing::warn!(error = %e, "Failed to mark index as ready");
-            }
-        }
-
-        // THEN persist metadata with correct root_offset
-        {
-            let mut storage = self.storage.write();
-            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
-                let index_meta = self
-                    .indexes
-                    .read()
-                    .get_btree_index(&index_name)
-                    .map(|index| {
-                        let mut meta = index.metadata.clone();
-                        meta.root_offset = root_offset;
-                        meta
-                    })
-                    .unwrap_or_else(|| IndexMetadata {
-                        name: index_name.clone(),
-                        field: field.clone(),
-                        fields: vec![field.clone()], // Single-field index
-                        unique,
-                        sparse,
-                        multikey: multikey_seen,
-                        case_insensitive: false,
-                        num_keys: 0,
-                        tree_height: 1,
-                        root_offset,
-                        stats: IndexStats::default(),
-                        building: false, // Explicitly set to false
-                    });
-
-                meta.indexes.push(index_meta);
-                storage.flush()?;
-            }
-        }
+        self.persist_and_finalize_btree_index(
+            &index_name,
+            &field,
+            std::slice::from_ref(&field),
+            unique,
+            sparse,
+            multikey_seen,
+            false, // case_insensitive
+        )?;
 
         tracing::info!(
             collection = %self.name,
@@ -798,68 +780,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             "B+ tree built, persisting to disk"
         );
 
-        // PERSIST index data to .idx file
-        let root_offset = {
-            let storage = self.storage.read();
-            let db_file_path = storage.get_file_path().to_string();
-            drop(storage);
-
-            if !db_file_path.is_empty() {
-                let mut indexes = self.indexes.write();
-                if let Some(index) = indexes.get_btree_index_mut(&index_name) {
-                    persist_index_to_disk(&db_file_path, &index_name, |file| {
-                        index.save_to_file(file)
-                    })?;
-                    index.metadata.root_offset
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
-
-        // Mark index as ready BEFORE persisting metadata
-        // This ensures the saved metadata has building=false
-        {
-            let mut indexes = self.indexes.write();
-            if let Err(e) = indexes.set_index_ready(&index_name) {
-                tracing::warn!(error = %e, "Failed to mark CI index as ready");
-            }
-        }
-
-        // Persist metadata
-        {
-            let mut storage = self.storage.write();
-            if let Some(meta) = storage.get_collection_meta_mut(&self.name) {
-                let index_meta = self
-                    .indexes
-                    .read()
-                    .get_btree_index(&index_name)
-                    .map(|index| {
-                        let mut meta = index.metadata.clone();
-                        meta.root_offset = root_offset;
-                        meta
-                    })
-                    .unwrap_or_else(|| IndexMetadata {
-                        name: index_name.clone(),
-                        field: field.clone(),
-                        fields: vec![field.clone()],
-                        unique,
-                        sparse: true, // CI indexes are implicitly sparse
-                        multikey: multikey_seen,
-                        case_insensitive: true,
-                        num_keys: 0,
-                        tree_height: 1,
-                        root_offset,
-                        stats: IndexStats::default(),
-                        building: false, // CI index is ready after this point
-                    });
-
-                meta.indexes.push(index_meta);
-                storage.flush()?;
-            }
-        }
+        self.persist_and_finalize_btree_index(
+            &index_name,
+            &field,
+            std::slice::from_ref(&field),
+            unique,
+            true, // sparse — CI indexes are implicitly sparse
+            multikey_seen,
+            true, // case_insensitive
+        )?;
 
         tracing::info!(
             collection = %self.name,

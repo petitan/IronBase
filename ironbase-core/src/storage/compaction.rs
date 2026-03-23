@@ -676,8 +676,12 @@ pub fn compact_scan_standalone(
                 continue;
             }
 
-            // Read document using pread (no seek, thread-safe)
-            match read_document_pread(&source_file, offset, snapshot.snapshot_data_end_offset) {
+            // Read document using positioned I/O (no seek, thread-safe)
+            match super::io::read_document_from_file(
+                &source_file,
+                offset,
+                snapshot.snapshot_data_end_offset,
+            ) {
                 Ok(doc_bytes) => {
                     stats.documents_scanned += 1;
 
@@ -771,106 +775,6 @@ pub fn compact_scan_standalone(
 // =========================================================================
 // FREE FUNCTIONS (no &self needed)
 // =========================================================================
-
-/// Read document at offset using pread (no seek, thread-safe)
-///
-/// Mirrors StorageEngine::read_data_at() logic but works on any File reference.
-/// Uses platform-specific positioned I/O (pread on Unix, seek_read on Windows).
-#[cfg(unix)]
-fn read_document_pread(file: &std::fs::File, offset: u64, data_boundary: u64) -> Result<Vec<u8>> {
-    use std::os::unix::fs::FileExt;
-
-    if offset >= data_boundary {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: offset {} >= data boundary {}",
-            offset, data_boundary
-        )));
-    }
-
-    if offset + 4 > data_boundary {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: insufficient space for length header at offset {} (boundary: {})",
-            offset, data_boundary
-        )));
-    }
-
-    // Read length header
-    let mut len_bytes = [0u8; 4];
-    file.read_at(&mut len_bytes, offset)?;
-    let len = u32::from_le_bytes(len_bytes) as usize;
-
-    if len == 0 {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: zero-length document at offset {}",
-            offset
-        )));
-    }
-    if len > super::MAX_DOCUMENT_SIZE_BYTES {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: document at offset {} exceeds max size: {} bytes",
-            offset, len
-        )));
-    }
-    if offset + 4 + (len as u64) > data_boundary {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: document at offset {} claims length {} but exceeds boundary",
-            offset, len
-        )));
-    }
-
-    let mut data = vec![0u8; len];
-    file.read_at(&mut data, offset + 4)?;
-
-    Ok(data)
-}
-
-/// Read document at offset using seek_read (Windows)
-#[cfg(windows)]
-fn read_document_pread(file: &std::fs::File, offset: u64, data_boundary: u64) -> Result<Vec<u8>> {
-    use std::os::windows::fs::FileExt;
-
-    if offset >= data_boundary {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: offset {} >= data boundary {}",
-            offset, data_boundary
-        )));
-    }
-
-    if offset + 4 > data_boundary {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: insufficient space for length header at offset {} (boundary: {})",
-            offset, data_boundary
-        )));
-    }
-
-    let mut len_bytes = [0u8; 4];
-    file.seek_read(&mut len_bytes, offset)?;
-    let len = u32::from_le_bytes(len_bytes) as usize;
-
-    if len == 0 {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: zero-length document at offset {}",
-            offset
-        )));
-    }
-    if len > super::MAX_DOCUMENT_SIZE_BYTES {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: document at offset {} exceeds max size: {} bytes",
-            offset, len
-        )));
-    }
-    if offset + 4 + (len as u64) > data_boundary {
-        return Err(IronBaseError::Corruption(format!(
-            "pread: document at offset {} claims length {} but exceeds boundary",
-            offset, len
-        )));
-    }
-
-    let mut data = vec![0u8; len];
-    file.seek_read(&mut data, offset + 4)?;
-
-    Ok(data)
-}
 
 /// Flush a chunk of documents to the compacted file (standalone, no &self)
 fn flush_compaction_chunk_standalone(

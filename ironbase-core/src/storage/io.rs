@@ -5,6 +5,98 @@ use super::{HeaderWriter, StorageEngine};
 use crate::error::Result;
 use std::io::{Read, Seek, SeekFrom, Write};
 
+// =========================================================================
+// Platform-specific positioned read — single dispatch point
+// =========================================================================
+
+/// Positioned read without changing the file descriptor's seek position.
+/// Uses `pread()` on Unix and `seek_read()` on Windows.
+#[cfg(unix)]
+fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::unix::fs::FileExt;
+    file.read_at(buf, offset)?;
+    Ok(())
+}
+
+/// Positioned read without changing the file descriptor's seek position.
+/// Uses `seek_read()` on Windows.
+#[cfg(windows)]
+fn read_exact_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    use std::os::windows::fs::FileExt;
+    file.seek_read(buf, offset)?;
+    Ok(())
+}
+
+// =========================================================================
+// Common document read with validation — used by io.rs and compaction.rs
+// =========================================================================
+
+/// Read a length-prefixed document at `offset` using positioned I/O.
+///
+/// Validates offset bounds, document length, and boundary overflow before
+/// reading. Does NOT change the file descriptor's seek position.
+///
+/// This is the single source of truth for pread-style document reads.
+/// Both `StorageEngine::read_data_at()` and compaction's standalone scan
+/// delegate to this function.
+///
+/// # Thread Safety
+/// Safe to call from multiple threads simultaneously (no shared mutable state).
+pub(crate) fn read_document_from_file(
+    file: &std::fs::File,
+    offset: u64,
+    data_boundary: u64,
+) -> Result<Vec<u8>> {
+    use crate::error::IronBaseError;
+
+    if offset >= data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "Attempted to read at offset {} but data region ends at {} bytes",
+            offset, data_boundary
+        )));
+    }
+
+    if offset + 4 > data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "Insufficient space to read length header at offset {} (data ends: {} bytes)",
+            offset, data_boundary
+        )));
+    }
+
+    // Read length header using positioned I/O (no seek, no position change)
+    let mut len_bytes = [0u8; 4];
+    read_exact_at(file, &mut len_bytes, offset)?;
+    let len = u32::from_le_bytes(len_bytes) as usize;
+
+    if len == 0 {
+        return Err(IronBaseError::Corruption(format!(
+            "Document at offset {} has zero length",
+            offset
+        )));
+    }
+    if len > super::MAX_DOCUMENT_SIZE_BYTES {
+        return Err(IronBaseError::Corruption(format!(
+            "Document at offset {} exceeds max size: {} bytes (limit: {})",
+            offset,
+            len,
+            super::MAX_DOCUMENT_SIZE_BYTES
+        )));
+    }
+
+    if offset + 4 + (len as u64) > data_boundary {
+        return Err(IronBaseError::Corruption(format!(
+            "Document at offset {} claims length {} but would exceed data region boundary ({} bytes)",
+            offset, len, data_boundary
+        )));
+    }
+
+    // Read document data using positioned I/O
+    let mut data = vec![0u8; len];
+    read_exact_at(file, &mut data, offset + 4)?;
+
+    Ok(data)
+}
+
 impl StorageEngine {
     /// Write data to end of document region
     /// Returns the offset where data was written
@@ -139,122 +231,16 @@ impl StorageEngine {
     /// Uses `pread()` on Unix and `seek_read()` on Windows.
     /// This allows concurrent reads because it doesn't modify the file descriptor's position.
     ///
+    /// Delegates to [`read_document_from_file()`] which contains the shared
+    /// validation + platform I/O logic (also used by compaction's standalone scan).
+    ///
     /// # Thread Safety
     /// Safe to call from multiple threads simultaneously.
-    #[cfg(unix)]
     pub fn read_data_at(&self, offset: u64) -> Result<Vec<u8>> {
-        use crate::error::IronBaseError;
-        use std::os::unix::fs::FileExt;
-
         // PERF FIX: Use cached header values instead of syscall per read!
         // data_end_offset is updated after document writes (not metadata flush)
         // This enables reading documents that were written but not yet flushed
-        let file_len = self.header.data_end_offset;
-
-        if offset >= file_len {
-            return Err(IronBaseError::Corruption(format!(
-                "Attempted to read at offset {} but data region ends at {} bytes",
-                offset, file_len
-            )));
-        }
-
-        if offset + 4 > file_len {
-            return Err(IronBaseError::Corruption(format!(
-                "Insufficient space to read length header at offset {} (data ends: {} bytes)",
-                offset, file_len
-            )));
-        }
-
-        // Read length header using pread (no seek, no position change)
-        let mut len_bytes = [0u8; 4];
-        self.file.read_at(&mut len_bytes, offset)?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        if len == 0 {
-            return Err(IronBaseError::Corruption(format!(
-                "Document at offset {} has zero length",
-                offset
-            )));
-        }
-        if len > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::Corruption(format!(
-                "Document at offset {} exceeds max size: {} bytes (limit: {})",
-                offset,
-                len,
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
-
-        if offset + 4 + (len as u64) > file_len {
-            return Err(IronBaseError::Corruption(format!(
-                "Document at offset {} claims length {} but would exceed file boundary",
-                offset, len
-            )));
-        }
-
-        // Read data using pread
-        let mut data = vec![0u8; len];
-        self.file.read_at(&mut data, offset + 4)?;
-
-        Ok(data)
-    }
-
-    /// Positioned read - Windows implementation using seek_read
-    #[cfg(windows)]
-    pub fn read_data_at(&self, offset: u64) -> Result<Vec<u8>> {
-        use crate::error::IronBaseError;
-        use std::os::windows::fs::FileExt;
-
-        // PERF FIX: Use cached header values instead of syscall per read!
-        // data_end_offset is updated after document writes (not metadata flush)
-        let file_len = self.header.data_end_offset;
-
-        if offset >= file_len {
-            return Err(IronBaseError::Corruption(format!(
-                "Attempted to read at offset {} but data region ends at {} bytes",
-                offset, file_len
-            )));
-        }
-
-        if offset + 4 > file_len {
-            return Err(IronBaseError::Corruption(format!(
-                "Insufficient space to read length header at offset {} (data ends: {} bytes)",
-                offset, file_len
-            )));
-        }
-
-        // Read length header using seek_read (atomic positioned read on Windows)
-        let mut len_bytes = [0u8; 4];
-        self.file.seek_read(&mut len_bytes, offset)?;
-        let len = u32::from_le_bytes(len_bytes) as usize;
-
-        if len == 0 {
-            return Err(IronBaseError::Corruption(format!(
-                "Document at offset {} has zero length",
-                offset
-            )));
-        }
-        if len > super::MAX_DOCUMENT_SIZE_BYTES {
-            return Err(IronBaseError::Corruption(format!(
-                "Document at offset {} exceeds max size: {} bytes (limit: {})",
-                offset,
-                len,
-                super::MAX_DOCUMENT_SIZE_BYTES
-            )));
-        }
-
-        if offset + 4 + (len as u64) > file_len {
-            return Err(IronBaseError::Corruption(format!(
-                "Document at offset {} claims length {} but would exceed file boundary",
-                offset, len
-            )));
-        }
-
-        // Read data using seek_read
-        let mut data = vec![0u8; len];
-        self.file.seek_read(&mut data, offset + 4)?;
-
-        Ok(data)
+        read_document_from_file(&self.file, offset, self.header.data_end_offset)
     }
 
     /// Write document and update catalog
