@@ -166,23 +166,15 @@ pub fn topk_documents<I>(docs: I, skip: usize, limit: usize, sort: &[(String, i3
 where
     I: Iterator<Item = Value>,
 {
-    // Collect all documents first, then use a simpler sort + skip + take
-    // This is still efficient for reasonable result sizes
-    let mut all_docs: Vec<Value> = docs.collect();
-
-    // Sort all documents
-    let sort_spec = sort.to_vec();
-    all_docs.sort_by(|a, b| compare_docs_by_sort(a, b, &sort_spec));
-
-    // Apply skip and limit
-    all_docs.into_iter().skip(skip).take(limit).collect()
+    // Delegate to streaming O(k) heap-based implementation
+    // Previous implementation collected ALL docs O(N) then sorted — OOM risk on large result sets
+    topk_documents_streaming(docs, skip, limit, sort)
 }
 
 /// Apply Top-K selection with true O(k) memory using a custom heap-based approach
 ///
 /// Unlike topk_documents which collects all, this one uses a heap for memory efficiency.
 /// Use this when dealing with very large iterators where collecting all would cause OOM.
-#[allow(dead_code)] // Reserved for future streaming query executor
 pub fn topk_documents_streaming<I>(
     docs: I,
     skip: usize,

@@ -624,6 +624,10 @@ impl HnswIndex {
     ///
     /// Format v2: [HNSW magic 4B][version u32 LE][bincode data...]
     /// This allows future format changes without breaking existing cache files.
+    ///
+    /// NOTE: This allocates the entire serialized index into a Vec<u8>.
+    /// For flush-to-disk, prefer `save_to_writer()` which streams directly
+    /// to a file via `bincode::serialize_into`, avoiding the ~2x peak memory.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let data = bincode::serialize(self).map_err(|e| {
             IronBaseError::Serialization(format!("Failed to serialize HNSW index: {}", e))
@@ -635,6 +639,39 @@ impl HnswIndex {
         buf.extend_from_slice(&data);
 
         Ok(buf)
+    }
+
+    /// Streaming serialize: write directly to a writer without intermediate Vec<u8>.
+    ///
+    /// Format is identical to `to_bytes()` v2: [HNSW magic 4B][version u32 LE][bincode data...]
+    /// Compatible with `from_bytes()` for deserialization.
+    ///
+    /// This avoids the ~2x peak memory of `to_bytes()` + `fs::write()`:
+    /// - `to_bytes()`: allocates full serialized copy (~170 MB for 119K vectors/300 dim)
+    /// - `save_to_writer()`: streams bincode data directly, O(1) extra allocation
+    ///
+    /// The HNSW graph structure (cross-referencing node indices in neighbors)
+    /// requires the full graph in memory during serialization — that is inherent
+    /// to the data structure. But the serialized *output* can stream to disk.
+    pub fn save_to_writer(&self, writer: &mut impl std::io::Write) -> Result<()> {
+        writer.write_all(Self::MAGIC_HEADER).map_err(|e| {
+            IronBaseError::Io(std::io::Error::other(format!(
+                "Failed to write HNSW header: {}",
+                e
+            )))
+        })?;
+        writer
+            .write_all(&Self::SERIALIZATION_VERSION.to_le_bytes())
+            .map_err(|e| {
+                IronBaseError::Io(std::io::Error::other(format!(
+                    "Failed to write HNSW version: {}",
+                    e
+                )))
+            })?;
+        bincode::serialize_into(writer, self).map_err(|e| {
+            IronBaseError::Serialization(format!("Failed to serialize HNSW index: {}", e))
+        })?;
+        Ok(())
     }
 
     /// Deserialize the index from bytes

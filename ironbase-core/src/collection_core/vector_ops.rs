@@ -138,9 +138,12 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         const PROGRESS_LOG_INTERVAL: usize = 1000;
         let mut indexed_count: usize = 0;
         let mut total_scanned: usize = 0;
-        let mut dimension_errors: Vec<String> = Vec::new();
+        let mut dimension_error_count: u64 = 0;
         let field_clone = field.to_string();
         let collection_name = self.name.clone();
+        // Maximum number of dimension mismatch errors to log individually.
+        // After this, only the total count is reported at the end.
+        const MAX_DIM_ERROR_LOG: u64 = 5;
 
         self.scan_documents_in_batches(INDEX_BUILD_BATCH_SIZE, |_batch_num, batch_docs| {
             for (doc_id, doc) in batch_docs {
@@ -150,19 +153,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     if let Some(vector) = Self::extract_f32_vector(vec_value) {
                         // Check dimension
                         if vector.len() != config.dim {
-                            dimension_errors.push(format!(
-                                "Document '{}': expected dim {}, got {}",
-                                id_str,
-                                config.dim,
-                                vector.len()
-                            ));
-                            if dimension_errors.len() <= 5 {
+                            dimension_error_count += 1;
+                            if dimension_error_count <= MAX_DIM_ERROR_LOG {
                                 tracing::warn!(
                                     doc_id = %id_str,
                                     expected = config.dim,
                                     actual = vector.len(),
                                     "Vector dimension mismatch, skipping"
                                 );
+                                if dimension_error_count == MAX_DIM_ERROR_LOG {
+                                    tracing::warn!(
+                                        "Suppressing further dimension mismatch warnings (limit: {})",
+                                        MAX_DIM_ERROR_LOG
+                                    );
+                                }
                             }
                         } else {
                             // Insert into HNSW
@@ -197,7 +201,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             collection = %self.name,
             total_scanned = total_scanned,
             indexed = indexed_count,
-            dimension_errors = dimension_errors.len(),
+            dimension_errors = dimension_error_count,
             "Document scan complete, persisting index"
         );
 

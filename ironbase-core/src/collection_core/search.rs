@@ -18,6 +18,7 @@ use crate::storage::{RawStorage, Storage};
 use crate::value_utils::get_nested_value;
 
 use super::index_persistence::build_fulltext_index_file_path;
+use super::topk::topk_select_with_skip;
 use super::CollectionCore;
 
 /// Search operations for CollectionCore
@@ -1199,13 +1200,36 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         } // drop indexes read lock
 
-        // Sort by score descending
-        let mut sorted_docs: Vec<_> = doc_scores.into_iter().collect();
-        sorted_docs.sort_by(|a, b| {
-            b.1 .0
-                .partial_cmp(&a.1 .0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Select top-K by score descending.
+        // When there is no post-filter (no parsed_filter, no phrase_regexes),
+        // every candidate passes through, so Top-K + skip is exact and uses
+        // O(skip + limit) memory instead of sorting the full O(candidate_limit) vec.
+        // When a filter/phrase IS present, candidates may be rejected after
+        // sorting, so we need the full sorted list (candidate_limit is already
+        // capped at 100K by calculate_candidate_limit, so this is bounded).
+        let has_post_filter = parsed_filter.is_some() || !phrase_regexes.is_empty();
+        let score_cmp =
+            |a: &(crate::DocumentId, (f64, HashSet<String>, Vec<String>)),
+             b: &(crate::DocumentId, (f64, HashSet<String>, Vec<String>))| {
+                b.1 .0
+                    .partial_cmp(&a.1 .0)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            };
+
+        let sorted_docs: Vec<_> = if has_post_filter {
+            // Full sort — post-filter may reject arbitrary elements
+            let mut v: Vec<_> = doc_scores.into_iter().collect();
+            v.sort_by(score_cmp);
+            v
+        } else {
+            // Top-K selection — O(skip + limit) memory, O(n log(skip + limit)) time
+            topk_select_with_skip(
+                doc_scores.into_iter(),
+                effective_skip,
+                effective_limit,
+                score_cmp,
+            )
+        };
 
         // Prepare query tokens for highlights (use first field's options)
         let query_tokens = if options.highlight {
@@ -1259,8 +1283,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 }
             }
 
-            // Handle skip
-            if skipped < effective_skip {
+            // Handle skip (only needed for full-sort path; Top-K path
+            // already applied skip inside topk_select_with_skip)
+            if has_post_filter && skipped < effective_skip {
                 skipped += 1;
                 continue;
             }

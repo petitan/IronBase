@@ -880,27 +880,44 @@ impl IndexManager {
     /// This should be called before database close to enable fast restart.
     /// Only dirty indexes (modified since last save) are written.
     ///
+    /// Uses streaming serialization (`save_to_writer` + `BufWriter`) to avoid
+    /// allocating the entire serialized index in memory. Previously `to_bytes()`
+    /// + `fs::write()` caused ~2x peak memory (original index + serialized Vec<u8>).
+    ///
     /// Returns the number of indexes flushed.
     pub fn flush_vector_indexes(&mut self, db_path: &str) -> Result<usize> {
+        use std::io::BufWriter;
+
         let mut count = 0;
         let dirty_names: Vec<String> = self.dirty_vector_indexes.iter().cloned().collect();
         for name in dirty_names {
             if let Some(index) = self.vector_indexes.get_mut(&name) {
                 let cache_path = Self::build_vector_cache_path(db_path, &name);
-                let bytes = index.to_bytes()?;
-                std::fs::write(&cache_path, &bytes).map_err(|e| {
+                let file = std::fs::File::create(&cache_path).map_err(|e| {
                     IronBaseError::Io(std::io::Error::other(format!(
-                        "Failed to write HNSW cache file '{}': {}",
+                        "Failed to create HNSW cache file '{}': {}",
                         cache_path.display(),
                         e
                     )))
                 })?;
+                let mut writer = BufWriter::new(file);
+                index.save_to_writer(&mut writer)?;
+                // Explicit flush to catch write errors before marking clean
+                std::io::Write::flush(&mut writer).map_err(|e| {
+                    IronBaseError::Io(std::io::Error::other(format!(
+                        "Failed to flush HNSW cache file '{}': {}",
+                        cache_path.display(),
+                        e
+                    )))
+                })?;
+                let file_size = cache_path.metadata().map(|m| m.len()).unwrap_or(0);
                 index.mark_clean();
                 self.dirty_vector_indexes.remove(&name);
                 crate::log_debug!(
-                    "Flushed vector index '{}' to {}",
+                    "Flushed vector index '{}' to {} ({:.1} MB, streaming)",
                     name,
-                    cache_path.display()
+                    cache_path.display(),
+                    file_size as f64 / (1024.0 * 1024.0)
                 );
                 count += 1;
             }
@@ -1074,26 +1091,42 @@ impl IndexManager {
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
     /// On error, the index remains dirty for retry.
+    ///
+    /// Uses streaming serialization (`save_to_writer` + `BufWriter`) to avoid
+    /// the ~2x peak memory of `to_bytes()` + `fs::write()`.
     pub fn flush_one_vector_index(&mut self, name: &str, db_path: &str) -> Result<bool> {
+        use std::io::BufWriter;
+
         if !self.dirty_vector_indexes.contains(name) {
             return Ok(false);
         }
         if let Some(index) = self.vector_indexes.get_mut(name) {
             let cache_path = Self::build_vector_cache_path(db_path, name);
-            let bytes = index.to_bytes()?;
-            std::fs::write(&cache_path, &bytes).map_err(|e| {
+            let file = std::fs::File::create(&cache_path).map_err(|e| {
                 IronBaseError::Io(std::io::Error::other(format!(
-                    "Failed to write HNSW cache file '{}': {}",
+                    "Failed to create HNSW cache file '{}': {}",
                     cache_path.display(),
                     e
                 )))
             })?;
+            let mut writer = BufWriter::new(file);
+            index.save_to_writer(&mut writer)?;
+            // Explicit flush to catch write errors before marking clean
+            std::io::Write::flush(&mut writer).map_err(|e| {
+                IronBaseError::Io(std::io::Error::other(format!(
+                    "Failed to flush HNSW cache file '{}': {}",
+                    cache_path.display(),
+                    e
+                )))
+            })?;
+            let file_size = cache_path.metadata().map(|m| m.len()).unwrap_or(0);
             index.mark_clean();
             self.dirty_vector_indexes.remove(name);
             crate::log_debug!(
-                "Flushed vector index '{}' to {}",
+                "Flushed vector index '{}' to {} ({:.1} MB, streaming)",
                 name,
-                cache_path.display()
+                cache_path.display(),
+                file_size as f64 / (1024.0 * 1024.0)
             );
             Ok(true)
         } else {

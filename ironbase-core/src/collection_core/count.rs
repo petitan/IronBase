@@ -268,7 +268,28 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                     }
                                     return Ok(total_count as u64);
                                 } else {
+                                    // OOM FIX: Estimate total size via O(1) Count mode, then try_reserve
+                                    let estimated: usize = keys
+                                        .iter()
+                                        .map(|key| {
+                                            index
+                                                .range_query(
+                                                    key,
+                                                    key,
+                                                    true,
+                                                    true,
+                                                    RangeQueryMode::Count,
+                                                )
+                                                .unwrap_count()
+                                        })
+                                        .sum();
                                     let mut all_doc_ids = Vec::new();
+                                    all_doc_ids.try_reserve(estimated).map_err(|e| {
+                                        IronBaseError::OutOfMemory(format!(
+                                            "Cannot allocate space for {} index entries in MultiValueScan count ({})",
+                                            estimated, e
+                                        ))
+                                    })?;
                                     for key in keys {
                                         let mode = RangeQueryMode::Scan {
                                             skip: 0,
@@ -538,7 +559,30 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             return Ok(total_count as u64);
                         } else {
                             // FIX #36: narrow via index, then post-filter
+                            // OOM FIX: Estimate total size via O(1) Count mode, then try_reserve
+                            let estimated: usize = prefixes
+                                .iter()
+                                .map(|prefix| {
+                                    let start = IndexKey::String(prefix.clone());
+                                    let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
+                                    index
+                                        .range_query(
+                                            &start,
+                                            &end,
+                                            true,
+                                            true,
+                                            RangeQueryMode::Count,
+                                        )
+                                        .unwrap_count()
+                                })
+                                .sum();
                             let mut all_doc_ids = Vec::new();
+                            all_doc_ids.try_reserve(estimated).map_err(|e| {
+                                IronBaseError::OutOfMemory(format!(
+                                    "Cannot allocate space for {} index entries in MultiRegexPrefixScan count ({})",
+                                    estimated, e
+                                ))
+                            })?;
                             for prefix in prefixes {
                                 let start = IndexKey::String(prefix.clone());
                                 let end = IndexKey::String(format!("{}\u{10ffff}", prefix));
@@ -585,7 +629,22 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                             return Ok(total_count as u64);
                         } else {
                             // FIX #36: narrow via index, then post-filter
+                            // OOM FIX: Estimate total size via O(1) Count mode, then try_reserve
+                            let estimated: usize = keys
+                                .iter()
+                                .map(|key| {
+                                    index
+                                        .range_query(key, key, true, true, RangeQueryMode::Count)
+                                        .unwrap_count()
+                                })
+                                .sum();
                             let mut all_doc_ids = Vec::new();
+                            all_doc_ids.try_reserve(estimated).map_err(|e| {
+                                IronBaseError::OutOfMemory(format!(
+                                    "Cannot allocate space for {} index entries in MultiValueScan count ({})",
+                                    estimated, e
+                                ))
+                            })?;
                             for key in keys {
                                 let mode = RangeQueryMode::Scan {
                                     skip: 0,
