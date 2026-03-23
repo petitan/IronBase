@@ -51,7 +51,7 @@ pub enum Operation {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexChange {
     pub operation: IndexOperation,
-    pub key: IndexKey,
+    pub key: crate::index::IndexKey,
     pub doc_id: DocumentId,
 }
 
@@ -60,73 +60,6 @@ pub struct IndexChange {
 pub enum IndexOperation {
     Insert,
     Delete,
-}
-
-/// Index key (simplified - matches index::IndexKey)
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub enum IndexKey {
-    Int(i64),
-    String(String),
-    Float(OrderedFloat),
-    Bool(bool),
-    Null,
-}
-
-/// Ordered float wrapper for IndexKey
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct OrderedFloat(f64);
-
-impl OrderedFloat {
-    /// Get the inner f64 value
-    pub fn value(&self) -> f64 {
-        self.0
-    }
-}
-
-impl PartialEq for OrderedFloat {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.to_bits() == other.0.to_bits()
-    }
-}
-
-impl Eq for OrderedFloat {}
-
-impl PartialOrd for OrderedFloat {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for OrderedFloat {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.0
-            .partial_cmp(&other.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }
-}
-
-impl std::hash::Hash for OrderedFloat {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.to_bits().hash(state);
-    }
-}
-
-impl From<&Value> for IndexKey {
-    fn from(value: &Value) -> Self {
-        match value {
-            Value::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    IndexKey::Int(i)
-                } else {
-                    IndexKey::Float(OrderedFloat(n.as_f64().unwrap_or(0.0)))
-                }
-            }
-            Value::String(s) => IndexKey::String(s.clone()),
-            Value::Bool(b) => IndexKey::Bool(*b),
-            Value::Null => IndexKey::Null,
-            _ => IndexKey::Null, // Arrays and objects as null for now
-        }
-    }
 }
 
 /// Collection metadata changes (e.g., last_id increments)
@@ -293,6 +226,7 @@ impl Transaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::index::IndexKey;
     use serde_json::json;
 
     #[test]

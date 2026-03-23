@@ -106,7 +106,7 @@ pub struct RecoveredIndexChange {
     pub collection: String,
     pub index_name: String,
     pub operation: crate::transaction::IndexOperation,
-    pub key: crate::transaction::IndexKey,
+    pub key: crate::index::IndexKey,
     pub doc_id: crate::document::DocumentId,
 }
 
@@ -1762,7 +1762,7 @@ impl StorageEngine {
                             }
                         };
 
-                        let key: crate::transaction::IndexKey =
+                        let key: crate::index::IndexKey =
                             serde_json::from_value(change_json["key"].clone())?;
                         let doc_id: crate::document::DocumentId =
                             serde_json::from_value(change_json["doc_id"].clone())?;

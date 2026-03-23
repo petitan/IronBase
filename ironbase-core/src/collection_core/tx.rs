@@ -105,7 +105,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 if let Some(key_value) =
                     crate::value_utils::get_nested_value(&doc_value, field_name)
                 {
-                    let key = crate::transaction::IndexKey::from(key_value);
+                    let key = crate::index::IndexKey::from(key_value);
                     tx.add_index_change(
                         index_name.clone(),
                         crate::transaction::IndexChange {
@@ -179,7 +179,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     // Delete old key if exists
                     if let Some(old_val) = old_value {
-                        let old_key = crate::transaction::IndexKey::from(old_val);
+                        let old_key = crate::index::IndexKey::from(old_val);
                         tx.add_index_change(
                             index_name.clone(),
                             crate::transaction::IndexChange {
@@ -192,7 +192,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     // Insert new key if exists
                     if let Some(new_val) = new_value {
-                        let new_key = crate::transaction::IndexKey::from(new_val);
+                        let new_key = crate::index::IndexKey::from(new_val);
                         tx.add_index_change(
                             index_name.clone(),
                             crate::transaction::IndexChange {
@@ -248,7 +248,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     if let Some(old_val) =
                         crate::value_utils::get_nested_value(&old_doc, field_name)
                     {
-                        let old_key = crate::transaction::IndexKey::from(old_val);
+                        let old_key = crate::index::IndexKey::from(old_val);
                         tx.add_index_change(
                             index_name.clone(),
                             crate::transaction::IndexChange {

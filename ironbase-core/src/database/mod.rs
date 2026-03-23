@@ -209,19 +209,6 @@ impl BatchDocBuffer {
     }
 }
 
-/// Convert transaction::IndexKey to index::IndexKey
-fn convert_index_key(tx_key: &crate::transaction::IndexKey) -> crate::index::IndexKey {
-    match tx_key {
-        crate::transaction::IndexKey::Int(i) => crate::index::IndexKey::Int(*i),
-        crate::transaction::IndexKey::String(s) => crate::index::IndexKey::String(s.clone()),
-        crate::transaction::IndexKey::Float(f) => {
-            crate::index::IndexKey::Float(crate::index::OrderedFloat(f.value()))
-        }
-        crate::transaction::IndexKey::Bool(b) => crate::index::IndexKey::Bool(*b),
-        crate::transaction::IndexKey::Null => crate::index::IndexKey::Null,
-    }
-}
-
 // NOTE: Use DocumentId::extract_from_value() for _id extraction with Result
 // This avoids code duplication across modules.
 
@@ -457,15 +444,12 @@ impl DatabaseCore<StorageEngine> {
                     // Apply the index change to the collection's indexes
                     let mut indexes = collection.indexes.write();
                     if let Some(btree_index) = indexes.get_btree_index_mut(&change.index_name) {
-                        // Convert transaction::IndexKey to index::IndexKey
-                        let index_key = convert_index_key(&change.key);
-
                         match change.operation {
                             crate::transaction::IndexOperation::Insert => {
-                                btree_index.insert(index_key, change.doc_id)?;
+                                btree_index.insert(change.key.clone(), change.doc_id)?;
                             }
                             crate::transaction::IndexOperation::Delete => {
-                                btree_index.delete(&index_key, &change.doc_id)?;
+                                btree_index.delete(&change.key, &change.doc_id)?;
                             }
                         }
                     }
@@ -695,7 +679,7 @@ mod tests {
                 "users_age".to_string(),
                 crate::transaction::IndexChange {
                     operation: crate::transaction::IndexOperation::Insert,
-                    key: crate::transaction::IndexKey::Int(30),
+                    key: crate::index::IndexKey::Int(30),
                     doc_id: DocumentId::Int(1),
                 },
             )?;
