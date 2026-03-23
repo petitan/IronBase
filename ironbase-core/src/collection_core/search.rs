@@ -723,8 +723,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             if let Some(doc) = self.read_document_by_id(&result.doc_id)? {
-                // Get field text for phrase matching
-                let text = doc.get(field).and_then(|v| v.as_str()).unwrap_or("");
+                // Get field text for phrase matching (supports dot notation, e.g. "address.city")
+                let text = get_nested_value(&doc, field)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 // Check all phrases match
                 let all_phrases_match = phrase_regexes.iter().all(|re| re.is_match(text));
@@ -949,7 +951,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             // Phrase check (if applicable)
             if !phrase_regexes.is_empty() {
-                let text = doc.get(field).and_then(|v| v.as_str()).unwrap_or("");
+                // Supports dot notation for nested fields (e.g. "address.city")
+                let text = get_nested_value(&doc, field)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 let all_phrases_match = phrase_regexes.iter().all(|re| re.is_match(text));
                 if !all_phrases_match {
                     continue;

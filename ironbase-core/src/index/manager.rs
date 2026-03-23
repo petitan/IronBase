@@ -310,6 +310,11 @@ impl IndexManager {
         }
         // Also remove file path if it exists
         self.index_file_paths.remove(name);
+        // Clean up dirty sets to prevent phantom dirty names during flush
+        self.dirty_btree_indexes.remove(name);
+        self.dirty_fuzzy_indexes.remove(name);
+        self.dirty_fulltext_indexes.remove(name);
+        self.dirty_vector_indexes.remove(name);
         Ok(())
     }
 
@@ -669,6 +674,8 @@ impl IndexManager {
     pub fn drop_fulltext_index(&mut self, name: &str) -> Result<()> {
         if self.fulltext_indexes.remove(name).is_some() {
             self.index_file_paths.remove(name);
+            // Clean up dirty set to prevent phantom dirty name during flush
+            self.dirty_fulltext_indexes.remove(name);
             Ok(())
         } else {
             Err(IronBaseError::IndexError(format!(

@@ -357,31 +357,23 @@ pub fn validate_projection(projection: &HashMap<String, i32>) -> Result<()> {
 
 /// Returns `InvalidQuery` if projection mixes inclusion (1) and exclusion (0) fields.
 /// Exception: `_id: 0` is allowed in include mode (MongoDB compatible).
+///
+/// NOTE: Callers should call `validate_projection()` once before the query loop.
+/// This function delegates validation to `validate_projection()` for safety
+/// (in case it's called without prior validation), but the cost is minimal
+/// since validate_projection() is O(fields) not O(docs).
 pub fn apply_projection(doc: &Value, projection: &HashMap<String, i32>) -> Result<Value> {
     if projection.is_empty() {
         return Ok(doc.clone());
     }
 
-    if let Some((field, value)) = projection.iter().find(|(_, &v)| v != 0 && v != 1) {
-        return Err(IronBaseError::InvalidQuery(format!(
-            "Invalid projection value for '{}': expected 0 or 1, got {}",
-            field, value
-        )));
-    }
+    // Validate once — delegates to validate_projection() which checks:
+    // 1. All values are 0 or 1
+    // 2. No mixed inclusion/exclusion (except _id: 0)
+    validate_projection(projection)?;
 
     // Detect mode
     let has_inclusions = projection.values().any(|&v| v == 1);
-    let has_non_id_exclusions = projection
-        .iter()
-        .any(|(field, &action)| action == 0 && field != "_id");
-
-    // Validate: Cannot mix inclusion and exclusion (except _id: 0 in include mode)
-    if has_inclusions && has_non_id_exclusions {
-        return Err(IronBaseError::InvalidQuery(
-            "Cannot mix inclusion and exclusion in projection (except _id: 0)".to_string(),
-        ));
-    }
-
     let include_mode = has_inclusions;
 
     if let Value::Object(obj) = doc {
