@@ -1446,12 +1446,24 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if query_obj.len() == 1 && query_obj.contains_key("_id") {
                 if let Some(id_val) = query_obj.get("_id") {
                     if let Ok(doc_id) = serde_json::from_value::<DocumentId>(id_val.clone()) {
+                        // Try original ID first
                         if let Some(doc) = self.read_document_by_id(&doc_id)? {
                             let parsed_query = Query::from_json(query_json)?;
                             let document = Document::from_value(&doc)?;
 
                             if parsed_query.matches(&document)? {
                                 return Ok(Some(doc));
+                            }
+                        }
+                        // Try normalized version (string "123" → int 123)
+                        if let Some(normalized) = Self::normalize_document_id(&doc_id) {
+                            if let Some(doc) = self.read_document_by_id(&normalized)? {
+                                let parsed_query = Query::from_json(query_json)?;
+                                let document = Document::from_value(&doc)?;
+
+                                if parsed_query.matches(&document)? {
+                                    return Ok(Some(doc));
+                                }
                             }
                         }
                     }
