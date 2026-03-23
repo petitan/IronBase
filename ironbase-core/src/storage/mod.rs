@@ -1983,16 +1983,36 @@ impl StorageEngine {
 // Automatic cleanup on drop
 impl Drop for StorageEngine {
     fn drop(&mut self) {
-        if let Err(e) = self.flush() {
-            log_error!("StorageEngine::drop flush failed: {}", e);
-        }
+        // CRITICAL: mark_clean_shutdown() ONLY if BOTH flush and checkpoint succeed.
+        // If either fails, metadata/indexes may not be persisted — marking clean
+        // would cause the next open() to trust stale .idx files (see #9ff48302).
+        let flush_ok = match self.flush() {
+            Ok(()) => true,
+            Err(e) => {
+                log_error!("StorageEngine::drop flush failed: {}", e);
+                false
+            }
+        };
         // Clear WAL on close to keep it clean for next open
-        if let Err(e) = self.checkpoint() {
-            log_error!("StorageEngine::drop checkpoint failed: {}", e);
-        }
-        // Mark clean shutdown for fast restart (indexes can be loaded from .idx files)
-        if let Err(e) = self.mark_clean_shutdown() {
-            log_error!("StorageEngine::drop mark_clean_shutdown failed: {}", e);
+        let checkpoint_ok = match self.checkpoint() {
+            Ok(_) => true,
+            Err(e) => {
+                log_error!("StorageEngine::drop checkpoint failed: {}", e);
+                false
+            }
+        };
+        // Mark clean shutdown ONLY when all data is safely persisted
+        if flush_ok && checkpoint_ok {
+            if let Err(e) = self.mark_clean_shutdown() {
+                log_error!("StorageEngine::drop mark_clean_shutdown failed: {}", e);
+            }
+        } else {
+            log_error!(
+                "StorageEngine::drop skipping mark_clean_shutdown (flush_ok={}, checkpoint_ok={}): \
+                 next open will rebuild indexes from documents",
+                flush_ok,
+                checkpoint_ok
+            );
         }
         // Explicitly unlock the lock file to ensure other processes can access the database
         // This is more reliable than relying on File::drop() to release the flock
