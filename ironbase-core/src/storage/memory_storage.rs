@@ -127,9 +127,11 @@ impl Storage for MemoryStorage {
         meta.document_count += 1;
 
         // Update last_id if this is an Int ID
+        // SAFETY: Only positive i64 values are valid auto-increment IDs.
+        // Negative i64 cast to u64 wraps to u64::MAX, corrupting last_id.
         if let DocumentId::Int(id) = &doc_id {
-            if *id > meta.last_id as i64 {
-                meta.last_id = *id as u64;
+            if *id > 0 {
+                meta.last_id = meta.last_id.max(*id as u64);
             }
         }
 

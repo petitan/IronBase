@@ -381,9 +381,11 @@ impl StorageEngine {
         }
 
         // Update last_id to prevent _id collisions after recovery
+        // SAFETY: Only positive i64 values are valid auto-increment IDs.
+        // Negative i64 cast to u64 wraps to u64::MAX, corrupting last_id.
         if let crate::document::DocumentId::Int(id_num) = doc_id {
-            if (*id_num as u64) > meta.last_id {
-                meta.last_id = *id_num as u64;
+            if *id_num > 0 {
+                meta.last_id = meta.last_id.max(*id_num as u64);
             }
         }
 

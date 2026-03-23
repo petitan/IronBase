@@ -1200,11 +1200,13 @@ impl StorageEngine {
                         documents_found += 1;
 
                         // Track max ID for last_id
+                        // SAFETY: Only positive i64 values are valid auto-increment IDs.
+                        // Negative i64 cast to u64 wraps to u64::MAX, corrupting last_id.
                         if let DocumentId::Int(id_num) = &doc_id {
-                            let current_max =
-                                max_ids_by_collection.entry(collection_name).or_insert(0);
-                            if (*id_num as u64) > *current_max {
-                                *current_max = *id_num as u64;
+                            if *id_num > 0 {
+                                let current_max =
+                                    max_ids_by_collection.entry(collection_name).or_insert(0);
+                                *current_max = (*current_max).max(*id_num as u64);
                             }
                         }
                     }
@@ -1491,7 +1493,11 @@ impl StorageEngine {
         if !already_applied {
             for metadata_change in transaction.metadata_changes() {
                 if let Some(meta) = self.collections.get_mut(&metadata_change.collection) {
-                    meta.last_id = metadata_change.last_id as u64;
+                    // SAFETY: Only positive i64 values are valid auto-increment IDs.
+                    // Negative i64 cast to u64 wraps to u64::MAX, corrupting last_id.
+                    if metadata_change.last_id > 0 {
+                        meta.last_id = meta.last_id.max(metadata_change.last_id as u64);
+                    }
                 }
             }
         }
@@ -1927,12 +1933,14 @@ impl StorageEngine {
                                 meta.live_document_count += 1;
 
                                 // Track max ID for last_id
+                                // SAFETY: Only positive i64 values are valid auto-increment IDs.
+                                // Negative i64 cast to u64 wraps to u64::MAX, corrupting last_id.
                                 if let DocumentId::Int(id_num) = &doc_id {
-                                    let current_max = max_ids_by_collection
-                                        .entry(collection_name.to_string())
-                                        .or_insert(0);
-                                    if (*id_num as u64) > *current_max {
-                                        *current_max = *id_num as u64;
+                                    if *id_num > 0 {
+                                        let current_max = max_ids_by_collection
+                                            .entry(collection_name.to_string())
+                                            .or_insert(0);
+                                        *current_max = (*current_max).max(*id_num as u64);
                                     }
                                 }
                             }
