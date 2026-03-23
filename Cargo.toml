@@ -12,7 +12,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.214"
+version = "0.3.215"
 edition = "2021"
 authors = ["Petitan"]
 repository = "https://github.com/petitan/IronBase"

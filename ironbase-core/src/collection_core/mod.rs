@@ -1800,8 +1800,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if let Some(index) = indexes.get_btree_index(index_name) {
                 if index.metadata.is_compound() {
                     for (_, updated_doc) in updates {
-                        let updated_value =
-                            serde_json::to_value(updated_doc).unwrap_or(serde_json::Value::Null);
+                        let updated_value = serde_json::to_value(updated_doc)?;
                         if IndexManager::count_compound_array_fields(
                             &updated_value,
                             &index.metadata.fields,
@@ -1857,10 +1856,30 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
             if let Some(index) = indexes.get_btree_index_mut(index_name) {
                 for (original_doc, updated_doc) in updates {
-                    let old_doc_value =
-                        serde_json::to_value(original_doc).unwrap_or(serde_json::Value::Null);
-                    let new_doc_value =
-                        serde_json::to_value(updated_doc).unwrap_or(serde_json::Value::Null);
+                    let old_doc_value = match serde_json::to_value(original_doc) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log_warn!(
+                                "B+tree index '{}' skipping doc {:?}: failed to serialize original doc: {}",
+                                index_name,
+                                original_doc.id,
+                                e
+                            );
+                            continue;
+                        }
+                    };
+                    let new_doc_value = match serde_json::to_value(updated_doc) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            log_warn!(
+                                "B+tree index '{}' skipping doc {:?}: failed to serialize updated doc: {}",
+                                index_name,
+                                updated_doc.id,
+                                e
+                            );
+                            continue;
+                        }
+                    };
 
                     let old_keys: HashSet<IndexKey> =
                         index.extract_keys(&old_doc_value).into_iter().collect();
