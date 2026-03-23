@@ -259,13 +259,17 @@ impl AccumulatorState {
     /// Update state with a single document (streaming/incremental)
     /// This is the key optimization - we don't store the document, only update state
     ///
-    /// **WARNING:** This method has NO LIMITS on $push/$addToSet!
-    /// Use `update_with_limits()` for OOM protection.
+    /// **WARNING:** This method uses a hardcoded default limit (100K) for $push/$addToSet.
+    /// Prefer `update_with_limits_tracking()` or `update_with_context()` in production code.
     #[allow(dead_code)]
+    #[deprecated(
+        since = "0.3.90",
+        note = "Use update_with_limits_tracking() or update_with_context() for proper OOM protection"
+    )]
     pub(crate) fn update(&mut self, doc: &Value, accumulator: &Accumulator) -> Result<()> {
-        // Delegate to unlimited version (backwards compatibility)
-        // Propagate errors (e.g. try_reserve OOM) instead of silently ignoring them
-        self.update_with_limits(doc, accumulator, usize::MAX, usize::MAX)
+        // Default limit: 100_000 (consistent with AggregationLimits::default().max_documents)
+        // Previously usize::MAX (~18 exabytes) — effectively no limit, OOM risk
+        self.update_with_limits(doc, accumulator, 100_000, 100_000)
     }
 
     /// Update state with explicit limits for $push and $addToSet

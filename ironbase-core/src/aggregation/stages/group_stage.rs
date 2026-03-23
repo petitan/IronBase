@@ -143,7 +143,7 @@ impl GroupStage {
         since = "0.3.90",
         note = "Use execute_streaming_with_context() or execute_streaming_with_limits() for OOM protection"
     )]
-    #[allow(dead_code)]
+    #[allow(dead_code, deprecated)]
     pub(crate) fn execute(&self, docs: Vec<Value>) -> Result<Vec<Value>> {
         // HashMap<hash, GroupEntry> - hash-based lookup avoids JSON serialization
         let mut groups: HashMap<u64, GroupEntry> = HashMap::new();
@@ -623,12 +623,17 @@ impl GroupStage {
         // Get the B+ tree index
         let btree = indexes.get_btree_index(&matching_index.index_name)?;
 
-        // Count entries per key directly from the index
-        // This avoids loading any documents!
+        // Count entries per key directly from the index using streaming traversal.
+        // O(1) memory — processes entries leaf-by-leaf without materializing them.
         // OOM FIX (2026-01): Apply max_group_count limit
         let mut counts: HashMap<u64, (Value, i64)> = HashMap::new();
+        let mut exceeded_limit = false;
 
-        for (key, _doc_id) in btree.get_all_entries() {
+        btree.for_each_entry(&mut |key, _doc_id| {
+            if exceeded_limit {
+                return; // Skip remaining entries after limit exceeded
+            }
+
             let key_value = key.to_value();
             let key_hash = value_hash(&key_value);
 
@@ -637,13 +642,18 @@ impl GroupStage {
                 // Check group count limit BEFORE inserting new group
                 if counts.len() >= limits.max_group_count {
                     // Too many groups - fall back to streaming which has proper error handling
-                    return None;
+                    exceeded_limit = true;
+                    return;
                 }
                 counts.insert(key_hash, (key_value, 1));
             } else {
                 // Update existing group's count
                 counts.get_mut(&key_hash).unwrap().1 += 1;
             }
+        });
+
+        if exceeded_limit {
+            return None;
         }
 
         // Build result documents
@@ -704,15 +714,22 @@ impl GroupStage {
         // Get the B+ tree index
         let btree = indexes.get_btree_index(&matching_index.index_name)?;
 
-        // Count entries per key directly from the index
+        // Count entries per key directly from the index using streaming traversal.
+        // O(1) memory — processes entries leaf-by-leaf without materializing them.
         // Uses context for both entry and group limit tracking
         let mut counts: HashMap<u64, (Value, i64)> = HashMap::new();
+        let mut exceeded_limit = false;
 
-        for (key, _doc_id) in btree.get_all_entries() {
+        btree.for_each_entry(&mut |key, _doc_id| {
+            if exceeded_limit {
+                return; // Skip remaining entries after limit exceeded
+            }
+
             // Track index entry (equivalent to document processing)
             if ctx.increment_index_entries(1).is_err() {
                 // Hit entry limit - fall back to streaming for proper error
-                return None;
+                exceeded_limit = true;
+                return;
             }
 
             let key_value = key.to_value();
@@ -725,7 +742,8 @@ impl GroupStage {
                     // Register new group via context
                     if ctx.register_new_group(key_hash).is_err() {
                         // Hit group limit - fall back to streaming for proper error
-                        return None;
+                        exceeded_limit = true;
+                        return;
                     }
                     e.insert((key_value, 1));
                 }
@@ -734,6 +752,10 @@ impl GroupStage {
                     e.get_mut().1 += 1;
                 }
             }
+        });
+
+        if exceeded_limit {
+            return None;
         }
 
         // Build result documents

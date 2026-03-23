@@ -52,6 +52,31 @@ fn checked_len_u32(bytes: &[u8], context: &str) -> Result<u32> {
     })
 }
 
+/// Maximum allowed size for a single entry read from a .ftidx file (256 MB).
+///
+/// When reading length-prefixed fields from disk, a corrupt file may contain
+/// an arbitrary u32 value (up to 4 GiB). Without validation, `vec![0u8; len]`
+/// would attempt to allocate up to 4 GiB, causing an OOM crash.
+/// This constant caps individual field reads at a safe maximum.
+const MAX_FTIDX_ENTRY_SIZE: usize = 256 * 1024 * 1024;
+
+/// Validate a length value read from a .ftidx file before allocating a buffer.
+///
+/// This is the read-side counterpart of [`checked_len_u32`] (which validates on write).
+/// Returns the length unchanged if valid, or an `IndexError` if it exceeds
+/// [`MAX_FTIDX_ENTRY_SIZE`], protecting against corrupt file data causing OOM.
+#[inline]
+fn validate_read_len(len: usize, context: &str) -> Result<usize> {
+    if len > MAX_FTIDX_ENTRY_SIZE {
+        return Err(IronBaseError::IndexError(format!(
+            "Corrupt .ftidx: {} length {} bytes exceeds maximum allowed size ({} bytes). \
+             The file may be corrupted.",
+            context, len, MAX_FTIDX_ENTRY_SIZE
+        )));
+    }
+    Ok(len)
+}
+
 // ============================================================================
 // Query Parsing (MongoDB-compatible phrase search)
 // ============================================================================
@@ -1654,12 +1679,14 @@ impl FulltextIndex {
         let mut len_buf = [0u8; 4];
         reader.read_exact(&mut len_buf)?;
         let doc_id_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(doc_id_len, "doc_id")?;
         let mut doc_id_buf = vec![0u8; doc_id_len];
         reader.read_exact(&mut doc_id_buf)?;
 
         // Read tokens
         reader.read_exact(&mut len_buf)?;
         let tokens_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(tokens_len, "doc_tokens")?;
         let mut tokens_buf = vec![0u8; tokens_len];
         reader.read_exact(&mut tokens_buf)?;
 
@@ -1690,12 +1717,14 @@ impl FulltextIndex {
         // Read and skip token (we already know which token we're looking for)
         reader.read_exact(&mut len_buf)?;
         let token_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(token_len, "token")?;
         let mut token_buf = vec![0u8; token_len];
         reader.read_exact(&mut token_buf)?;
 
         // Read doc_ids
         reader.read_exact(&mut len_buf)?;
         let doc_ids_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(doc_ids_len, "token_doc_ids")?;
         let mut doc_ids_buf = vec![0u8; doc_ids_len];
         reader.read_exact(&mut doc_ids_buf)?;
 
@@ -1723,12 +1752,14 @@ impl FulltextIndex {
         // Read and skip token (we already know which token we're looking for)
         reader.read_exact(&mut len_buf)?;
         let token_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(token_len, "token")?;
         let mut token_buf = vec![0u8; token_len];
         reader.read_exact(&mut token_buf)?;
 
         // Read entries: Vec<(DocumentId, u32)>
         reader.read_exact(&mut len_buf)?;
         let entries_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(entries_len, "token_entries")?;
         let mut entries_buf = vec![0u8; entries_len];
         reader.read_exact(&mut entries_buf)?;
 
@@ -2930,12 +2961,14 @@ impl FulltextIndex {
         // Read and skip token name
         file.read_exact(&mut len_buf)?;
         let token_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(token_len, "token")?;
         let mut token_buf = vec![0u8; token_len];
         file.read_exact(&mut token_buf)?;
 
         // Read entries
         file.read_exact(&mut len_buf)?;
         let entries_len = u32::from_le_bytes(len_buf) as usize;
+        validate_read_len(entries_len, "token_entries")?;
         let mut entries_buf = vec![0u8; entries_len];
         file.read_exact(&mut entries_buf)?;
 

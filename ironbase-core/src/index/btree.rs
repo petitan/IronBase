@@ -1374,6 +1374,108 @@ impl BPlusTree {
         }
     }
 
+    /// Streaming traversal of all entries without materializing them into a Vec.
+    ///
+    /// O(1) memory — processes entries leaf-by-leaf via callback.
+    /// Supports lazy mode: if the index is lazy, opens the file and loads
+    /// child nodes on-demand (same pattern as `walk_leaves_desc`).
+    ///
+    /// # Arguments
+    /// * `callback` - Called for each (key, doc_id) pair in ascending key order.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut count = 0u64;
+    /// btree.for_each_entry(&mut |_key, _doc_id| {
+    ///     count += 1;
+    /// });
+    /// ```
+    pub fn for_each_entry<F: FnMut(&IndexKey, &DocumentId)>(&self, callback: &mut F) {
+        // LAZY MODE: open file for on-demand child loading
+        if self.lazy_mode {
+            if let Some(ref path) = self.source_path {
+                match File::open(path) {
+                    Ok(mut file) => {
+                        Self::for_each_entry_with_file(&self.root, callback, &mut file);
+                        return;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            index = %self.metadata.name,
+                            path = %path.display(),
+                            error = %e,
+                            "for_each_entry: failed to open lazy index file, falling back to in-memory"
+                        );
+                        // Fall through to in-memory path
+                    }
+                }
+            }
+        }
+
+        // IN-MEMORY PATH: walk leaves without any allocation
+        Self::for_each_entry_in_memory(&self.root, callback);
+    }
+
+    /// In-memory ascending leaf walk — calls callback for each (key, doc_id).
+    fn for_each_entry_in_memory<F: FnMut(&IndexKey, &DocumentId)>(
+        node: &BTreeNode,
+        callback: &mut F,
+    ) {
+        match node {
+            BTreeNode::Leaf(leaf) => {
+                for (key, doc_id) in leaf.keys.iter().zip(leaf.document_ids.iter()) {
+                    callback(key, doc_id);
+                }
+            }
+            BTreeNode::Internal(internal) => {
+                for child in &internal.children {
+                    Self::for_each_entry_in_memory(child, callback);
+                }
+            }
+        }
+    }
+
+    /// Lazy-file ascending leaf walk — loads child nodes from disk on-demand.
+    fn for_each_entry_with_file<F: FnMut(&IndexKey, &DocumentId)>(
+        node: &BTreeNode,
+        callback: &mut F,
+        file: &mut File,
+    ) {
+        match node {
+            BTreeNode::Leaf(leaf) => {
+                for (key, doc_id) in leaf.keys.iter().zip(leaf.document_ids.iter()) {
+                    callback(key, doc_id);
+                }
+            }
+            BTreeNode::Internal(internal) => {
+                if !internal.children.is_empty() {
+                    // In-memory children available
+                    for child in &internal.children {
+                        Self::for_each_entry_with_file(child, callback, file);
+                    }
+                } else {
+                    // Lazy load children from file (LEFT to RIGHT for ascending order)
+                    for &child_offset in &internal.children_offsets {
+                        if child_offset > 0 {
+                            match Self::load_node(file, child_offset) {
+                                Ok(child_node) => {
+                                    Self::for_each_entry_with_file(&child_node, callback, file);
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        offset = child_offset,
+                                        error = %e,
+                                        "for_each_entry_with_file: failed to load lazy child node"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Apply batch updates without full rebuild.
     ///
     /// Performs a two-phase update:

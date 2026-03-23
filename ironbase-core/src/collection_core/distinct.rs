@@ -184,23 +184,20 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             if !info.is_compound && info.prefix_field == field {
                 // Found a matching index!
                 if let Some(btree) = indexes.get_btree_index(&info.index_name) {
-                    // Get all entries from the index
-                    let entries = btree.get_all_entries();
-
-                    // Extract unique keys (the B+ tree already has them in order)
-                    // But we need to deduplicate because non-unique indexes have duplicates
+                    // Streaming traversal — O(distinct_keys) memory instead of O(all_entries).
+                    // Uses for_each_entry to avoid materializing the entire index.
                     let mut seen: HashSet<IndexKey> = HashSet::new();
                     let mut distinct_values = Vec::new();
 
-                    for (key, _doc_id) in entries {
+                    btree.for_each_entry(&mut |key, _doc_id| {
                         // Skip Null keys (documents without this field)
                         if matches!(key, IndexKey::Null) {
-                            continue;
+                            return;
                         }
                         if seen.insert(key.clone()) {
                             distinct_values.push(key.to_value());
                         }
-                    }
+                    });
 
                     return Ok(Some(distinct_values));
                 }
