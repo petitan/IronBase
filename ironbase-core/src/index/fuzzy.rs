@@ -39,7 +39,7 @@ impl FuzzyAlgorithm {
             FuzzyAlgorithm::JaroWinkler => jaro_winkler(&a_lower, &b_lower),
             FuzzyAlgorithm::Levenshtein => normalized_levenshtein(&a_lower, &b_lower),
             FuzzyAlgorithm::DamerauLevenshtein => {
-                let max_len = a_lower.len().max(b_lower.len());
+                let max_len = a_lower.chars().count().max(b_lower.chars().count());
                 if max_len == 0 {
                     return 1.0;
                 }

@@ -200,7 +200,7 @@ impl FuzzyAlgorithm {
             FuzzyAlgorithm::Levenshtein => normalized_levenshtein(a, b),
             FuzzyAlgorithm::DamerauLevenshtein => {
                 // Normalize Damerau-Levenshtein distance to 0.0-1.0
-                let max_len = a.len().max(b.len());
+                let max_len = a.chars().count().max(b.chars().count());
                 if max_len == 0 {
                     return 1.0; // Both empty strings are identical
                 }
