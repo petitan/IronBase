@@ -554,8 +554,14 @@ impl DatabaseCore<StorageEngine> {
                 if let Some(threshold) = auto_checkpoint_ops {
                     let count = self.unsafe_op_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     if count >= threshold as u64 {
-                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
-                        self.checkpoint()?;
+                        // Only the thread that hit the threshold resets and checkpoints
+                        if self
+                            .unsafe_op_counter
+                            .compare_exchange_weak(count, 0, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            self.checkpoint()?;
+                        }
                     }
                 }
 
@@ -677,8 +683,14 @@ impl DatabaseCore<StorageEngine> {
                 if let Some(threshold) = auto_checkpoint_ops {
                     let count = self.unsafe_op_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     if count >= threshold as u64 {
-                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
-                        self.checkpoint()?;
+                        // Only the thread that hit the threshold resets and checkpoints
+                        if self
+                            .unsafe_op_counter
+                            .compare_exchange_weak(count, 0, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            self.checkpoint()?;
+                        }
                     }
                 }
 
@@ -917,8 +929,14 @@ impl DatabaseCore<StorageEngine> {
                 if let Some(threshold) = auto_checkpoint_ops {
                     let count = self.unsafe_op_counter.fetch_add(1, Ordering::Relaxed) + 1;
                     if count >= threshold as u64 {
-                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
-                        self.checkpoint()?;
+                        // Only the thread that hit the threshold resets and checkpoints
+                        if self
+                            .unsafe_op_counter
+                            .compare_exchange_weak(count, 0, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            self.checkpoint()?;
+                        }
                     }
                 }
 
@@ -1068,8 +1086,14 @@ impl DatabaseCore<StorageEngine> {
                         .fetch_add(result.inserted_count as u64, Ordering::Relaxed)
                         + result.inserted_count as u64;
                     if count >= threshold as u64 {
-                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
-                        self.checkpoint()?;
+                        // Only the thread that hit the threshold resets and checkpoints
+                        if self
+                            .unsafe_op_counter
+                            .compare_exchange_weak(count, 0, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            self.checkpoint()?;
+                        }
                     }
                 }
 
@@ -1209,8 +1233,14 @@ impl DatabaseCore<StorageEngine> {
                         .fetch_add(result.1, Ordering::Relaxed)
                         + result.1;
                     if count >= threshold as u64 {
-                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
-                        self.checkpoint()?;
+                        // Only the thread that hit the threshold resets and checkpoints
+                        if self
+                            .unsafe_op_counter
+                            .compare_exchange_weak(count, 0, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            self.checkpoint()?;
+                        }
                     }
                 }
 
@@ -1337,8 +1367,14 @@ impl DatabaseCore<StorageEngine> {
                     let count =
                         self.unsafe_op_counter.fetch_add(deleted, Ordering::Relaxed) + deleted;
                     if count >= threshold as u64 {
-                        self.unsafe_op_counter.store(0, Ordering::Relaxed);
-                        self.checkpoint()?;
+                        // Only the thread that hit the threshold resets and checkpoints
+                        if self
+                            .unsafe_op_counter
+                            .compare_exchange_weak(count, 0, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            self.checkpoint()?;
+                        }
                     }
                 }
 

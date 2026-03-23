@@ -546,8 +546,8 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Load persisted indexes and schema
-        let storage_guard = self.storage.write();
+        // Load persisted indexes and schema (read lock: only &self methods used)
+        let storage_guard = self.storage.read();
         let meta = storage_guard
             .get_collection_meta(name)
             .ok_or_else(|| crate::error::IronBaseError::CollectionNotFound(name.to_string()))?;
