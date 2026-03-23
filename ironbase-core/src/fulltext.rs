@@ -2993,9 +2993,22 @@ impl FulltextIndex {
             file.read_exact(&mut buf8)?;
             let metadata_offset = u64::from_le_bytes(buf8);
 
+            // Validate V1 offset ordering (corrupt header protection)
+            if !(offsets_offset <= inverted_offset && inverted_offset <= metadata_offset) {
+                return Err(IronBaseError::IndexError(format!(
+                    "Corrupt .ftidx V1 header: offsets not in order (offsets={}, inverted={}, metadata={})",
+                    offsets_offset, inverted_offset, metadata_offset
+                )));
+            }
+
             // Read offset table
             file.seek(SeekFrom::Start(offsets_offset))?;
-            let offsets_size = (inverted_offset - offsets_offset) as usize;
+            let offsets_size = inverted_offset.checked_sub(offsets_offset).ok_or_else(|| {
+                IronBaseError::IndexError(format!(
+                    "Corrupt .ftidx V1: inverted_offset ({}) < offsets_offset ({})",
+                    inverted_offset, offsets_offset
+                ))
+            })? as usize;
             let mut offsets_buf = vec![0u8; offsets_size];
             file.read_exact(&mut offsets_buf)?;
             let offsets_vec: Vec<(DocumentId, u64)> = serde_json::from_slice(&offsets_buf)?;
@@ -3003,7 +3016,14 @@ impl FulltextIndex {
 
             // Read inverted index (entire blob - V1 behavior)
             file.seek(SeekFrom::Start(inverted_offset))?;
-            let inverted_size = (metadata_offset - inverted_offset) as usize;
+            let inverted_size = metadata_offset
+                .checked_sub(inverted_offset)
+                .ok_or_else(|| {
+                    IronBaseError::IndexError(format!(
+                        "Corrupt .ftidx V1: metadata_offset ({}) < inverted_offset ({})",
+                        metadata_offset, inverted_offset
+                    ))
+                })? as usize;
             let mut inverted_buf = vec![0u8; inverted_size];
             file.read_exact(&mut inverted_buf)?;
             // V1 format stored HashSet<DocumentId>, convert to V3 Vec<TokenEntry> with TF=1
@@ -3053,9 +3073,27 @@ impl FulltextIndex {
             file.read_exact(&mut buf8)?;
             let metadata_offset = u64::from_le_bytes(buf8);
 
+            // Validate V2/V3 offset ordering (corrupt header protection)
+            if !(offsets_offset <= token_entries_offset
+                && token_entries_offset <= token_offsets_offset
+                && token_offsets_offset <= metadata_offset)
+            {
+                return Err(IronBaseError::IndexError(format!(
+                    "Corrupt .ftidx V2/V3 header: offsets not in order (offsets={}, token_entries={}, token_offsets={}, metadata={})",
+                    offsets_offset, token_entries_offset, token_offsets_offset, metadata_offset
+                )));
+            }
+
             // Read doc_tokens offset table
             file.seek(SeekFrom::Start(offsets_offset))?;
-            let offsets_size = (token_entries_offset - offsets_offset) as usize;
+            let offsets_size = token_entries_offset
+                .checked_sub(offsets_offset)
+                .ok_or_else(|| {
+                    IronBaseError::IndexError(format!(
+                        "Corrupt .ftidx V2/V3: token_entries_offset ({}) < offsets_offset ({})",
+                        token_entries_offset, offsets_offset
+                    ))
+                })? as usize;
             let mut offsets_buf = vec![0u8; offsets_size];
             file.read_exact(&mut offsets_buf)?;
             let offsets_vec: Vec<(DocumentId, u64)> = serde_json::from_slice(&offsets_buf)?;
@@ -3063,7 +3101,14 @@ impl FulltextIndex {
 
             // Read token_offsets table (small, stays in memory)
             file.seek(SeekFrom::Start(token_offsets_offset))?;
-            let token_offsets_size = (metadata_offset - token_offsets_offset) as usize;
+            let token_offsets_size = metadata_offset
+                .checked_sub(token_offsets_offset)
+                .ok_or_else(|| {
+                    IronBaseError::IndexError(format!(
+                        "Corrupt .ftidx V2/V3: metadata_offset ({}) < token_offsets_offset ({})",
+                        metadata_offset, token_offsets_offset
+                    ))
+                })? as usize;
             let mut token_offsets_buf = vec![0u8; token_offsets_size];
             file.read_exact(&mut token_offsets_buf)?;
             let token_offsets_vec: Vec<(String, (u64, u32))> =
