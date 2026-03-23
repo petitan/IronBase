@@ -297,10 +297,12 @@ impl HnswIndex {
         }
 
         // OOM Protection: Check vector count limit
-        if self.nodes.len() >= self.config.max_vectors {
+        // Use self.len() (= id_to_index.len()) to count only active vectors,
+        // not self.nodes.len() which includes orphans from lazy removal
+        if self.len() >= self.config.max_vectors {
             return Err(IronBaseError::OutOfMemory(format!(
                 "Vector index full: {} vectors (max: {}). Remove documents or increase max_vectors.",
-                self.nodes.len(),
+                self.len(),
                 self.config.max_vectors
             )));
         }
