@@ -413,6 +413,23 @@ impl<'a> HeaderWriter<'a> {
         Ok(())
     }
 
+    /// Set data_end_offset during crash recovery
+    ///
+    /// Used by recovery code paths (`open()`, `recover_metadata_from_wal()`,
+    /// `rebuild_from_documents()`) where the offset is calculated externally
+    /// (e.g., from WAL snapshot or document scan) rather than from
+    /// `stream_position()`.
+    ///
+    /// Unlike `advance_after_write()` which reads the file cursor, this method
+    /// accepts an explicit offset value computed by the recovery logic.
+    ///
+    /// # Safety invariant
+    /// The caller MUST ensure `offset >= HEADER_SIZE` and that it points to
+    /// the actual end of the document data region.
+    pub fn set_recovery_offset(&mut self, offset: u64) {
+        self.header.data_end_offset = offset;
+    }
+
     /// Get current data_end_offset (read-only)
     pub fn data_end_offset(&self) -> u64 {
         self.header.data_end_offset
@@ -702,8 +719,15 @@ impl StorageEngine {
                             storage.header.data_end_offset,
                             recovered_offset
                         );
-                        storage.header.data_end_offset = recovered_offset;
-                        storage.mark_metadata_dirty()?;
+                        // CRITICAL: Use HeaderWriter instead of direct assignment
+                        HeaderWriter::new(&mut storage.header, &mut storage.file)
+                            .set_recovery_offset(recovered_offset);
+                        // Persist recovery to disk immediately — without this,
+                        // a crash before the next flush() would lose the fix
+                        // and re-trigger recovery with the old corrupt value.
+                        storage.flush_metadata()?;
+                        storage.metadata_snapshot_pending = false;
+                        storage.file.sync_all()?;
                     }
                     Err(e) => {
                         return Err(IronBaseError::Corruption(format!(
@@ -1043,8 +1067,11 @@ impl StorageEngine {
 
             // Restore collections and header
             self.collections = snapshot.collections;
-            self.header.data_end_offset = snapshot.data_end_offset;
-            self.header.metadata_offset = snapshot.data_end_offset;
+            // CRITICAL: Use HeaderWriter instead of direct assignment
+            // set_recovery_offset sets data_end_offset; flush_metadata() below
+            // will call set_after_metadata() which updates metadata_offset too.
+            HeaderWriter::new(&mut self.header, &mut self.file)
+                .set_recovery_offset(snapshot.data_end_offset);
             self.header.collection_count = self.collections.len() as u32;
 
             // Write corrected metadata to file
@@ -1196,7 +1223,10 @@ impl StorageEngine {
         }
 
         // Update header
-        self.header.data_end_offset = offset;
+        // CRITICAL: Use HeaderWriter instead of direct assignment
+        // flush_metadata() below will call set_after_metadata() which finalizes
+        // the header, but it reads data_end_offset to determine metadata position.
+        HeaderWriter::new(&mut self.header, &mut self.file).set_recovery_offset(offset);
         self.header.collection_count = self.collections.len() as u32;
 
         // Write corrected metadata
