@@ -165,7 +165,7 @@ pub fn estimate_json_size(value: &Value) -> usize {
         Value::Null => 4,
         Value::Bool(true) => 4,
         Value::Bool(false) => 5,
-        Value::Number(n) => n.to_string().len(),
+        Value::Number(_) => 20, // max i64 = 20 digits, avoids String allocation
         Value::String(s) => s.len() + 2, // quotes
         Value::Array(arr) => {
             2 + arr.iter().map(estimate_json_size).sum::<usize>() + arr.len().saturating_sub(1)

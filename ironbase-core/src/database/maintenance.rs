@@ -519,8 +519,9 @@ impl DatabaseCore<StorageEngine> {
             let t = std::time::Instant::now();
             let mut mgr = index_manager.write();
             let lock_wait_ms = t.elapsed().as_millis() as u64;
+            let flush_start = std::time::Instant::now();
             if mgr.flush_one_fuzzy_index(name)? {
-                let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                let flush_ms = flush_start.elapsed().as_millis() as u64;
                 tracing::info!(
                     collection = %collection_name, index = %name,
                     kind = "fuzzy", lock_wait_ms, flush_ms,
@@ -533,8 +534,9 @@ impl DatabaseCore<StorageEngine> {
             let t = std::time::Instant::now();
             let mut mgr = index_manager.write();
             let lock_wait_ms = t.elapsed().as_millis() as u64;
+            let flush_start = std::time::Instant::now();
             if mgr.flush_one_btree_index(name, db_path)? {
-                let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
+                let flush_ms = flush_start.elapsed().as_millis() as u64;
                 tracing::info!(
                     collection = %collection_name, index = %name,
                     kind = "btree", lock_wait_ms, flush_ms,

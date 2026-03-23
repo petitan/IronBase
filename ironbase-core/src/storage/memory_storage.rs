@@ -111,8 +111,7 @@ impl Storage for MemoryStorage {
         };
 
         // Convert to Document struct
-        let doc_json = serde_json::to_string(&doc_obj)?;
-        let document = Document::from_json(&doc_json)?;
+        let document = Document::from_value_owned(Value::Object(doc_obj))?;
 
         // Add to collection
         let docs = self
@@ -158,9 +157,7 @@ impl Storage for MemoryStorage {
         for doc in docs {
             if &doc.id == id {
                 // Convert Document to Value
-                let doc_json = doc.to_json()?;
-                let value: Value = serde_json::from_str(&doc_json)?;
-                return Ok(Some(value));
+                return Ok(Some(Value::from(doc.clone())));
             }
         }
 

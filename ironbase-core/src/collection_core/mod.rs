@@ -2905,8 +2905,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         for doc_id in doc_ids {
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
+                let document = Document::from_value_owned(doc)?;
 
                 if parsed_query.matches(&document)? {
                     if skipped < match_skip {
@@ -3150,8 +3149,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
 
             if let Some(doc) = self.read_document_by_id(&doc_id)? {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let document = Document::from_json(&doc_json_str)?;
+                let document = Document::from_value_owned(doc)?;
 
                 if parsed_query.matches(&document)? {
                     if skipped < skip {
