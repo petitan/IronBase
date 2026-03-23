@@ -319,7 +319,13 @@ impl DatabaseCore<StorageEngine> {
         if let Err(e) = self.persist_buffered_operations(&mut doc_buffer) {
             // Persist failed → write ABORT to WAL
             // This ensures recovery will skip this transaction
-            let _ = self.abort_committed_transaction(tx_id);
+            if let Err(abort_err) = self.abort_committed_transaction(tx_id) {
+                tracing::warn!(
+                    tx_id = tx_id,
+                    error = %abort_err,
+                    "Failed to write WAL ABORT entry after persist failure — recovery may replay this transaction"
+                );
+            }
             return Err(e);
         }
 
@@ -473,7 +479,13 @@ impl DatabaseCore<StorageEngine> {
                     Err(e) => {
                         // Persist failed - write ABORT to invalidate the committed WAL entry
                         // This ensures recovery will skip this transaction
-                        let _ = self.abort_committed_transaction(tx_id);
+                        if let Err(abort_err) = self.abort_committed_transaction(tx_id) {
+                            tracing::warn!(
+                                tx_id = tx_id,
+                                error = %abort_err,
+                                "Failed to write WAL ABORT entry after insert_one persist failure — recovery may replay this transaction"
+                            );
+                        }
                         Err(e)
                     }
                 }
@@ -973,7 +985,13 @@ impl DatabaseCore<StorageEngine> {
                     Ok(inserted_ids) => Ok(inserted_ids),
                     Err(e) => {
                         // Persist failed - write ABORT to invalidate the committed WAL entry
-                        let _ = self.abort_committed_transaction(tx_id);
+                        if let Err(abort_err) = self.abort_committed_transaction(tx_id) {
+                            tracing::warn!(
+                                tx_id = tx_id,
+                                error = %abort_err,
+                                "Failed to write WAL ABORT entry after insert_many persist failure — recovery may replay this transaction"
+                            );
+                        }
                         Err(e)
                     }
                 }
@@ -1108,7 +1126,13 @@ impl DatabaseCore<StorageEngine> {
                     // PHASE 4: PERSIST to storage (WAL is safe now)
                     // If persist fails, write ABORT to WAL to prevent recovery replaying this tx
                     if let Err(e) = collection.update_many_persist(prepared) {
-                        let _ = self.abort_committed_transaction(tx_id);
+                        if let Err(abort_err) = self.abort_committed_transaction(tx_id) {
+                            tracing::warn!(
+                                tx_id = tx_id,
+                                error = %abort_err,
+                                "Failed to write WAL ABORT entry after update_many persist failure — recovery may replay this transaction"
+                            );
+                        }
                         return Err(e);
                     }
                 }
@@ -1236,7 +1260,13 @@ impl DatabaseCore<StorageEngine> {
                     // PHASE 4: PERSIST tombstones to storage (WAL is safe now)
                     // If persist fails, write ABORT to WAL to prevent recovery replaying this tx
                     if let Err(e) = collection.delete_many_persist(prepared) {
-                        let _ = self.abort_committed_transaction(tx_id);
+                        if let Err(abort_err) = self.abort_committed_transaction(tx_id) {
+                            tracing::warn!(
+                                tx_id = tx_id,
+                                error = %abort_err,
+                                "Failed to write WAL ABORT entry after delete_many persist failure — recovery may replay this transaction"
+                            );
+                        }
                         return Err(e);
                     }
                 }
@@ -1387,10 +1417,16 @@ impl DatabaseCore<MemoryStorage> {
                 // Perform upsert: create new document from filter + update
                 let upsert_doc = create_upsert_document(query, update);
 
-                // Convert Value to HashMap for insert
+                // FIX: Validate upsert document - don't silently insert empty documents
+                // Must match StorageEngine behavior (durability.rs:740-748)
                 let doc_map: HashMap<String, Value> = match upsert_doc {
                     Value::Object(map) => map.into_iter().collect(),
-                    _ => HashMap::new(),
+                    other => {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Upsert document creation failed: expected Object, got {:?}",
+                            other
+                        )));
+                    }
                 };
 
                 // Insert the new document
@@ -1402,10 +1438,16 @@ impl DatabaseCore<MemoryStorage> {
                 // Collection doesn't exist but upsert is enabled - create it via insert
                 let upsert_doc = create_upsert_document(query, update);
 
-                // Convert Value to HashMap for insert
+                // FIX: Validate upsert document - don't silently insert empty documents
+                // Must match StorageEngine behavior (durability.rs:773-780)
                 let doc_map: HashMap<String, Value> = match upsert_doc {
                     Value::Object(map) => map.into_iter().collect(),
-                    _ => HashMap::new(),
+                    other => {
+                        return Err(IronBaseError::InvalidQuery(format!(
+                            "Upsert document creation failed: expected Object, got {:?}",
+                            other
+                        )));
+                    }
                 };
 
                 // Insert creates the collection implicitly

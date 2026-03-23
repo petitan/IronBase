@@ -1298,7 +1298,16 @@ impl StorageEngine {
     ///
     /// # Arguments
     /// * `transaction` - The transaction to commit
-    /// * `sync_file` - Whether to sync the main file (false for batch mode)
+    /// * `_sync_file` - UNUSED since 2026-02-01 PERF FIX. Previously intended to
+    ///   distinguish Safe mode (fsync main .mlite file per commit) from Batch mode
+    ///   (defer fsync). After the PERF FIX removed per-commit metadata flush
+    ///   (see Step 8 comment below), the main file is only fsynced during:
+    ///   - Batch mode: `flush_batch()` → `sync_storage_file()` at batch end
+    ///   - Periodic checkpoint (every 120s)
+    ///   - Graceful shutdown via `close()` / `Drop`
+    ///   WAL fsync (Step 4) still guarantees durability in all modes.
+    ///   Parameter retained for API compatibility with `commit_transaction()` /
+    ///   `commit_transaction_batch()` callers.
     fn commit_transaction_internal(
         &mut self,
         transaction: &mut Transaction,

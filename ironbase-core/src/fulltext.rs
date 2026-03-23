@@ -1788,10 +1788,29 @@ impl FulltextIndex {
             self.token_offsets.get(token).and_then(|(offset, _)| {
                 if self.file_version >= FTIDX_VERSION_V3 {
                     // V3: Read entries with TF embedded
-                    self.read_token_entry_v3(*offset).ok()
+                    self.read_token_entry_v3(*offset)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                index = %self.name,
+                                token = %token,
+                                error = %e,
+                                "Failed to read V3 token entry from disk, treating as missing"
+                            );
+                            e
+                        })
+                        .ok()
                 } else {
                     // V2: Convert HashSet to Vec<TokenEntry> with TF=1 placeholder
                     self.read_token_entry(*offset)
+                        .map_err(|e| {
+                            tracing::warn!(
+                                index = %self.name,
+                                token = %token,
+                                error = %e,
+                                "Failed to read V2 token entry from disk, treating as missing"
+                            );
+                            e
+                        })
                         .ok()
                         .map(|doc_ids| doc_ids.into_iter().map(|id| (id, 1)).collect())
                 }
@@ -1945,7 +1964,15 @@ impl FulltextIndex {
         // Get tokens to update inverted_index
         let token_counts = if self.storage_path.is_some() {
             // Disk-based: try to read tokens
-            self.read_doc_tokens_from_disk(doc_id).ok()
+            self.read_doc_tokens_from_disk(doc_id).map_err(|e| {
+                tracing::warn!(
+                    index = %self.name,
+                    doc_id = ?doc_id,
+                    error = %e,
+                    "Failed to read doc tokens from disk during remove, inverted index entries may become stale"
+                );
+                e
+            }).ok()
         } else {
             // Memory-based: get from memory
             self.doc_tokens_memory.remove(doc_id)
@@ -2566,11 +2593,14 @@ impl FulltextIndex {
             if self.lazy_mode {
                 if let Some((offset, _count)) = self.token_offsets.get(token) {
                     let disk_entries = if self.file_version >= FTIDX_VERSION_V3 {
-                        self.read_token_entry_v3(*offset).ok()
+                        Some(self.read_token_entry_v3(*offset)?)
                     } else {
-                        self.read_token_entry(*offset)
-                            .ok()
-                            .map(|doc_ids| doc_ids.into_iter().map(|id| (id, 1u32)).collect())
+                        Some(
+                            self.read_token_entry(*offset)?
+                                .into_iter()
+                                .map(|id| (id, 1u32))
+                                .collect(),
+                        )
                     };
                     if let Some(disk_entries) = disk_entries {
                         let existing_doc_ids: std::collections::HashSet<_> =
@@ -3271,6 +3301,15 @@ impl FulltextIndex {
             // Try disk first, then memory
             let doc_len = if self.storage_path.is_some() {
                 self.read_doc_tokens_from_disk(doc_id)
+                    .map_err(|e| {
+                        tracing::warn!(
+                            index = %self.name,
+                            doc_id = ?doc_id,
+                            error = %e,
+                            "Failed to read doc tokens during BM25 doc_lengths rebuild, skipping document"
+                        );
+                        e
+                    })
                     .ok()
                     .map(|tokens| tokens.values().sum::<u32>())
             } else {

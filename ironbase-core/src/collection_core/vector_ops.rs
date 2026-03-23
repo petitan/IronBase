@@ -743,7 +743,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     if let Some(vector) = Self::extract_f32_vector(vec_value) {
                         if vector.len() == meta.config.dim {
                             let id_str = doc_id_to_string(&doc_id);
-                            let _ = hnsw.insert(&id_str, &vector);
+                            if let Err(e) = hnsw.insert(&id_str, &vector) {
+                                tracing::warn!(
+                                    doc_id = %id_str,
+                                    error = %e,
+                                    "Failed to insert vector during HNSW rebuild, skipping"
+                                );
+                            }
                         }
                     }
                 }
