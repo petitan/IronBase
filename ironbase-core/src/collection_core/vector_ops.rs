@@ -527,10 +527,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 matching_docs
                     .iter()
                     .filter_map(|doc| {
-                        doc.get("_id").and_then(|id| match id {
-                            Value::String(s) => Some(s.clone()),
-                            Value::Number(n) => Some(n.to_string()),
-                            _ => None,
+                        doc.get("_id").and_then(|id| {
+                            let did = serde_json::from_value::<DocumentId>(id.clone()).ok()?;
+                            Some(doc_id_to_string(&did))
                         })
                     })
                     .collect()
@@ -663,11 +662,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         let id_set: std::collections::HashSet<String> = doc_ids
             .into_iter()
-            .map(|did| match did {
-                DocumentId::String(s) => s,
-                DocumentId::Int(i) => i.to_string(),
-                DocumentId::ObjectId(oid) => oid,
-            })
+            .map(|did| doc_id_to_string(&did))
             .collect();
 
         Ok(Some(id_set))

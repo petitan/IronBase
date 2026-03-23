@@ -113,7 +113,7 @@ impl Default for AggregationLimits {
             max_unwind_output: 100_000, // 100K × 1KB = 100 MB
 
             // Memory budget (for documentation/error messages)
-            max_memory_mb: 256, // 25% of 1GB reference
+            max_memory_mb: 256, // Default for 2-8 GB RAM tier (see from_system_memory())
         }
     }
 }

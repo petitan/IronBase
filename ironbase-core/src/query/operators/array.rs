@@ -460,6 +460,11 @@ impl OperatorMatcher for SizeOperator {
             None => Ok(false),
             Some(Value::Array(arr)) => {
                 if let Some(size) = filter_value.as_i64() {
+                    if size < 0 {
+                        return Err(IronBaseError::InvalidQuery(
+                            "$size operator does not accept negative values".to_string(),
+                        ));
+                    }
                     Ok(arr.len() as i64 == size)
                 } else if let Some(size) = filter_value.as_u64() {
                     Ok(arr.len() as u64 == size)

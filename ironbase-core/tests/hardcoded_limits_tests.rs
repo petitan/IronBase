@@ -279,18 +279,27 @@ fn test_estimate_json_size() {
     assert_eq!(estimate_json_size(&json!(null)), 4); // "null"
     assert_eq!(estimate_json_size(&json!(true)), 4); // "true"
     assert_eq!(estimate_json_size(&json!(false)), 5); // "false"
-    assert_eq!(estimate_json_size(&json!(123)), 3); // "123"
+                                                      // Number estimation uses fixed 20 (max i64 digits) to avoid heap allocation
+    assert_eq!(estimate_json_size(&json!(123)), 20);
     assert_eq!(estimate_json_size(&json!("hello")), 7); // "hello" + quotes
 
-    // Test arrays
+    // Test arrays (numbers use fixed 20-byte estimate, so [1,2,3] ≈ 3*20 + brackets)
     let arr = json!([1, 2, 3]);
     let size = estimate_json_size(&arr);
-    assert!(size > 0 && size < 20, "Array size should be reasonable");
+    assert!(
+        size > 0 && size < 100,
+        "Array size should be reasonable: {}",
+        size
+    );
 
-    // Test objects
+    // Test objects (keys + number values use fixed 20-byte estimate)
     let obj = json!({"a": 1, "b": 2});
     let size = estimate_json_size(&obj);
-    assert!(size > 0 && size < 30, "Object size should be reasonable");
+    assert!(
+        size > 0 && size < 100,
+        "Object size should be reasonable: {}",
+        size
+    );
 }
 
 // ============================================================================

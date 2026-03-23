@@ -4,7 +4,7 @@
 //! - Tokenization with accent folding
 //! - Stop words filtering (Hungarian, English, German)
 //! - Stemming support via rust-stemmers
-//! - TF-IDF scoring for relevance ranking
+//! - BM25 scoring for relevance ranking
 //!
 //! # Example
 //! ```rust,ignore
@@ -748,7 +748,7 @@ const FTIDX_HEADER_SIZE: u64 = 64;
 // V1: magic(8) + version(4) + doc_count(8) + offsets_offset(8) + inverted_offset(8) + metadata_offset(8) + padding(20)
 // V2: magic(8) + version(4) + doc_count(8) + offsets_offset(8) + token_entries_offset(8) + token_offsets_offset(8) + metadata_offset(8) + padding(12)
 
-/// Full-text search index using inverted index with TF-IDF scoring
+/// Full-text search index using inverted index with BM25 scoring
 ///
 /// # Performance Characteristics
 /// - Insert: O(t) where t = tokens in document
@@ -1021,7 +1021,7 @@ pub struct FulltextSearchOptions {
     pub limit: Option<usize>,
     /// Results to skip for pagination
     pub skip: Option<usize>,
-    /// Minimum TF-IDF score threshold
+    /// Minimum BM25 score threshold
     pub min_score: Option<f64>,
     /// Field projection (include/exclude): {"field": 1} or {"field": 0}
     pub projection: Option<StdHashMap<String, i32>>,
@@ -1107,7 +1107,7 @@ impl FulltextSearchOptions {
     /// Calculate candidate limit for fulltext search
     ///
     /// When filters or phrase matching is enabled, we request more candidates
-    /// from the TF-IDF search to account for post-filtering that may eliminate
+    /// from the BM25 search to account for post-filtering that may eliminate
     /// some results.
     ///
     /// # Arguments
@@ -1115,13 +1115,13 @@ impl FulltextSearchOptions {
     /// * `has_filter_or_phrase` - Whether post-filtering will be applied
     ///
     /// # Returns
-    /// The number of candidates to request from TF-IDF search
+    /// The number of candidates to request from BM25 search
     pub fn calculate_candidate_limit(effective_limit: usize, has_filter_or_phrase: bool) -> usize {
         if has_filter_or_phrase {
             // When a filter is present, the relevant documents may appear at ANY
-            // position in the TF-IDF ranking. Example: "ajánlat" has 6766 matches,
-            // but year=2026 docs are ranked at positions 6735-6766 (lowest TF-IDF).
-            // The TF-IDF search is already O(N) internally (scores all matching docs),
+            // position in the BM25 ranking. Example: "ajánlat" has 6766 matches,
+            // but year=2026 docs are ranked at positions 6735-6766 (lowest BM25).
+            // The BM25 search is already O(N) internally (scores all matching docs),
             // so a large candidate_limit only affects the output vector size (~100
             // bytes/result). Cap at 100K to prevent pathological cases (~10MB).
             // Document loading in the post-filter loop has early termination.
@@ -1140,7 +1140,7 @@ impl FulltextSearchOptions {
 pub struct FulltextSearchResultExt {
     /// The matched document (with projection applied if specified)
     pub document: Value,
-    /// TF-IDF relevance score
+    /// BM25 relevance score
     pub score: f64,
     /// Query tokens that matched in the document
     pub matched_tokens: Vec<String>,
@@ -2034,7 +2034,7 @@ impl FulltextIndex {
         self.insert_with_parent_doc_id(doc_id, text, parent_doc_id)
     }
 
-    /// Search for documents matching the query using TF-IDF scoring
+    /// Search for documents matching the query using BM25 scoring
     ///
     /// # Arguments
     /// * `query` - Search query text
