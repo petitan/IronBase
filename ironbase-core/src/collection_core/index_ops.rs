@@ -819,6 +819,15 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             }
         };
 
+        // Mark index as ready BEFORE persisting metadata
+        // This ensures the saved metadata has building=false
+        {
+            let mut indexes = self.indexes.write();
+            if let Err(e) = indexes.set_index_ready(&index_name) {
+                tracing::warn!(error = %e, "Failed to mark CI index as ready");
+            }
+        }
+
         // Persist metadata
         {
             let mut storage = self.storage.write();
