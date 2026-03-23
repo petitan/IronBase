@@ -34,6 +34,24 @@ use unicode_normalization::UnicodeNormalization;
 /// Used in V3 format where TF is embedded directly in the inverted index
 pub type TokenEntry = (DocumentId, u32);
 
+/// Safe cast of byte slice length to u32 for the .ftidx file format.
+///
+/// The fulltext index file format uses u32 length prefixes for serialized data fields.
+/// A bare `bytes.len() as u32` silently truncates lengths >4 GiB, which leads to
+/// data corruption: the reader will read fewer bytes than written, shifting every
+/// subsequent field offset. This helper turns that silent truncation into an explicit error.
+#[inline]
+fn checked_len_u32(bytes: &[u8], context: &str) -> Result<u32> {
+    u32::try_from(bytes.len()).map_err(|_| {
+        IronBaseError::IndexError(format!(
+            "Fulltext index: serialized {} is {} bytes, exceeds u32::MAX (4 GiB). \
+             The .ftidx format cannot store entries this large.",
+            context,
+            bytes.len()
+        ))
+    })
+}
+
 // ============================================================================
 // Query Parsing (MongoDB-compatible phrase search)
 // ============================================================================
@@ -1599,11 +1617,11 @@ impl FulltextIndex {
 
         // Serialize doc_id
         let doc_id_bytes = serde_json::to_vec(doc_id)?;
-        let doc_id_len = doc_id_bytes.len() as u32;
+        let doc_id_len = checked_len_u32(&doc_id_bytes, "doc_id")?;
 
         // Serialize tokens
         let tokens_bytes = serde_json::to_vec(tokens)?;
-        let tokens_len = tokens_bytes.len() as u32;
+        let tokens_len = checked_len_u32(&tokens_bytes, "doc_tokens")?;
 
         // Write: doc_id_len + doc_id + tokens_len + tokens
         file.write_all(&doc_id_len.to_le_bytes())?;
@@ -2549,10 +2567,11 @@ impl FulltextIndex {
                 let file = self.file_handle.as_mut().ok_or_else(|| {
                     IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
                 })?;
+                let entries_len = checked_len_u32(&entries_bytes, "token entries (flush)")?;
                 file.seek(SeekFrom::Start(current_offset))?;
                 file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
                 file.write_all(token_bytes)?;
-                file.write_all(&(entries_bytes.len() as u32).to_le_bytes())?;
+                file.write_all(&entries_len.to_le_bytes())?;
                 file.write_all(&entries_bytes)?;
             }
 
@@ -2753,10 +2772,11 @@ impl FulltextIndex {
 
             let token_bytes = token.as_bytes();
             let entries_bytes = serde_json::to_vec(&entries)?;
+            let entries_len = checked_len_u32(&entries_bytes, "token entries (serialize_flush)")?;
             file.seek(SeekFrom::Start(current_offset))?;
             file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
             file.write_all(token_bytes)?;
-            file.write_all(&(entries_bytes.len() as u32).to_le_bytes())?;
+            file.write_all(&entries_len.to_le_bytes())?;
             file.write_all(&entries_bytes)?;
 
             new_token_offsets.insert(token.clone(), (current_offset, entries.len() as u32));
