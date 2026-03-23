@@ -23,17 +23,48 @@ use crate::vector::{HnswIndex, VectorIndexConfig, VectorIndexMetadata, VectorSea
 use super::CollectionCore;
 
 /// Convert DocumentId to String for HNSW storage
+///
+/// Uses type-prefixed format to preserve DocumentId variant across roundtrip:
+/// - `DocumentId::Int(n)` → `"i:{n}"`
+/// - `DocumentId::String(s)` → `"s:{s}"`
+/// - `DocumentId::ObjectId(hex)` → `"o:{hex}"`
+///
+/// NOTE: This is distinct from `adapter.rs::doc_id_to_string()` which produces
+/// unprefixed strings for MCP JSON responses (no roundtrip needed there).
 fn doc_id_to_string(id: &DocumentId) -> String {
     match id {
-        DocumentId::Int(i) => i.to_string(),
-        DocumentId::String(s) => s.clone(),
-        DocumentId::ObjectId(oid) => oid.clone(),
+        DocumentId::Int(i) => format!("i:{}", i),
+        DocumentId::String(s) => format!("s:{}", s),
+        DocumentId::ObjectId(oid) => format!("o:{}", oid),
     }
 }
 
 /// Convert String back to DocumentId
+///
+/// Recognizes type-prefixed format (`"i:"`, `"s:"`, `"o:"`) for lossless roundtrip.
+/// Falls back to heuristic guessing for backward compatibility with old .hnsw cache
+/// files that stored unprefixed IDs.
 fn string_to_doc_id(s: &str) -> DocumentId {
-    // Try to parse as int first
+    // New prefixed format — lossless roundtrip
+    if let Some(rest) = s.strip_prefix("i:") {
+        if let Ok(i) = rest.parse::<i64>() {
+            return DocumentId::Int(i);
+        }
+        // Malformed "i:" prefix — treat as string to avoid data loss
+        return DocumentId::String(s.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("s:") {
+        return DocumentId::String(rest.to_string());
+    }
+    if let Some(rest) = s.strip_prefix("o:") {
+        return DocumentId::ObjectId(rest.to_string());
+    }
+
+    // Backward compatibility fallback for old unprefixed HNSW cache entries.
+    // This heuristic can misidentify DocumentId::String("12345") as Int(12345)
+    // or DocumentId::String("aabbccdd11223344aabbccdd") as ObjectId, but this
+    // only affects legacy cache data. New inserts use the prefixed format above,
+    // so these entries will be replaced on the next HNSW rebuild.
     if let Ok(i) = s.parse::<i64>() {
         DocumentId::Int(i)
     } else if s.len() == 24 && s.chars().all(|c| c.is_ascii_hexdigit()) {
