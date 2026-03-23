@@ -452,8 +452,14 @@ impl HnswIndex {
         let candidates = self.search_layer(query, current, self.config.ef_search, 0);
 
         // Convert to results with similarity scores based on metric
+        // Filter out orphan nodes: after lazy remove(), nodes remain in the graph
+        // but are no longer in id_to_index. Only return active (non-orphan) results.
         candidates
             .into_iter()
+            .filter(|(idx, _)| {
+                let node = &self.nodes[*idx];
+                self.id_to_index.contains_key(&node.id)
+            })
             .take(k)
             .map(|(idx, _distance)| {
                 let node = &self.nodes[idx];
@@ -496,10 +502,14 @@ impl HnswIndex {
         let candidates = self.search_layer(query, current, ef, 0);
 
         // Filter and convert to results
+        // First filter out orphan nodes (lazy-deleted), then apply caller's filter.
         candidates
             .into_iter()
             .filter_map(|(idx, _distance)| {
                 let node = &self.nodes[idx];
+                if !self.id_to_index.contains_key(&node.id) {
+                    return None; // orphan node — skip
+                }
                 if filter(&node.id) {
                     let score = self.compute_similarity(query, &node.vector);
                     Some(VectorSearchResult {
