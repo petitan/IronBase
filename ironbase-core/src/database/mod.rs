@@ -689,7 +689,7 @@ mod tests {
         .unwrap();
 
         // Commit with indexes
-        let result = db.commit_transaction_with_indexes(tx_id);
+        let result = db.commit_transaction(tx_id);
         assert!(result.is_ok());
 
         // Verify transaction removed from active list
@@ -720,7 +720,7 @@ mod tests {
         .unwrap();
 
         // Commit with indexes (should delegate to simple commit)
-        let result = db.commit_transaction_with_indexes(tx_id);
+        let result = db.commit_transaction(tx_id);
         assert!(result.is_ok());
     }
 
@@ -731,7 +731,7 @@ mod tests {
         let db = DatabaseCore::open(&db_path).unwrap();
 
         // Try to commit non-existent transaction
-        let result = db.commit_transaction_with_indexes(999);
+        let result = db.commit_transaction(999);
         assert!(result.is_err());
 
         // Should be TransactionAborted error

@@ -63,6 +63,11 @@ fn build_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf
     build_index_file_path_with_ext(db_file_path, index_name, "idx")
 }
 
+/// Build the .idx file path for a B+ tree index (public for drop_collection cleanup)
+pub fn build_btree_index_file_path(db_file_path: &str, index_name: &str) -> Option<PathBuf> {
+    build_index_file_path_with_ext(db_file_path, index_name, "idx")
+}
+
 pub fn persist_index_to_disk<F, T>(db_file_path: &str, index_name: &str, save_fn: F) -> Result<()>
 where
     F: FnOnce(&mut File) -> Result<T>,

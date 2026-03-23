@@ -1019,6 +1019,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
+        // Collect and delete index files BEFORE removing the IndexManager
+        self.cleanup_index_files_for_collection(name);
+
         // Remove shared IndexManager, SchemaManager, and collection write lock
         self.index_managers.write().remove(name);
         self.schema_managers.write().remove(name);
@@ -1072,6 +1075,9 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// Force drop a protected collection (admin only)
     /// Use with caution - bypasses protection checks
     pub fn force_drop_collection(&self, name: &str) -> Result<()> {
+        // Collect and delete index files BEFORE removing the IndexManager
+        self.cleanup_index_files_for_collection(name);
+
         // Remove shared IndexManager, SchemaManager, and collection write lock
         self.index_managers.write().remove(name);
         self.schema_managers.write().remove(name);
@@ -1079,5 +1085,79 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
 
         let mut storage = self.storage.write();
         storage.drop_collection(name)
+    }
+
+    /// Delete all index files (.idx, .ftidx, .fzidx, .hnsw) for a collection.
+    ///
+    /// Called BEFORE removing the IndexManager so we can still read index names.
+    /// Best-effort: file deletion errors are logged but do not fail the drop.
+    ///
+    /// Uses the same path-building functions that flush/load use, ensuring
+    /// consistent file naming.
+    fn cleanup_index_files_for_collection(&self, collection_name: &str) {
+        let db_path = {
+            let storage = self.storage.read();
+            storage.get_file_path().to_string()
+        };
+        if db_path.is_empty() {
+            return; // MemoryStorage — no index files on disk
+        }
+
+        // Read index names from the IndexManager (if it exists for this collection)
+        let index_managers = self.index_managers.read();
+        let mgr_arc = match index_managers.get(collection_name) {
+            Some(arc) => arc.clone(),
+            None => return, // No IndexManager — nothing to clean up
+        };
+        drop(index_managers); // Release the outer map lock
+
+        let mgr = mgr_arc.read();
+        let index_names = mgr.list_indexes();
+        drop(mgr);
+
+        // Build and delete file paths for each index type
+        for name in &index_names {
+            // B+ tree (.idx)
+            if let Some(path) = crate::collection_core::build_btree_index_file_path(&db_path, name)
+            {
+                Self::try_remove_file(&path, name, "idx");
+            }
+            // Fulltext (.ftidx)
+            if let Some(path) =
+                crate::collection_core::build_fulltext_index_file_path(&db_path, name)
+            {
+                Self::try_remove_file(&path, name, "ftidx");
+            }
+            // Fuzzy (.fzidx)
+            if let Some(path) = crate::collection_core::build_fuzzy_index_file_path(&db_path, name)
+            {
+                Self::try_remove_file(&path, name, "fzidx");
+            }
+            // HNSW vector (.hnsw)
+            let hnsw_path = IndexManager::build_vector_cache_path(&db_path, name);
+            Self::try_remove_file(&hnsw_path, name, "hnsw");
+        }
+    }
+
+    /// Try to remove an index file. Logs on error, does not propagate.
+    fn try_remove_file(path: &std::path::Path, index_name: &str, ext: &str) {
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(path) {
+                tracing::warn!(
+                    path = %path.display(),
+                    index = %index_name,
+                    ext = %ext,
+                    error = %e,
+                    "Failed to delete orphaned index file during drop_collection"
+                );
+            } else {
+                tracing::debug!(
+                    path = %path.display(),
+                    index = %index_name,
+                    ext = %ext,
+                    "Deleted index file during drop_collection"
+                );
+            }
+        }
     }
 }

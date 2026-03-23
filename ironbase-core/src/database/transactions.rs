@@ -79,30 +79,16 @@ impl DatabaseCore<StorageEngine> {
     /// Commit transaction with index operations - StorageEngine-specific
     ///
     /// Automatically releases the write lock on completion (success or failure).
+    ///
+    /// **Deprecated:** This method is identical to `commit_transaction()`. The name
+    /// suggests separate index handling, but no such logic was ever implemented.
+    /// Use `commit_transaction()` directly instead.
+    #[deprecated(
+        since = "0.3.200",
+        note = "Identical to commit_transaction(). Use commit_transaction() instead."
+    )]
     pub fn commit_transaction_with_indexes(&self, tx_id: TransactionId) -> Result<()> {
-        // Remove transaction from active list
-        let mut transaction = {
-            let mut active = self.active_transactions.write();
-            active.remove(&tx_id).ok_or_else(|| {
-                // Release lock even if transaction not found
-                self.release_write_lock(tx_id);
-                crate::error::IronBaseError::TransactionAborted(format!(
-                    "Transaction {} not found",
-                    tx_id
-                ))
-            })?
-        };
-
-        // Commit through storage engine with index operations
-        let result = {
-            let mut storage = self.storage.write();
-            storage.commit_transaction(&mut transaction)
-        };
-
-        // Always release write lock (even on error to prevent deadlock)
-        self.release_write_lock(tx_id);
-
-        result
+        self.commit_transaction(tx_id)
     }
 
     // ========== Two-Phase Commit Helper Methods (StorageEngine-specific) ==========

@@ -13,6 +13,14 @@
 //!
 //! **Future work:** Two-phase commit for atomic index updates (see INDEX_CONSISTENCY.md)
 //!
+//! ## B+ Tree Only Index Tracking (TODO N4)
+//!
+//! Index change tracking (`add_index_change`) only supports B+ tree indexes because
+//! `IndexChange` uses `IndexKey` which is btree-specific. Fulltext (tokenized text),
+//! fuzzy (similarity strings), and HNSW (vector embeddings) indexes are NOT tracked
+//! in transactions. After commit, these indexes may be stale until the next
+//! `rebuild_indexes` call.
+//!
 //! ## Optimistic Concurrency
 //!
 //! Update and delete operations use optimistic concurrency:
@@ -95,9 +103,18 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
         })?;
 
         // Track index changes for two-phase commit
+        //
+        // TODO(N4): Only B+ tree indexes are tracked. Fulltext, fuzzy, and HNSW index
+        // changes are NOT recorded in the transaction and will be lost on commit.
+        // Fixing this requires extending IndexChange/IndexOperation to support:
+        //   - Fulltext: tokenized text (not a single IndexKey)
+        //   - Fuzzy: string value for similarity index
+        //   - HNSW: vector embedding (f32 array)
+        // Until then, non-btree indexes may become inconsistent after transaction
+        // commit and require rebuild_indexes to restore consistency.
         let indexes = self.indexes.read();
         for index_name in indexes.list_indexes() {
-            // Get the index to extract field name
+            // Only B+ tree indexes support transactional tracking (IndexKey-based)
             if let Some(btree_index) = indexes.get_btree_index(&index_name) {
                 let field_name = &btree_index.metadata.field;
 
@@ -166,8 +183,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             })?;
 
             // Track index changes for two-phase commit
+            // TODO(N4): Only B+ tree indexes are tracked — see insert_one_tx for details.
             let indexes = self.indexes.read();
             for index_name in indexes.list_indexes() {
+                // Only B+ tree indexes support transactional tracking (IndexKey-based)
                 if let Some(btree_index) = indexes.get_btree_index(&index_name) {
                     let field_name = &btree_index.metadata.field;
 
@@ -238,8 +257,10 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             })?;
 
             // Track index changes for two-phase commit
+            // TODO(N4): Only B+ tree indexes are tracked — see insert_one_tx for details.
             let indexes = self.indexes.read();
             for index_name in indexes.list_indexes() {
+                // Only B+ tree indexes support transactional tracking (IndexKey-based)
                 if let Some(btree_index) = indexes.get_btree_index(&index_name) {
                     let field_name = &btree_index.metadata.field;
 
