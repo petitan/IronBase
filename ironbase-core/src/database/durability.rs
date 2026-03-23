@@ -339,11 +339,11 @@ impl DatabaseCore<StorageEngine> {
     /// Persist all buffered operations to storage (WAL ORDERING FIX)
     ///
     /// Called after WAL commit in flush_batch() to actually write:
-    /// - Inserts: new documents
-    /// - Updates: modified documents
-    /// - Deletes: tombstones
+    /// - Inserts: new documents (single + batch)
+    /// - Updates: modified documents (single + batch)
+    /// - Deletes: tombstones (single + batch)
     fn persist_buffered_operations(&self, doc_buffer: &mut super::BatchDocBuffer) -> Result<()> {
-        // 1. Persist inserts
+        // 1. Persist inserts (_one)
         for (collection_name, prepared_docs) in doc_buffer.inserts.drain() {
             let collection = self.collection(&collection_name)?;
             for prepared in prepared_docs {
@@ -351,7 +351,7 @@ impl DatabaseCore<StorageEngine> {
             }
         }
 
-        // 2. Persist updates (WAL ORDERING FIX)
+        // 2. Persist updates (_one) (WAL ORDERING FIX)
         for (collection_name, prepared_updates) in doc_buffer.updates.drain() {
             let collection = self.collection(&collection_name)?;
             for prepared in prepared_updates {
@@ -359,11 +359,27 @@ impl DatabaseCore<StorageEngine> {
             }
         }
 
-        // 3. Persist deletes (WAL ORDERING FIX)
+        // 3. Persist deletes (_one) (WAL ORDERING FIX)
         for (collection_name, prepared_deletes) in doc_buffer.deletes.drain() {
             let collection = self.collection(&collection_name)?;
             for prepared in prepared_deletes {
                 collection.delete_one_persist_batch(prepared)?;
+            }
+        }
+
+        // 4. Persist update_many ops (WAL ORDERING FIX for _many)
+        for (collection_name, prepared_updates) in doc_buffer.update_many_ops.drain() {
+            let collection = self.get_collection(&collection_name)?;
+            for prepared in prepared_updates {
+                collection.update_many_persist(prepared)?;
+            }
+        }
+
+        // 5. Persist delete_many ops (WAL ORDERING FIX for _many)
+        for (collection_name, prepared_deletes) in doc_buffer.delete_many_ops.drain() {
+            let collection = self.get_collection(&collection_name)?;
+            for prepared in prepared_deletes {
+                collection.delete_many_persist(prepared)?;
             }
         }
 
@@ -968,24 +984,31 @@ impl DatabaseCore<StorageEngine> {
                 let collection = self.collection(collection_name)?;
 
                 // 1. PREPARE phase: validate all documents, generate IDs, build WAL docs
+                // No storage writes happen here - just preparation
                 let prepared = collection.insert_many_prepare(documents)?;
 
                 if prepared.prepared_docs.is_empty() {
                     return Ok(Vec::new());
                 }
 
-                // 2. Collect WAL data before persist consumes prepared
+                // 2. Collect WAL data and IDs before moving prepared docs into buffer
+                let inserted_ids = prepared.inserted_ids.clone();
                 let wal_entries: Vec<_> = prepared
                     .prepared_docs
                     .iter()
                     .map(|p| (p.doc_id.clone(), p.wal_doc.clone()))
                     .collect();
 
-                // 3. PERSIST phase: write all documents to storage
-                // (Batch mode writes storage first, WAL later)
-                let inserted_ids = collection.insert_many_persist(prepared)?;
+                // 3. BUFFER phase: store each prepared doc for later persist
+                // InsertManyPrepared contains Vec<InsertOnePrepared>, so we buffer individually
+                {
+                    let mut doc_buffer = self.batch_doc_buffer.write();
+                    for prep in prepared.prepared_docs {
+                        doc_buffer.add_insert(collection_name.to_string(), prep);
+                    }
+                }
 
-                // 4. Add to WAL batch (wal_doc has _id and _collection)
+                // 4. Add all WAL operations to batch buffer
                 for (doc_id, wal_doc) in wal_entries {
                     let should_flush = self.add_to_batch(Operation::Insert {
                         collection: collection_name.to_string(),
@@ -996,6 +1019,16 @@ impl DatabaseCore<StorageEngine> {
                     if should_flush {
                         self.flush_batch()?;
                     }
+                }
+
+                // 5. Check if memory limit exceeded (early flush trigger)
+                let memory_exceeded = {
+                    let doc_buffer = self.batch_doc_buffer.read();
+                    doc_buffer.memory_limit_exceeded()
+                };
+
+                if memory_exceeded {
+                    self.flush_batch()?;
                 }
 
                 Ok(inserted_ids)
@@ -1087,22 +1120,37 @@ impl DatabaseCore<StorageEngine> {
                 // Use get_collection - no implicit creation for update operations
                 let collection = self.get_collection(collection_name)?;
 
-                // BUG #1 FIX: Use prepare/persist pattern for correct WAL ordering
+                // WAL ORDERING FIX for _many: Use buffer+flush_batch pattern
                 // PHASE 1: PREPARE - compute updates in memory (NO storage writes!)
                 let prepared = collection.update_many_prepare(query, update)?;
 
-                // Save counts before moving prepared into persist
+                // Save counts before moving prepared into buffer
                 let matched = prepared.matched;
                 let modified = prepared.modified;
 
                 if modified > 0 {
-                    // PHASE 2: BUILD batch WAL from prepared results
-                    for (doc_id, old_doc, new_doc) in &prepared.wal_entries {
+                    // PHASE 2: Collect WAL entries before moving prepared into buffer
+                    let wal_entries: Vec<_> = prepared
+                        .wal_entries
+                        .iter()
+                        .map(|(doc_id, old_doc, new_doc)| {
+                            (doc_id.clone(), old_doc.clone(), new_doc.clone())
+                        })
+                        .collect();
+
+                    // PHASE 3: BUFFER prepared data for later persist (after WAL commit)
+                    {
+                        let mut doc_buffer = self.batch_doc_buffer.write();
+                        doc_buffer.add_update_many(collection_name.to_string(), prepared);
+                    }
+
+                    // PHASE 4: Add WAL operations to batch buffer
+                    for (doc_id, old_doc, new_doc) in wal_entries {
                         let should_flush = self.add_to_batch(Operation::Update {
                             collection: collection_name.to_string(),
-                            doc_id: doc_id.clone(),
-                            old_doc: old_doc.clone(),
-                            new_doc: new_doc.clone(),
+                            doc_id,
+                            old_doc,
+                            new_doc,
                         })?;
 
                         if should_flush {
@@ -1110,8 +1158,15 @@ impl DatabaseCore<StorageEngine> {
                         }
                     }
 
-                    // PHASE 3: PERSIST to storage (batch WAL handles durability)
-                    collection.update_many_persist(prepared)?;
+                    // PHASE 5: Check if memory limit exceeded (early flush trigger)
+                    let memory_exceeded = {
+                        let doc_buffer = self.batch_doc_buffer.read();
+                        doc_buffer.memory_limit_exceeded()
+                    };
+
+                    if memory_exceeded {
+                        self.flush_batch()?;
+                    }
                 }
 
                 Ok((matched, modified))
@@ -1193,20 +1248,33 @@ impl DatabaseCore<StorageEngine> {
                 // Use get_collection - no implicit creation for delete operations
                 let collection = self.get_collection(collection_name)?;
 
-                // BUG #1 FIX: Use prepare/persist pattern for correct WAL ordering
+                // WAL ORDERING FIX for _many: Use buffer+flush_batch pattern
                 // PHASE 1: PREPARE - identify deletions in memory (NO storage writes!)
                 let prepared = collection.delete_many_prepare(query)?;
 
-                // Save count before moving prepared into persist
+                // Save count before moving prepared into buffer
                 let deleted = prepared.deleted;
 
                 if deleted > 0 {
-                    // PHASE 2: BUILD batch WAL from prepared results
-                    for (doc_id, old_doc) in &prepared.wal_entries {
+                    // PHASE 2: Collect WAL entries before moving prepared into buffer
+                    let wal_entries: Vec<_> = prepared
+                        .wal_entries
+                        .iter()
+                        .map(|(doc_id, old_doc)| (doc_id.clone(), old_doc.clone()))
+                        .collect();
+
+                    // PHASE 3: BUFFER prepared data for later persist (after WAL commit)
+                    {
+                        let mut doc_buffer = self.batch_doc_buffer.write();
+                        doc_buffer.add_delete_many(collection_name.to_string(), prepared);
+                    }
+
+                    // PHASE 4: Add WAL operations to batch buffer
+                    for (doc_id, old_doc) in wal_entries {
                         let should_flush = self.add_to_batch(Operation::Delete {
                             collection: collection_name.to_string(),
-                            doc_id: doc_id.clone(),
-                            old_doc: old_doc.clone(),
+                            doc_id,
+                            old_doc,
                         })?;
 
                         if should_flush {
@@ -1214,8 +1282,15 @@ impl DatabaseCore<StorageEngine> {
                         }
                     }
 
-                    // PHASE 3: PERSIST tombstones to storage (batch WAL handles durability)
-                    collection.delete_many_persist(prepared)?;
+                    // PHASE 5: Check if memory limit exceeded (early flush trigger)
+                    let memory_exceeded = {
+                        let doc_buffer = self.batch_doc_buffer.read();
+                        doc_buffer.memory_limit_exceeded()
+                    };
+
+                    if memory_exceeded {
+                        self.flush_batch()?;
+                    }
                 }
 
                 Ok(deleted)

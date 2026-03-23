@@ -245,6 +245,9 @@ pub(crate) use self::raw_operations::InsertOnePrepared;
 // Re-export batch-mode prepared structs (WAL ORDERING FIX)
 pub(crate) use self::raw_operations::{DeleteOnePreparedBatch, UpdateOnePreparedBatch};
 
+// Re-export _many prepared structs (WAL ORDERING FIX for _many Batch mode)
+pub(crate) use self::raw_operations::{DeleteManyPrepared, UpdateManyPrepared};
+
 // Re-export FindCursor for streaming queries
 pub use self::cursor::FindCursor;
 

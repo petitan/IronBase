@@ -55,7 +55,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::collection_core::schema::CompiledSchema;
-use crate::collection_core::{DeleteOnePreparedBatch, InsertOnePrepared, UpdateOnePreparedBatch};
+use crate::collection_core::{
+    DeleteManyPrepared, DeleteOnePreparedBatch, InsertOnePrepared, UpdateManyPrepared,
+    UpdateOnePreparedBatch,
+};
 use crate::durability::DurabilityMode;
 use crate::error::{IronBaseError, Result};
 use crate::index::IndexManager;
@@ -81,6 +84,10 @@ pub struct BatchDocBuffer {
     pub(crate) updates: HashMap<String, Vec<UpdateOnePreparedBatch>>,
     /// Buffered delete operations by collection name (WAL ORDERING FIX)
     pub(crate) deletes: HashMap<String, Vec<DeleteOnePreparedBatch>>,
+    /// Buffered update_many operations by collection name (WAL ORDERING FIX for _many)
+    pub(crate) update_many_ops: HashMap<String, Vec<UpdateManyPrepared>>,
+    /// Buffered delete_many operations by collection name (WAL ORDERING FIX for _many)
+    pub(crate) delete_many_ops: HashMap<String, Vec<DeleteManyPrepared>>,
     /// Approximate memory usage in bytes
     pub(crate) memory_bytes: usize,
 }
@@ -92,13 +99,19 @@ impl BatchDocBuffer {
             inserts: HashMap::new(),
             updates: HashMap::new(),
             deletes: HashMap::new(),
+            update_many_ops: HashMap::new(),
+            delete_many_ops: HashMap::new(),
             memory_bytes: 0,
         }
     }
 
     /// Check if the buffer is empty
     pub fn is_empty(&self) -> bool {
-        self.inserts.is_empty() && self.updates.is_empty() && self.deletes.is_empty()
+        self.inserts.is_empty()
+            && self.updates.is_empty()
+            && self.deletes.is_empty()
+            && self.update_many_ops.is_empty()
+            && self.delete_many_ops.is_empty()
     }
 
     /// Clear all buffered documents
@@ -106,6 +119,8 @@ impl BatchDocBuffer {
         self.inserts.clear();
         self.updates.clear();
         self.deletes.clear();
+        self.update_many_ops.clear();
+        self.delete_many_ops.clear();
         self.memory_bytes = 0;
     }
 
@@ -114,6 +129,8 @@ impl BatchDocBuffer {
         self.inserts.shrink_to_fit();
         self.updates.shrink_to_fit();
         self.deletes.shrink_to_fit();
+        self.update_many_ops.shrink_to_fit();
+        self.delete_many_ops.shrink_to_fit();
     }
 
     /// Clear buffers and optionally shrink if recent usage was high.
@@ -155,6 +172,35 @@ impl BatchDocBuffer {
         self.memory_bytes += doc_size;
 
         self.deletes.entry(collection).or_default().push(prepared);
+    }
+
+    /// Add a prepared update_many to the buffer (WAL ORDERING FIX for _many)
+    pub fn add_update_many(&mut self, collection: String, prepared: UpdateManyPrepared) {
+        // Estimate memory usage from WAL entries
+        for (_, _, new_doc) in &prepared.wal_entries {
+            let doc_size = serde_json::to_string(new_doc)
+                .map(|s| s.len())
+                .unwrap_or(100);
+            self.memory_bytes += doc_size;
+        }
+
+        self.update_many_ops
+            .entry(collection)
+            .or_default()
+            .push(prepared);
+    }
+
+    /// Add a prepared delete_many to the buffer (WAL ORDERING FIX for _many)
+    pub fn add_delete_many(&mut self, collection: String, prepared: DeleteManyPrepared) {
+        // Estimate memory usage from tombstone writes
+        for (_, tombstone_json) in &prepared.tombstone_writes {
+            self.memory_bytes += tombstone_json.len();
+        }
+
+        self.delete_many_ops
+            .entry(collection)
+            .or_default()
+            .push(prepared);
     }
 
     /// Check if memory limit exceeded
