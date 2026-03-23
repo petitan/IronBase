@@ -1599,9 +1599,15 @@ impl BPlusTree {
                         limit,
                         &mut lazy_file,
                     ),
-                    ScanOrder::Desc => {
-                        self.scan_desc_internal(start, end, skip, limit, &mut lazy_file)
-                    }
+                    ScanOrder::Desc => self.scan_desc_internal(
+                        start,
+                        end,
+                        inclusive_start,
+                        inclusive_end,
+                        skip,
+                        limit,
+                        &mut lazy_file,
+                    ),
                 };
                 RangeQueryResult::Docs(docs)
             }
@@ -2111,19 +2117,27 @@ impl BPlusTree {
         results
     }
 
-    /// Walk all leaf nodes in DESCENDING order (right-to-left traversal).
+    /// Walk leaf nodes in DESCENDING order (right-to-left traversal) with child pruning.
     /// Callback returns `true` to continue, `false` to stop early.
-    /// This avoids collecting all leaves into a Vec for LIMIT queries.
-    fn walk_leaves_desc<F>(&self, callback: &mut F, lazy_file: &mut Option<File>) -> bool
+    /// Children whose key range is entirely outside [start, end] are skipped (pruned).
+    fn walk_leaves_desc<F>(
+        &self,
+        callback: &mut F,
+        start: &IndexKey,
+        end: &IndexKey,
+        lazy_file: &mut Option<File>,
+    ) -> bool
     where
         F: FnMut(&LeafNode) -> bool,
     {
-        Self::walk_leaves_desc_node(&self.root, callback, lazy_file)
+        Self::walk_leaves_desc_node(&self.root, callback, start, end, lazy_file)
     }
 
     fn walk_leaves_desc_node<F>(
         node: &BTreeNode,
         callback: &mut F,
+        start: &IndexKey,
+        end: &IndexKey,
         lazy_file: &mut Option<File>,
     ) -> bool
     where
@@ -2132,25 +2146,48 @@ impl BPlusTree {
         match node {
             BTreeNode::Leaf(leaf) => callback(leaf),
             BTreeNode::Internal(internal) => {
-                if !internal.children.is_empty() {
-                    // In-memory children: traverse RIGHT to LEFT
-                    for child in internal.children.iter().rev() {
-                        if !Self::walk_leaves_desc_node(child, callback, lazy_file) {
-                            return false; // Early termination
-                        }
+                let child_count = if !internal.children.is_empty() {
+                    internal.children.len()
+                } else {
+                    internal.children_offsets.len()
+                };
+
+                // Traverse RIGHT to LEFT (descending), with child pruning.
+                // B+ tree convention: child[i] covers keys in range
+                //   [keys[i-1], keys[i]) where keys[-1] = -inf, keys[len] = +inf.
+                // A child might match if its range overlaps [start, end].
+                // Same pruning logic as scan_asc Internal branch, but reversed iteration.
+                for i in (0..child_count).rev() {
+                    let child_min_might_match = i == 0 || &internal.keys[i - 1] <= end;
+                    let child_max_might_match =
+                        i >= internal.keys.len() || &internal.keys[i] >= start;
+                    if !(child_min_might_match && child_max_might_match) {
+                        continue; // This child's range doesn't overlap [start, end]
                     }
-                } else if lazy_file.is_some() {
-                    // Lazy load children from file: traverse RIGHT to LEFT
-                    for &offset in internal.children_offsets.iter().rev() {
+
+                    let should_continue = if i < internal.children.len() {
+                        Self::walk_leaves_desc_node(
+                            &internal.children[i],
+                            callback,
+                            start,
+                            end,
+                            lazy_file,
+                        )
+                    } else if lazy_file.is_some() {
+                        let offset = internal.children_offsets[i];
                         let Some(mut f) = lazy_file.take() else {
                             break;
                         };
                         match BPlusTree::load_node(&mut f, offset) {
                             Ok(child_node) => {
                                 *lazy_file = Some(f);
-                                if !Self::walk_leaves_desc_node(&child_node, callback, lazy_file) {
-                                    return false;
-                                }
+                                Self::walk_leaves_desc_node(
+                                    &child_node,
+                                    callback,
+                                    start,
+                                    end,
+                                    lazy_file,
+                                )
                             }
                             Err(e) => {
                                 *lazy_file = Some(f);
@@ -2159,8 +2196,15 @@ impl BPlusTree {
                                     error = %e,
                                     "walk_leaves_desc: failed to load lazy child node"
                                 );
+                                true // Continue despite error
                             }
                         }
+                    } else {
+                        true
+                    };
+
+                    if !should_continue {
+                        return false; // Early termination from callback
                     }
                 }
                 true
@@ -2174,6 +2218,8 @@ impl BPlusTree {
         &self,
         start: &IndexKey,
         end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
         skip: usize,
         limit: Option<usize>,
         lazy_file: &mut Option<File>,
@@ -2189,11 +2235,25 @@ impl BPlusTree {
 
         self.walk_leaves_desc(
             &mut |leaf| {
+                // Descending: iterate keys right-to-left within each leaf
                 for idx in (0..leaf.keys.len()).rev() {
                     let key = &leaf.keys[idx];
 
-                    // Check if key is in range [start, end]
-                    if key < start || key > end {
+                    // Check if key is in range, respecting inclusive/exclusive boundaries
+                    // (mirrors scan_asc_internal logic)
+                    let below_start = if inclusive_start {
+                        key < start
+                    } else {
+                        key <= start
+                    };
+                    let above_end = if inclusive_end { key > end } else { key >= end };
+
+                    if below_start || above_end {
+                        // Descending order: if key < start, all remaining keys in this
+                        // leaf (and all leaves to the left) are also < start → stop early
+                        if below_start {
+                            return false;
+                        }
                         continue;
                     }
 
@@ -2215,6 +2275,8 @@ impl BPlusTree {
                 }
                 true // Continue to next leaf
             },
+            start,
+            end,
             lazy_file,
         );
 
@@ -2227,6 +2289,8 @@ impl BPlusTree {
         &self,
         start: &IndexKey,
         end: &IndexKey,
+        inclusive_start: bool,
+        inclusive_end: bool,
         skip: usize,
         limit: Option<usize>,
         lazy_file: &mut Option<File>,
@@ -2244,9 +2308,22 @@ impl BPlusTree {
             &mut |leaf| {
                 for idx in (0..leaf.keys.len()).rev() {
                     let key = &leaf.keys[idx];
-                    if key < start || key > end {
+
+                    // Check if key is in range, respecting inclusive/exclusive boundaries
+                    let below_start = if inclusive_start {
+                        key < start
+                    } else {
+                        key <= start
+                    };
+                    let above_end = if inclusive_end { key > end } else { key >= end };
+
+                    if below_start || above_end {
+                        if below_start {
+                            return false;
+                        }
                         continue;
                     }
+
                     if skipped < skip {
                         skipped += 1;
                         continue;
@@ -2260,6 +2337,8 @@ impl BPlusTree {
                 }
                 true // Continue to next leaf
             },
+            start,
+            end,
             lazy_file,
         );
 
@@ -2306,7 +2385,15 @@ impl BPlusTree {
                 limit,
                 &mut file,
             ),
-            ScanOrder::Desc => self.scan_desc_pairs_internal(start, end, skip, limit, &mut file),
+            ScanOrder::Desc => self.scan_desc_pairs_internal(
+                start,
+                end,
+                inclusive_start,
+                inclusive_end,
+                skip,
+                limit,
+                &mut file,
+            ),
         }
     }
 

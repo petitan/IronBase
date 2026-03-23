@@ -526,11 +526,16 @@ impl QueryPlanner {
         }
 
         // Detect contradictory range: lower bound > upper bound → None
-        // Only check when both bounds are the same type (Number-Number or String-String)
+        // Also detect mixed-type bounds (e.g. Number lower + String upper) as impossible
         let effective_lower = gte_val.or(gt_val);
         let effective_upper = lte_val.or(lt_val);
         if let (Some(lo), Some(hi)) = (effective_lower, effective_upper) {
-            if Self::compare_json_for_bound(lo, hi) == std::cmp::Ordering::Greater {
+            // Mixed types are impossible ranges (Number vs String can never overlap)
+            let mixed_types = matches!(
+                (lo, hi),
+                (Value::Number(_), Value::String(_)) | (Value::String(_), Value::Number(_))
+            );
+            if mixed_types || Self::compare_json_for_bound(lo, hi) == std::cmp::Ordering::Greater {
                 return None;
             }
         }
@@ -604,7 +609,9 @@ impl QueryPlanner {
 
     /// Compare two JSON values for bound tightening (used in conflicting range resolution).
     ///
-    /// Supports Number and String comparisons. Falls back to Equal for incompatible types.
+    /// Supports Number and String comparisons.
+    /// Mixed types (e.g. Number vs String) return Less to signal an impossible range,
+    /// so the contradictory range check in resolve_range_conditions() can filter it out.
     fn compare_json_for_bound(a: &Value, b: &Value) -> std::cmp::Ordering {
         match (a, b) {
             (Value::Number(an), Value::Number(bn)) => {
@@ -613,7 +620,8 @@ impl QueryPlanner {
                 af.partial_cmp(&bf).unwrap_or(std::cmp::Ordering::Equal)
             }
             (Value::String(a_s), Value::String(b_s)) => a_s.cmp(b_s),
-            _ => std::cmp::Ordering::Equal,
+            // Mixed types (e.g. Number vs String) → impossible range
+            _ => std::cmp::Ordering::Less,
         }
     }
 
@@ -624,6 +632,8 @@ impl QueryPlanner {
     /// - prefix_field: The first field (for compound) or only field (for single)
     /// - is_compound: Whether this is a compound index
     ///
+    /// Skips indexes that are currently being built (building == true).
+    ///
     /// Returns (index_name, is_compound) if found.
     fn find_index_for_field(
         field: &str,
@@ -631,7 +641,7 @@ impl QueryPlanner {
     ) -> Option<(String, bool)> {
         index_fields
             .iter()
-            .find(|info| info.prefix_field == field)
+            .find(|info| info.prefix_field == field && !info.building)
             .map(|info| (info.index_name.clone(), info.is_compound))
     }
 
@@ -662,11 +672,11 @@ impl QueryPlanner {
     ) -> Vec<CandidatePlan> {
         let mut candidates = Vec::new();
 
-        if let Value::Object(ref map) = query_json {
-            // Skip logical operators at root level - not optimizable yet
-            if map.keys().any(|k| k.starts_with('$')) {
-                return candidates;
-            }
+        if let Value::Object(ref _map) = query_json {
+            // NOTE: $-prefixed root keys (e.g. $text, $expr) are skipped per-field
+            // inside each collect_*_candidates method. We do NOT skip the entire query
+            // here, so that indexable fields like "age" in {"age": 25, "$text": "hello"}
+            // can still get index plans.
 
             // Collect candidates from each analyzer
             Self::collect_exists_candidates(query_json, index_fields, &mut candidates);
@@ -701,7 +711,7 @@ impl QueryPlanner {
             // Sparse index scan is very efficient - low cost
             if let Some(info) = index_fields
                 .iter()
-                .find(|i| i.prefix_field == field && i.sparse)
+                .find(|i| i.prefix_field == field && i.sparse && !i.building)
             {
                 // Dynamic cost based on actual index size (num_keys)
                 // Small sparse index = very cheap, large sparse index = proportionally more expensive
@@ -734,6 +744,7 @@ impl QueryPlanner {
             let info = index_fields.iter().find(|i| {
                 i.prefix_field == field &&
                 !i.is_compound &&
+                !i.building &&
                 // Match the index used in the plan
                 matches!(&plan, QueryPlan::RegexPrefixScan { index_name, .. } if i.index_name == *index_name)
             });
@@ -769,7 +780,7 @@ impl QueryPlanner {
         if let Some((field, plan)) = Self::analyze_in_with_regex(query_json, index_fields) {
             if let Some(info) = index_fields
                 .iter()
-                .find(|i| i.prefix_field == field && !i.is_compound)
+                .find(|i| i.prefix_field == field && !i.is_compound && !i.building)
             {
                 // Multi-regex scan cost depends on number of prefixes
                 let prefix_count = match &plan {
@@ -831,10 +842,10 @@ impl QueryPlanner {
                             continue;
                         }
 
-                        // Find matching index for this field
+                        // Find matching index for this field (skip building indexes)
                         if let Some(info) = index_fields
                             .iter()
-                            .find(|i| i.prefix_field == *field && !i.is_compound)
+                            .find(|i| i.prefix_field == *field && !i.is_compound && !i.building)
                         {
                             // Convert values to IndexKeys
                             let keys: Vec<IndexKey> =
@@ -879,7 +890,7 @@ impl QueryPlanner {
         if let Some((field, plan)) = Self::analyze_range_query_v2(query_json, index_fields) {
             if let Some(info) = index_fields
                 .iter()
-                .find(|i| i.prefix_field == field && !i.is_compound)
+                .find(|i| i.prefix_field == field && !i.is_compound && !i.building)
             {
                 // Extract start/end from the plan for histogram-based estimation
                 // Clone the keys since we need to move plan later
@@ -951,8 +962,11 @@ impl QueryPlanner {
                     None => continue,
                 };
 
-                // Find ALL matching indexes for this field (not just first)
-                for info in index_fields.iter().filter(|i| i.prefix_field == *field) {
+                // Find ALL matching indexes for this field (not just first, skip building)
+                for info in index_fields
+                    .iter()
+                    .filter(|i| i.prefix_field == *field && !i.building)
+                {
                     let key = IndexKey::from(eq_val);
                     let plan = QueryPlan::IndexScan {
                         index_name: info.index_name.clone(),
@@ -997,11 +1011,10 @@ impl QueryPlanner {
                         if cond_map.keys().any(|k| k != "$exists") {
                             continue;
                         }
-                        // Look for a sparse index on this field
-                        if let Some(info) = index_fields
-                            .iter()
-                            .find(|info| info.prefix_field == *field && info.sparse)
-                        {
+                        // Look for a sparse index on this field (skip building indexes)
+                        if let Some(info) = index_fields.iter().find(|info| {
+                            info.prefix_field == *field && info.sparse && !info.building
+                        }) {
                             return Some((
                                 field.clone(),
                                 QueryPlan::SparseIndexScan {
@@ -1043,24 +1056,51 @@ impl QueryPlanner {
                             continue;
                         }
 
-                        let start = if has_gte {
-                            cond_map.get("$gte").map(IndexKey::from)
-                        } else if has_gt {
-                            cond_map.get("$gt").map(IndexKey::from)
-                        } else {
-                            None
-                        };
+                        // Resolve lower bound: if both $gt and $gte exist,
+                        // pick the tighter (higher value) bound.
+                        // $gt: 10 + $gte: 5 → use $gt: 10 (exclusive, tighter)
+                        // $gt: 3  + $gte: 8 → use $gte: 8 (inclusive, tighter)
+                        let (start, inclusive_start) =
+                            match (cond_map.get("$gt"), cond_map.get("$gte")) {
+                                (Some(gt_val), Some(gte_val)) => {
+                                    match Self::compare_json_for_bound(gt_val, gte_val) {
+                                        std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => {
+                                            // $gt value >= $gte value → $gt is tighter (exclusive)
+                                            (Some(IndexKey::from(gt_val)), false)
+                                        }
+                                        std::cmp::Ordering::Less => {
+                                            // $gte value > $gt value → $gte is tighter (inclusive)
+                                            (Some(IndexKey::from(gte_val)), true)
+                                        }
+                                    }
+                                }
+                                (Some(gt_val), None) => (Some(IndexKey::from(gt_val)), false),
+                                (None, Some(gte_val)) => (Some(IndexKey::from(gte_val)), true),
+                                (None, None) => (None, true),
+                            };
 
-                        let end = if has_lte {
-                            cond_map.get("$lte").map(IndexKey::from)
-                        } else if has_lt {
-                            cond_map.get("$lt").map(IndexKey::from)
-                        } else {
-                            None
+                        // Resolve upper bound: if both $lt and $lte exist,
+                        // pick the tighter (lower value) bound.
+                        // $lt: 100 + $lte: 200 → use $lt: 100 (exclusive, tighter)
+                        // $lt: 50  + $lte: 20  → use $lte: 20 (inclusive, tighter)
+                        let (end, inclusive_end) = match (cond_map.get("$lt"), cond_map.get("$lte"))
+                        {
+                            (Some(lt_val), Some(lte_val)) => {
+                                match Self::compare_json_for_bound(lt_val, lte_val) {
+                                    std::cmp::Ordering::Less | std::cmp::Ordering::Equal => {
+                                        // $lt value <= $lte value → $lt is tighter (exclusive)
+                                        (Some(IndexKey::from(lt_val)), false)
+                                    }
+                                    std::cmp::Ordering::Greater => {
+                                        // $lte value < $lt value → $lte is tighter (inclusive)
+                                        (Some(IndexKey::from(lte_val)), true)
+                                    }
+                                }
+                            }
+                            (Some(lt_val), None) => (Some(IndexKey::from(lt_val)), false),
+                            (None, Some(lte_val)) => (Some(IndexKey::from(lte_val)), true),
+                            (None, None) => (None, true),
                         };
-
-                        let inclusive_start = has_gte || (!has_gt && !has_gte);
-                        let inclusive_end = has_lte || (!has_lt && !has_lte);
 
                         return Some((
                             field.clone(),
@@ -1108,7 +1148,7 @@ impl QueryPlanner {
                     // Look for case-insensitive index by flag (not by name suffix)
                     if let Some(idx_info) = index_fields
                         .iter()
-                        .find(|i| i.prefix_field == *field && i.case_insensitive)
+                        .find(|i| i.prefix_field == *field && i.case_insensitive && !i.building)
                     {
                         if !idx_info.is_compound {
                             return Some((
