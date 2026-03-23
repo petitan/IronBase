@@ -113,19 +113,23 @@ pub enum RangeQueryResult {
 }
 
 impl RangeQueryResult {
-    /// Unwrap as count, panics if not a Count variant
+    /// Unwrap as count — caller must ensure this is a Count variant
     pub fn unwrap_count(self) -> usize {
         match self {
             RangeQueryResult::Count(c) => c,
-            RangeQueryResult::Docs(_) => panic!("Expected Count, got Docs"),
+            RangeQueryResult::Docs(_) => {
+                unreachable!("RangeQueryResult::unwrap_count() called on Docs variant — this is a bug in the caller (used RangeQueryMode::Scan but called unwrap_count)")
+            }
         }
     }
 
-    /// Unwrap as docs, panics if not a Docs variant
+    /// Unwrap as docs — caller must ensure this is a Docs variant
     pub fn unwrap_docs(self) -> Vec<DocumentId> {
         match self {
             RangeQueryResult::Docs(d) => d,
-            RangeQueryResult::Count(_) => panic!("Expected Docs, got Count"),
+            RangeQueryResult::Count(_) => {
+                unreachable!("RangeQueryResult::unwrap_docs() called on Count variant — this is a bug in the caller (used RangeQueryMode::Count but called unwrap_docs)")
+            }
         }
     }
 }

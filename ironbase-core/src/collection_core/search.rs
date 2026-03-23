@@ -1209,8 +1209,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
         // Prepare query tokens for highlights (use first field's options)
         let query_tokens = if options.highlight {
-            let first_fts_opts = field_fts_options.values().next().unwrap();
-            tokenize(query, first_fts_opts)
+            field_fts_options
+                .values()
+                .next()
+                .map(|fts_opts| tokenize(query, fts_opts))
+                .unwrap_or_default()
         } else {
             Vec::new()
         };

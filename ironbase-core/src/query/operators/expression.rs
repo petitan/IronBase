@@ -8,6 +8,19 @@ use serde_json::Value;
 
 use super::traits::OperatorMatcher;
 
+/// Maximum recursion depth for expression evaluation to prevent stack overflow DoS.
+const MAX_EXPR_DEPTH: usize = 64;
+
+fn check_depth(depth: usize) -> Result<()> {
+    if depth >= MAX_EXPR_DEPTH {
+        return Err(IronBaseError::InvalidQuery(format!(
+            "$expr recursion depth exceeded maximum of {}",
+            MAX_EXPR_DEPTH
+        )));
+    }
+    Ok(())
+}
+
 /// $expr operator: Allows use of aggregation expressions within the query language
 ///
 /// # MongoDB Spec
@@ -32,13 +45,13 @@ pub struct ExprOperator;
 /// - If value is an object with an operator, evaluate it recursively
 /// - If value starts with "$", extract field from document
 /// - Otherwise return the literal value
-fn resolve_expr_value(value: &Value, document: &Document) -> Result<Option<Value>> {
+fn resolve_expr_value(value: &Value, document: &Document, depth: usize) -> Result<Option<Value>> {
     // Check if it's a computed expression (object with operator)
     if let Some(obj) = value.as_object() {
         if obj.len() == 1 {
             let (op, _) = obj.iter().next().unwrap();
             if op.starts_with('$') {
-                return evaluate_expression_value(value, document);
+                return evaluate_expression_value(value, document, depth);
             }
         }
     }
@@ -54,7 +67,12 @@ fn resolve_expr_value(value: &Value, document: &Document) -> Result<Option<Value
     Ok(Some(value.clone()))
 }
 
-fn evaluate_expression_value(expr: &Value, document: &Document) -> Result<Option<Value>> {
+fn evaluate_expression_value(
+    expr: &Value,
+    document: &Document,
+    depth: usize,
+) -> Result<Option<Value>> {
+    check_depth(depth)?;
     let expr_obj = expr
         .as_object()
         .ok_or_else(|| IronBaseError::InvalidQuery("Expression must be an object".to_string()))?;
@@ -76,7 +94,7 @@ fn evaluate_expression_value(expr: &Value, document: &Document) -> Result<Option
                 ));
             }
 
-            let input = resolve_expr_value(&arr[0], document)?;
+            let input = resolve_expr_value(&arr[0], document, depth + 1)?;
             let text = match input {
                 Some(Value::String(s)) => s,
                 Some(Value::Null) | None => return Ok(Some(Value::Null)),
@@ -95,7 +113,7 @@ fn evaluate_expression_value(expr: &Value, document: &Document) -> Result<Option
             ))))
         }
         _ => {
-            let computed = evaluate_arithmetic_expr(expr, document)?;
+            let computed = evaluate_arithmetic_expr(expr, document, depth + 1)?;
             Ok(computed.map(Value::from))
         }
     }
@@ -115,12 +133,17 @@ fn parse_substr_number(value: &Value, label: &str) -> Result<usize> {
 }
 
 /// Evaluate an arithmetic expression and return a numeric result
-fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<f64>> {
+fn evaluate_arithmetic_expr(
+    expr: &Value,
+    document: &Document,
+    depth: usize,
+) -> Result<Option<f64>> {
+    check_depth(depth)?;
     let expr_obj = match expr.as_object() {
         Some(obj) => obj,
         None => {
             // It's a literal or field reference
-            let resolved = resolve_expr_value(expr, document)?;
+            let resolved = resolve_expr_value(expr, document, depth + 1)?;
             return Ok(resolved.and_then(|v| value_to_number(&v)));
         }
     };
@@ -140,7 +163,7 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
                 .ok_or_else(|| IronBaseError::InvalidQuery("$add requires an array".to_string()))?;
             let mut result = 0.0;
             for arg in arr {
-                if let Some(num) = evaluate_arithmetic_expr(arg, document)? {
+                if let Some(num) = evaluate_arithmetic_expr(arg, document, depth + 1)? {
                     result += num;
                 } else {
                     return Ok(None); // Missing field or non-numeric value
@@ -157,8 +180,8 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
                     "$subtract requires exactly 2 arguments".to_string(),
                 ));
             }
-            let left = evaluate_arithmetic_expr(&arr[0], document)?;
-            let right = evaluate_arithmetic_expr(&arr[1], document)?;
+            let left = evaluate_arithmetic_expr(&arr[0], document, depth + 1)?;
+            let right = evaluate_arithmetic_expr(&arr[1], document, depth + 1)?;
             match (left, right) {
                 (Some(l), Some(r)) => Ok(Some(l - r)),
                 _ => Ok(None),
@@ -170,7 +193,7 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
             })?;
             let mut result = 1.0;
             for arg in arr {
-                if let Some(num) = evaluate_arithmetic_expr(arg, document)? {
+                if let Some(num) = evaluate_arithmetic_expr(arg, document, depth + 1)? {
                     result *= num;
                 } else {
                     return Ok(None);
@@ -187,8 +210,8 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
                     "$divide requires exactly 2 arguments".to_string(),
                 ));
             }
-            let left = evaluate_arithmetic_expr(&arr[0], document)?;
-            let right = evaluate_arithmetic_expr(&arr[1], document)?;
+            let left = evaluate_arithmetic_expr(&arr[0], document, depth + 1)?;
+            let right = evaluate_arithmetic_expr(&arr[1], document, depth + 1)?;
             match (left, right) {
                 (Some(l), Some(r)) => {
                     if r == 0.0 {
@@ -209,8 +232,8 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
                     "$mod requires exactly 2 arguments".to_string(),
                 ));
             }
-            let left = evaluate_arithmetic_expr(&arr[0], document)?;
-            let right = evaluate_arithmetic_expr(&arr[1], document)?;
+            let left = evaluate_arithmetic_expr(&arr[0], document, depth + 1)?;
+            let right = evaluate_arithmetic_expr(&arr[1], document, depth + 1)?;
             match (left, right) {
                 (Some(l), Some(r)) => {
                     if r == 0.0 {
@@ -231,7 +254,7 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
                     "$abs requires exactly 1 argument".to_string(),
                 ));
             }
-            let val = evaluate_arithmetic_expr(&arr[0], document)?;
+            let val = evaluate_arithmetic_expr(&arr[0], document, depth + 1)?;
             Ok(val.map(|v| v.abs()))
         }
         "$ceil" => {
@@ -243,7 +266,7 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
                     "$ceil requires exactly 1 argument".to_string(),
                 ));
             }
-            let val = evaluate_arithmetic_expr(&arr[0], document)?;
+            let val = evaluate_arithmetic_expr(&arr[0], document, depth + 1)?;
             Ok(val.map(|v| v.ceil()))
         }
         "$floor" => {
@@ -255,12 +278,12 @@ fn evaluate_arithmetic_expr(expr: &Value, document: &Document) -> Result<Option<
                     "$floor requires exactly 1 argument".to_string(),
                 ));
             }
-            let val = evaluate_arithmetic_expr(&arr[0], document)?;
+            let val = evaluate_arithmetic_expr(&arr[0], document, depth + 1)?;
             Ok(val.map(|v| v.floor()))
         }
         _ => {
             // Not an arithmetic operator - try to resolve as a value
-            let resolved = resolve_expr_value(expr, document)?;
+            let resolved = resolve_expr_value(expr, document, depth + 1)?;
             Ok(resolved.and_then(|v| value_to_number(&v)))
         }
     }
@@ -275,7 +298,8 @@ fn value_to_number(value: &Value) -> Option<f64> {
 }
 
 /// Evaluate an aggregation expression against a document
-fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
+fn evaluate_expr(expr: &Value, document: &Document, depth: usize) -> Result<bool> {
+    check_depth(depth)?;
     let expr_obj = expr.as_object().ok_or_else(|| {
         IronBaseError::InvalidQuery("$expr expression must be an object".to_string())
     })?;
@@ -291,14 +315,22 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
 
     match op.as_str() {
         // Comparison operators
-        "$eq" => evaluate_comparison_expr(args, document, |ord| ord == std::cmp::Ordering::Equal),
-        "$ne" => evaluate_comparison_expr(args, document, |ord| ord != std::cmp::Ordering::Equal),
-        "$gt" => evaluate_comparison_expr(args, document, |ord| ord == std::cmp::Ordering::Greater),
-        "$gte" => evaluate_comparison_expr(args, document, |ord| {
+        "$eq" => evaluate_comparison_expr(args, document, depth, |ord| {
+            ord == std::cmp::Ordering::Equal
+        }),
+        "$ne" => evaluate_comparison_expr(args, document, depth, |ord| {
+            ord != std::cmp::Ordering::Equal
+        }),
+        "$gt" => evaluate_comparison_expr(args, document, depth, |ord| {
+            ord == std::cmp::Ordering::Greater
+        }),
+        "$gte" => evaluate_comparison_expr(args, document, depth, |ord| {
             ord == std::cmp::Ordering::Greater || ord == std::cmp::Ordering::Equal
         }),
-        "$lt" => evaluate_comparison_expr(args, document, |ord| ord == std::cmp::Ordering::Less),
-        "$lte" => evaluate_comparison_expr(args, document, |ord| {
+        "$lt" => {
+            evaluate_comparison_expr(args, document, depth, |ord| ord == std::cmp::Ordering::Less)
+        }
+        "$lte" => evaluate_comparison_expr(args, document, depth, |ord| {
             ord == std::cmp::Ordering::Less || ord == std::cmp::Ordering::Equal
         }),
 
@@ -308,7 +340,7 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
                 IronBaseError::InvalidQuery("$and in $expr requires an array".to_string())
             })?;
             for sub_expr in arr {
-                if !evaluate_expr(sub_expr, document)? {
+                if !evaluate_expr(sub_expr, document, depth + 1)? {
                     return Ok(false);
                 }
             }
@@ -319,7 +351,7 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
                 IronBaseError::InvalidQuery("$or in $expr requires an array".to_string())
             })?;
             for sub_expr in arr {
-                if evaluate_expr(sub_expr, document)? {
+                if evaluate_expr(sub_expr, document, depth + 1)? {
                     return Ok(true);
                 }
             }
@@ -334,7 +366,7 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
                     "$not in $expr requires exactly one element".to_string(),
                 ));
             }
-            Ok(!evaluate_expr(&arr[0], document)?)
+            Ok(!evaluate_expr(&arr[0], document, depth + 1)?)
         }
 
         _ => Err(IronBaseError::InvalidQuery(format!(
@@ -346,7 +378,12 @@ fn evaluate_expr(expr: &Value, document: &Document) -> Result<bool> {
 
 /// Evaluate a comparison expression like { "$gt": ["$field1", "$field2"] }
 /// Supports computed expressions: { "$gt": [{ "$add": ["$a", "$b"] }, "$c"] }
-fn evaluate_comparison_expr<F>(args: &Value, document: &Document, compare_fn: F) -> Result<bool>
+fn evaluate_comparison_expr<F>(
+    args: &Value,
+    document: &Document,
+    depth: usize,
+    compare_fn: F,
+) -> Result<bool>
 where
     F: Fn(std::cmp::Ordering) -> bool,
 {
@@ -360,8 +397,8 @@ where
         ));
     }
 
-    let left = resolve_expr_value(&arr[0], document)?;
-    let right = resolve_expr_value(&arr[1], document)?;
+    let left = resolve_expr_value(&arr[0], document, depth + 1)?;
+    let right = resolve_expr_value(&arr[1], document, depth + 1)?;
 
     match (left, right) {
         (Some(l), Some(r)) => {
@@ -392,6 +429,6 @@ impl OperatorMatcher for ExprOperator {
             IronBaseError::InvalidQuery("$expr operator requires document context".to_string())
         })?;
 
-        evaluate_expr(filter_value, doc)
+        evaluate_expr(filter_value, doc, 0)
     }
 }

@@ -434,8 +434,9 @@ impl AccumulatorState {
             }
 
             _ => {
-                // Mismatched state/accumulator - should never happen
-                debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
+                return Err(IronBaseError::AggregationError(
+                    "Mismatched AccumulatorState and Accumulator types in update()".to_string(),
+                ));
             }
         }
         Ok(())
@@ -602,7 +603,9 @@ impl AccumulatorState {
             }
 
             _ => {
-                debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
+                return Err(IronBaseError::AggregationError(
+                    "Mismatched AccumulatorState and Accumulator types in update_with_limits_tracking()".to_string(),
+                ));
             }
         }
 
@@ -766,7 +769,10 @@ impl AccumulatorState {
             }
 
             _ => {
-                debug_assert!(false, "Mismatched AccumulatorState and Accumulator types");
+                return Err(IronBaseError::AggregationError(
+                    "Mismatched AccumulatorState and Accumulator types in update_with_context()"
+                        .to_string(),
+                ));
             }
         }
         Ok(())
