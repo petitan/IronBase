@@ -1837,182 +1837,141 @@ impl<S: Storage + RawStorage> RawOperations for CollectionCore<S> {
         self.check_not_closed()?;
         let parsed_query = Query::from_json(query_json)?;
 
-        // 🔒 ATOMIC: Acquire write lock for entire read-modify-write cycle
-        let mut storage = self.storage.write();
-
-        // Clone catalog to avoid borrow issues
-        let catalog = match storage.get_collection_meta(&self.name) {
-            Some(m) => m.document_catalog.clone(),
-            None => {
-                return Ok(UpdateOnePrepared {
-                    doc_id: None,
-                    old_doc: None,
-                    new_doc: None,
-                    matched: 0,
-                    modified: 0,
-                    collection_name: self.name.clone(),
-                });
-            }
-        };
-
-        // ⚠️ OOM PREVENTION: Streaming document lookup instead of bulk load
-        // Previously used inline_scan_with_catalog() which loaded ALL documents
-
-        // OPTIMIZATION: O(1) lookup for _id queries
-        if let Some(direct_map) = try_direct_id_lookup(&mut *storage, &catalog, query_json) {
-            for (_, doc) in direct_map {
-                let doc_json_str = serde_json::to_string(&doc)?;
-                let mut document = Document::from_json(&doc_json_str)?;
-
-                if parsed_query.matches(&document)? {
-                    let old_doc_value = doc.clone();
-                    let original_document = document.clone();
-                    let was_modified = super::update_operators::apply_update_operators(
-                        &mut document,
-                        update_json,
-                    )?;
-
-                    if was_modified {
-                        self.check_index_constraints(&document, Some(&document.id))?;
-                        self.remove_from_indexes(&original_document)?;
-                        self.add_to_indexes(&document)?;
-
-                        let mut tombstone = old_doc_value.clone();
-                        if let Value::Object(ref mut map) = tombstone {
-                            map.insert("_tombstone".to_string(), Value::Bool(true));
-                            map.insert("_collection".to_string(), Value::String(self.name.clone()));
-                        }
-                        let tombstone_json = serde_json::to_string(&tombstone)?;
-                        storage.write_data(tombstone_json.as_bytes())?;
-
-                        self.validate_document(&document)?;
-                        let updated_json = document.to_json()?;
-                        storage.write_document_raw(
-                            &self.name,
-                            &document.id,
-                            updated_json.as_bytes(),
-                        )?;
-
-                        let new_doc_value = serde_json::to_value(&document)
-                            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-
-                        return Ok(UpdateOnePrepared {
-                            doc_id: Some(document.id),
-                            old_doc: Some(old_doc_value),
-                            new_doc: Some(new_doc_value),
-                            matched: 1,
-                            modified: 1,
-                            collection_name: self.name.clone(),
-                        });
-                    } else {
-                        return Ok(UpdateOnePrepared {
-                            doc_id: Some(document.id),
-                            old_doc: Some(old_doc_value.clone()),
-                            new_doc: Some(old_doc_value),
-                            matched: 1,
-                            modified: 0,
-                            collection_name: self.name.clone(),
-                        });
-                    }
-                }
-            }
-        }
-
-        // STREAMING: Process documents one by one - O(1) memory per doc
-        for (_doc_id, &offset) in catalog.iter() {
-            // Read single document
-            let doc_bytes = match storage.read_data(offset) {
-                Ok(bytes) => bytes,
-                Err(_) => continue,
-            };
-
-            let doc: Value = match serde_json::from_slice(&doc_bytes) {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-            // Skip tombstones
-            if doc
-                .get("_tombstone")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                continue;
-            }
-
-            let doc_json_str = serde_json::to_string(&doc)?;
-            let mut document = Document::from_json(&doc_json_str)?;
-
-            if parsed_query.matches(&document)? {
-                // Found match - save original for WAL
-                let old_doc_value = doc.clone();
-                let original_document = document.clone();
-
-                // Apply update operators
-                let was_modified =
-                    super::update_operators::apply_update_operators(&mut document, update_json)?;
-
-                if was_modified {
-                    // Check unique constraints
-                    self.check_index_constraints(&document, Some(&document.id))?;
-
-                    // Update indexes (under storage lock)
-                    self.remove_from_indexes(&original_document)?;
-                    self.add_to_indexes(&document)?;
-
-                    // Write tombstone for old document
-                    let mut tombstone = old_doc_value.clone();
-                    if let Value::Object(ref mut map) = tombstone {
-                        map.insert("_tombstone".to_string(), Value::Bool(true));
-                        map.insert("_collection".to_string(), Value::String(self.name.clone()));
-                    }
-                    let tombstone_json = serde_json::to_string(&tombstone)?;
-                    storage.write_data(tombstone_json.as_bytes())?;
-
-                    // Validate and write updated document
-                    self.validate_document(&document)?;
-                    let updated_json = document.to_json()?;
-                    storage.write_document_raw(
-                        &self.name,
-                        &document.id,
-                        updated_json.as_bytes(),
-                    )?;
-
-                    // Convert new doc to Value for WAL
-                    let new_doc_value = serde_json::to_value(&document)
-                        .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
-
-                    return Ok(UpdateOnePrepared {
-                        doc_id: Some(document.id),
-                        old_doc: Some(old_doc_value),
-                        new_doc: Some(new_doc_value),
-                        matched: 1,
-                        modified: 1,
-                        collection_name: self.name.clone(),
-                    });
-                } else {
-                    // Matched but not modified
-                    return Ok(UpdateOnePrepared {
-                        doc_id: Some(document.id),
-                        old_doc: Some(old_doc_value.clone()),
-                        new_doc: Some(old_doc_value), // Same as old
-                        matched: 1,
-                        modified: 0,
-                        collection_name: self.name.clone(),
-                    });
-                }
-            }
-        }
-
-        // No match found
-        Ok(UpdateOnePrepared {
+        let no_match = UpdateOnePrepared {
             doc_id: None,
             old_doc: None,
             new_doc: None,
             matched: 0,
             modified: 0,
             collection_name: self.name.clone(),
-        })
+        };
+
+        // ====================================================================
+        // PHASE 1: Find matching document ID (no storage write lock)
+        //
+        // Uses query planner for O(log N) index lookup instead of O(N) catalog
+        // scan. Same approach as delete_one_prepare and update_many_prepare.
+        //
+        // Indexed fields get O(log N) btree lookup via QueryPlanner.
+        // Unindexed fields fall back to collection scan under storage.read()
+        // (still better than the old code which scanned under storage.write()).
+        //
+        // NOTE: limit=Some(1) disables query cache (cache requires limit=None).
+        // ====================================================================
+        let (doc_ids, _) = self.collect_doc_ids_with_options(
+            query_json,
+            None,    // no hint
+            None,    // no sort_field
+            false,   // not desc
+            0,       // skip
+            Some(1), // limit=1 (update_one finds first match)
+            false,   // no cache (limit=1 bypasses cache anyway)
+            0,       // original_skip
+            None,    // original_limit
+            None,    // no cancel_flag
+            None,    // no deadline
+        )?;
+
+        let target_doc_id = match doc_ids.into_iter().next() {
+            Some(id) => id,
+            None => return Ok(no_match),
+        };
+
+        // ====================================================================
+        // PHASE 2: Read-modify-write under storage write lock (brief)
+        //
+        // Re-read document to ensure consistency — it may have been modified
+        // or deleted between Phase 1 and Phase 2 by a concurrent writer.
+        //
+        // Operation order (AKTA #1 fix): validate + storage write BEFORE
+        // index update, so indexes remain consistent if storage write fails.
+        // ====================================================================
+        let mut storage = self.storage.write();
+
+        // Re-read document from catalog under write lock
+        let offset = match storage.get_collection_meta(&self.name) {
+            Some(m) => match m.document_catalog.get(&target_doc_id) {
+                Some(&off) => off,
+                None => return Ok(no_match), // Deleted between phases
+            },
+            None => return Ok(no_match),
+        };
+
+        let doc_bytes = storage.read_data(offset)?;
+        let doc: Value = serde_json::from_slice(&doc_bytes)
+            .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+
+        // Skip tombstones (document may have been deleted between phases)
+        if doc
+            .get("_tombstone")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Ok(no_match);
+        }
+
+        // PERF: Direct Value→Document (no serialization roundtrip)
+        let mut document = Document::from_value(&doc)?;
+
+        // Re-check query match (document may have been modified between phases)
+        if !parsed_query.matches(&document)? {
+            return Ok(no_match);
+        }
+
+        // Found match — apply update
+        let old_doc_value = doc;
+        let original_document = document.clone();
+
+        let was_modified =
+            super::update_operators::apply_update_operators(&mut document, update_json)?;
+
+        if was_modified {
+            // 1. Validate BEFORE any side effects
+            self.check_index_constraints(&document, Some(&document.id))?;
+            self.validate_document(&document)?;
+            let updated_json = document.to_json()?;
+
+            // 2. Write tombstone for old document
+            // Uses write_data (not write_document_raw) because the new doc
+            // will overwrite this doc_id's catalog entry below.
+            let mut tombstone = old_doc_value.clone();
+            if let Value::Object(ref mut map) = tombstone {
+                map.insert("_tombstone".to_string(), Value::Bool(true));
+                map.insert("_collection".to_string(), Value::String(self.name.clone()));
+            }
+            let tombstone_json = serde_json::to_string(&tombstone)?;
+            storage.write_data(tombstone_json.as_bytes())?;
+
+            // 3. Write updated document to storage (source of truth)
+            storage.write_document_raw(&self.name, &document.id, updated_json.as_bytes())?;
+
+            // 4. Update indexes AFTER successful storage write
+            // If index update fails, storage is correct and indexes will be
+            // rebuilt from storage on next restart (WAL recovery).
+            self.remove_from_indexes(&original_document)?;
+            self.add_to_indexes(&document)?;
+
+            let new_doc_value = serde_json::to_value(&document)
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+
+            Ok(UpdateOnePrepared {
+                doc_id: Some(document.id),
+                old_doc: Some(old_doc_value),
+                new_doc: Some(new_doc_value),
+                matched: 1,
+                modified: 1,
+                collection_name: self.name.clone(),
+            })
+        } else {
+            Ok(UpdateOnePrepared {
+                doc_id: Some(document.id),
+                old_doc: Some(old_doc_value.clone()),
+                new_doc: Some(old_doc_value),
+                matched: 1,
+                modified: 0,
+                collection_name: self.name.clone(),
+            })
+        }
     }
 
     /// PERSIST phase for update_one: cache invalidation only.
