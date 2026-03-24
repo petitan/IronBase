@@ -140,13 +140,14 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
     /// Update one document within a transaction
     ///
-    /// Note: Pass the new_doc directly (not update operators).
+    /// Applies update operators ($set, $inc, etc.) to the matched document,
+    /// consistent with non-transactional `update_one`.
     /// Index changes are tracked but not yet applied atomically.
     /// See INDEX_CONSISTENCY.md for future two-phase commit implementation.
     pub fn update_one_tx(
         &self,
         query: &Value,
-        new_doc: Value,
+        update: Value,
         tx: &mut crate::transaction::Transaction,
     ) -> Result<(u64, u64)> {
         use crate::transaction::Operation;
@@ -159,27 +160,31 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
             let id_value = old_doc.get("_id").ok_or(IronBaseError::DocumentNotFound)?;
             let doc_id = Self::extract_doc_id_from_value(id_value)?;
 
-            // Ensure new_doc has _id and _collection fields
-            let new_doc_with_meta = if let Value::Object(mut map) = new_doc {
-                map.insert("_id".to_string(), id_value.clone());
-                map.insert("_collection".to_string(), Value::String(self.name.clone()));
-                Value::Object(map)
-            } else {
-                return Err(IronBaseError::Serialization(
-                    "new_doc must be an object".to_string(),
-                ));
-            };
+            // Build Document from old_doc Value, apply update operators
+            // (mirrors raw_operations.rs:update_one_prepare logic)
+            let mut document = Document::from_value(&old_doc)?;
+            let was_modified =
+                super::update_operators::apply_update_operators(&mut document, &update)?;
 
-            // Prepare new_doc for index tracking
-            let new_doc_for_tracking = new_doc_with_meta.clone();
-            self.validate_value_against_schema(&new_doc_for_tracking)?;
+            if !was_modified {
+                // Matched but nothing changed — return (1, 0)
+                return Ok((1, 0));
+            }
+
+            // Validate BEFORE recording in the transaction
+            self.check_index_constraints(&document, Some(&document.id))?;
+            self.validate_document(&document)?;
+
+            // Convert back to Value for the WAL
+            let new_doc_value = serde_json::to_value(&document)
+                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
 
             // Add operation to transaction
             tx.add_operation(Operation::Update {
                 collection: self.name.clone(),
                 doc_id: doc_id.clone(),
                 old_doc: old_doc.clone(),
-                new_doc: new_doc_with_meta,
+                new_doc: new_doc_value.clone(),
             })?;
 
             // Track index changes for two-phase commit
@@ -194,7 +199,7 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                     // FIX #19: Use get_nested_value to support dot notation (e.g., "profile.code")
                     let old_value = crate::value_utils::get_nested_value(&old_doc, field_name);
                     let new_value =
-                        crate::value_utils::get_nested_value(&new_doc_for_tracking, field_name);
+                        crate::value_utils::get_nested_value(&new_doc_value, field_name);
 
                     // Delete old key if exists
                     if let Some(old_val) = old_value {
