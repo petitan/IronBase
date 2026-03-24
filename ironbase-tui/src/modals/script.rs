@@ -547,8 +547,8 @@ fn render_result(frame: &mut Frame, area: Rect, state: &ScriptState, theme: &The
             err.clone()
         } else {
             let result_str = serde_json::to_string(&result.result).unwrap_or_default();
-            if result_str.len() > 60 {
-                format!("{}...", &result_str[..60])
+            if result_str.chars().count() > 60 {
+                format!("{}...", result_str.chars().take(60).collect::<String>())
             } else {
                 result_str
             }

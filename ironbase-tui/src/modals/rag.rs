@@ -254,7 +254,10 @@ fn render_import_tab(frame: &mut Frame, area: Rect, state: &RagState, theme: &Th
         Style::default().fg(theme.muted)
     };
     let content_block = Block::default()
-        .title(format!(" Content ({} chars) ", state.import_content.len()))
+        .title(format!(
+            " Content ({} chars) ",
+            state.import_content.chars().count()
+        ))
         .borders(Borders::ALL)
         .border_style(content_style);
     let content_preview = if state.import_content.is_empty() {

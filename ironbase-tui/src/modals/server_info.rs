@@ -324,8 +324,8 @@ pub fn render(
     for prompt in &state.prompts {
         let desc = prompt.description.as_deref().unwrap_or("Nincs leiras");
         // Truncate description if too long
-        let desc_truncated = if desc.len() > 50 {
-            format!("{}...", &desc[..47])
+        let desc_truncated = if desc.chars().count() > 50 {
+            format!("{}...", desc.chars().take(47).collect::<String>())
         } else {
             desc.to_string()
         };

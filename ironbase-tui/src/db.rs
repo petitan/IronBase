@@ -681,7 +681,7 @@ impl DbWrapper {
         Ok(result)
     }
 
-    pub async fn rag_search(
+    pub async fn hybrid_search_rag(
         &self,
         collection: &str,
         query: &str,
@@ -691,7 +691,7 @@ impl DbWrapper {
     ) -> Result<Value> {
         let result = self
             .client
-            .rag_search(collection, query, limit, search_mode, rrf_k)
+            .hybrid_search_rag(collection, query, limit, search_mode, rrf_k)
             .await?;
         Ok(result)
     }

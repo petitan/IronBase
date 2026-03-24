@@ -105,8 +105,11 @@ fn render_search_tab(frame: &mut Frame, area: Rect, state: &VectorSearchState, t
         .title(" Vector (JSON array) ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme.accent));
-    let vector_preview = if state.vector_input.len() > 50 {
-        format!("{}...", &state.vector_input[..50])
+    let vector_preview = if state.vector_input.chars().count() > 50 {
+        format!(
+            "{}...",
+            state.vector_input.chars().take(50).collect::<String>()
+        )
     } else if state.vector_input.is_empty() {
         "[1.0, 2.0, 3.0, ...]".to_string()
     } else {

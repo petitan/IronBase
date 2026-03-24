@@ -116,7 +116,7 @@ impl McpClient {
     /// Create a new collection
     pub async fn create_collection(&self, name: &str) -> McpResult<()> {
         let args = serde_json::json!({
-            "name": name
+            "collection": name
         });
         self.call_tool("collection_create", args).await?;
         Ok(())
@@ -125,7 +125,7 @@ impl McpClient {
     /// Drop a collection
     pub async fn drop_collection(&self, name: &str) -> McpResult<()> {
         let args = serde_json::json!({
-            "name": name
+            "collection": name
         });
         self.call_tool("collection_drop", args).await?;
         Ok(())
@@ -986,7 +986,7 @@ impl McpClient {
         let args = serde_json::json!({
             "collection": collection,
             "field": field,
-            "dimension": dimension,
+            "dim": dimension,
             "metric": metric
         });
         let result = self.call_tool("index_create_vector", args).await?;
@@ -1122,7 +1122,7 @@ impl McpClient {
     }
 
     /// Hybrid search with automatic query embedding (auto-embed mode)
-    pub async fn rag_search(
+    pub async fn hybrid_search_rag(
         &self,
         collection: &str,
         query: &str,

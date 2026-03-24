@@ -35,8 +35,18 @@ impl FulltextState {
         }
     }
 
+    /// Convert char index to byte index for String operations
+    fn char_to_byte_pos(&self, char_pos: usize) -> usize {
+        self.query
+            .char_indices()
+            .nth(char_pos)
+            .map(|(byte_pos, _)| byte_pos)
+            .unwrap_or(self.query.len())
+    }
+
     pub fn insert_char(&mut self, c: char) {
-        self.query.insert(self.cursor_pos, c);
+        let byte_pos = self.char_to_byte_pos(self.cursor_pos);
+        self.query.insert(byte_pos, c);
         self.cursor_pos += 1;
         self.error = None;
     }
@@ -44,14 +54,16 @@ impl FulltextState {
     pub fn backspace(&mut self) {
         if self.cursor_pos > 0 {
             self.cursor_pos -= 1;
-            self.query.remove(self.cursor_pos);
+            let byte_pos = self.char_to_byte_pos(self.cursor_pos);
+            self.query.remove(byte_pos);
             self.error = None;
         }
     }
 
     pub fn delete(&mut self) {
-        if self.cursor_pos < self.query.len() {
-            self.query.remove(self.cursor_pos);
+        if self.cursor_pos < self.query.chars().count() {
+            let byte_pos = self.char_to_byte_pos(self.cursor_pos);
+            self.query.remove(byte_pos);
             self.error = None;
         }
     }
@@ -63,7 +75,7 @@ impl FulltextState {
     }
 
     pub fn move_cursor_right(&mut self) {
-        if self.cursor_pos < self.query.len() {
+        if self.cursor_pos < self.query.chars().count() {
             self.cursor_pos += 1;
         }
     }

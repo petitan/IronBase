@@ -111,7 +111,7 @@ impl RagState {
             import_mode: "auto".to_string(),
             create_embedding_field: "embedding".to_string(),
             create_text_field: "content".to_string(),
-            create_provider: "fasttext".to_string(),
+            create_provider: "ollama".to_string(),
             create_language: "hungarian".to_string(),
             ..Default::default()
         }
@@ -240,10 +240,9 @@ impl RagState {
 
     pub fn toggle_create_provider(&mut self) {
         self.create_provider = match self.create_provider.as_str() {
-            "fasttext" => "openai".to_string(),
+            "ollama" => "openai".to_string(),
             "openai" => "ollama".to_string(),
-            "ollama" => "fasttext".to_string(),
-            _ => "fasttext".to_string(),
+            _ => "ollama".to_string(),
         };
     }
 }

@@ -2768,7 +2768,7 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
 
             if let Some(ref db) = app.db {
                 match db
-                    .rag_search(&collection, &query, limit, &mode, rrf_k)
+                    .hybrid_search_rag(&collection, &query, limit, &mode, rrf_k)
                     .await
                 {
                     Ok(result) => {
