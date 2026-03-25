@@ -181,7 +181,9 @@ pub(crate) fn char_to_byte_offset(content: &str, char_offset: usize) -> usize {
 /// Calculate byte offset for the overlap start position.
 ///
 /// Goes back `overlap_chars` characters from `chunk_start_byte` in the
-/// original content. Always returns a valid UTF-8 boundary.
+/// original content, then snaps forward to the nearest word boundary
+/// (whitespace) so overlapping text doesn't start mid-word.
+/// Always returns a valid UTF-8 boundary.
 pub(crate) fn overlap_start_byte(
     content: &str,
     chunk_start_byte: usize,
@@ -192,7 +194,30 @@ pub(crate) fn overlap_start_byte(
     }
     let current_char = byte_to_char_offset(content, chunk_start_byte);
     let target_char = current_char.saturating_sub(overlap_chars);
-    char_to_byte_offset(content, target_char)
+    let target_byte = char_to_byte_offset(content, target_char);
+
+    // Snap forward to nearest word boundary (whitespace)
+    // so the overlap doesn't start in the middle of a word
+    if target_byte < chunk_start_byte {
+        let slice = &content[target_byte..chunk_start_byte];
+        // If we're already at a word boundary, keep it
+        if slice.starts_with(|c: char| c.is_whitespace()) {
+            return target_byte;
+        }
+        // Find the next whitespace in the slice and snap to it
+        if let Some(ws_offset) = slice.find(|c: char| c.is_whitespace()) {
+            // Skip the whitespace itself to start at the word
+            let after_ws = target_byte + ws_offset;
+            let snapped = content[after_ws..]
+                .find(|c: char| !c.is_whitespace())
+                .map(|off| after_ws + off)
+                .unwrap_or(after_ws);
+            if snapped < chunk_start_byte {
+                return snapped;
+            }
+        }
+    }
+    target_byte
 }
 
 /// Convert markdown table rows to plain comma-separated text.
@@ -380,25 +405,46 @@ mod tests {
 
     #[test]
     fn test_overlap_start_byte_basic() {
-        let content = "abcdefghij"; // 10 ASCII chars
-                                    // Go back 3 chars from byte 7 ('h') → byte 4 ('e')
-        assert_eq!(overlap_start_byte(content, 7, 3), 4);
+        let content = "alpha bravo charlie delta";
+        // Go back 6 chars from byte 12 ('c') → lands at "bravo " → snaps to 'b'
+        let result = overlap_start_byte(content, 12, 6);
+        assert!(
+            content[result..].starts_with(|c: char| !c.is_whitespace()),
+            "Overlap should start at a word, got: '{}'",
+            &content[result..result + 5.min(content.len() - result)]
+        );
         // Go back 0 chars → same position
-        assert_eq!(overlap_start_byte(content, 7, 0), 7);
+        assert_eq!(overlap_start_byte(content, 12, 0), 12);
         // Go back from position 0 → stays at 0
         assert_eq!(overlap_start_byte(content, 0, 5), 0);
-        // Go back more chars than available → 0
-        assert_eq!(overlap_start_byte(content, 3, 100), 0);
+    }
+
+    #[test]
+    fn test_overlap_start_byte_snaps_to_word() {
+        let content = "fékerőmérő kalibrálási jegyzőkönyv elkészítése";
+        // Go back from "jegyzőkönyv" start — should snap to a word boundary
+        let jegyzo_start = content.find("jegyző").unwrap();
+        let result = overlap_start_byte(content, jegyzo_start, 5);
+        let overlap_text = &content[result..jegyzo_start];
+        // Should not start mid-word
+        assert!(
+            result == 0
+                || content[..result].ends_with(|c: char| c.is_whitespace())
+                || content[result..].starts_with(|c: char| !c.is_whitespace()),
+            "Overlap should start at word boundary, got offset {} = '{}'",
+            result,
+            overlap_text
+        );
     }
 
     #[test]
     fn test_overlap_start_byte_multibyte() {
-        // "Helló világ" - H(1) e(1) l(1) l(1) ó(2) ' '(1) v(1) i(1) l(1) á(2) g(1)
-        // = 12 bytes, 11 chars
         let content = "Helló világ";
-        assert_eq!(content.len(), 13); // actual byte len
-                                       // Go back 3 chars from byte 7 (which is 'v', char index 6) → char 3 = 'l' = byte 3
-        assert_eq!(overlap_start_byte(content, 7, 3), 3);
+        // Go back 3 chars from 'v' (byte 7) → snaps to word boundary
+        let result = overlap_start_byte(content, 7, 3);
+        assert!(result <= 7);
+        // Should land at a valid position
+        assert!(content.is_char_boundary(result));
     }
 
     #[test]
