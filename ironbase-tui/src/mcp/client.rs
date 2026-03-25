@@ -397,19 +397,81 @@ impl McpClient {
         Ok(docs)
     }
 
-    /// List indexes for a collection
+    /// List indexes for a collection (names only, for backward compat)
     pub async fn list_indexes(&self, collection: &str) -> McpResult<Vec<String>> {
+        let entries = self.list_indexes_typed(collection).await?;
+        Ok(entries.into_iter().map(|e| e.name).collect())
+    }
+
+    /// List indexes with type information (btree/fulltext/vector)
+    pub async fn list_indexes_typed(
+        &self,
+        collection: &str,
+    ) -> McpResult<Vec<crate::state::index::IndexEntry>> {
+        use crate::state::index::{IndexEntry, IndexKind};
+
         let args = serde_json::json!({
             "collection": collection
         });
 
         let result = self.call_tool("index_list", args).await?;
-        // Result is {"indexes": ["name1", "name2", ...]}
-        let indexes: Vec<String> = result
-            .get("indexes")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        Ok(indexes)
+        let mut entries = Vec::new();
+
+        // B+ tree indexes (simple string names)
+        if let Some(btree) = result.get("btree_indexes").and_then(|v| v.as_array()) {
+            for idx in btree {
+                if let Some(name) = idx.as_str() {
+                    entries.push(IndexEntry {
+                        name: name.to_string(),
+                        kind: IndexKind::BTree,
+                        detail: String::new(),
+                    });
+                }
+            }
+        }
+
+        // Fulltext indexes (objects with name, field, language, etc.)
+        if let Some(ft) = result.get("fulltext_indexes").and_then(|v| v.as_array()) {
+            for idx in ft {
+                let name = idx.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let field = idx.get("field").and_then(|v| v.as_str()).unwrap_or("");
+                let lang = idx.get("language").and_then(|v| v.as_str()).unwrap_or("");
+                let docs = idx
+                    .get("num_documents")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                // Remove from btree list if present (server includes fts in both)
+                entries.retain(|e| e.name != name);
+                entries.push(IndexEntry {
+                    name: name.to_string(),
+                    kind: IndexKind::Fulltext,
+                    detail: format!("{} ({}, {} docs)", field, lang, docs),
+                });
+            }
+        }
+
+        // Vector indexes (objects with name, field, dim, metric, etc.)
+        if let Some(vi) = result.get("vector_indexes").and_then(|v| v.as_array()) {
+            for idx in vi {
+                let name = idx.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                let field = idx.get("field").and_then(|v| v.as_str()).unwrap_or("");
+                let dim = idx.get("dim").and_then(|v| v.as_u64()).unwrap_or(0);
+                let metric = idx.get("metric").and_then(|v| v.as_str()).unwrap_or("");
+                let count = idx
+                    .get("vector_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                // Remove from btree list if present
+                entries.retain(|e| e.name != name);
+                entries.push(IndexEntry {
+                    name: name.to_string(),
+                    kind: IndexKind::Vector,
+                    detail: format!("{} ({}d, {}, {} vecs)", field, dim, metric, count),
+                });
+            }
+        }
+
+        Ok(entries)
     }
 
     /// Create a single-field index

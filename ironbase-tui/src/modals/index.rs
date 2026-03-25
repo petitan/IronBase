@@ -88,17 +88,23 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
                 Style::default().fg(theme.fg)
             };
 
+            // Find entry with type info
+            let entry = state.index_entries.iter().find(|e| &e.name == idx);
+            let kind_label = entry
+                .map(|e| format!("[{}]", e.kind.label()))
+                .unwrap_or_default();
+            let detail = entry
+                .map(|e| {
+                    if e.detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", e.detail)
+                    }
+                })
+                .unwrap_or_default();
+
             // Find statistics for this index
             let stats = state.statistics.iter().find(|s| &s.name == idx);
-
-            // Build markers
-            let mut markers = String::new();
-            if idx.contains("unique") {
-                markers.push_str(" [U]");
-            }
-            if idx.contains("sparse") {
-                markers.push_str(" [S]");
-            }
 
             // Add staleness indicator
             let staleness_icon = match stats.map(|s| s.staleness_hint()) {
@@ -108,8 +114,8 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
                 _ => "",
             };
 
-            // Format: "  index_name [U] [S] ●  "
-            let text = format!("  {}{}{}", idx, markers, staleness_icon);
+            // Format: "  [B+] index_name field_detail ●  "
+            let text = format!("  {} {}{}{}", kind_label, idx, detail, staleness_icon);
 
             // Color the staleness icon
             if is_selected {
@@ -123,7 +129,7 @@ fn render_index_list(frame: &mut Frame, area: Rect, state: &IndexState, theme: &
                 };
 
                 // Create spans for proper coloring
-                let base_text = format!("  {}{}", idx, markers);
+                let base_text = format!("  {} {}{}", kind_label, idx, detail);
                 ListItem::new(Line::from(vec![
                     Span::styled(base_text, style),
                     Span::styled(staleness_icon, Style::default().fg(staleness_color)),

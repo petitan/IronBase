@@ -62,11 +62,40 @@ impl IndexStatistics {
     }
 }
 
+/// Index entry with type information
+#[derive(Debug, Clone)]
+pub struct IndexEntry {
+    pub name: String,
+    pub kind: IndexKind,
+    /// Extra info (e.g. field, language, dim, metric)
+    pub detail: String,
+}
+
+/// Index type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexKind {
+    BTree,
+    Fulltext,
+    Vector,
+}
+
+impl IndexKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            IndexKind::BTree => "B+",
+            IndexKind::Fulltext => "FT",
+            IndexKind::Vector => "VEC",
+        }
+    }
+}
+
 /// Index management state
 #[derive(Debug, Clone, Default)]
 pub struct IndexState {
     pub collection: String,
     pub indexes: Vec<String>,
+    /// Structured index entries with type info
+    pub index_entries: Vec<IndexEntry>,
     pub selected_index: usize,
     pub is_creating: bool,
     pub form_field: usize, // 0 = field name, 1 = compound, 2 = unique, 3 = sparse
@@ -91,6 +120,28 @@ impl IndexState {
         Self {
             collection,
             indexes,
+            index_entries: Vec::new(),
+            selected_index: 0,
+            is_creating: false,
+            form_field: 0,
+            field_input: String::new(),
+            compound_fields: Vec::new(),
+            is_compound: false,
+            unique: false,
+            sparse: false,
+            error: None,
+            message: None,
+            statistics: Vec::new(),
+            is_analyzing: false,
+        }
+    }
+
+    pub fn new_with_entries(collection: String, entries: Vec<IndexEntry>) -> Self {
+        let indexes = entries.iter().map(|e| e.name.clone()).collect();
+        Self {
+            collection,
+            indexes,
+            index_entries: entries,
             selected_index: 0,
             is_creating: false,
             form_field: 0,

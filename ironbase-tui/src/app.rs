@@ -550,9 +550,10 @@ impl App {
             return;
         };
 
-        match db.list_indexes(&collection).await {
-            Ok(indexes) => {
-                self.index_state.indexes = indexes;
+        match db.list_indexes_typed(&collection).await {
+            Ok(entries) => {
+                self.index_state.indexes = entries.iter().map(|e| e.name.clone()).collect();
+                self.index_state.index_entries = entries;
             }
             Err(e) => {
                 self.index_state.message = Some(format!("Hiba: {}", e));

@@ -258,10 +258,19 @@ impl DbWrapper {
         Ok(result)
     }
 
-    /// Get indexes for a collection
+    /// Get indexes for a collection (names only)
     pub async fn list_indexes(&self, collection: &str) -> Result<Vec<String>> {
         let indexes = self.client.list_indexes(collection).await?;
         Ok(indexes)
+    }
+
+    /// Get indexes with type information (btree/fulltext/vector)
+    pub async fn list_indexes_typed(
+        &self,
+        collection: &str,
+    ) -> Result<Vec<crate::state::index::IndexEntry>> {
+        let entries = self.client.list_indexes_typed(collection).await?;
+        Ok(entries)
     }
 
     /// Get total document count across all loaded collections
