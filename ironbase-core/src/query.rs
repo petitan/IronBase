@@ -118,6 +118,23 @@ impl Query {
     /// assert!(result.is_err());
     /// ```
     pub fn from_json(json: &Value) -> Result<Self> {
+        // Query/filter must be a JSON object or null (MongoDB-compatible)
+        // Strings like "{}" are NOT valid — they silently match nothing
+        match json {
+            Value::Object(_) | Value::Null => {}
+            other => {
+                return Err(crate::IronBaseError::InvalidQuery(format!(
+                    "Query filter must be a JSON object, got {}",
+                    match other {
+                        Value::String(s) => format!("string \"{}\"", s),
+                        Value::Number(n) => format!("number {}", n),
+                        Value::Bool(b) => format!("boolean {}", b),
+                        Value::Array(_) => "array".to_string(),
+                        _ => "unknown type".to_string(),
+                    }
+                )));
+            }
+        }
         // Validate operators before storing
         Self::validate_query_operators(json)?;
         Ok(Query { json: json.clone() })
