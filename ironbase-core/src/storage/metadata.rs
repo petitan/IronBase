@@ -438,36 +438,29 @@ impl StorageEngine {
         Ok(buffer.into_inner())
     }
 
-    /// Write metadata body and update header atomically
+    /// Write metadata body and update the header pointer durably.
     ///
-    /// Performs the following steps:
-    /// 1. Seek to metadata position and write metadata bytes
-    /// 2. Update header struct with new metadata location
-    /// 3. Rewrite header at file start
-    /// 4. Sync all changes to disk
+    /// Uses a two-fsync write barrier: the metadata body is synced before the
+    /// header is rewritten, so a crash between the two fsyncs leaves the file
+    /// with the OLD header pointing at OLD metadata (still valid) rather than
+    /// a NEW header pointing at un-persisted bytes. A single `sync_all()` at
+    /// the end would be insufficient — the kernel may flush pages in any order.
     pub(crate) fn write_metadata_and_header(
         file: &mut File,
         header: &mut Header,
         metadata_bytes: &[u8],
         metadata_offset: u64,
     ) -> Result<()> {
-        // 1. Seek to metadata position
         file.seek(SeekFrom::Start(metadata_offset))?;
-
-        // 2. Write metadata body
         file.write_all(metadata_bytes)?;
+        file.sync_all()?;
 
-        // 3. Update header with new metadata location
         header.metadata_offset = metadata_offset;
         header.metadata_size = metadata_bytes.len() as u64;
-
-        // 4. Rewrite header at file start
         file.seek(SeekFrom::Start(0))?;
         let header_bytes =
             bincode::serialize(header).map_err(|e| IronBaseError::Serialization(e.to_string()))?;
         file.write_all(&header_bytes)?;
-
-        // 5. Sync all changes to disk
         file.sync_all()?;
 
         Ok(())
