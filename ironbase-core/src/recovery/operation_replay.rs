@@ -3,6 +3,7 @@
 
 use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
+use crate::recovery::RecoveryMode;
 use crate::storage::{RawStorage, Storage};
 use crate::transaction::Operation;
 use crate::wal::{WALEntry, WALEntryType};
@@ -13,13 +14,36 @@ use crate::wal::{WALEntry, WALEntryType};
 /// to the storage engine.
 pub struct OperationReplay;
 
+/// Truncate bytes to a UTF-8 safe string preview for diagnostics.
+fn data_preview(data: &[u8]) -> String {
+    const MAX: usize = 200;
+    let cut = data.len().min(MAX);
+    String::from_utf8_lossy(&data[..cut]).into_owned()
+}
+
 impl OperationReplay {
-    /// Replay a set of WAL entries to storage
+    /// Replay a set of WAL entries to storage.
     ///
     /// Only processes Operation entries, ignoring Begin/Commit/Abort markers.
+    /// The recovery mode is read from the `IRONBASE_RECOVERY_MODE` env var
+    /// (`strict` by default, `best_effort` to skip bad entries on corruption).
     pub fn replay<S: Storage + RawStorage>(
         storage: &mut S,
         entries: &[WALEntry],
+    ) -> Result<ReplayStats> {
+        Self::replay_with_mode(storage, entries, RecoveryMode::from_env())
+    }
+
+    /// Replay WAL entries with an explicit recovery mode.
+    ///
+    /// In `Strict` mode, any deserialize or apply failure aborts recovery.
+    /// In `BestEffort` mode, failures are logged at WARN and the offending
+    /// entry is skipped (`ReplayStats::entries_skipped` is incremented);
+    /// this may cause data loss and is intended for emergency recovery.
+    pub fn replay_with_mode<S: Storage + RawStorage>(
+        storage: &mut S,
+        entries: &[WALEntry],
+        mode: RecoveryMode,
     ) -> Result<ReplayStats> {
         let mut stats = ReplayStats::default();
 
@@ -27,10 +51,51 @@ impl OperationReplay {
             .iter()
             .filter(|e| e.entry_type == WALEntryType::Operation)
         {
-            let op: Operation = serde_json::from_slice(&entry.data)
-                .map_err(|e| IronBaseError::Serialization(e.to_string()))?;
+            let op: Operation = match serde_json::from_slice(&entry.data) {
+                Ok(op) => op,
+                Err(e) => match mode {
+                    RecoveryMode::Strict => {
+                        tracing::error!(
+                            tx_id = entry.transaction_id,
+                            entry_size = entry.data.len(),
+                            data_preview = %data_preview(&entry.data),
+                            error = %e,
+                            "WAL replay: Operation deserialization failed (possible schema mismatch or corruption)"
+                        );
+                        return Err(IronBaseError::Serialization(format!(
+                            "WAL replay failed at tx_id={}: {}. Set IRONBASE_RECOVERY_MODE=best_effort to skip bad entries (may cause data loss).",
+                            entry.transaction_id, e
+                        )));
+                    }
+                    RecoveryMode::BestEffort => {
+                        tracing::warn!(
+                            tx_id = entry.transaction_id,
+                            entry_size = entry.data.len(),
+                            data_preview = %data_preview(&entry.data),
+                            error = %e,
+                            "WAL replay: SKIPPING bad Operation entry (best_effort mode — DATA LOSS POSSIBLE)"
+                        );
+                        stats.entries_skipped += 1;
+                        continue;
+                    }
+                },
+            };
 
-            Self::apply_operation(storage, &op)?;
+            if let Err(e) = Self::apply_operation(storage, &op) {
+                match mode {
+                    RecoveryMode::Strict => return Err(e),
+                    RecoveryMode::BestEffort => {
+                        tracing::warn!(
+                            tx_id = entry.transaction_id,
+                            error = %e,
+                            "WAL replay: SKIPPING Operation — apply_operation failed (best_effort mode — DATA LOSS POSSIBLE)"
+                        );
+                        stats.entries_skipped += 1;
+                        continue;
+                    }
+                }
+            }
+
             stats.operations_replayed += 1;
 
             match op {
@@ -122,6 +187,8 @@ pub struct ReplayStats {
     pub inserts: usize,
     pub updates: usize,
     pub deletes: usize,
+    /// Number of entries skipped due to deserialize/apply errors (best_effort mode only)
+    pub entries_skipped: usize,
 }
 
 #[cfg(test)]
@@ -420,5 +487,65 @@ mod tests {
 
         assert_eq!(stats.operations_replayed, 1);
         assert_eq!(stats.inserts, 1);
+    }
+
+    fn build_mixed_entries() -> Vec<WALEntry> {
+        let good1 = Operation::Insert {
+            collection: "test".to_string(),
+            doc_id: DocumentId::Int(1),
+            doc: json!({"_id": 1, "name": "Alice"}),
+        };
+        let good2 = Operation::Insert {
+            collection: "test".to_string(),
+            doc_id: DocumentId::Int(3),
+            doc: json!({"_id": 3, "name": "Charlie"}),
+        };
+        vec![
+            WALEntry::new(
+                1,
+                WALEntryType::Operation,
+                serde_json::to_vec(&good1).unwrap(),
+            ),
+            WALEntry::new(
+                2,
+                WALEntryType::Operation,
+                b"not valid json at all".to_vec(),
+            ),
+            WALEntry::new(
+                3,
+                WALEntryType::Operation,
+                serde_json::to_vec(&good2).unwrap(),
+            ),
+        ]
+    }
+
+    #[test]
+    fn test_replay_strict_mode_fails_on_corrupt_entry() {
+        let mut storage = MemoryStorage::new();
+        let entries = build_mixed_entries();
+
+        let result =
+            OperationReplay::replay_with_mode(&mut storage, &entries, RecoveryMode::Strict);
+
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("tx_id=2") && err.contains("IRONBASE_RECOVERY_MODE=best_effort"),
+            "error must mention tx_id and the best_effort hint, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_replay_best_effort_skips_corrupt_entry() {
+        let mut storage = MemoryStorage::new();
+        let entries = build_mixed_entries();
+
+        let stats =
+            OperationReplay::replay_with_mode(&mut storage, &entries, RecoveryMode::BestEffort)
+                .expect("best_effort must not propagate deserialize errors");
+
+        assert_eq!(stats.operations_replayed, 2);
+        assert_eq!(stats.inserts, 2);
+        assert_eq!(stats.entries_skipped, 1);
     }
 }

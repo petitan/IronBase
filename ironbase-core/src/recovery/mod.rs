@@ -19,6 +19,38 @@ use crate::error::Result;
 use crate::storage::{RawStorage, Storage};
 use crate::wal::{TransactionGrouper, WALEntryIterator, WriteAheadLog};
 
+/// Behavior when a WAL entry fails to deserialize or apply during recovery.
+///
+/// Default is `Strict` (abort on any error). `BestEffort` logs and skips
+/// failed entries — use only for emergency recovery from a partially corrupt
+/// WAL that would otherwise block startup. May cause data loss.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecoveryMode {
+    /// Abort recovery on the first deserialize/apply failure.
+    #[default]
+    Strict,
+    /// Log the failure and skip the offending entry, then continue.
+    BestEffort,
+}
+
+impl RecoveryMode {
+    /// Read mode from the `IRONBASE_RECOVERY_MODE` env var.
+    ///
+    /// Recognized values: `strict` (default, any unset/unknown value maps here),
+    /// `best_effort` / `besteffort` (case-insensitive).
+    pub fn from_env() -> Self {
+        match std::env::var("IRONBASE_RECOVERY_MODE")
+            .ok()
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("best_effort" | "besteffort") => Self::BestEffort,
+            _ => Self::Strict,
+        }
+    }
+}
+
 /// Combined statistics from WAL recovery
 #[derive(Debug, Default, Clone)]
 pub struct RecoveryStats {
@@ -34,6 +66,8 @@ pub struct RecoveryStats {
     pub deletes: usize,
     /// Number of index changes parsed
     pub index_changes: usize,
+    /// Number of entries skipped due to deserialize/apply errors (best_effort mode only)
+    pub entries_skipped: usize,
 }
 
 impl RecoveryStats {
@@ -43,6 +77,7 @@ impl RecoveryStats {
         self.inserts += replay.inserts;
         self.updates += replay.updates;
         self.deletes += replay.deletes;
+        self.entries_skipped += replay.entries_skipped;
     }
 
     /// Merge index replay stats
@@ -238,6 +273,7 @@ mod tests {
             inserts: 3,
             updates: 1,
             deletes: 1,
+            entries_skipped: 2,
         };
 
         stats.merge_replay_stats(&replay);
@@ -246,6 +282,7 @@ mod tests {
         assert_eq!(stats.inserts, 3);
         assert_eq!(stats.updates, 1);
         assert_eq!(stats.deletes, 1);
+        assert_eq!(stats.entries_skipped, 2);
     }
 
     #[test]
