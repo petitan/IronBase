@@ -221,8 +221,8 @@ impl WriteAheadLog {
         temp_file.sync_all()?;
         drop(temp_file);
 
-        // Atomic rename
-        std::fs::rename(&temp_path, &self.path)?;
+        // Atomic rename + parent directory fsync for durability on POSIX
+        crate::fs_utils::atomic_rename_and_sync(&temp_path, &self.path)?;
 
         // Reopen file
         self.file = OpenOptions::new()

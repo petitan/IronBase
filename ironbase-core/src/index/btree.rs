@@ -3116,8 +3116,9 @@ impl BPlusTree {
     }
 
     /// Two-Phase Commit: Phase 2 - Commit prepared changes atomically
-    /// Performs atomic rename from temp file to final file
-    /// If final_path doesn't exist yet, creates parent directories
+    /// Performs atomic rename from temp file to final file, then fsyncs the
+    /// parent directory on POSIX to persist the directory entry.
+    /// If final_path doesn't exist yet, creates parent directories.
     pub fn commit_prepared_changes(temp_path: &PathBuf, final_path: &PathBuf) -> Result<()> {
         use std::fs;
 
@@ -3126,8 +3127,8 @@ impl BPlusTree {
             fs::create_dir_all(parent).map_err(IronBaseError::Io)?;
         }
 
-        // Atomic rename: temp → final
-        fs::rename(temp_path, final_path).map_err(IronBaseError::Io)?;
+        // Atomic rename + parent directory fsync for durability on POSIX
+        crate::fs_utils::atomic_rename_and_sync(temp_path, final_path)?;
 
         Ok(())
     }

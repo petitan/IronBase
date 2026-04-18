@@ -527,8 +527,8 @@ impl StorageEngine {
         // Close new file before renaming
         drop(new_file);
 
-        // Replace old file with new file (atomic on most filesystems)
-        fs::rename(temp_path, &self.file_path)?;
+        // Atomic rename + parent directory fsync for durability on POSIX
+        crate::fs_utils::atomic_rename_and_sync(temp_path, &self.file_path)?;
 
         // Reopen the compacted file
         let mut file = OpenOptions::new()
