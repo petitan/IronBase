@@ -484,31 +484,27 @@ impl FilterState {
 
     pub fn backspace(&mut self) {
         match self.focus {
-            FilterFocus::Field => {
-                if self.field_cursor > 0 {
-                    self.field_cursor -= 1;
-                    // Convert character position to byte position for UTF-8 safety
-                    let byte_pos = self
-                        .field_input
-                        .char_indices()
-                        .nth(self.field_cursor)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.field_input.remove(byte_pos);
-                    self.update_suggestions();
-                }
+            FilterFocus::Field if self.field_cursor > 0 => {
+                self.field_cursor -= 1;
+                // Convert character position to byte position for UTF-8 safety
+                let byte_pos = self
+                    .field_input
+                    .char_indices()
+                    .nth(self.field_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.field_input.remove(byte_pos);
+                self.update_suggestions();
             }
-            FilterFocus::Value => {
-                if self.value_cursor > 0 {
-                    self.value_cursor -= 1;
-                    let byte_pos = self
-                        .value_input
-                        .char_indices()
-                        .nth(self.value_cursor)
-                        .map(|(i, _)| i)
-                        .unwrap_or(0);
-                    self.value_input.remove(byte_pos);
-                }
+            FilterFocus::Value if self.value_cursor > 0 => {
+                self.value_cursor -= 1;
+                let byte_pos = self
+                    .value_input
+                    .char_indices()
+                    .nth(self.value_cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.value_input.remove(byte_pos);
             }
             _ => {}
         }
@@ -516,15 +512,11 @@ impl FilterState {
 
     pub fn cursor_left(&mut self) {
         match self.focus {
-            FilterFocus::Field => {
-                if self.field_cursor > 0 {
-                    self.field_cursor -= 1;
-                }
+            FilterFocus::Field if self.field_cursor > 0 => {
+                self.field_cursor -= 1;
             }
-            FilterFocus::Value => {
-                if self.value_cursor > 0 {
-                    self.value_cursor -= 1;
-                }
+            FilterFocus::Value if self.value_cursor > 0 => {
+                self.value_cursor -= 1;
             }
             _ => {}
         }
@@ -532,17 +524,15 @@ impl FilterState {
 
     pub fn cursor_right(&mut self) {
         match self.focus {
-            FilterFocus::Field => {
+            FilterFocus::Field
                 // Use character count, not byte length
-                if self.field_cursor < self.field_input.chars().count() {
+                if self.field_cursor < self.field_input.chars().count() => {
                     self.field_cursor += 1;
                 }
-            }
-            FilterFocus::Value => {
-                if self.value_cursor < self.value_input.chars().count() {
+            FilterFocus::Value
+                if self.value_cursor < self.value_input.chars().count() => {
                     self.value_cursor += 1;
                 }
-            }
             _ => {}
         }
     }

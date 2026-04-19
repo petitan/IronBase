@@ -638,8 +638,6 @@ pub fn compact_scan_standalone(
     for (coll_name, coll_meta) in snapshot.snapshot_collections.iter() {
         // Check for cancellation at collection boundary
         if config.is_cancelled() {
-            stats.cancelled = true;
-            // Cleanup temp file
             let _ = fs::remove_file(&snapshot.temp_path);
             return Err(IronBaseError::Cancelled(
                 "Compaction cancelled by user".to_string(),
@@ -655,7 +653,6 @@ pub fn compact_scan_standalone(
 
             // Check for cancellation periodically (every chunk)
             if chunk_count > 0 && chunk_count % config.chunk_size == 0 && config.is_cancelled() {
-                stats.cancelled = true;
                 let _ = fs::remove_file(&snapshot.temp_path);
                 return Err(IronBaseError::Cancelled(
                     "Compaction cancelled by user".to_string(),

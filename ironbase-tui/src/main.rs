@@ -233,13 +233,12 @@ async fn run_app<B: Backend>(terminal: &mut Terminal<B>, app: &mut App) -> anyho
                         handle_global_key_async(app, key.code, key.modifiers).await;
                     }
                 }
-                Event::Resize(_, height) => {
+                Event::Resize(_, height)
                     // Update page_size when terminal is resized
-                    if app.update_page_size(height) {
+                    if app.update_page_size(height) => {
                         // Refresh documents with new page size
                         let _ = app.refresh_documents_async().await;
                     }
-                }
                 _ => {}
             }
         }
@@ -601,10 +600,10 @@ fn handle_help_key(app: &mut App, key: KeyCode) {
             app.help_scroll = 0;
             app.close_modal();
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.help_scroll < modals::help::HELP_LINES.saturating_sub(10) {
-                app.help_scroll += 1;
-            }
+        KeyCode::Down | KeyCode::Char('j')
+            if app.help_scroll < modals::help::HELP_LINES.saturating_sub(10) =>
+        {
+            app.help_scroll += 1;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.help_scroll = app.help_scroll.saturating_sub(1);
@@ -634,10 +633,8 @@ fn handle_server_info_key(app: &mut App, key: KeyCode) {
             app.server_info_scroll = 0;
             app.close_modal();
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.server_info_scroll < max_scroll {
-                app.server_info_scroll += 1;
-            }
+        KeyCode::Down | KeyCode::Char('j') if app.server_info_scroll < max_scroll => {
+            app.server_info_scroll += 1;
         }
         KeyCode::Up | KeyCode::Char('k') => {
             app.server_info_scroll = app.server_info_scroll.saturating_sub(1);
@@ -1574,10 +1571,8 @@ async fn handle_collection_search_key(app: &mut App, key: KeyCode) {
             KeyCode::Backspace => app.search.delete_char(),
             KeyCode::Left => app.search.cursor_left(),
             KeyCode::Right => app.search.cursor_right(),
-            KeyCode::Tab | KeyCode::Down => {
-                if !app.search.results.is_empty() {
-                    app.search.input_active = false;
-                }
+            KeyCode::Tab | KeyCode::Down if !app.search.results.is_empty() => {
+                app.search.input_active = false;
             }
             _ => {}
         }
@@ -1603,14 +1598,12 @@ async fn handle_collection_search_key(app: &mut App, key: KeyCode) {
 fn handle_document_search_key(app: &mut App, key: KeyCode) {
     match key {
         KeyCode::Esc => app.close_modal(),
-        KeyCode::Enter => {
-            if !app.search.query_input.is_empty() {
-                app.execute_document_search();
-                // Ha van találat, zárd be a modalt és váltsd Detail pane-re
-                if !app.search.doc_matches.is_empty() {
-                    app.close_modal();
-                    app.active_pane = crate::app::Pane::Detail;
-                }
+        KeyCode::Enter if !app.search.query_input.is_empty() => {
+            app.execute_document_search();
+            // Ha van találat, zárd be a modalt és váltsd Detail pane-re
+            if !app.search.doc_matches.is_empty() {
+                app.close_modal();
+                app.active_pane = crate::app::Pane::Detail;
             }
         }
         KeyCode::Char('n') => {
@@ -1961,10 +1954,8 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                         app.filter_state.update_suggestions();
                     }
                 }
-                FilterFocus::Filters => {
-                    if app.filter_state.selected_filter > 0 {
-                        app.filter_state.selected_filter -= 1;
-                    }
+                FilterFocus::Filters if app.filter_state.selected_filter > 0 => {
+                    app.filter_state.selected_filter -= 1;
                 }
                 _ => {}
             }
@@ -1980,10 +1971,10 @@ async fn handle_filter_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
                         app.filter_state.update_suggestions();
                     }
                 }
-                FilterFocus::Filters => {
-                    if app.filter_state.selected_filter + 1 < app.filter_state.filters.len() {
-                        app.filter_state.selected_filter += 1;
-                    }
+                FilterFocus::Filters
+                    if app.filter_state.selected_filter + 1 < app.filter_state.filters.len() =>
+                {
+                    app.filter_state.selected_filter += 1;
                 }
                 _ => {}
             }
@@ -2081,51 +2072,45 @@ async fn handle_script_key_async(app: &mut App, key: KeyCode, modifiers: KeyModi
 async fn handle_script_browse_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     match (key, modifiers) {
         (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => app.close_modal(),
-        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-            if app.script_state.selected_script > 0 {
+        (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE)
+            if app.script_state.selected_script > 0 => {
                 app.script_state.selected_script -= 1;
             }
-        }
-        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-            if app.script_state.selected_script + 1 < app.script_state.scripts.len() {
+        (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE)
+            if app.script_state.selected_script + 1 < app.script_state.scripts.len() => {
                 app.script_state.selected_script += 1;
             }
-        }
-        (KeyCode::Enter, _) => {
+        (KeyCode::Enter, _)
             // Open selected script for editing (load full script from MCP)
-            if !app.script_state.scripts.is_empty() {
+            if !app.script_state.scripts.is_empty() => {
                 app.load_script_for_edit_async().await;
             }
-        }
         (KeyCode::Char('n'), _) => {
             // New script
             app.script_state.start_new();
         }
-        (KeyCode::Char('d'), _) | (KeyCode::Delete, _) => {
+        (KeyCode::Char('d'), _) | (KeyCode::Delete, _)
             // Delete selected script (with confirmation)
-            if !app.script_state.scripts.is_empty() {
+            if !app.script_state.scripts.is_empty() => {
                 app.script_state.confirm_action =
                     Some(crate::app::ScriptConfirmAction::DeleteScript);
             }
-        }
-        (KeyCode::Char('s'), KeyModifiers::CONTROL) => {
+        (KeyCode::Char('s'), KeyModifiers::CONTROL)
             // Run selected script directly from browse (Ctrl+S)
-            if !app.script_state.scripts.is_empty() {
+            if !app.script_state.scripts.is_empty() => {
                 // Load the script first, then run
                 app.load_script_for_edit_async().await;
                 app.run_script_async().await;
             }
-        }
-        (KeyCode::Char('h'), _) => {
+        (KeyCode::Char('h'), _)
             // Show history for selected script
-            if !app.script_state.scripts.is_empty() {
+            if !app.script_state.scripts.is_empty() => {
                 // First load the script to get the name
                 app.load_script_for_edit_async().await;
                 // Then load history
                 app.load_script_history_async().await;
                 app.script_state.enter_history();
             }
-        }
         (KeyCode::Char('i'), _) => {
             // Inline mode (ad-hoc script)
             app.script_state.enter_inline();
@@ -2193,16 +2178,14 @@ async fn handle_script_history_key(app: &mut App, key: KeyCode) {
             app.script_state.mode = crate::app::ScriptMode::Edit;
             app.script_state.focus = crate::app::ScriptFocus::Editor;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.script_state.selected_version > 0 {
+        KeyCode::Up | KeyCode::Char('k')
+            if app.script_state.selected_version > 0 => {
                 app.script_state.selected_version -= 1;
             }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.script_state.selected_version + 1 < app.script_state.versions.len() {
+        KeyCode::Down | KeyCode::Char('j')
+            if app.script_state.selected_version + 1 < app.script_state.versions.len() => {
                 app.script_state.selected_version += 1;
             }
-        }
         KeyCode::Enter => {
             // Load selected version into editor (view mode)
             if let Some(version) = app
@@ -2224,12 +2207,11 @@ async fn handle_script_history_key(app: &mut App, key: KeyCode) {
                 app.script_state.dirty = true; // Mark as dirty so user knows it's not the current version
             }
         }
-        KeyCode::Char('r') => {
+        KeyCode::Char('r')
             // Rollback to selected version
-            if !app.script_state.versions.is_empty() {
+            if !app.script_state.versions.is_empty() => {
                 app.rollback_script_async().await;
             }
-        }
         _ => {}
     }
 }
@@ -2305,26 +2287,23 @@ fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) 
     } else {
         // Navigating tags
         match key {
-            KeyCode::Left | KeyCode::Char('h') => {
-                if app.script_state.selected_tag > 0 {
+            KeyCode::Left | KeyCode::Char('h')
+                if app.script_state.selected_tag > 0 => {
                     app.script_state.selected_tag -= 1;
                 }
-            }
-            KeyCode::Right | KeyCode::Char('l') => {
+            KeyCode::Right | KeyCode::Char('l')
                 // +1 for the [+] button
-                if app.script_state.selected_tag < app.script_state.tags.len() {
+                if app.script_state.selected_tag < app.script_state.tags.len() => {
                     app.script_state.selected_tag += 1;
                 }
-            }
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                if app.script_state.selected_tag == app.script_state.tags.len() {
+            KeyCode::Enter | KeyCode::Char(' ')
+                if app.script_state.selected_tag == app.script_state.tags.len() => {
                     // [+] button - start adding new tag
                     app.script_state.tag_input_active = true;
                 }
-            }
-            KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('x') => {
+            KeyCode::Delete | KeyCode::Backspace | KeyCode::Char('x')
                 // Delete selected tag
-                if app.script_state.selected_tag < app.script_state.tags.len() {
+                if app.script_state.selected_tag < app.script_state.tags.len() => {
                     app.script_state.tags.remove(app.script_state.selected_tag);
                     if app.script_state.selected_tag > 0
                         && app.script_state.selected_tag >= app.script_state.tags.len()
@@ -2333,7 +2312,6 @@ fn handle_script_tags_key(app: &mut App, key: KeyCode, modifiers: KeyModifiers) 
                     }
                     app.script_state.dirty = true;
                 }
-            }
             _ => {}
         }
     }
@@ -2820,10 +2798,8 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
         // Adjust option values with Up/Down when focus is on options
         (KeyCode::Up, _) if app.rag_state.search_focus == 1 => {
             match app.rag_state.search_option_idx {
-                0 => {
-                    if app.rag_state.search_limit < 100 {
-                        app.rag_state.search_limit += 1;
-                    }
+                0 if app.rag_state.search_limit < 100 => {
+                    app.rag_state.search_limit += 1;
                 }
                 1 => {
                     app.rag_state.toggle_search_mode();
@@ -2836,18 +2812,14 @@ async fn handle_rag_search_key(app: &mut App, key: KeyCode, modifiers: KeyModifi
         }
         (KeyCode::Down, _) if app.rag_state.search_focus == 1 => {
             match app.rag_state.search_option_idx {
-                0 => {
-                    if app.rag_state.search_limit > 1 {
-                        app.rag_state.search_limit -= 1;
-                    }
+                0 if app.rag_state.search_limit > 1 => {
+                    app.rag_state.search_limit -= 1;
                 }
                 1 => {
                     app.rag_state.toggle_search_mode();
                 }
-                2 => {
-                    if app.rag_state.search_rrf_k > 5.0 {
-                        app.rag_state.search_rrf_k -= 5.0;
-                    }
+                2 if app.rag_state.search_rrf_k > 5.0 => {
+                    app.rag_state.search_rrf_k -= 5.0;
                 }
                 _ => {}
             }

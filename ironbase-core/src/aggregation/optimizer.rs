@@ -488,31 +488,21 @@ pub fn select_plan(logical: &LogicalPlan, stats: &CollectionStats) -> (PhysicalP
             };
             (plan, cost)
         }
-        LogicalPlan::CountByField { field, filter: _ } => {
-            if stats.has_index(field) {
-                let cost = CostEstimate::for_index_group(stats, stats.doc_count / 100);
-                let plan = PhysicalPlan::CountByIndex {
-                    field: field.clone(),
-                    output_field: "count".to_string(),
-                };
-                (plan, cost)
-            } else {
-                let cost = CostEstimate::for_full_scan(stats);
-                (PhysicalPlan::FullScanPipeline, cost)
-            }
+        LogicalPlan::CountByField { field, filter: _ } if stats.has_index(field) => {
+            let cost = CostEstimate::for_index_group(stats, stats.doc_count / 100);
+            let plan = PhysicalPlan::CountByIndex {
+                field: field.clone(),
+                output_field: "count".to_string(),
+            };
+            (plan, cost)
         }
-        LogicalPlan::IndexGroup { field, .. } => {
-            if stats.has_index(field) {
-                let cost = CostEstimate::for_index_group(stats, stats.doc_count / 100);
-                let plan = PhysicalPlan::CountByIndex {
-                    field: field.clone(),
-                    output_field: "count".to_string(),
-                };
-                (plan, cost)
-            } else {
-                let cost = CostEstimate::for_full_scan(stats);
-                (PhysicalPlan::FullScanPipeline, cost)
-            }
+        LogicalPlan::IndexGroup { field, .. } if stats.has_index(field) => {
+            let cost = CostEstimate::for_index_group(stats, stats.doc_count / 100);
+            let plan = PhysicalPlan::CountByIndex {
+                field: field.clone(),
+                output_field: "count".to_string(),
+            };
+            (plan, cost)
         }
         _ => {
             let cost = CostEstimate::for_full_scan(stats);

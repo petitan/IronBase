@@ -2689,7 +2689,7 @@ impl BPlusTree {
 
         // Extract top N by frequency
         let mut entries: Vec<(IndexKey, u64)> = freq_map.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by frequency DESC
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.1)); // Sort by frequency DESC
         entries.truncate(mcv_size);
 
         let mcv_frequency_sum: u64 = entries.iter().map(|(_, f)| *f).sum();

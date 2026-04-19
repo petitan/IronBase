@@ -283,7 +283,7 @@ impl EmbeddingManager {
             let new_embeddings = provider.embed_batch(&uncached_texts)?;
 
             // Update results and cache
-            for ((i, text), embedding) in needs_embedding.iter().zip(new_embeddings.into_iter()) {
+            for ((i, text), embedding) in needs_embedding.iter().zip(new_embeddings) {
                 cache.put(text, provider_name, model_name, embedding.clone());
                 results[*i] = embedding;
             }

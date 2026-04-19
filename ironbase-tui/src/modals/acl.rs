@@ -315,10 +315,8 @@ impl AclState {
 
     pub fn select_next(&mut self) {
         match self.mode {
-            AclModalMode::List => {
-                if !self.acls.is_empty() {
-                    self.selected = (self.selected + 1) % self.acls.len();
-                }
+            AclModalMode::List if !self.acls.is_empty() => {
+                self.selected = (self.selected + 1) % self.acls.len();
             }
             AclModalMode::ViewCollection => {
                 if let Some(acl) = self.acls.get(self.selected) {
@@ -327,10 +325,8 @@ impl AclState {
                     }
                 }
             }
-            AclModalMode::Edit if !self.is_adding_rule => {
-                if !self.edit_rules.is_empty() {
-                    self.edit_selected_rule = (self.edit_selected_rule + 1) % self.edit_rules.len();
-                }
+            AclModalMode::Edit if !self.is_adding_rule && !self.edit_rules.is_empty() => {
+                self.edit_selected_rule = (self.edit_selected_rule + 1) % self.edit_rules.len();
             }
             _ => {}
         }
@@ -338,10 +334,8 @@ impl AclState {
 
     pub fn select_prev(&mut self) {
         match self.mode {
-            AclModalMode::List => {
-                if !self.acls.is_empty() {
-                    self.selected = self.selected.checked_sub(1).unwrap_or(self.acls.len() - 1);
-                }
+            AclModalMode::List if !self.acls.is_empty() => {
+                self.selected = self.selected.checked_sub(1).unwrap_or(self.acls.len() - 1);
             }
             AclModalMode::ViewCollection => {
                 if let Some(acl) = self.acls.get(self.selected) {
@@ -353,13 +347,11 @@ impl AclState {
                     }
                 }
             }
-            AclModalMode::Edit if !self.is_adding_rule => {
-                if !self.edit_rules.is_empty() {
-                    self.edit_selected_rule = self
-                        .edit_selected_rule
-                        .checked_sub(1)
-                        .unwrap_or(self.edit_rules.len() - 1);
-                }
+            AclModalMode::Edit if !self.is_adding_rule && !self.edit_rules.is_empty() => {
+                self.edit_selected_rule = self
+                    .edit_selected_rule
+                    .checked_sub(1)
+                    .unwrap_or(self.edit_rules.len() - 1);
             }
             _ => {}
         }

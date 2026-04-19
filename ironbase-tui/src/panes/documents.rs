@@ -69,12 +69,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: 
     let available_width = inner.width as usize;
     let id_width = 8; // Fixed width for _id
     let remaining = available_width.saturating_sub(id_width + 1);
-    let col_width = (if col_count > 0 {
-        remaining / col_count
-    } else {
-        10
-    })
-    .clamp(6, 20);
+    let col_width = remaining.checked_div(col_count).unwrap_or(10).clamp(6, 20);
 
     // Build header row
     let mut header_cells = vec![Cell::from("_id").style(Style::default().fg(theme.accent).bold())];
