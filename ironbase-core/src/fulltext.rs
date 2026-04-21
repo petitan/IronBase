@@ -2927,6 +2927,14 @@ impl FulltextIndex {
     ///
     /// Installs new token_offsets, re-opens file_handle, flushes buffered
     /// doc_tokens from concurrent inserts, and clears frozen state.
+    ///
+    /// Ordering note: `frozen_inverted` is cleared LAST, after all writes
+    /// succeed. If `write_doc_tokens_to_disk` fails mid-loop, the caller's
+    /// `rollback_flush()` can still restore `frozen_inverted` into
+    /// `inverted_index`, so no Phase 1 state is lost. `get_token_entries_merged`
+    /// deduplicates by doc_id across mem/frozen/disk sources, so keeping
+    /// frozen_inverted live during the buffered-write loop does not produce
+    /// duplicate search hits.
     pub(crate) fn commit_flush(&mut self, result: FulltextFlushResult) -> Result<()> {
         // 1. Install new token_offsets and switch to lazy mode
         self.token_offsets = result.new_token_offsets;
@@ -2940,24 +2948,24 @@ impl FulltextIndex {
         //   because those docs are still in the freshly written token_offsets on disk.
         // - The next full flush (close/compact via flush()) will clear deleted_doc_ids.
 
-        // 2. Re-open file_handle BEFORE clearing frozen_inverted.
-        //    If this fails, rollback_flush() can still restore frozen → inverted_index.
+        // 2. Re-open file_handle for subsequent writes.
         self.open_storage_file_rw()?;
 
-        // 3. Clear frozen_inverted (entries are now on disk via token_offsets)
-        self.frozen_inverted = None;
-        // inverted_index has only new entries from concurrent inserts — keep them
-
-        // 4. Flush buffered doc_tokens (inserts during Phase 2 used doc_tokens_memory)
+        // 3. Flush buffered doc_tokens (inserts during Phase 2 used doc_tokens_memory).
         //    doc_tokens_offsets already has old entries (not moved, only cloned to snapshot).
         //    New entries from concurrent inserts have offset=0 in doc_tokens_offsets;
-        //    write them to disk now and update with real offsets.
+        //    write them to disk now and update with real offsets. If any write fails,
+        //    frozen_inverted is still live — rollback_flush() can restore.
         let buffered: Vec<(DocumentId, HashMap<String, u32>)> =
             self.doc_tokens_memory.drain().collect();
         for (doc_id, tokens) in buffered {
             let offset = self.write_doc_tokens_to_disk(&doc_id, &tokens)?;
             self.doc_tokens_offsets.insert(doc_id, offset);
         }
+
+        // 4. Clear frozen_inverted last — all entries are now durable on disk
+        //    via token_offsets (Phase 1) and doc_tokens_offsets (Phase 2).
+        self.frozen_inverted = None;
 
         Ok(())
     }
