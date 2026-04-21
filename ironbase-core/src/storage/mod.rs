@@ -603,12 +603,15 @@ impl StorageEngine {
             .create(true)
             .open(&path)?;
 
-        // Clean up orphaned .idx.tmp files from interrupted two-phase index commits
+        // Clean up orphaned index temp files from interrupted atomic commits.
+        // `.idx.tmp` — b+ tree two-phase commit (btree.rs::commit_prepared_changes)
+        // `.fzidx.tmp` — fuzzy flush (fuzzy.rs::flush)
         if let Some(db_dir) = Path::new(&path_str).parent() {
             if let Ok(entries) = std::fs::read_dir(db_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
-                    if p.to_string_lossy().ends_with(".idx.tmp") {
+                    let name = p.to_string_lossy();
+                    if name.ends_with(".idx.tmp") || name.ends_with(".fzidx.tmp") {
                         log_warn!(
                             path = %p.display(),
                             "Removing orphaned index temp file from interrupted commit"

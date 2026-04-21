@@ -1,6 +1,6 @@
 [package]
 name = "mcp-ironbase-server"
-version = "1.0.438"
+version = "1.0.439"
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
