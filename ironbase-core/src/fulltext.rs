@@ -3314,14 +3314,30 @@ impl FulltextIndex {
         self.lazy_mode
     }
 
-    /// Rebuild doc_lengths from disk-based doc_tokens (startup migration for legacy indexes).
+    /// Rebuild doc_lengths from disk-based doc_tokens when the persisted
+    /// per-doc length map is missing or inconsistent with doc_tokens_offsets.
     ///
-    /// Called when loading an index that was saved before BM25 doc length tracking.
-    /// Reads each document's token counts from disk and populates doc_lengths + total_doc_length.
+    /// Two triggers:
+    /// 1. Legacy indexes saved before BM25 doc length tracking (doc_lengths empty).
+    /// 2. Partial state after a crash between a two-phase flush commit and the
+    ///    next full flush: Phase 2 inserts added documents to doc_tokens_offsets
+    ///    on disk, but commit_flush does not re-serialize doc_lengths metadata,
+    ///    so the count on disk lags. Without rebuild, Phase 2 docs fall back to
+    ///    `doc_length=0` in `term_score`, producing inflated BM25 scores.
     pub fn rebuild_doc_lengths_if_needed(&mut self) {
-        if !self.doc_lengths.is_empty() || self.doc_tokens_offsets.is_empty() {
-            return; // Already has data or empty index
+        if self.doc_tokens_offsets.is_empty() {
+            return; // Empty index — nothing to do
         }
+        if !self.doc_lengths.is_empty() && self.doc_lengths.len() == self.doc_tokens_offsets.len() {
+            return; // Already consistent
+        }
+
+        // Clear before rebuild so partial state doesn't leave stale entries
+        // (e.g., entries for docs removed from doc_tokens_offsets but still
+        // present in doc_lengths would never be cleaned up by this function
+        // without an explicit clear).
+        self.doc_lengths.clear();
+        self.total_doc_length = 0;
 
         // Collect doc_ids first to avoid borrow conflict
         let doc_ids: Vec<DocumentId> = self.doc_tokens_offsets.keys().cloned().collect();
@@ -3361,7 +3377,7 @@ impl FulltextIndex {
                 index = %self.name,
                 doc_count = self.doc_lengths.len(),
                 avg_dl = total as f64 / self.doc_lengths.len() as f64,
-                "Rebuilt BM25 doc_lengths from existing doc_tokens (startup migration)"
+                "Rebuilt BM25 doc_lengths from existing doc_tokens"
             );
         }
     }
