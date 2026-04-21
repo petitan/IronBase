@@ -113,7 +113,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-windows
-          cp mcp-server/target/release/mcp-ironbase-server.exe release-windows/
+          cp target/release/mcp-ironbase-server.exe release-windows/
           cp mcp-server/scripts/install.ps1 release-windows/
           echo "IronBase MCP Server for Windows" > release-windows/README.txt
           echo "" >> release-windows/README.txt

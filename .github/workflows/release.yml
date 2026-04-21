@@ -81,13 +81,6 @@ jobs:
           fi
           echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Copy binaries for MSI
-        shell: cmd
-        run: |
-          copy ironbase-tui\target\release\ironbase-tui.exe mcp-server\target\release\
-          copy target\release\ironbase-backup.exe mcp-server\target\release\
-          copy ironbase-bridge\target\release\ironbase-bridge.exe mcp-server\target\release\
-
       - name: Build MSI Installer
         shell: cmd
         run: |
@@ -106,7 +99,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mcp-ironbase-server-windows
-          path: mcp-server/target/release/mcp-ironbase-server.exe
+          path: target/release/mcp-ironbase-server.exe
 
       - name: Upload Windows Backup artifact
         uses: actions/upload-artifact@v4
@@ -118,13 +111,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-tui-windows
-          path: ironbase-tui/target/release/ironbase-tui.exe
+          path: target/release/tuti-tui.exe
 
       - name: Upload Windows Bridge artifact
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-bridge-windows
-          path: ironbase-bridge/target/release/ironbase-bridge.exe
+          path: target/release/ironbase-bridge.exe
 
   build-linux:
     name: Build Linux
@@ -172,7 +165,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mcp-ironbase-server-linux
-          path: mcp-server/target/release/mcp-ironbase-server
+          path: target/release/mcp-ironbase-server
 
       - name: Upload Linux Backup artifact
         uses: actions/upload-artifact@v4
@@ -184,13 +177,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-tui-linux
-          path: ironbase-tui/target/release/ironbase-tui
+          path: target/release/tuti-tui
 
       - name: Upload Linux Bridge artifact
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-bridge-linux
-          path: ironbase-bridge/target/release/ironbase-bridge
+          path: target/release/ironbase-bridge
 
   build-macos:
     name: Build macOS
@@ -238,7 +231,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mcp-ironbase-server-macos
-          path: mcp-server/target/release/mcp-ironbase-server
+          path: target/release/mcp-ironbase-server
 
       - name: Upload macOS Backup artifact
         uses: actions/upload-artifact@v4
@@ -250,13 +243,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-tui-macos
-          path: ironbase-tui/target/release/ironbase-tui
+          path: target/release/tuti-tui
 
       - name: Upload macOS Bridge artifact
         uses: actions/upload-artifact@v4
         with:
           name: ironbase-bridge-macos
-          path: ironbase-bridge/target/release/ironbase-bridge
+          path: target/release/ironbase-bridge
 
   create-release:
     name: Create Release
@@ -306,17 +299,17 @@ jobs:
              release-assets/ironbase-backup-macos
           chmod +x release-assets/ironbase-backup-macos
 
-          # TUI - Windows
-          cp artifacts/ironbase-tui-windows/ironbase-tui.exe \
+          # TUI - Windows (binary is named tuti-tui, renamed on release)
+          cp artifacts/ironbase-tui-windows/tuti-tui.exe \
              release-assets/ironbase-tui-windows.exe
 
           # TUI - Linux
-          cp artifacts/ironbase-tui-linux/ironbase-tui \
+          cp artifacts/ironbase-tui-linux/tuti-tui \
              release-assets/ironbase-tui-linux
           chmod +x release-assets/ironbase-tui-linux
 
           # TUI - macOS
-          cp artifacts/ironbase-tui-macos/ironbase-tui \
+          cp artifacts/ironbase-tui-macos/tuti-tui \
              release-assets/ironbase-tui-macos
           chmod +x release-assets/ironbase-tui-macos
 

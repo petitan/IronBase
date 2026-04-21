@@ -83,13 +83,13 @@
                     <Component Id='MainExecutable' Guid='A1B2C3D4-E5F6-7890-ABCD-EF1234567890' Win64='yes'>
                         <File Id='exe0'
                               Name='mcp-ironbase-server.exe'
-                              Source='target\release\mcp-ironbase-server.exe'
+                              Source='..\target\release\mcp-ironbase-server.exe'
                               KeyPath='yes'/>
                     </Component>
                     <Component Id='BackupExecutable' Guid='F6A7B8C9-D0E1-2345-FABC-678901234567' Win64='yes'>
                         <File Id='exe2'
                               Name='ironbase-backup.exe'
-                              Source='target\release\ironbase-backup.exe'
+                              Source='..\target\release\ironbase-backup.exe'
                               KeyPath='yes'/>
                     </Component>
                     <Component Id='ConfigExample' Guid='B2C3D4E5-F6A7-8901-BCDE-F12345678901' Win64='yes'>
