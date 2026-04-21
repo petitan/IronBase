@@ -1980,16 +1980,15 @@ impl FulltextIndex {
 
         // Get tokens to update inverted_index
         let token_counts = if self.storage_path.is_some() {
-            // Disk-based: try to read tokens
-            self.read_doc_tokens_from_disk(doc_id).map_err(|e| {
-                tracing::warn!(
-                    index = %self.name,
-                    doc_id = ?doc_id,
-                    error = %e,
-                    "Failed to read doc tokens from disk during remove, inverted index entries may become stale"
-                );
-                e
-            }).ok()
+            // Disk-based: propagate real IO errors so update() fails loudly
+            // instead of leaving stale posting-list entries that cause
+            // duplicate (doc_id, tf) pairs after the subsequent insert().
+            // Missing doc_id (not in doc_tokens_offsets) stays a no-op.
+            if self.doc_tokens_offsets.contains_key(doc_id) {
+                Some(self.read_doc_tokens_from_disk(doc_id)?)
+            } else {
+                None
+            }
         } else {
             // Memory-based: get from memory
             self.doc_tokens_memory.remove(doc_id)
