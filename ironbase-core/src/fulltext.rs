@@ -2915,6 +2915,14 @@ impl FulltextIndex {
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         file.write_all(&metadata_bytes)?;
 
+        // Write barrier: payload sections must be durable on disk before the
+        // header is rewritten to point at them. Without this fsync, the kernel
+        // could persist the header first and crash before the data lands, so
+        // a reopen would see a header pointing at un-persisted bytes and load
+        // "successfully" with garbage. Same pattern as the single-phase
+        // flush() fix.
+        file.sync_all()?;
+
         // Update V3 header
         file.seek(SeekFrom::Start(8))?; // After magic
         file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
