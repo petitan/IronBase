@@ -1957,10 +1957,27 @@ impl FulltextIndex {
     /// When exceeded, a warning is logged suggesting a flush() call
     const DELETED_DOC_IDS_WARNING_THRESHOLD: usize = 10_000;
 
+    /// Hard cap on deleted_doc_ids in lazy mode. Once reached, further
+    /// removes return `OutOfMemory` to avoid unbounded heap growth
+    /// (~40MB worst-case). Caller should flush() to reclaim.
+    const DELETED_DOC_IDS_MAX: usize = 1_000_000;
+
     /// Remove a document from the index
     /// Note: This marks the document as removed but doesn't reclaim disk space.
     /// Disk space is reclaimed during compaction/rebuild.
     pub fn remove(&mut self, doc_id: &DocumentId) -> Result<()> {
+        // Enforce hard cap on deleted_doc_ids before mutating state.
+        // In lazy mode we track every deletion to filter search results; if the
+        // tracking set is full, refuse further removes so the heap can't grow
+        // unboundedly between flushes.
+        if self.lazy_mode && self.deleted_doc_ids.len() >= Self::DELETED_DOC_IDS_MAX {
+            return Err(IronBaseError::OutOfMemory(format!(
+                "Fulltext index '{}' deleted_doc_ids cap reached ({}). Call flush() to reclaim before removing more documents.",
+                self.name,
+                Self::DELETED_DOC_IDS_MAX
+            )));
+        }
+
         // Get tokens to update inverted_index
         let token_counts = if self.storage_path.is_some() {
             // Disk-based: try to read tokens
