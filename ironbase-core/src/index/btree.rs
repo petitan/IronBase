@@ -2779,6 +2779,17 @@ impl BPlusTree {
         let len_bytes: [u8; 4] = page[1..5].try_into().unwrap();
         let data_len = u32::from_le_bytes(len_bytes) as usize;
 
+        // Validate data_len fits within the page — prevents panic on a corrupt
+        // .idx file whose length prefix exceeds the physical page size.
+        if data_len > NODE_PAGE_SIZE - 5 {
+            return Err(IronBaseError::Corruption(format!(
+                "Node at offset {} declares invalid data_len {} (max {})",
+                offset,
+                data_len,
+                NODE_PAGE_SIZE - 5
+            )));
+        }
+
         // Read node data
         let node_bytes = &page[5..(5 + data_len)];
 
