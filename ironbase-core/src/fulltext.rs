@@ -2712,6 +2712,13 @@ impl FulltextIndex {
                 IronBaseError::IndexError("fulltext save_to_file: file_handle is None".into())
             })?;
             file.write_all(&metadata_bytes)?;
+            // Write barrier: all payload sections MUST be durable on disk before
+            // the header is rewritten to point at them. Without this fsync, the
+            // kernel may reorder page flushes so the new header lands first,
+            // and a crash between that and the final fsync would leave the file
+            // with a header pointing at un-persisted bytes — loads would succeed
+            // on magic/version check and silently return garbage.
+            file.sync_all()?;
         }
 
         // Update V3 header with final offsets
