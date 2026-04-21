@@ -365,6 +365,9 @@ impl FuzzyIndex {
     /// - Header (64 bytes): magic, version, entry_count, entries_offset, metadata_offset
     /// - Entries (bincode): Vec<(String, String, DocumentId)>
     /// - Metadata (JSON): FuzzyIndexMetadata
+    ///
+    /// Writes atomically via temp file + rename so a crash mid-flush cannot
+    /// leave a torn `.fzidx` whose header references un-persisted data.
     pub fn flush(&self) -> Result<()> {
         let path = self.storage_path.as_ref().ok_or_else(|| {
             IronBaseError::IndexError("No storage path set for fuzzy index".to_string())
@@ -373,8 +376,9 @@ impl FuzzyIndex {
             return Ok(());
         }
 
-        let mut file = File::create(path).map_err(|e| {
-            IronBaseError::IndexError(format!("Failed to create fuzzy index file: {}", e))
+        let temp_path = path.with_extension("fzidx.tmp");
+        let mut file = File::create(&temp_path).map_err(|e| {
+            IronBaseError::IndexError(format!("Failed to create fuzzy index temp file: {}", e))
         })?;
 
         // Serialize entries with JSON (more compatible with enum types like DocumentId)
@@ -426,9 +430,14 @@ impl FuzzyIndex {
         file.write_all(&metadata_json)
             .map_err(|e| IronBaseError::IndexError(format!("Failed to write metadata: {}", e)))?;
 
-        // Fsync for durability
-        file.sync_all()
-            .map_err(|e| IronBaseError::IndexError(format!("Failed to sync fuzzy index: {}", e)))?;
+        // Fsync temp file contents before renaming
+        file.sync_all().map_err(|e| {
+            IronBaseError::IndexError(format!("Failed to sync fuzzy index temp file: {}", e))
+        })?;
+        drop(file);
+
+        // Atomic rename + parent directory fsync for POSIX durability
+        crate::fs_utils::atomic_rename_and_sync(&temp_path, path)?;
 
         Ok(())
     }
