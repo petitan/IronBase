@@ -881,6 +881,11 @@ pub(crate) struct FulltextFlushResult {
     pub new_token_offsets: HashMap<String, (u64, u32)>,
     /// New write offset (end of all written data)
     pub new_write_offset: u64,
+    /// Doc IDs that serialize_flush excluded from the newly persisted
+    /// token_offsets (they were in snapshot.deleted_doc_ids). commit_flush
+    /// uses this to prune the live `deleted_doc_ids` set — those entries
+    /// no longer need filtering because they're gone from disk.
+    pub durably_deleted: HashSet<DocumentId>,
 }
 
 /// Search result with score and matched tokens
@@ -2920,6 +2925,7 @@ impl FulltextIndex {
         Ok(FulltextFlushResult {
             new_token_offsets,
             new_write_offset,
+            durably_deleted: snapshot.deleted_doc_ids.clone(),
         })
     }
 
@@ -2929,41 +2935,57 @@ impl FulltextIndex {
     /// doc_tokens from concurrent inserts, and clears frozen state.
     ///
     /// Ordering note: `frozen_inverted` is cleared LAST, after all writes
-    /// succeed. If `write_doc_tokens_to_disk` fails mid-loop, the caller's
-    /// `rollback_flush()` can still restore `frozen_inverted` into
-    /// `inverted_index`, so no Phase 1 state is lost. `get_token_entries_merged`
-    /// deduplicates by doc_id across mem/frozen/disk sources, so keeping
-    /// frozen_inverted live during the buffered-write loop does not produce
-    /// duplicate search hits.
+    /// succeed. If `write_doc_tokens_to_disk` fails mid-loop, the failed
+    /// entry is restored to `doc_tokens_memory` (so a later flush can retry)
+    /// and the caller's `rollback_flush()` can still restore
+    /// `frozen_inverted` into `inverted_index`, so no Phase 1 state is lost.
+    /// `get_token_entries_merged` deduplicates by doc_id across mem/frozen/
+    /// disk sources, so keeping frozen_inverted live during the
+    /// buffered-write loop does not produce duplicate search hits.
     pub(crate) fn commit_flush(&mut self, result: FulltextFlushResult) -> Result<()> {
         // 1. Install new token_offsets and switch to lazy mode
         self.token_offsets = result.new_token_offsets;
         self.write_offset = result.new_write_offset;
         self.lazy_mode = true;
         self.file_version = FTIDX_VERSION_V3;
-        // NOTE: Do NOT clear deleted_doc_ids here.
-        // - Snapshot's deleted entries are already filtered out of the flushed data
-        //   (serialize_flush checks snapshot.deleted_doc_ids), so they're harmless in memory.
-        // - Phase 2 deletions (added to self.deleted_doc_ids during the flush) are NEEDED
-        //   because those docs are still in the freshly written token_offsets on disk.
-        // - The next full flush (close/compact via flush()) will clear deleted_doc_ids.
 
-        // 2. Re-open file_handle for subsequent writes.
-        self.open_storage_file_rw()?;
-
-        // 3. Flush buffered doc_tokens (inserts during Phase 2 used doc_tokens_memory).
-        //    doc_tokens_offsets already has old entries (not moved, only cloned to snapshot).
-        //    New entries from concurrent inserts have offset=0 in doc_tokens_offsets;
-        //    write them to disk now and update with real offsets. If any write fails,
-        //    frozen_inverted is still live — rollback_flush() can restore.
-        let buffered: Vec<(DocumentId, HashMap<String, u32>)> =
-            self.doc_tokens_memory.drain().collect();
-        for (doc_id, tokens) in buffered {
-            let offset = self.write_doc_tokens_to_disk(&doc_id, &tokens)?;
-            self.doc_tokens_offsets.insert(doc_id, offset);
+        // 2. Prune deletions that are now permanently filtered out of disk.
+        //    `result.durably_deleted` are the snapshot's deleted doc_ids;
+        //    serialize_flush excluded them from the freshly persisted
+        //    token_offsets, so they cannot reappear in searches. Phase 2
+        //    deletions (added to self.deleted_doc_ids during the flush) stay
+        //    — their docs are still present in the freshly written
+        //    token_offsets on disk and must keep being filtered until the
+        //    next full flush().
+        for doc_id in &result.durably_deleted {
+            self.deleted_doc_ids.remove(doc_id);
         }
 
-        // 4. Clear frozen_inverted last — all entries are now durable on disk
+        // 3. Re-open file_handle for subsequent writes.
+        self.open_storage_file_rw()?;
+
+        // 4. Flush buffered doc_tokens (inserts during Phase 2 used
+        //    doc_tokens_memory). Process one at a time; on a mid-loop
+        //    write failure, restore the failed entry so the next flush
+        //    attempt can retry it. Remaining entries stay in
+        //    doc_tokens_memory untouched.
+        while let Some(doc_id) = self.doc_tokens_memory.keys().next().cloned() {
+            let tokens = self
+                .doc_tokens_memory
+                .remove(&doc_id)
+                .expect("key just cloned must still be present");
+            match self.write_doc_tokens_to_disk(&doc_id, &tokens) {
+                Ok(offset) => {
+                    self.doc_tokens_offsets.insert(doc_id, offset);
+                }
+                Err(e) => {
+                    self.doc_tokens_memory.insert(doc_id, tokens);
+                    return Err(e);
+                }
+            }
+        }
+
+        // 5. Clear frozen_inverted last — all entries are now durable on disk
         //    via token_offsets (Phase 1) and doc_tokens_offsets (Phase 2).
         self.frozen_inverted = None;
 
