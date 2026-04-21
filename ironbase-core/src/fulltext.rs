@@ -1915,6 +1915,20 @@ impl FulltextIndex {
             return Ok(());
         }
 
+        // Idempotency guard: if the doc is already registered, drop the old
+        // posting-list entries first. Without this, a second insert() on the
+        // same doc_id (e.g., after a partial caller-side failure, or a retry
+        // that skipped remove) produces duplicate (doc_id, tf) pairs in the
+        // posting lists and inflates BM25 scores.
+        if self.doc_tokens_offsets.contains_key(doc_id) {
+            self.remove(doc_id)?;
+        }
+        // Clear any prior deletion marker. Without this, a remove() followed
+        // by insert() (on the same doc_id, within a lazy-mode window)
+        // would leave the doc in `deleted_doc_ids`, so search would still
+        // filter it out despite the fresh posting-list entries.
+        self.deleted_doc_ids.remove(doc_id);
+
         // Count token frequencies for this document
         let mut token_counts: HashMap<String, u32> = HashMap::new();
         for token in &tokens {
