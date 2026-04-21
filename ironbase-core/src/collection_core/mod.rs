@@ -1926,14 +1926,11 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
 
                     // Check if the field value actually changed
                     if old_value != new_value {
-                        // Update the fulltext index for this document
-                        // First remove old entry (handles type changes too)
-                        if old_value.is_some() {
-                            let _ = fts_index.remove(&original_doc.id);
-                        }
-                        // Then add new entry if it's a string
-                        if let Some(new_val) = new_value {
-                            if let Some(text) = new_val.as_str() {
+                        // Dispatch on the new value's string-ness:
+                        // - string → update() handles remove+insert internally
+                        // - non-string / None → plain remove() of prior entry
+                        match new_value.and_then(|v| v.as_str()) {
+                            Some(text) => {
                                 let pdid_field = fts_index.parent_doc_id_field().to_string();
                                 let parent_doc_id = updated_doc
                                     .get(&pdid_field)
@@ -1953,7 +1950,13 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                                     );
                                 }
                             }
-                            // If new value is not a string, entry already removed above
+                            None => {
+                                // New value is None or non-string. Only drop the old
+                                // entry if there was a prior string indexed.
+                                if old_value.and_then(|v| v.as_str()).is_some() {
+                                    let _ = fts_index.remove(&original_doc.id);
+                                }
+                            }
                         }
                     }
                 }
