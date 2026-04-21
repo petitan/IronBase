@@ -604,14 +604,18 @@ impl StorageEngine {
             .open(&path)?;
 
         // Clean up orphaned index temp files from interrupted atomic commits.
-        // `.idx.tmp` — b+ tree two-phase commit (btree.rs::commit_prepared_changes)
+        // `.idx.tmp`   — b+ tree two-phase commit (btree.rs::commit_prepared_changes)
         // `.fzidx.tmp` — fuzzy flush (fuzzy.rs::flush)
+        // `.hnsw.tmp`  — HNSW flush (index/manager.rs::persist_hnsw_to_file)
         if let Some(db_dir) = Path::new(&path_str).parent() {
             if let Ok(entries) = std::fs::read_dir(db_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
                     let name = p.to_string_lossy();
-                    if name.ends_with(".idx.tmp") || name.ends_with(".fzidx.tmp") {
+                    if name.ends_with(".idx.tmp")
+                        || name.ends_with(".fzidx.tmp")
+                        || name.ends_with(".hnsw.tmp")
+                    {
                         log_warn!(
                             path = %p.display(),
                             "Removing orphaned index temp file from interrupted commit"

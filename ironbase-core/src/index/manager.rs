@@ -882,46 +882,78 @@ impl IndexManager {
         }
     }
 
+    /// Atomically persist a single HNSW index to its cache path via
+    /// temp file + rename. Returns the final file size in bytes.
+    ///
+    /// Writes to `{cache_path}.hnsw.tmp`, fsyncs, then uses
+    /// `fs_utils::atomic_rename_and_sync` to swap into place and fsync the
+    /// parent directory. A crash mid-write leaves `.hnsw.tmp` orphaned and
+    /// the original `.hnsw` untouched (or absent); a crash after rename
+    /// leaves the new file durable. Startup cleanup in `storage::mod::open`
+    /// removes stale `.hnsw.tmp` files.
+    fn persist_hnsw_to_file(index: &HnswIndex, cache_path: &PathBuf) -> Result<u64> {
+        use std::io::BufWriter;
+
+        let temp_path = cache_path.with_extension("hnsw.tmp");
+        let file = std::fs::File::create(&temp_path).map_err(|e| {
+            IronBaseError::Io(std::io::Error::other(format!(
+                "Failed to create HNSW temp file '{}': {}",
+                temp_path.display(),
+                e
+            )))
+        })?;
+        let mut writer = BufWriter::new(file);
+        index.save_to_writer(&mut writer)?;
+        std::io::Write::flush(&mut writer).map_err(|e| {
+            IronBaseError::Io(std::io::Error::other(format!(
+                "Failed to flush HNSW temp file '{}': {}",
+                temp_path.display(),
+                e
+            )))
+        })?;
+        let file = writer.into_inner().map_err(|e| {
+            IronBaseError::Io(std::io::Error::other(format!(
+                "BufWriter into_inner failed for '{}': {}",
+                temp_path.display(),
+                e
+            )))
+        })?;
+        file.sync_all().map_err(|e| {
+            IronBaseError::Io(std::io::Error::other(format!(
+                "Failed to fsync HNSW temp file '{}': {}",
+                temp_path.display(),
+                e
+            )))
+        })?;
+        drop(file);
+
+        crate::fs_utils::atomic_rename_and_sync(&temp_path, cache_path)?;
+
+        let file_size = cache_path.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(file_size)
+    }
+
     /// Flush all vector indexes to .hnsw files
     ///
     /// This should be called before database close to enable fast restart.
     /// Only dirty indexes (modified since last save) are written.
     ///
-    /// Uses streaming serialization (`save_to_writer` + `BufWriter`) to avoid
-    /// allocating the entire serialized index in memory. Previously `to_bytes()`
-    /// + `fs::write()` caused ~2x peak memory (original index + serialized Vec<u8>).
+    /// Writes go through a temp file + atomic rename so a crash mid-flush
+    /// cannot produce a torn `.hnsw` file that loads "successfully" with
+    /// garbage.
     ///
     /// Returns the number of indexes flushed.
     pub fn flush_vector_indexes(&mut self, db_path: &str) -> Result<usize> {
-        use std::io::BufWriter;
-
         let mut count = 0;
         let dirty_names: Vec<String> = self.dirty_vector_indexes.iter().cloned().collect();
         for name in dirty_names {
             if let Some(index) = self.vector_indexes.get_mut(&name) {
                 let cache_path = Self::build_vector_cache_path(db_path, &name);
-                let file = std::fs::File::create(&cache_path).map_err(|e| {
-                    IronBaseError::Io(std::io::Error::other(format!(
-                        "Failed to create HNSW cache file '{}': {}",
-                        cache_path.display(),
-                        e
-                    )))
-                })?;
-                let mut writer = BufWriter::new(file);
-                index.save_to_writer(&mut writer)?;
-                // Explicit flush to catch write errors before marking clean
-                std::io::Write::flush(&mut writer).map_err(|e| {
-                    IronBaseError::Io(std::io::Error::other(format!(
-                        "Failed to flush HNSW cache file '{}': {}",
-                        cache_path.display(),
-                        e
-                    )))
-                })?;
-                let file_size = cache_path.metadata().map(|m| m.len()).unwrap_or(0);
+                let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
                 index.mark_clean();
                 self.dirty_vector_indexes.remove(&name);
                 crate::log_debug!(
-                    "Flushed vector index '{}' to {} ({:.1} MB, streaming)",
+                    "Flushed vector index '{}' to {} ({:.1} MB, atomic)",
                     name,
                     cache_path.display(),
                     file_size as f64 / (1024.0 * 1024.0)
@@ -1097,40 +1129,19 @@ impl IndexManager {
     /// Flush a single vector index to disk
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
-    /// On error, the index remains dirty for retry.
-    ///
-    /// Uses streaming serialization (`save_to_writer` + `BufWriter`) to avoid
-    /// the ~2x peak memory of `to_bytes()` + `fs::write()`.
+    /// On error, the index remains dirty for retry. Writes via temp file +
+    /// atomic rename — see `persist_hnsw_to_file`.
     pub fn flush_one_vector_index(&mut self, name: &str, db_path: &str) -> Result<bool> {
-        use std::io::BufWriter;
-
         if !self.dirty_vector_indexes.contains(name) {
             return Ok(false);
         }
         if let Some(index) = self.vector_indexes.get_mut(name) {
             let cache_path = Self::build_vector_cache_path(db_path, name);
-            let file = std::fs::File::create(&cache_path).map_err(|e| {
-                IronBaseError::Io(std::io::Error::other(format!(
-                    "Failed to create HNSW cache file '{}': {}",
-                    cache_path.display(),
-                    e
-                )))
-            })?;
-            let mut writer = BufWriter::new(file);
-            index.save_to_writer(&mut writer)?;
-            // Explicit flush to catch write errors before marking clean
-            std::io::Write::flush(&mut writer).map_err(|e| {
-                IronBaseError::Io(std::io::Error::other(format!(
-                    "Failed to flush HNSW cache file '{}': {}",
-                    cache_path.display(),
-                    e
-                )))
-            })?;
-            let file_size = cache_path.metadata().map(|m| m.len()).unwrap_or(0);
+            let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
             index.mark_clean();
             self.dirty_vector_indexes.remove(name);
             crate::log_debug!(
-                "Flushed vector index '{}' to {} ({:.1} MB, streaming)",
+                "Flushed vector index '{}' to {} ({:.1} MB, atomic)",
                 name,
                 cache_path.display(),
                 file_size as f64 / (1024.0 * 1024.0)
