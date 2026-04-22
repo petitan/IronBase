@@ -707,13 +707,14 @@ impl IndexManager {
     ///
     /// Returns the number of indexes flushed.
     /// On error, dirty flags are preserved for retry on next flush.
-    pub fn flush_fulltext_indexes(&mut self) -> Result<usize> {
+    pub fn flush_fulltext_indexes(&mut self, watermark: u64) -> Result<usize> {
         // Collect names first to avoid borrowing issues
         let dirty_names: Vec<String> = self.dirty_fulltext_indexes.iter().cloned().collect();
         let mut count = 0;
 
         for name in dirty_names {
             if let Some(index) = self.fulltext_indexes.get_mut(&name) {
+                index.set_flushed_tx_id(watermark);
                 index.save_to_file()?;
                 // Only remove from dirty set AFTER successful write
                 self.dirty_fulltext_indexes.remove(&name);
@@ -731,14 +732,15 @@ impl IndexManager {
     ///
     /// Returns the number of indexes flushed.
     /// On error, dirty flags are preserved for retry on next flush.
-    pub fn flush_fuzzy_indexes(&mut self) -> Result<usize> {
+    pub fn flush_fuzzy_indexes(&mut self, watermark: u64) -> Result<usize> {
         // Collect names first to avoid borrowing issues
         let dirty_names: Vec<String> = self.dirty_fuzzy_indexes.iter().cloned().collect();
         let mut count = 0;
 
         for name in dirty_names {
-            if let Some(index) = self.fuzzy_indexes.get(&name) {
+            if let Some(index) = self.fuzzy_indexes.get_mut(&name) {
                 if index.storage_path().is_some() {
+                    index.set_flushed_tx_id(watermark);
                     index.save_to_file()?;
                     // Only remove from dirty set AFTER successful write
                     self.dirty_fuzzy_indexes.remove(&name);
@@ -943,11 +945,12 @@ impl IndexManager {
     /// garbage.
     ///
     /// Returns the number of indexes flushed.
-    pub fn flush_vector_indexes(&mut self, db_path: &str) -> Result<usize> {
+    pub fn flush_vector_indexes(&mut self, db_path: &str, watermark: u64) -> Result<usize> {
         let mut count = 0;
         let dirty_names: Vec<String> = self.dirty_vector_indexes.iter().cloned().collect();
         for name in dirty_names {
             if let Some(index) = self.vector_indexes.get_mut(&name) {
+                index.set_flushed_tx_id(watermark);
                 let cache_path = Self::build_vector_cache_path(db_path, &name);
                 let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
                 index.mark_clean();
@@ -1020,11 +1023,16 @@ impl IndexManager {
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
     /// On error, the dirty flag is preserved for retry.
-    pub fn flush_one_fulltext_index(&mut self, name: &str) -> Result<bool> {
+    ///
+    /// `watermark` is the current `DatabaseCore::watermark_tx_id()` —
+    /// stamped into the persisted file so crash recovery knows which WAL
+    /// Operations need replay (task #26).
+    pub fn flush_one_fulltext_index(&mut self, name: &str, watermark: u64) -> Result<bool> {
         if !self.dirty_fulltext_indexes.contains(name) {
             return Ok(false);
         }
         if let Some(index) = self.fulltext_indexes.get_mut(name) {
+            index.set_flushed_tx_id(watermark);
             index.save_to_file()?;
             self.dirty_fulltext_indexes.remove(name);
             Ok(true)
@@ -1039,14 +1047,20 @@ impl IndexManager {
     /// After this call, the index is in "flush in progress" state:
     /// - inverted_index moved to frozen_inverted (search still works)
     /// - file_handle closed (inserts use doc_tokens_memory)
+    ///
+    /// `watermark` is stamped into the index before the snapshot so the
+    /// persisted file (serialized later in Phase 2) records it (task #26).
     pub(crate) fn take_fulltext_flush_snapshot(
         &mut self,
         name: &str,
+        watermark: u64,
     ) -> Option<crate::fulltext::FulltextFlushSnapshot> {
         if !self.dirty_fulltext_indexes.contains(name) {
             return None;
         }
-        self.fulltext_indexes.get_mut(name)?.take_flush_snapshot()
+        let index = self.fulltext_indexes.get_mut(name)?;
+        index.set_flushed_tx_id(watermark);
+        index.take_flush_snapshot()
     }
 
     /// Two-phase flush error recovery: rollback a failed flush.
@@ -1090,12 +1104,16 @@ impl IndexManager {
     ///
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty, no storage path, or not found.
     /// On error, the dirty flag is preserved for retry.
-    pub fn flush_one_fuzzy_index(&mut self, name: &str) -> Result<bool> {
+    ///
+    /// `watermark` is stamped into the metadata for WAL-replay recovery
+    /// (task #26).
+    pub fn flush_one_fuzzy_index(&mut self, name: &str, watermark: u64) -> Result<bool> {
         if !self.dirty_fuzzy_indexes.contains(name) {
             return Ok(false);
         }
-        if let Some(index) = self.fuzzy_indexes.get(name) {
+        if let Some(index) = self.fuzzy_indexes.get_mut(name) {
             if index.storage_path().is_some() {
+                index.set_flushed_tx_id(watermark);
                 index.save_to_file()?;
                 self.dirty_fuzzy_indexes.remove(name);
                 Ok(true)
@@ -1131,11 +1149,20 @@ impl IndexManager {
     /// Returns `Ok(true)` if flushed, `Ok(false)` if not dirty or not found.
     /// On error, the index remains dirty for retry. Writes via temp file +
     /// atomic rename — see `persist_hnsw_to_file`.
-    pub fn flush_one_vector_index(&mut self, name: &str, db_path: &str) -> Result<bool> {
+    ///
+    /// `watermark` is stamped into the v3 cache file header for WAL-replay
+    /// recovery (task #26).
+    pub fn flush_one_vector_index(
+        &mut self,
+        name: &str,
+        db_path: &str,
+        watermark: u64,
+    ) -> Result<bool> {
         if !self.dirty_vector_indexes.contains(name) {
             return Ok(false);
         }
         if let Some(index) = self.vector_indexes.get_mut(name) {
+            index.set_flushed_tx_id(watermark);
             let cache_path = Self::build_vector_cache_path(db_path, name);
             let file_size = Self::persist_hnsw_to_file(index, &cache_path)?;
             index.mark_clean();

@@ -447,10 +447,16 @@ impl DatabaseCore<StorageEngine> {
             if cpus > 1 && index_managers.len() > 1 {
                 use rayon::prelude::*;
 
+                let watermark = self.watermark_tx_id();
                 let results: Vec<Result<usize>> = index_managers
                     .par_iter()
                     .map(|(collection_name, index_manager)| {
-                        Self::flush_collection_indexes(collection_name, index_manager, &db_path)
+                        Self::flush_collection_indexes(
+                            collection_name,
+                            index_manager,
+                            &db_path,
+                            watermark,
+                        )
                     })
                     .collect();
 
@@ -464,9 +470,14 @@ impl DatabaseCore<StorageEngine> {
 
         // Sequential fallback: single collection, single core, or no parallel feature
         let mut total_flushed = 0;
+        let watermark = self.watermark_tx_id();
         for (collection_name, index_manager) in index_managers.iter() {
-            total_flushed +=
-                Self::flush_collection_indexes(collection_name, index_manager, &db_path)?;
+            total_flushed += Self::flush_collection_indexes(
+                collection_name,
+                index_manager,
+                &db_path,
+                watermark,
+            )?;
         }
         Ok(total_flushed)
     }
@@ -480,6 +491,7 @@ impl DatabaseCore<StorageEngine> {
         collection_name: &str,
         index_manager: &std::sync::Arc<parking_lot::RwLock<crate::index::IndexManager>>,
         db_path: &str,
+        watermark: u64,
     ) -> Result<usize> {
         let mut total_flushed = 0;
 
@@ -511,7 +523,8 @@ impl DatabaseCore<StorageEngine> {
         //    Phase 2: serialize ALL in parallel (NO lock, 13s+ each → max(individual))
         //    Phase 3: commit ALL in single write lock (~ms each)
         if !dirty_ft.is_empty() {
-            total_flushed += Self::flush_fulltext_batch(collection_name, index_manager, &dirty_ft)?;
+            total_flushed +=
+                Self::flush_fulltext_batch(collection_name, index_manager, &dirty_ft, watermark)?;
         }
 
         // 3. Fuzzy, btree (sequential — each flush < 300ms, not worth parallelizing)
@@ -520,7 +533,7 @@ impl DatabaseCore<StorageEngine> {
             let mut mgr = index_manager.write();
             let lock_wait_ms = t.elapsed().as_millis() as u64;
             let flush_start = std::time::Instant::now();
-            if mgr.flush_one_fuzzy_index(name)? {
+            if mgr.flush_one_fuzzy_index(name, watermark)? {
                 let flush_ms = flush_start.elapsed().as_millis() as u64;
                 tracing::info!(
                     collection = %collection_name, index = %name,
@@ -565,7 +578,7 @@ impl DatabaseCore<StorageEngine> {
             let t = std::time::Instant::now();
             let mut mgr = index_manager.write();
             let lock_wait_ms = t.elapsed().as_millis() as u64;
-            if mgr.flush_one_vector_index(name, db_path)? {
+            if mgr.flush_one_vector_index(name, db_path, watermark)? {
                 let flush_ms = t.elapsed().as_millis() as u64 - lock_wait_ms;
                 tracing::info!(
                     collection = %collection_name, index = %name,
@@ -591,6 +604,7 @@ impl DatabaseCore<StorageEngine> {
         collection_name: &str,
         index_manager: &std::sync::Arc<parking_lot::RwLock<crate::index::IndexManager>>,
         dirty_ft: &[String],
+        watermark: u64,
     ) -> Result<usize> {
         let t_batch = std::time::Instant::now();
 
@@ -600,7 +614,7 @@ impl DatabaseCore<StorageEngine> {
             dirty_ft
                 .iter()
                 .filter_map(|name| {
-                    mgr.take_fulltext_flush_snapshot(name)
+                    mgr.take_fulltext_flush_snapshot(name, watermark)
                         .map(|s| (name.clone(), s))
                 })
                 .collect()
@@ -784,20 +798,21 @@ impl<S: Storage + RawStorage> Drop for DatabaseCore<S> {
         };
 
         // 2. Flush all indexes to disk (B+ tree + fulltext + fuzzy + vector)
+        let watermark = self.watermark_tx_id();
         let index_managers = self.index_managers.read();
         for index_manager in index_managers.values() {
             let mut manager = index_manager.write();
-            if let Err(e) = manager.flush_fulltext_indexes() {
+            if let Err(e) = manager.flush_fulltext_indexes(watermark) {
                 log_warn!("Failed to flush fulltext indexes on drop: {}", e);
             }
-            if let Err(e) = manager.flush_fuzzy_indexes() {
+            if let Err(e) = manager.flush_fuzzy_indexes(watermark) {
                 log_warn!("Failed to flush fuzzy indexes on drop: {}", e);
             }
             if !db_path.is_empty() {
                 if let Err(e) = manager.flush_btree_indexes(&db_path) {
                     log_warn!("Failed to flush btree indexes on drop: {}", e);
                 }
-                if let Err(e) = manager.flush_vector_indexes(&db_path) {
+                if let Err(e) = manager.flush_vector_indexes(&db_path, watermark) {
                     log_warn!("Failed to flush vector indexes on drop: {}", e);
                 }
             }
