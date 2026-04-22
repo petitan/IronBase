@@ -80,6 +80,12 @@ pub struct FuzzyIndexMetadata {
     /// True while index is being built - query planner should ignore this index
     #[serde(default)]
     pub building: bool,
+    /// WAL-replay recovery watermark (task #26): tx_id of the most-recent
+    /// committed transaction whose data is durable in this file. On load,
+    /// Operations with `tx_id > last_flushed_tx_id` need replay. Legacy
+    /// files (pre-watermark) default to 0 → full rebuild fallback.
+    #[serde(default)]
+    pub last_flushed_tx_id: u64,
 }
 
 /// Fuzzy text index - stores string values for similarity search
@@ -122,6 +128,7 @@ impl FuzzyIndex {
                 threshold: threshold.clamp(0.0, 1.0),
                 num_entries: 0,
                 building: false,
+                last_flushed_tx_id: 0,
             },
             entries: Vec::new(),
             storage_path: None,
@@ -147,6 +154,7 @@ impl FuzzyIndex {
                 threshold: threshold.clamp(0.0, 1.0),
                 num_entries: 0,
                 building: false,
+                last_flushed_tx_id: 0,
             },
             entries: Vec::new(),
             storage_path: Some(storage_path),
@@ -164,6 +172,22 @@ impl FuzzyIndex {
     /// Set the building flag (for index creation lifecycle)
     pub fn set_building(&mut self, building: bool) {
         self.metadata.building = building;
+    }
+
+    /// WAL-replay recovery watermark. Returns the `tx_id` of the most-recent
+    /// committed transaction whose data is durable in the persisted file.
+    /// Zero for fresh / legacy indexes → full rebuild fallback.
+    pub fn last_flushed_tx_id(&self) -> u64 {
+        self.metadata.last_flushed_tx_id
+    }
+
+    /// Advance the watermark (monotonic — never regresses). Called at
+    /// flush start with `DatabaseCore::watermark_tx_id()` so the next
+    /// flush stamps it into metadata.
+    pub fn set_flushed_tx_id(&mut self, tx_id: u64) {
+        if tx_id > self.metadata.last_flushed_tx_id {
+            self.metadata.last_flushed_tx_id = tx_id;
+        }
     }
 
     /// Set storage path for persistence
