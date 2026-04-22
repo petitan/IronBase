@@ -703,6 +703,13 @@ struct FulltextIndexMetadataForSave {
     chunk_doc_mapping: Vec<(DocumentId, String)>,
     #[serde(default)]
     parent_doc_id_field: Option<String>,
+    /// Watermark: tx_id of the most-recent committed transaction whose data
+    /// is durable in this file. On crash recovery, only committed Operations
+    /// with `tx_id > last_flushed_tx_id` need replay into the index. Legacy
+    /// files (V3 or older saved before watermark tracking) default to 0 →
+    /// full rebuild fallback.
+    #[serde(default)]
+    last_flushed_tx_id: u64,
 }
 
 // ============================================================================
@@ -833,6 +840,15 @@ pub struct FulltextIndex {
     /// search can still find entries while the flush serializes WITHOUT holding a lock.
     /// Set to None when no flush is in progress.
     frozen_inverted: Option<Arc<HashMap<String, Vec<TokenEntry>>>>,
+
+    // === WAL-replay Recovery Watermark (task #26) ===
+    /// tx_id of the most-recently-committed transaction whose data is durable
+    /// in the persisted `.ftidx` file. Stamped into metadata at flush time.
+    /// On load, the value determines the WAL-replay starting point: only
+    /// Operations with `tx_id > last_flushed_tx_id` need replay into this
+    /// in-memory index. Initialized to 0 for fresh or legacy indexes → full
+    /// rebuild fallback.
+    last_flushed_tx_id: u64,
 }
 
 // ============================================================================
@@ -873,6 +889,9 @@ pub(crate) struct FulltextFlushSnapshot {
     pub chunk_doc_mapping: HashMap<DocumentId, String>,
     /// Parent doc_id field name
     pub parent_doc_id_field: Option<String>,
+    /// WAL-replay recovery watermark (task #26) — stamped into the persisted
+    /// file so on reload we know which Operations still need replay.
+    pub last_flushed_tx_id: u64,
 }
 
 /// Result of a two-phase flush, to be committed under write lock.
@@ -1508,6 +1527,7 @@ impl FulltextIndex {
             total_doc_length: 0,
             chunk_doc_mapping: HashMap::new(),
             parent_doc_id_field: None,
+            last_flushed_tx_id: 0,
         }
     }
 
@@ -1538,6 +1558,7 @@ impl FulltextIndex {
             total_doc_length: 0,
             chunk_doc_mapping: HashMap::new(),
             parent_doc_id_field: None,
+            last_flushed_tx_id: 0,
         };
 
         // Create and initialize the file with header
@@ -1630,6 +1651,24 @@ impl FulltextIndex {
     /// Set the building flag (for index creation lifecycle)
     pub fn set_building(&mut self, building: bool) {
         self.building = building;
+    }
+
+    /// WAL-replay recovery watermark. Returns the `tx_id` of the most-recent
+    /// committed transaction whose data is durable in this index's persisted
+    /// file. On load, only Operations with `tx_id > last_flushed_tx_id` need
+    /// replay. Zero for fresh or legacy (pre-watermark) indexes → full
+    /// rebuild fallback.
+    pub fn last_flushed_tx_id(&self) -> u64 {
+        self.last_flushed_tx_id
+    }
+
+    /// Advance the watermark. Called at flush start (under write lock) with
+    /// the current `DatabaseCore::watermark_tx_id()` so the next flush stamps
+    /// it into the persisted metadata. Monotonic — never regresses.
+    pub fn set_flushed_tx_id(&mut self, tx_id: u64) {
+        if tx_id > self.last_flushed_tx_id {
+            self.last_flushed_tx_id = tx_id;
+        }
     }
 
     /// Write doc_tokens to disk and return the file offset
@@ -2705,6 +2744,7 @@ impl FulltextIndex {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             parent_doc_id_field: self.parent_doc_id_field.clone(),
+            last_flushed_tx_id: self.last_flushed_tx_id,
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         {
@@ -2807,6 +2847,7 @@ impl FulltextIndex {
             total_doc_length: self.total_doc_length,
             chunk_doc_mapping: self.chunk_doc_mapping.clone(),
             parent_doc_id_field: self.parent_doc_id_field.clone(),
+            last_flushed_tx_id: self.last_flushed_tx_id,
         })
     }
 
@@ -2911,6 +2952,7 @@ impl FulltextIndex {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             parent_doc_id_field: snapshot.parent_doc_id_field.clone(),
+            last_flushed_tx_id: snapshot.last_flushed_tx_id,
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
         file.write_all(&metadata_bytes)?;
@@ -3197,6 +3239,7 @@ impl FulltextIndex {
                 total_doc_length: metadata.total_doc_length,
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
                 parent_doc_id_field: metadata.parent_doc_id_field,
+                last_flushed_tx_id: metadata.last_flushed_tx_id,
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
@@ -3285,6 +3328,7 @@ impl FulltextIndex {
                 total_doc_length: metadata.total_doc_length,
                 chunk_doc_mapping: metadata.chunk_doc_mapping.into_iter().collect(),
                 parent_doc_id_field: metadata.parent_doc_id_field,
+                last_flushed_tx_id: metadata.last_flushed_tx_id,
             };
             index.rebuild_doc_lengths_if_needed();
             Ok(index)
