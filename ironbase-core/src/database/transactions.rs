@@ -41,6 +41,12 @@ impl DatabaseCore<StorageEngine> {
             storage.commit_transaction(&mut transaction)
         };
 
+        // Advance watermark on successful commit (for WAL-replay index recovery)
+        if result.is_ok() {
+            self.max_committed_tx_id
+                .fetch_max(tx_id, std::sync::atomic::Ordering::SeqCst);
+        }
+
         // Always release write lock (even on error to prevent deadlock)
         self.release_write_lock(tx_id);
 

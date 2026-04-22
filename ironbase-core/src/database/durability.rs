@@ -231,10 +231,15 @@ impl DatabaseCore<StorageEngine> {
         }
 
         // Write to WAL and commit
+        let tx_id = transaction.id;
         storage.commit_transaction(&mut transaction)?;
 
         // WAL is automatically flushed in commit_transaction()
         // This ensures durability even on power failure
+
+        // Advance the watermark for WAL-replay-based index recovery.
+        // Monotonic fetch_max is safe under concurrent commits.
+        self.max_committed_tx_id.fetch_max(tx_id, Ordering::SeqCst);
 
         Ok(())
     }
@@ -243,7 +248,9 @@ impl DatabaseCore<StorageEngine> {
     /// WAL is synced for durability, but file sync is deferred to batch end.
     pub(crate) fn commit_auto_transaction_batch(&self, mut transaction: Transaction) -> Result<()> {
         let mut storage = self.storage.write();
+        let tx_id = transaction.id;
         storage.commit_transaction_batch(&mut transaction)?;
+        self.max_committed_tx_id.fetch_max(tx_id, Ordering::SeqCst);
         Ok(())
     }
 

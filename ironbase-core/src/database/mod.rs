@@ -273,6 +273,13 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     pub(crate) storage: Arc<RwLock<S>>,
     pub(crate) db_path: String,
     pub(crate) next_tx_id: AtomicU64,
+    /// Watermark for WAL-based index recovery: tx_id of the most recent
+    /// transaction whose commit has been acknowledged (WAL fsynced and
+    /// Operations applied to storage + in-memory indexes). Monotonically
+    /// non-decreasing. Used by periodic index flushes to stamp
+    /// `last_flushed_tx_id` into the index file metadata so that on
+    /// crash recovery, only ops with `tx_id > watermark` need replay.
+    pub(crate) max_committed_tx_id: AtomicU64,
     pub(crate) active_transactions:
         Arc<RwLock<std::collections::HashMap<TransactionId, Transaction>>>,
 
@@ -408,6 +415,7 @@ impl DatabaseCore<StorageEngine> {
             storage: Arc::new(RwLock::new(storage)),
             db_path: path_str,
             next_tx_id: AtomicU64::new(1),
+            max_committed_tx_id: AtomicU64::new(0),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: mode,
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -504,6 +512,7 @@ impl DatabaseCore<MemoryStorage> {
             storage: Arc::new(RwLock::new(storage)),
             db_path: String::new(), // No file path for memory storage
             next_tx_id: AtomicU64::new(1),
+            max_committed_tx_id: AtomicU64::new(0),
             active_transactions: Arc::new(RwLock::new(std::collections::HashMap::new())),
             durability_mode: DurabilityMode::default(),
             batch_buffer: Arc::new(RwLock::new(Vec::new())),
@@ -532,6 +541,19 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             return Err(IronBaseError::DatabaseClosed);
         }
         Ok(())
+    }
+
+    /// Current watermark tx_id for WAL-based index recovery.
+    ///
+    /// Returns the `transaction_id` of the most recent transaction whose
+    /// commit is durable (WAL fsynced, Operations applied to storage +
+    /// in-memory indexes). Monotonically non-decreasing.
+    ///
+    /// Index flushes stamp this value into their file metadata as
+    /// `last_flushed_tx_id`. On crash recovery, only committed Operations
+    /// with `tx_id > last_flushed_tx_id` need replay into the index.
+    pub fn watermark_tx_id(&self) -> u64 {
+        self.max_committed_tx_id.load(Ordering::SeqCst)
     }
 }
 
