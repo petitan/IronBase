@@ -159,6 +159,12 @@ pub struct HnswIndex {
     /// Whether the index has been modified since last save
     #[serde(skip)]
     dirty: bool,
+    /// WAL-replay recovery watermark (task #26): tx_id of the most-recent
+    /// committed transaction whose data is durable in the persisted `.hnsw`
+    /// cache file. Serialized OUTSIDE the bincode body so backward compat
+    /// with v2 (no watermark) is preserved — see `to_bytes` / `from_bytes`.
+    #[serde(skip)]
+    last_flushed_tx_id: u64,
 }
 
 impl HnswIndex {
@@ -173,6 +179,7 @@ impl HnswIndex {
             id_to_index: HashMap::new(),
             level_mult,
             dirty: false,
+            last_flushed_tx_id: 0,
         }
     }
 
@@ -617,13 +624,19 @@ impl HnswIndex {
     /// HNSW serialization format version
     /// Version 1: Original bincode format (no header)
     /// Version 2: Magic header + version + bincode data
-    const SERIALIZATION_VERSION: u32 = 2;
+    /// Version 3: Magic header + version + last_flushed_tx_id (u64) + bincode data
+    ///            — watermark for WAL-replay-based index recovery (task #26)
+    const SERIALIZATION_VERSION: u32 = 3;
     const MAGIC_HEADER: &'static [u8; 4] = b"HNSW";
 
     /// Serialize the index to bytes (for cache file)
     ///
-    /// Format v2: [HNSW magic 4B][version u32 LE][bincode data...]
-    /// This allows future format changes without breaking existing cache files.
+    /// Format v3: [HNSW magic 4B][version u32 LE][last_flushed_tx_id u64 LE][bincode data...]
+    /// Format v2 (legacy): [HNSW magic 4B][version u32 LE][bincode data...]
+    ///
+    /// v3 adds the WAL-replay watermark outside the bincode body so it can
+    /// be read/skipped without parsing the graph. Writer always emits v3;
+    /// reader accepts v1, v2, and v3 for backward compat.
     ///
     /// NOTE: This allocates the entire serialized index into a Vec<u8>.
     /// For flush-to-disk, prefer `save_to_writer()` which streams directly
@@ -633,9 +646,10 @@ impl HnswIndex {
             IronBaseError::Serialization(format!("Failed to serialize HNSW index: {}", e))
         })?;
 
-        let mut buf = Vec::with_capacity(8 + data.len());
+        let mut buf = Vec::with_capacity(16 + data.len());
         buf.extend_from_slice(Self::MAGIC_HEADER);
         buf.extend_from_slice(&Self::SERIALIZATION_VERSION.to_le_bytes());
+        buf.extend_from_slice(&self.last_flushed_tx_id.to_le_bytes());
         buf.extend_from_slice(&data);
 
         Ok(buf)
@@ -643,16 +657,8 @@ impl HnswIndex {
 
     /// Streaming serialize: write directly to a writer without intermediate Vec<u8>.
     ///
-    /// Format is identical to `to_bytes()` v2: [HNSW magic 4B][version u32 LE][bincode data...]
-    /// Compatible with `from_bytes()` for deserialization.
-    ///
-    /// This avoids the ~2x peak memory of `to_bytes()` + `fs::write()`:
-    /// - `to_bytes()`: allocates full serialized copy (~170 MB for 119K vectors/300 dim)
-    /// - `save_to_writer()`: streams bincode data directly, O(1) extra allocation
-    ///
-    /// The HNSW graph structure (cross-referencing node indices in neighbors)
-    /// requires the full graph in memory during serialization — that is inherent
-    /// to the data structure. But the serialized *output* can stream to disk.
+    /// Same v3 format as `to_bytes()`. Compatible with `from_bytes()` for
+    /// deserialization.
     pub fn save_to_writer(&self, writer: &mut impl std::io::Write) -> Result<()> {
         writer.write_all(Self::MAGIC_HEADER).map_err(|e| {
             IronBaseError::Io(std::io::Error::other(format!(
@@ -668,6 +674,14 @@ impl HnswIndex {
                     e
                 )))
             })?;
+        writer
+            .write_all(&self.last_flushed_tx_id.to_le_bytes())
+            .map_err(|e| {
+                IronBaseError::Io(std::io::Error::other(format!(
+                    "Failed to write HNSW watermark: {}",
+                    e
+                )))
+            })?;
         bincode::serialize_into(writer, self).map_err(|e| {
             IronBaseError::Serialization(format!("Failed to serialize HNSW index: {}", e))
         })?;
@@ -676,9 +690,11 @@ impl HnswIndex {
 
     /// Deserialize the index from bytes
     ///
-    /// Supports both v1 (legacy, no header) and v2 (with header) formats.
+    /// Supports v1 (legacy, no header), v2 (header, no watermark), and v3
+    /// (header + 8-byte watermark) formats. Older formats deserialize with
+    /// `last_flushed_tx_id = 0`, which triggers full rebuild fallback on
+    /// crash recovery.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        // Check for v2 format (has HNSW magic header)
         if bytes.len() >= 8 && &bytes[0..4] == Self::MAGIC_HEADER {
             let version = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| {
                 IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
@@ -695,13 +711,30 @@ impl HnswIndex {
                 )));
             }
 
-            // v2: data starts after header
-            return bincode::deserialize(&bytes[8..]).map_err(|e| {
+            // Determine bincode start offset + watermark based on version
+            let (bincode_start, watermark) = if version >= 3 {
+                if bytes.len() < 16 {
+                    return Err(IronBaseError::Deserialization(serde_json::Error::io(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "HNSW v3 header truncated (watermark missing)",
+                        ),
+                    )));
+                }
+                let wm = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+                (16usize, wm)
+            } else {
+                (8usize, 0u64)
+            };
+
+            let mut index: Self = bincode::deserialize(&bytes[bincode_start..]).map_err(|e| {
                 IronBaseError::Deserialization(serde_json::Error::io(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     format!("Failed to deserialize HNSW index v{}: {}", version, e),
                 )))
-            });
+            })?;
+            index.last_flushed_tx_id = watermark;
+            return Ok(index);
         }
 
         // v1 (legacy): no header, raw bincode
@@ -711,6 +744,22 @@ impl HnswIndex {
                 format!("Failed to deserialize HNSW index (legacy format): {}", e),
             )))
         })
+    }
+
+    /// WAL-replay recovery watermark. Returns the `tx_id` of the most-recent
+    /// committed transaction whose data is durable in the persisted file.
+    /// Zero for fresh / legacy indexes → full rebuild fallback.
+    pub fn last_flushed_tx_id(&self) -> u64 {
+        self.last_flushed_tx_id
+    }
+
+    /// Advance the watermark (monotonic — never regresses). Called at
+    /// flush start with `DatabaseCore::watermark_tx_id()` so the next
+    /// flush stamps it into the persisted file.
+    pub fn set_flushed_tx_id(&mut self, tx_id: u64) {
+        if tx_id > self.last_flushed_tx_id {
+            self.last_flushed_tx_id = tx_id;
+        }
     }
 
     // === Private helper methods ===
