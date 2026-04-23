@@ -27,10 +27,16 @@ impl OperationReplay {
     /// Only processes Operation entries, ignoring Begin/Commit/Abort markers.
     /// The recovery mode is read from the `IRONBASE_RECOVERY_MODE` env var
     /// (`strict` by default, `best_effort` to skip bad entries on corruption).
+    ///
+    /// Returns the stats AND a `(tx_id, Operation)` list of successfully
+    /// applied ops, in encounter order. The caller uses this for WAL-replay-
+    /// based index recovery (task #26) — each index compares its persisted
+    /// `last_flushed_tx_id` against these tx_ids and replays only entries
+    /// with `tx_id > last_flushed_tx_id`.
     pub fn replay<S: Storage + RawStorage>(
         storage: &mut S,
         entries: &[WALEntry],
-    ) -> Result<ReplayStats> {
+    ) -> Result<(ReplayStats, Vec<(u64, Operation)>)> {
         Self::replay_with_mode(storage, entries, RecoveryMode::from_env())
     }
 
@@ -44,8 +50,9 @@ impl OperationReplay {
         storage: &mut S,
         entries: &[WALEntry],
         mode: RecoveryMode,
-    ) -> Result<ReplayStats> {
+    ) -> Result<(ReplayStats, Vec<(u64, Operation)>)> {
         let mut stats = ReplayStats::default();
+        let mut applied: Vec<(u64, Operation)> = Vec::new();
 
         for entry in entries
             .iter()
@@ -98,14 +105,16 @@ impl OperationReplay {
 
             stats.operations_replayed += 1;
 
-            match op {
+            match &op {
                 Operation::Insert { .. } => stats.inserts += 1,
                 Operation::Update { .. } => stats.updates += 1,
                 Operation::Delete { .. } => stats.deletes += 1,
             }
+
+            applied.push((entry.transaction_id, op));
         }
 
-        Ok(stats)
+        Ok((stats, applied))
     }
 
     /// Apply a single operation to storage
@@ -259,7 +268,7 @@ mod tests {
         let entry_data = serde_json::to_vec(&op).unwrap();
         let entry = WALEntry::new(1, WALEntryType::Operation, entry_data);
 
-        let stats = OperationReplay::replay(&mut storage, &[entry]).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &[entry]).unwrap();
 
         assert_eq!(stats.operations_replayed, 1);
         assert_eq!(stats.inserts, 1);
@@ -293,7 +302,7 @@ mod tests {
         let update_entry_data = serde_json::to_vec(&update_op).unwrap();
         let update_entry = WALEntry::new(2, WALEntryType::Operation, update_entry_data);
 
-        let stats = OperationReplay::replay(&mut storage, &[update_entry]).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &[update_entry]).unwrap();
 
         assert_eq!(stats.operations_replayed, 1);
         assert_eq!(stats.updates, 1);
@@ -326,7 +335,7 @@ mod tests {
         let delete_entry_data = serde_json::to_vec(&delete_op).unwrap();
         let delete_entry = WALEntry::new(2, WALEntryType::Operation, delete_entry_data);
 
-        let stats = OperationReplay::replay(&mut storage, &[delete_entry]).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &[delete_entry]).unwrap();
 
         assert_eq!(stats.operations_replayed, 1);
         assert_eq!(stats.deletes, 1);
@@ -371,7 +380,7 @@ mod tests {
             })
             .collect();
 
-        let stats = OperationReplay::replay(&mut storage, &entries).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &entries).unwrap();
 
         assert_eq!(stats.operations_replayed, 4);
         assert_eq!(stats.inserts, 2);
@@ -398,7 +407,7 @@ mod tests {
             WALEntry::new(1, WALEntryType::Commit, vec![]),
         ];
 
-        let stats = OperationReplay::replay(&mut storage, &entries).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &entries).unwrap();
 
         // Should only count the Operation entry, not Begin/Commit
         assert_eq!(stats.operations_replayed, 1);
@@ -410,7 +419,7 @@ mod tests {
         let mut storage = MemoryStorage::new();
         let entries: Vec<WALEntry> = vec![];
 
-        let stats = OperationReplay::replay(&mut storage, &entries).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &entries).unwrap();
 
         assert_eq!(stats.operations_replayed, 0);
         assert_eq!(stats.inserts, 0);
@@ -432,7 +441,7 @@ mod tests {
         let entry_data = serde_json::to_vec(&op).unwrap();
         let entry = WALEntry::new(1, WALEntryType::Operation, entry_data);
 
-        let stats = OperationReplay::replay(&mut storage, &[entry]).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &[entry]).unwrap();
 
         assert_eq!(stats.operations_replayed, 1);
         assert_eq!(stats.inserts, 1);
@@ -464,7 +473,7 @@ mod tests {
         let entry_data = serde_json::to_vec(&op).unwrap();
         let entry = WALEntry::new(1, WALEntryType::Operation, entry_data);
 
-        let stats = OperationReplay::replay(&mut storage, &[entry]).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &[entry]).unwrap();
 
         assert_eq!(stats.operations_replayed, 1);
         assert_eq!(stats.inserts, 1);
@@ -483,7 +492,7 @@ mod tests {
         let entry_data = serde_json::to_vec(&op).unwrap();
         let entry = WALEntry::new(1, WALEntryType::Operation, entry_data);
 
-        let stats = OperationReplay::replay(&mut storage, &[entry]).unwrap();
+        let (stats, _) = OperationReplay::replay(&mut storage, &[entry]).unwrap();
 
         assert_eq!(stats.operations_replayed, 1);
         assert_eq!(stats.inserts, 1);
@@ -540,7 +549,7 @@ mod tests {
         let mut storage = MemoryStorage::new();
         let entries = build_mixed_entries();
 
-        let stats =
+        let (stats, _) =
             OperationReplay::replay_with_mode(&mut storage, &entries, RecoveryMode::BestEffort)
                 .expect("best_effort must not propagate deserialize errors");
 

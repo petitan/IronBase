@@ -17,7 +17,16 @@ use std::path::Path;
 
 use crate::error::Result;
 use crate::storage::{RawStorage, Storage};
+use crate::transaction::{Operation, TransactionId};
 use crate::wal::{TransactionGrouper, WALEntryIterator, WriteAheadLog};
+
+/// Applied operations with their originating transaction IDs, returned from
+/// recovery so callers (e.g. per-index replay) can selectively re-apply them
+/// based on each index's `last_flushed_tx_id()` watermark.
+pub type AppliedOps = Vec<(TransactionId, Operation)>;
+
+/// Full recovery result: stats, btree index changes, and applied operations.
+pub type RecoveryResult = (RecoveryStats, Vec<RecoveredIndexChange>, AppliedOps);
 
 /// Behavior when a WAL entry fails to deserialize or apply during recovery.
 ///
@@ -100,22 +109,27 @@ impl RecoveryCoordinator {
     /// 2. Groups entries by transaction (only committed transactions)
     /// 3. Replays operations to storage
     /// 4. Extracts index changes for later application
-    /// 5. Returns stats and index changes
+    /// 5. Returns stats, btree index changes, and the replayed Operation
+    ///    entries (with their tx_ids) for WAL-replay-based non-btree index
+    ///    recovery (task #26)
     ///
-    /// Memory usage: O(active transactions + single entry) instead of O(entire WAL)
+    /// Memory usage: O(active transactions + single entry) for streaming,
+    /// plus O(applied ops) for the returned replay buffer. The buffer is
+    /// bounded by the WAL size since last flush.
     pub fn recover<S: Storage + RawStorage>(
         wal_path: &Path,
         storage: &mut S,
-    ) -> Result<(RecoveryStats, Vec<RecoveredIndexChange>)> {
+    ) -> Result<RecoveryResult> {
         use std::fs::File;
         use std::io::BufReader;
 
         let mut stats = RecoveryStats::default();
         let mut all_index_changes = Vec::new();
+        let mut all_applied_ops: AppliedOps = Vec::new();
 
         // Check if WAL file exists
         if !wal_path.exists() {
-            return Ok((stats, all_index_changes));
+            return Ok((stats, all_index_changes, all_applied_ops));
         }
 
         // Open WAL and create streaming iterator
@@ -132,8 +146,10 @@ impl RecoveryCoordinator {
             stats.transactions_recovered += 1;
 
             // Replay operations to storage
-            let replay_stats = OperationReplay::replay(storage, &committed_tx.entries)?;
+            let (replay_stats, applied_ops) =
+                OperationReplay::replay(storage, &committed_tx.entries)?;
             stats.merge_replay_stats(&replay_stats);
+            all_applied_ops.extend(applied_ops);
 
             // Extract index changes
             let index_changes = IndexReplay::parse_entries(&committed_tx.entries)?;
@@ -142,7 +158,7 @@ impl RecoveryCoordinator {
             all_index_changes.extend(index_changes);
         }
 
-        Ok((stats, all_index_changes))
+        Ok((stats, all_index_changes, all_applied_ops))
     }
 
     /// Recover and clear WAL
@@ -152,7 +168,7 @@ impl RecoveryCoordinator {
     pub fn recover_and_clear<S: Storage + RawStorage>(
         wal_path: &Path,
         storage: &mut S,
-    ) -> Result<(RecoveryStats, Vec<RecoveredIndexChange>)> {
+    ) -> Result<RecoveryResult> {
         let result = Self::recover(wal_path, storage)?;
 
         // Clear WAL after successful recovery
@@ -184,7 +200,8 @@ mod tests {
         }
 
         let mut storage = MemoryStorage::new();
-        let (stats, index_changes) = RecoveryCoordinator::recover(&wal_path, &mut storage).unwrap();
+        let (stats, index_changes, _) =
+            RecoveryCoordinator::recover(&wal_path, &mut storage).unwrap();
 
         assert_eq!(stats.transactions_recovered, 0);
         assert_eq!(stats.operations_replayed, 0);
@@ -222,7 +239,8 @@ mod tests {
         }
 
         let mut storage = MemoryStorage::new();
-        let (stats, index_changes) = RecoveryCoordinator::recover(&wal_path, &mut storage).unwrap();
+        let (stats, index_changes, _) =
+            RecoveryCoordinator::recover(&wal_path, &mut storage).unwrap();
 
         assert_eq!(stats.transactions_recovered, 1);
         assert_eq!(stats.operations_replayed, 1);
@@ -257,7 +275,7 @@ mod tests {
         }
 
         let mut storage = MemoryStorage::new();
-        let (stats, _) = RecoveryCoordinator::recover(&wal_path, &mut storage).unwrap();
+        let (stats, _, _) = RecoveryCoordinator::recover(&wal_path, &mut storage).unwrap();
 
         // Uncommitted transaction should be ignored
         assert_eq!(stats.transactions_recovered, 0);
@@ -311,7 +329,8 @@ mod tests {
         }
 
         let mut storage = MemoryStorage::new();
-        let (stats, _) = RecoveryCoordinator::recover_and_clear(&wal_path, &mut storage).unwrap();
+        let (stats, _, _) =
+            RecoveryCoordinator::recover_and_clear(&wal_path, &mut storage).unwrap();
 
         assert_eq!(stats.transactions_recovered, 1);
 
