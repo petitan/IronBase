@@ -8,6 +8,7 @@
 // - `RecoveryStats`: Combined statistics from recovery
 
 mod index_replay;
+mod index_replay_ops;
 mod operation_replay;
 
 pub use index_replay::{IndexOperation, IndexReplay, IndexReplayStats, RecoveredIndexChange};

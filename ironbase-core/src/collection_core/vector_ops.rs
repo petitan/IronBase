@@ -31,7 +31,7 @@ use super::CollectionCore;
 ///
 /// NOTE: This is distinct from `adapter.rs::doc_id_to_string()` which produces
 /// unprefixed strings for MCP JSON responses (no roundtrip needed there).
-fn doc_id_to_string(id: &DocumentId) -> String {
+pub(crate) fn doc_id_to_string(id: &DocumentId) -> String {
     match id {
         DocumentId::Int(i) => format!("i:{}", i),
         DocumentId::String(s) => format!("s:{}", s),

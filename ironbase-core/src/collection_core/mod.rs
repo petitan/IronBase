@@ -215,6 +215,7 @@ mod update_operators;
 mod vector_ops;
 
 pub(crate) use self::context::QueryExecutionContext;
+pub(crate) use self::vector_ops::doc_id_to_string;
 
 // Public exports for Top-K algorithm
 pub use topk::{topk_select, topk_select_with_skip};
