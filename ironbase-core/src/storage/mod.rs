@@ -110,6 +110,18 @@ pub struct RecoveredIndexChange {
     pub doc_id: crate::document::DocumentId,
 }
 
+/// WAL-recovered operations with their originating transaction IDs.
+///
+/// Returned from [`StorageEngine::recover_from_wal`] so higher layers
+/// (e.g. per-index replay in `initialize_index_manager`) can selectively
+/// re-apply ops with `tx_id > index.last_flushed_tx_id()` instead of
+/// doing a full rebuild-from-catalog.
+pub type RecoveredOperations = Vec<(TransactionId, crate::transaction::Operation)>;
+
+/// Full result of [`StorageEngine::recover_from_wal`]:
+/// `(recovered_tx_count, btree_index_changes, applied_operations)`.
+pub type WalRecoveryOutput = (usize, Vec<RecoveredIndexChange>, RecoveredOperations);
+
 pub const HEADER_SIZE: u64 = 256; // Fixed header size
 
 // Re-export from central limits module
@@ -1719,18 +1731,22 @@ impl StorageEngine {
     /// Returns (recovered_tx_count, index_changes):
     /// - recovered_tx_count: number of committed transactions replayed (0 = no recovery needed)
     /// - index_changes: B+ tree index modifications to apply after storage recovery
+    /// - applied_ops: `(tx_id, Operation)` pairs for every successfully applied op,
+    ///   preserved so per-index WAL replay can selectively re-apply ops with
+    ///   `tx_id > index.last_flushed_tx_id()` instead of doing a full rebuild.
     ///
     /// NOTE: Previously returned the full Vec<Vec<WALEntry>>, but the caller only
     /// used .is_empty() on it. Returning count saves O(WAL_size) memory.
-    pub fn recover_from_wal(&mut self) -> Result<(usize, Vec<RecoveredIndexChange>)> {
+    pub fn recover_from_wal(&mut self) -> Result<WalRecoveryOutput> {
         let recovered = self.wal.recover()?;
 
         if recovered.is_empty() {
-            return Ok((0, vec![]));
+            return Ok((0, vec![], vec![]));
         }
 
         let recovered_count = recovered.len();
         let mut all_index_changes = Vec::new();
+        let mut applied_ops: Vec<(TransactionId, crate::transaction::Operation)> = Vec::new();
 
         // Replay each committed transaction
         for tx_entries in &recovered {
@@ -1751,6 +1767,7 @@ impl StorageEngine {
                         // - live_document_count
                         // - last_id (critical for preventing _id collisions!)
                         self.apply_wal_operation(&operation)?;
+                        applied_ops.push((entry.transaction_id, operation));
                     }
                     crate::wal::WALEntryType::IndexChange => {
                         // Parse index change from JSON
@@ -1810,7 +1827,7 @@ impl StorageEngine {
         self.metadata_snapshot_pending = false;
         self.wal_ops_since_clear = 0;
 
-        Ok((recovered_count, all_index_changes))
+        Ok((recovered_count, all_index_changes, applied_ops))
     }
 
     /// Rebuild document catalog from file after WAL recovery
@@ -2745,7 +2762,7 @@ mod tests {
         {
             let mut storage = StorageEngine::open(&db_path).unwrap();
             // Explicitly call recovery (DatabaseCore does this automatically)
-            storage.recover_from_wal().unwrap();
+            let (_, _, _) = storage.recover_from_wal().unwrap();
 
             // WAL should be cleared after recovery
             let mut wal_result = WriteAheadLog::open(&wal_path).unwrap();

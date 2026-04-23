@@ -330,6 +330,17 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Used by storage_wastage() to estimate bloat ratio.
     // Starts at 0 (never compacted) — bloat_ratio = infinity until first compact.
     pub(crate) last_compact_size: AtomicU64,
+
+    /// WAL-recovered operations awaiting per-collection non-btree index replay.
+    ///
+    /// Populated by `open_with_durability()` from `storage.recover_from_wal()`.
+    /// Consumed by `initialize_index_manager()` per-collection: operations whose
+    /// `tx_id > index.last_flushed_tx_id()` are replayed into fulltext/fuzzy/hnsw
+    /// indexes, skipping the full rebuild-from-catalog on dirty shutdown.
+    ///
+    /// Empty after clean shutdown or MemoryStorage (no WAL replay).
+    #[allow(dead_code)] // consumed by initialize_index_manager in a follow-up commit
+    pub(crate) recovered_operations: Arc<RwLock<Vec<(TransactionId, Operation)>>>,
 }
 
 // ============================================================================
@@ -386,8 +397,9 @@ impl DatabaseCore<StorageEngine> {
 
         let mut storage = StorageEngine::open(&path_str)?;
 
-        // Recover from WAL (includes both data and index changes)
-        let (recovered_tx_count, recovered_index_changes) = storage.recover_from_wal()?;
+        // Recover from WAL (includes both data and index changes + applied ops for per-index replay)
+        let (recovered_tx_count, recovered_index_changes, recovered_ops) =
+            storage.recover_from_wal()?;
 
         // CRITICAL FIX: Flush metadata after WAL recovery to persist updated data_end_offset
         //
@@ -429,6 +441,7 @@ impl DatabaseCore<StorageEngine> {
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
             last_compact_size: AtomicU64::new(0),
+            recovered_operations: Arc::new(RwLock::new(recovered_ops)),
         };
 
         // Apply recovered index changes to collections
@@ -526,6 +539,7 @@ impl DatabaseCore<MemoryStorage> {
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
             last_compact_size: AtomicU64::new(0),
+            recovered_operations: Arc::new(RwLock::new(Vec::new())),
         })
     }
 }
@@ -554,6 +568,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// with `tx_id > last_flushed_tx_id` need replay into the index.
     pub fn watermark_tx_id(&self) -> u64 {
         self.max_committed_tx_id.load(Ordering::SeqCst)
+    }
+
+    /// Snapshot (clone) of WAL-recovered operations awaiting per-index replay.
+    ///
+    /// Returns all `(tx_id, Operation)` pairs preserved from the WAL during
+    /// `open_with_durability()`. Per-collection index init reads this list
+    /// and applies only ops whose `tx_id > index.last_flushed_tx_id()`.
+    ///
+    /// Returns empty Vec if the DB was opened cleanly or uses MemoryStorage.
+    #[allow(dead_code)] // consumed by initialize_index_manager in a follow-up commit
+    pub(crate) fn recovered_operations_snapshot(&self) -> Vec<(TransactionId, Operation)> {
+        self.recovered_operations.read().clone()
+    }
+
+    /// Total count of WAL-recovered operations available for replay.
+    #[allow(dead_code)] // consumed by initialize_index_manager in a follow-up commit
+    pub(crate) fn recovered_operations_count(&self) -> usize {
+        self.recovered_operations.read().len()
     }
 }
 

@@ -396,7 +396,7 @@ fn test_recovery_wal_ahead_of_storage() {
     // Reopen storage - should trigger recovery
     {
         let mut storage = StorageEngine::open(&db_path).unwrap();
-        let (_recovered_txs, _index_changes) = storage.recover_from_wal().unwrap();
+        let (_recovered_txs, _index_changes, _applied_ops) = storage.recover_from_wal().unwrap();
 
         // WAL should be cleared after recovery
         let mut wal = WriteAheadLog::open(&wal_path).unwrap();
@@ -440,7 +440,7 @@ fn test_recovery_ignores_aborted_transaction() {
 
     // Recovery
     let mut storage = StorageEngine::open(&db_path).unwrap();
-    let (recovered, _) = storage.recover_from_wal().unwrap();
+    let (recovered, _, _) = storage.recover_from_wal().unwrap();
 
     // Aborted transaction should not be in recovered list
     assert_eq!(recovered, 0, "Aborted tx should not be recovered");
@@ -461,7 +461,7 @@ fn test_recovery_empty_wal() {
 
     // Reopen - empty WAL recovery should succeed
     let mut storage = StorageEngine::open(&db_path).unwrap();
-    let (recovered, _) = storage.recover_from_wal().unwrap();
+    let (recovered, _, _) = storage.recover_from_wal().unwrap();
 
     assert_eq!(recovered, 0);
 }
@@ -550,7 +550,7 @@ fn test_large_transaction_crash_recovery() {
 
     // Recovery should handle large transaction
     let mut storage = StorageEngine::open(&db_path).unwrap();
-    let (recovered, _) = storage.recover_from_wal().unwrap();
+    let (recovered, _, _) = storage.recover_from_wal().unwrap();
 
     assert_eq!(recovered, 1, "Should recover 1 committed transaction");
     // Verify all 100 documents were recovered via storage state
@@ -572,7 +572,7 @@ fn test_recovery_no_wal_file() {
     storage.create_collection("test").unwrap();
 
     // Recovery on fresh WAL
-    let (recovered, _) = storage.recover_from_wal().unwrap();
+    let (recovered, _, _) = storage.recover_from_wal().unwrap();
     assert_eq!(recovered, 0);
 }
 
@@ -669,7 +669,7 @@ fn test_wal_recovery_metadata_convergence() {
     // Phase 3: Reopen and recover
     {
         let mut storage = StorageEngine::open(&db_path).unwrap();
-        let (recovered, _) = storage.recover_from_wal().unwrap();
+        let (recovered, _, _) = storage.recover_from_wal().unwrap();
 
         // Should have recovered 1 transaction
         assert_eq!(recovered, 1, "Should recover 1 transaction");
@@ -792,7 +792,7 @@ fn test_wal_recovery_mixed_operations_metadata() {
     // Recover and verify
     {
         let mut storage = StorageEngine::open(&db_path).unwrap();
-        let (recovered, _) = storage.recover_from_wal().unwrap();
+        let (recovered, _, _) = storage.recover_from_wal().unwrap();
 
         assert_eq!(recovered, 1);
 
