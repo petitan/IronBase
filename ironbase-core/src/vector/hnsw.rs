@@ -286,7 +286,9 @@ impl HnswIndex {
     ///
     /// # Returns
     ///
-    /// Error if dimension mismatch or ID already exists
+    /// Error only on dimension mismatch or capacity exhaustion.
+    /// If `id` already exists, the prior entry is removed first (idempotent)
+    /// so WAL-replay based recovery can re-apply ops without error.
     pub fn insert(&mut self, id: &str, vector: &[f32]) -> Result<()> {
         if vector.len() != self.config.dim {
             return Err(IronBaseError::IndexError(format!(
@@ -296,11 +298,14 @@ impl HnswIndex {
             )));
         }
 
+        // Idempotency guard: if the id is already registered, drop the old
+        // node first (lazy-delete from id_to_index). Without this, WAL-replay
+        // based recovery after crash — which may re-apply an op that is
+        // already present in the loaded .hnsw cache — would error instead
+        // of producing the correct final state. Mirrors the fulltext guard
+        // at `FulltextIndex::insert_impl` (PR 5).
         if self.id_to_index.contains_key(id) {
-            return Err(IronBaseError::IndexError(format!(
-                "ID already exists in vector index: {}",
-                id
-            )));
+            self.remove(id);
         }
 
         // OOM Protection: Check vector count limit
