@@ -762,6 +762,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // ops). Phase A atomic flush (commit fab5d97e / 84638dea) makes the
         // file safe to load even after a crash — any post-flush mutations are
         // captured in the WAL and replayed per-index below.
+        //
+        // `all_non_btree_loaded` tracks whether every persisted non-btree index
+        // was successfully loaded. If any load returns None, WAL replay is
+        // unsafe (pre-watermark data is gone) and we must fall back to
+        // rebuild-from-catalog even when `can_try_replay` is true.
+        let mut all_non_btree_loaded = true;
         for fuzzy_meta in &persisted_fuzzy_indexes {
             let mut loaded = false;
             if was_clean || can_try_replay {
@@ -778,6 +784,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 }
             }
             if !loaded {
+                all_non_btree_loaded = false;
                 // Create new index with disk storage (will be rebuilt from documents)
                 let storage_path =
                     crate::collection_core::build_fuzzy_index_file_path(&db_path, &fuzzy_meta.name);
@@ -818,6 +825,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 }
             }
             if !loaded {
+                all_non_btree_loaded = false;
                 // Create new index with disk storage (will be rebuilt from documents)
                 let storage_path = crate::collection_core::build_fulltext_index_file_path(
                     &db_path,
@@ -859,6 +867,7 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
                 }
             }
             if !loaded {
+                all_non_btree_loaded = false;
                 // Create new index (will be rebuilt from documents)
                 log_debug!(
                     "Vector index '{}' {} - creating empty (will rebuild)",
@@ -897,7 +906,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         //
         // On guardrail failure (too many ops, legacy index without watermark,
         // helper error), the rebuild path below runs exactly as before.
-        let wal_replay_succeeded = if can_try_replay {
+        if can_try_replay && !all_non_btree_loaded {
+            log_warn!(
+                "Collection '{}': WAL replay skipped — some persisted non-btree index files failed to load, rebuild will rescue them",
+                name
+            );
+        }
+        let wal_replay_succeeded = if can_try_replay && all_non_btree_loaded {
             match Self::try_wal_replay_for_collection(
                 &mut index_manager,
                 &recovered_ops_for_collection,

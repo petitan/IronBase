@@ -481,6 +481,27 @@ impl DatabaseCore<StorageEngine> {
 
         Ok(db)
     }
+
+    /// Simulate an unclean (kill -9) shutdown. **Testing only.**
+    ///
+    /// Releases the `StorageEngine` file lock so the same process can reopen
+    /// the database, marks the in-memory handle as closed so `Drop` is a no-op,
+    /// then leaks `self` so `StorageEngine::Drop` also does not run. The
+    /// on-disk `clean_shutdown` byte therefore stays at its pre-session value
+    /// (false after any prior write or first open), making the next open see
+    /// `was_clean_shutdown() == false` and take the recovery path.
+    ///
+    /// Hidden from public docs (`#[doc(hidden)]`) because production code
+    /// must never call this — it deliberately leaks the `StorageEngine`.
+    /// Exposed as `pub` only so integration tests in `tests/` can reach it.
+    #[doc(hidden)]
+    pub fn __simulate_crash_for_test(self) {
+        self.is_closed.store(true, Ordering::SeqCst);
+        if let Some(storage) = self.storage.try_read() {
+            let _ = storage.release_lock();
+        }
+        std::mem::forget(self);
+    }
 }
 
 // ============================================================================
