@@ -47,10 +47,16 @@ pub(crate) fn collection_of(op: &Operation) -> &str {
 
 /// Apply a single WAL op to a fulltext index on `field`.
 ///
-/// Insert / Update: read `field` as a string and call `index.insert(doc_id, text)`
-/// (idempotent thanks to the PR 5 guard). If the field is absent or not a
-/// string in the new-state doc, any prior entry for `doc_id` is dropped so
-/// replay converges to the post-op state.
+/// Insert / Update: read `field` as a string. If the index has a
+/// `parent_doc_id_field` and the new-state doc supplies a string value for it,
+/// call `index.insert_with_parent_doc_id(doc_id, text, parent)` so the
+/// `chunk_doc_mapping` stays populated (required by hybrid_search
+/// `group_by_document` / document-level AND qualification). Otherwise fall back
+/// to plain `index.insert(doc_id, text)`. Both inserts are idempotent thanks
+/// to the PR 5 guard.
+///
+/// If the field is absent or not a string in the new-state doc, any prior
+/// entry for `doc_id` is dropped so replay converges to the post-op state.
 ///
 /// Delete: `index.remove(doc_id)`.
 pub fn apply_op_to_fulltext(index: &mut FulltextIndex, op: &Operation, field: &str) -> Result<()> {
@@ -59,7 +65,13 @@ pub fn apply_op_to_fulltext(index: &mut FulltextIndex, op: &Operation, field: &s
         Operation::Insert { .. } | Operation::Update { .. } => {
             if let Some(doc) = new_doc(op) {
                 if let Some(Value::String(text)) = get_nested_value(doc, field) {
-                    index.insert(doc_id, text)?;
+                    let pdid_field = index.parent_doc_id_field().to_string();
+                    let parent_doc_id = get_nested_value(doc, &pdid_field)
+                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                    match parent_doc_id {
+                        Some(pdid) => index.insert_with_parent_doc_id(doc_id, text, &pdid)?,
+                        None => index.insert(doc_id, text)?,
+                    }
                     return Ok(());
                 }
             }
@@ -233,6 +245,36 @@ mod tests {
         apply_op_to_fulltext(&mut fts, &op, "content").unwrap();
         apply_op_to_fulltext(&mut fts, &op, "content").unwrap();
         assert_eq!(fts.doc_count(), 1);
+    }
+
+    #[test]
+    fn fulltext_replay_populates_chunk_doc_mapping_for_rag() {
+        // Simulate a RAG-style fulltext index where chunk docs carry a
+        // `doc_id` string field pointing at their parent document id.
+        let mut fts = FulltextIndex::new("fts", "content", FtsOptions::default());
+        // Default parent_doc_id_field is "doc_id" (see FulltextIndex::parent_doc_id_field).
+
+        // Insert three chunks of the same parent document.
+        for (cid, text) in &[
+            ("c1", "alpha one"),
+            ("c2", "alpha two"),
+            ("c3", "alpha three"),
+        ] {
+            let op = insert_op(
+                DocumentId::String(cid.to_string()),
+                json!({"content": text, "doc_id": "parent-A"}),
+            );
+            apply_op_to_fulltext(&mut fts, &op, "content").unwrap();
+        }
+
+        assert_eq!(fts.doc_count(), 3);
+        // Without the chunk mapping, group_by_document-style search breaks
+        // silently — the post-replay state MUST mirror the insert-time state.
+        assert!(fts.has_chunk_doc_mapping());
+        assert_eq!(
+            fts.get_chunk_doc_id(&DocumentId::String("c2".to_string())),
+            Some("parent-A")
+        );
     }
 
     #[test]
