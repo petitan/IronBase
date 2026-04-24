@@ -1040,11 +1040,16 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_id() {
+    fn test_duplicate_id_is_idempotent() {
+        // Post-0260ccda: insert() with an existing id removes the prior entry
+        // and inserts the new vector. Required so WAL-replay based recovery
+        // can re-apply ops that are already present in the loaded .hnsw cache.
         let mut hnsw = HnswIndex::with_dim(3);
         hnsw.insert("doc1", &[1.0, 0.0, 0.0]).unwrap();
-        let result = hnsw.insert("doc1", &[0.0, 1.0, 0.0]);
-        assert!(result.is_err());
+        hnsw.insert("doc1", &[0.0, 1.0, 0.0]).unwrap();
+        assert_eq!(hnsw.len(), 1);
+        // Active id_to_index has exactly one entry for "doc1" — the new vector.
+        assert!(hnsw.contains("doc1"));
     }
 
     #[test]
