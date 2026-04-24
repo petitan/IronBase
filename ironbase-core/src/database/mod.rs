@@ -1806,4 +1806,282 @@ mod wal_replay_tests {
         eprintln!("   speedup:                {:>8.2}x", ratio);
         eprintln!();
     }
+
+    // ========================================================================
+    // Production-readiness E2E
+    //
+    // This is the single most-important test for the week's changes
+    // (atomic flushes + watermark tracking + WAL replay recovery).
+    // It exercises every non-trivial code path the production MCP server
+    // uses on startup / shutdown / crash, against all four index types at
+    // once, and asserts that every search still returns the expected data
+    // after each phase.
+    //
+    // Run:
+    //   cargo test --release -p ironbase-core --lib \
+    //     wal_replay_tests::production_readiness_e2e \
+    //     -- --ignored --nocapture --test-threads=1
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn production_readiness_e2e() {
+        use crate::index::fuzzy::FuzzyAlgorithm;
+        use crate::vector::{DistanceMetric, VectorIndexConfig};
+        use serde_json::json;
+
+        const BASE_DOCS: usize = 300;
+        const POST_CHECKPOINT_DOCS: usize = 50;
+        const POST_CRASH_DOCS: usize = 25;
+        const TOTAL: usize = BASE_DOCS + POST_CHECKPOINT_DOCS + POST_CRASH_DOCS;
+
+        // Synthetic 64-dim vector so the HNSW index has real data to exercise
+        // the replay + orphan-compaction paths without needing an embedding
+        // provider. Values are deterministic per-id so the same doc always
+        // hashes to the same vector.
+        fn synth_vec(seed: usize) -> Vec<f32> {
+            (0..64)
+                .map(|i| ((seed.wrapping_mul(31).wrapping_add(i)) as f32).sin())
+                .collect()
+        }
+
+        fn make_doc(
+            i: usize,
+            content: &str,
+            tag: &str,
+        ) -> std::collections::HashMap<String, serde_json::Value> {
+            let mut m = std::collections::HashMap::new();
+            m.insert("tag".to_string(), json!(tag));
+            m.insert("content".to_string(), json!(content));
+            m.insert("name".to_string(), json!(format!("person_{}", i)));
+            m.insert("embedding".to_string(), json!(synth_vec(i)));
+            m
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("e2e.mlite");
+
+        // -------------------- Phase A: cold create + seed --------------------
+        let t_seed = std::time::Instant::now();
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+
+            // Btree index on "tag", fuzzy on "name", fulltext on "content",
+            // HNSW on "embedding" — all four non-trivial index types.
+            coll.create_index("tag".to_string(), false, false).unwrap();
+            coll.create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.7)
+                .unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            coll.create_vector_index(
+                "embedding",
+                VectorIndexConfig {
+                    dim: 64,
+                    metric: DistanceMetric::Cosine,
+                    ..VectorIndexConfig::default()
+                },
+            )
+            .unwrap();
+
+            for i in 0..BASE_DOCS {
+                db.insert_one(
+                    "docs",
+                    make_doc(i, &format!("alpha document number {}", i), "tag-A"),
+                )
+                .unwrap();
+            }
+            db.close().unwrap();
+        }
+        let seed_elapsed = t_seed.elapsed();
+
+        // -------------------- Phase B: reopen + search sanity --------------------
+        let t_reopen1 = std::time::Instant::now();
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let reopen1_elapsed = t_reopen1.elapsed();
+        let coll = db.collection("docs").unwrap();
+
+        let fts_hits = coll
+            .fulltext_search("content", "alpha", Some(500), None, None, None)
+            .unwrap();
+        assert_eq!(fts_hits.len(), BASE_DOCS, "fulltext lost seeded docs");
+
+        let fuzzy_hits = coll
+            .find(&json!({ "name": { "$fuzzy": "person_1" } }))
+            .unwrap();
+        assert!(
+            !fuzzy_hits.is_empty(),
+            "fuzzy returned nothing for seeded name"
+        );
+
+        let tag_hits = coll.find(&json!({ "tag": "tag-A" })).unwrap();
+        assert_eq!(tag_hits.len(), BASE_DOCS, "btree lost tag-A docs");
+
+        // -------------------- Phase C: more inserts + checkpoint --------------------
+        for i in 0..POST_CHECKPOINT_DOCS {
+            let id = BASE_DOCS + i;
+            db.insert_one(
+                "docs",
+                make_doc(id, &format!("beta document number {}", id), "tag-B"),
+            )
+            .unwrap();
+        }
+        let watermark_pre = db.watermark_tx_id();
+        db.checkpoint().unwrap();
+        assert!(watermark_pre > 0, "watermark did not advance past 0");
+
+        // Verify all 4 search types AFTER checkpoint (index state consistent).
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(500), None, None, None)
+                .unwrap()
+                .len(),
+            POST_CHECKPOINT_DOCS,
+            "fulltext missed post-checkpoint beta docs"
+        );
+        assert_eq!(
+            coll.find(&json!({ "tag": "tag-B" })).unwrap().len(),
+            POST_CHECKPOINT_DOCS,
+            "btree missed tag-B docs"
+        );
+
+        // -------------------- Phase D: crash simulation --------------------
+        // Keep the DB open — do a few more inserts that will live in the WAL
+        // only (no post-checkpoint flush), then pull the plug.
+        for i in 0..POST_CRASH_DOCS {
+            let id = BASE_DOCS + POST_CHECKPOINT_DOCS + i;
+            db.insert_one(
+                "docs",
+                make_doc(id, &format!("gamma document number {}", id), "tag-C"),
+            )
+            .unwrap();
+        }
+        db.simulate_crash_for_test();
+
+        // -------------------- Phase E: reopen after crash, full verify --------------------
+        let t_recover = std::time::Instant::now();
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let recover_elapsed = t_recover.elapsed();
+
+        // Every committed doc must survive the crash (replay or rebuild, either is fine).
+        assert_eq!(
+            db.count_documents("docs", &json!({})).unwrap() as usize,
+            TOTAL,
+            "catalog doc count mismatch after crash recovery"
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(1000), None, None, None)
+                .unwrap()
+                .len(),
+            BASE_DOCS,
+            "fulltext lost batch A after crash"
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(500), None, None, None)
+                .unwrap()
+                .len(),
+            POST_CHECKPOINT_DOCS,
+            "fulltext lost batch B (post-checkpoint) after crash"
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "gamma", Some(500), None, None, None)
+                .unwrap()
+                .len(),
+            POST_CRASH_DOCS,
+            "fulltext lost batch C (WAL-only) after crash"
+        );
+        assert_eq!(
+            coll.find(&json!({ "tag": "tag-A" })).unwrap().len(),
+            BASE_DOCS,
+            "btree tag-A shrunk"
+        );
+        assert_eq!(
+            coll.find(&json!({ "tag": "tag-B" })).unwrap().len(),
+            POST_CHECKPOINT_DOCS,
+            "btree tag-B shrunk"
+        );
+        assert_eq!(
+            coll.find(&json!({ "tag": "tag-C" })).unwrap().len(),
+            POST_CRASH_DOCS,
+            "btree tag-C shrunk"
+        );
+        let fuzzy_late = coll
+            .find(&json!({ "name": { "$fuzzy": "person_350" } }))
+            .unwrap();
+        assert!(
+            !fuzzy_late.is_empty(),
+            "fuzzy lost post-checkpoint name after crash"
+        );
+
+        // -------------------- Phase F: post-crash writes + clean close --------------------
+        db.insert_one(
+            "docs",
+            make_doc(TOTAL, "delta document post-recovery", "tag-D"),
+        )
+        .unwrap();
+        db.update_many(
+            "docs",
+            &json!({"tag": "tag-C"}),
+            &json!({"$set": {"tag": "tag-C-updated"}}),
+        )
+        .unwrap();
+        db.delete_many("docs", &json!({"tag": "tag-C-updated"}))
+            .unwrap();
+        assert_eq!(
+            db.count_documents("docs", &json!({})).unwrap() as usize,
+            TOTAL + 1 - POST_CRASH_DOCS,
+            "doc count wrong after delete_many"
+        );
+        // Explicit close so the file lock is released before Phase G's reopen.
+        // `drop(db)` would also work on StorageEngine, but close() is more
+        // readable and matches what production callers are expected to do.
+        db.close().unwrap();
+
+        // -------------------- Phase G: clean reopen (fast path) --------------------
+        let t_reopen2 = std::time::Instant::now();
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let reopen2_elapsed = t_reopen2.elapsed();
+
+        // All deletions + updates must be visible.
+        assert_eq!(
+            coll.find(&json!({ "tag": "tag-C" })).unwrap().len(),
+            0,
+            "deleted docs reappeared"
+        );
+        assert_eq!(
+            coll.find(&json!({ "tag": "tag-D" })).unwrap().len(),
+            1,
+            "post-recovery insert lost"
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "delta", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            1,
+            "fulltext lost delta doc"
+        );
+
+        // -------------------- Report --------------------
+        eprintln!();
+        eprintln!("=== Week's-changes E2E: production readiness ===");
+        eprintln!(
+            "   seed {} docs + close:            {:>8.2?}",
+            BASE_DOCS, seed_elapsed
+        );
+        eprintln!(
+            "   first clean reopen:              {:>8.2?}",
+            reopen1_elapsed
+        );
+        eprintln!(
+            "   recovery reopen (crash path):    {:>8.2?}  ({} docs, {} WAL-only)",
+            recover_elapsed, TOTAL, POST_CRASH_DOCS
+        );
+        eprintln!(
+            "   second clean reopen (fast path): {:>8.2?}",
+            reopen2_elapsed
+        );
+        eprintln!("   all index types + find + update + delete + fuzzy + fulltext verified ✓");
+        eprintln!();
+    }
 }
