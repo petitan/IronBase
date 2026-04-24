@@ -1686,4 +1686,124 @@ mod wal_replay_tests {
             .unwrap();
         assert_eq!(hits.len(), 5);
     }
+
+    // ========================================================================
+    // Perf benches for task #26 Phase 4b WAL replay.
+    //
+    // Run:
+    //   cargo test --release -p ironbase-core --lib \
+    //     wal_replay_tests::bench -- --ignored --nocapture --test-threads=1
+    //
+    // Ignored by default because they write tens of thousands of docs and
+    // measure I/O-bound wall clock.
+    // ========================================================================
+
+    #[test]
+    #[ignore]
+    fn bench_replay_vs_rebuild_fulltext() {
+        const BASE_DOCS: usize = 10_000;
+        const POST_CHECKPOINT_DOCS: usize = 500;
+
+        let tmp = TempDir::new().unwrap();
+
+        // Scenario A: crash-and-replay path.
+        //   checkpoint writes a V4 .ftidx with watermark, so the reopen
+        //   takes the load+replay branch and only the 500 post-checkpoint
+        //   docs are re-applied from the WAL.
+        let replay_path = tmp.path().join("replay.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&replay_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..BASE_DOCS {
+                db.insert_one(
+                    "docs",
+                    doc(&format!("a{}", i), &format!("alpha document number {}", i)),
+                )
+                .unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 0..POST_CHECKPOINT_DOCS {
+                db.insert_one(
+                    "docs",
+                    doc(&format!("b{}", i), &format!("beta document number {}", i)),
+                )
+                .unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+
+        let t0 = std::time::Instant::now();
+        let db = DatabaseCore::<StorageEngine>::open(&replay_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        // Touching the collection drives initialize_index_manager; the
+        // fulltext search then proves the index is usable afterwards.
+        let hits_alpha = coll
+            .fulltext_search("content", "alpha", Some(10), None, None, None)
+            .unwrap();
+        let hits_beta = coll
+            .fulltext_search("content", "beta", Some(10), None, None, None)
+            .unwrap();
+        let replay_elapsed = t0.elapsed();
+        assert!(
+            !hits_alpha.is_empty() && !hits_beta.is_empty(),
+            "replay path produced unusable index"
+        );
+        drop(db);
+
+        // Scenario B: no checkpoint → no .ftidx on disk → dirty shutdown
+        //   reload has no file to load → all_non_btree_loaded=false (because
+        //   the load returns None), the safety rail forces rebuild from
+        //   catalog. This mirrors the pre-Phase-4b behaviour for every
+        //   dirty-shutdown reopen.
+        let rebuild_path = tmp.path().join("rebuild.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&rebuild_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            // Same total document count so the rebuild work is comparable.
+            for i in 0..(BASE_DOCS + POST_CHECKPOINT_DOCS) {
+                db.insert_one(
+                    "docs",
+                    doc(&format!("x{}", i), &format!("alpha document number {}", i)),
+                )
+                .unwrap();
+            }
+            // NO checkpoint — the .ftidx never makes it to disk, so the
+            // reopen cannot use replay no matter what.
+            db.simulate_crash_for_test();
+        }
+
+        let t1 = std::time::Instant::now();
+        let db = DatabaseCore::<StorageEngine>::open(&rebuild_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let hits = coll
+            .fulltext_search("content", "alpha", Some(10), None, None, None)
+            .unwrap();
+        let rebuild_elapsed = t1.elapsed();
+        assert!(!hits.is_empty(), "rebuild path produced unusable index");
+
+        let ratio = rebuild_elapsed.as_secs_f64() / replay_elapsed.as_secs_f64();
+
+        eprintln!();
+        eprintln!("=== Task #26 Phase 4b bench: fulltext WAL replay vs rebuild-from-catalog ===");
+        eprintln!("   base docs:              {} (checkpointed)", BASE_DOCS);
+        eprintln!(
+            "   post-checkpoint docs:   {} (WAL-only)",
+            POST_CHECKPOINT_DOCS
+        );
+        eprintln!(
+            "   replay path reopen:     {:>8.2?}  (load .ftidx @ watermark + replay {} ops)",
+            replay_elapsed, POST_CHECKPOINT_DOCS
+        );
+        eprintln!(
+            "   rebuild path reopen:    {:>8.2?}  (full rebuild from {} catalog entries)",
+            rebuild_elapsed,
+            BASE_DOCS + POST_CHECKPOINT_DOCS
+        );
+        eprintln!("   speedup:                {:>8.2}x", ratio);
+        eprintln!();
+    }
 }
