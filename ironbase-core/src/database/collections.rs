@@ -680,24 +680,34 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         // (too many ops, legacy index without watermark, helper error), we
         // fall back to the existing rebuild path via `rebuild_indexes_from_catalog`
         // which skips any index that already has data.
-        const MAX_REPLAY_OPS_PER_COLLECTION: usize = 100_000;
-        let recovered_ops_for_collection: Vec<(TransactionId, Operation)> = if was_clean {
+        //
+        // `take_recovered_operations_for_collection` drains this collection's
+        // bucket out of the DB-level map so its memory is freed as soon as the
+        // replay finishes. Clean shutdown path returns an empty Vec because the
+        // map is always empty on a clean reopen.
+        let recovered_ops_for_collection = if was_clean {
             Vec::new()
         } else {
-            self.recovered_operations_snapshot()
-                .into_iter()
-                .filter(|(_, op)| crate::recovery::collection_of(op) == name)
-                .collect()
+            self.take_recovered_operations_for_collection(name)
         };
         let can_try_replay = !was_clean
             && !recovered_ops_for_collection.is_empty()
-            && recovered_ops_for_collection.len() <= MAX_REPLAY_OPS_PER_COLLECTION;
+            && recovered_ops_for_collection.len() <= crate::limits::MAX_REPLAY_OPS_PER_COLLECTION;
 
         if can_try_replay {
             log_info!(
                 "Collection '{}': attempting WAL replay recovery ({} ops pending)",
                 name,
                 recovered_ops_for_collection.len()
+            );
+        } else if !was_clean
+            && recovered_ops_for_collection.len() > crate::limits::MAX_REPLAY_OPS_PER_COLLECTION
+        {
+            log_warn!(
+                "Collection '{}': {} pending WAL ops exceed MAX_REPLAY_OPS_PER_COLLECTION ({}), falling back to rebuild-from-catalog",
+                name,
+                recovered_ops_for_collection.len(),
+                crate::limits::MAX_REPLAY_OPS_PER_COLLECTION
             );
         }
 

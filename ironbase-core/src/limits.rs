@@ -167,6 +167,29 @@ pub const DEFAULT_WRITE_LOCK_TIMEOUT_SECS: u64 = 5;
 pub const LOCK_POLL_INTERVAL_MS: u64 = 10;
 
 // ============================================================================
+// Recovery Limits (task #26 WAL replay)
+// ============================================================================
+
+/// Maximum recovered WAL operations per collection that may be WAL-replayed
+/// into the loaded non-btree indexes on dirty shutdown. Above this count,
+/// `try_wal_replay_for_collection` returns `Ok(false)` and recovery falls
+/// back to rebuild-from-catalog.
+///
+/// Rationale: each recovered `Operation::Insert` / `Update` carries its full
+/// document JSON; the collected `Vec<(tx_id, Op)>` therefore scales with
+/// `ops × avg_doc_size`. At 10 KB average doc size, a 100 000 op cap yields
+/// ~1 GB of working memory per collection during replay. Very large
+/// accumulated WALs are almost certainly faster to recover via the
+/// sequential catalog scan anyway, so the threshold caps blast radius
+/// without losing a meaningful speedup.
+///
+/// Tune downward on memory-constrained systems; tune upward only after
+/// verifying that `avg_doc_size × threshold` still fits comfortably in RAM
+/// alongside the catalog, the loaded indexes, and other collections'
+/// replay buffers.
+pub const MAX_REPLAY_OPS_PER_COLLECTION: usize = 100_000;
+
+// ============================================================================
 // Cancellation Check Frequency
 // ============================================================================
 

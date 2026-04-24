@@ -331,15 +331,19 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     // Starts at 0 (never compacted) — bloat_ratio = infinity until first compact.
     pub(crate) last_compact_size: AtomicU64,
 
-    /// WAL-recovered operations awaiting per-collection non-btree index replay.
+    /// WAL-recovered operations awaiting per-collection non-btree index replay,
+    /// **grouped by collection name** for O(1) lookup and drain-style consumption.
     ///
-    /// Populated by `open_with_durability()` from `storage.recover_from_wal()`.
-    /// Consumed by `initialize_index_manager()` per-collection: operations whose
-    /// `tx_id > index.last_flushed_tx_id()` are replayed into fulltext/fuzzy/hnsw
-    /// indexes, skipping the full rebuild-from-catalog on dirty shutdown.
+    /// Populated once by `open_with_durability()` from
+    /// `storage.recover_from_wal()` — the ungrouped `Vec<(tx_id, Op)>` is
+    /// walked once and each entry routed into its collection's bucket.
+    /// Consumed by `initialize_index_manager()` via
+    /// `take_recovered_operations_for_collection(name)`, which **removes**
+    /// the bucket from the map so the memory is freed as each collection
+    /// finishes its replay.
     ///
     /// Empty after clean shutdown or MemoryStorage (no WAL replay).
-    pub(crate) recovered_operations: Arc<RwLock<Vec<(TransactionId, Operation)>>>,
+    pub(crate) recovered_operations: Arc<RwLock<HashMap<String, Vec<(TransactionId, Operation)>>>>,
 }
 
 // ============================================================================
@@ -400,6 +404,19 @@ impl DatabaseCore<StorageEngine> {
         let (recovered_tx_count, recovered_index_changes, recovered_ops) =
             storage.recover_from_wal()?;
 
+        // Group recovered ops by collection once so each collection's index
+        // init is O(1) lookup instead of O(N) filter, and the buckets can
+        // be drained individually to free memory as we go.
+        let mut recovered_ops_by_collection: HashMap<String, Vec<(TransactionId, Operation)>> =
+            HashMap::new();
+        for (tx_id, op) in recovered_ops {
+            let collection = crate::recovery::collection_of(&op).to_string();
+            recovered_ops_by_collection
+                .entry(collection)
+                .or_default()
+                .push((tx_id, op));
+        }
+
         // CRITICAL FIX: Flush metadata after WAL recovery to persist updated data_end_offset
         //
         // Scenario without this fix:
@@ -440,7 +457,7 @@ impl DatabaseCore<StorageEngine> {
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
             last_compact_size: AtomicU64::new(0),
-            recovered_operations: Arc::new(RwLock::new(recovered_ops)),
+            recovered_operations: Arc::new(RwLock::new(recovered_ops_by_collection)),
         };
 
         // Apply recovered index changes to collections
@@ -561,7 +578,7 @@ impl DatabaseCore<MemoryStorage> {
             collection_write_locks: Arc::new(RwLock::new(HashMap::new())),
             is_compacting: AtomicBool::new(false),
             last_compact_size: AtomicU64::new(0),
-            recovered_operations: Arc::new(RwLock::new(Vec::new())),
+            recovered_operations: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 }
@@ -592,21 +609,24 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         self.max_committed_tx_id.load(Ordering::SeqCst)
     }
 
-    /// Snapshot (clone) of WAL-recovered operations awaiting per-index replay.
+    /// Take (remove and return) the WAL-recovered operations for a single
+    /// collection, freeing the bucket inside `recovered_operations`.
     ///
-    /// Returns all `(tx_id, Operation)` pairs preserved from the WAL during
-    /// `open_with_durability()`. Per-collection index init reads this list
-    /// and applies only ops whose `tx_id > index.last_flushed_tx_id()`.
-    ///
-    /// Returns empty Vec if the DB was opened cleanly or uses MemoryStorage.
-    pub(crate) fn recovered_operations_snapshot(&self) -> Vec<(TransactionId, Operation)> {
-        self.recovered_operations.read().clone()
-    }
-
-    /// Total count of WAL-recovered operations available for replay.
-    #[allow(dead_code)] // diagnostic/fallback helper, retained for future use
-    pub(crate) fn recovered_operations_count(&self) -> usize {
-        self.recovered_operations.read().len()
+    /// Called once per collection by `initialize_index_manager`. The
+    /// drain-style transfer means ops for a collection that has already
+    /// finished its replay no longer occupy memory while later collections
+    /// are still being initialised — critical because `Operation::Insert`
+    /// carries the full document JSON. Returns an empty Vec when the
+    /// collection had no pending ops (clean shutdown, or no writes to
+    /// this collection since the last checkpoint).
+    pub(crate) fn take_recovered_operations_for_collection(
+        &self,
+        collection: &str,
+    ) -> Vec<(TransactionId, Operation)> {
+        self.recovered_operations
+            .write()
+            .remove(collection)
+            .unwrap_or_default()
     }
 }
 
