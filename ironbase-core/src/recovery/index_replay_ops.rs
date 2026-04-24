@@ -6,10 +6,6 @@
 // an op that is already reflected in the index's loaded state is a no-op
 // (fulltext and HNSW `insert()` guard on existing id; fuzzy replay
 // removes-then-inserts per doc_id at the helper layer).
-//
-// The helpers are marked `#[allow(dead_code)]` until Phase 4b wires
-// them into `initialize_index_manager`; unit tests exercise them now.
-#![allow(dead_code)]
 
 use serde_json::Value;
 

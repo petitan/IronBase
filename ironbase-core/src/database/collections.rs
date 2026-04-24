@@ -60,6 +60,7 @@ use crate::document::DocumentId;
 use crate::error::{IronBaseError, Result};
 use crate::index::{IndexKey, IndexManager};
 use crate::storage::{RawStorage, Storage};
+use crate::transaction::{Operation, TransactionId};
 
 use super::DatabaseCore;
 
@@ -528,12 +529,106 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         Ok(rebuilt_count)
     }
 
+    /// Attempt watermark-filtered WAL replay for a collection's non-btree indexes.
+    ///
+    /// For each loaded fuzzy / fulltext / vector index, iterate `recovered_ops`
+    /// and apply those whose `tx_id > index.last_flushed_tx_id()` using the
+    /// helpers in `recovery::index_replay_ops`. The helpers are idempotent —
+    /// applying an op whose effect is already reflected in the loaded file
+    /// state is a no-op.
+    ///
+    /// Returns:
+    /// - `Ok(true)` — replay converged; indexes are consistent with the latest
+    ///   committed state and should NOT be rebuilt from catalog.
+    /// - `Ok(false)` — a safety rail tripped (a loaded-but-non-empty index has
+    ///   `last_flushed_tx_id == 0`, i.e. a legacy V3/pre-watermark file; or a
+    ///   helper returned an error). Caller must fall back to rebuild.
+    ///
+    /// Note: this does NOT change the behavior for btree indexes — btree has
+    /// its own WAL `IndexChange` replay path in `database/mod.rs::open_with_durability`
+    /// and the existing `has_btree_without_file` logic still drives btree rebuild.
+    fn try_wal_replay_for_collection(
+        index_manager: &mut IndexManager,
+        recovered_ops: &[(TransactionId, Operation)],
+        persisted_fuzzy: &[crate::index::fuzzy::FuzzyIndexMetadata],
+        persisted_fulltext: &[crate::fulltext::FulltextIndexMetadata],
+        persisted_vector: &[crate::vector::VectorIndexMetadata],
+    ) -> Result<bool> {
+        // Fuzzy
+        for fz_meta in persisted_fuzzy {
+            let watermark = match index_manager.get_fuzzy_index(&fz_meta.name) {
+                Some(idx) => {
+                    // A loaded-but-non-empty index with watermark=0 is a legacy
+                    // V3 file — we cannot know which ops are already applied, so
+                    // the safe path is a full rebuild.
+                    if idx.last_flushed_tx_id() == 0 && idx.entry_count() > 0 {
+                        return Ok(false);
+                    }
+                    idx.last_flushed_tx_id()
+                }
+                None => continue, // index wasn't loaded — rebuild path will handle it
+            };
+            let field = fz_meta.field.clone();
+            if let Some(idx) = index_manager.get_fuzzy_index_mut(&fz_meta.name) {
+                for (tx_id, op) in recovered_ops {
+                    if *tx_id > watermark {
+                        crate::recovery::apply_op_to_fuzzy(idx, op, &field)?;
+                    }
+                }
+            }
+        }
+
+        // Fulltext
+        for ft_meta in persisted_fulltext {
+            let watermark = match index_manager.get_fulltext_index(&ft_meta.name) {
+                Some(idx) => {
+                    if idx.last_flushed_tx_id() == 0 && idx.doc_count() > 0 {
+                        return Ok(false);
+                    }
+                    idx.last_flushed_tx_id()
+                }
+                None => continue,
+            };
+            let field = ft_meta.field.clone();
+            if let Some(idx) = index_manager.get_fulltext_index_mut(&ft_meta.name) {
+                for (tx_id, op) in recovered_ops {
+                    if *tx_id > watermark {
+                        crate::recovery::apply_op_to_fulltext(idx, op, &field)?;
+                    }
+                }
+            }
+        }
+
+        // Vector (HNSW)
+        for vec_meta in persisted_vector {
+            let watermark = match index_manager.get_vector_index(&vec_meta.name) {
+                Some(idx) => {
+                    if idx.last_flushed_tx_id() == 0 && !idx.is_empty() {
+                        return Ok(false);
+                    }
+                    idx.last_flushed_tx_id()
+                }
+                None => continue,
+            };
+            let field = vec_meta.field.clone();
+            if let Some(idx) = index_manager.get_vector_index_mut(&vec_meta.name) {
+                for (tx_id, op) in recovered_ops {
+                    if *tx_id > watermark {
+                        crate::recovery::apply_op_to_hnsw(idx, op, &field)?;
+                    }
+                }
+            }
+        }
+
+        Ok(true)
+    }
+
     /// Initialize an IndexManager for a collection (internal)
     ///
     /// This creates the _id index, loads persisted indexes, and rebuilds
     /// all indexes from the document catalog.
     fn initialize_index_manager(&self, name: &str) -> Result<IndexManager> {
-        use crate::{log_debug, log_warn};
+        use crate::{log_debug, log_info, log_warn};
 
         let mut index_manager = IndexManager::new();
         let id_index_name = format!("{}_id", name);
@@ -573,6 +668,38 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let was_clean = storage_guard.was_clean_shutdown();
 
         drop(storage_guard); // Release write lock before rebuilding
+
+        // Task #26 phase 4b: on dirty shutdown, attempt WAL replay for non-btree
+        // indexes if the pending ops are bounded. This lets us load the persisted
+        // index files (Phase A atomic flush makes them safe to trust) and then
+        // apply only the post-watermark ops, instead of doing the O(N docs)
+        // rebuild-from-catalog for fulltext / fuzzy / hnsw.
+        //
+        // The load blocks below gate on `was_clean || can_try_replay` so the
+        // dirty-shutdown case also attempts to load. If any safety rail fails
+        // (too many ops, legacy index without watermark, helper error), we
+        // fall back to the existing rebuild path via `rebuild_indexes_from_catalog`
+        // which skips any index that already has data.
+        const MAX_REPLAY_OPS_PER_COLLECTION: usize = 100_000;
+        let recovered_ops_for_collection: Vec<(TransactionId, Operation)> = if was_clean {
+            Vec::new()
+        } else {
+            self.recovered_operations_snapshot()
+                .into_iter()
+                .filter(|(_, op)| crate::recovery::collection_of(op) == name)
+                .collect()
+        };
+        let can_try_replay = !was_clean
+            && !recovered_ops_for_collection.is_empty()
+            && recovered_ops_for_collection.len() <= MAX_REPLAY_OPS_PER_COLLECTION;
+
+        if can_try_replay {
+            log_info!(
+                "Collection '{}': attempting WAL replay recovery ({} ops pending)",
+                name,
+                recovered_ops_for_collection.len()
+            );
+        }
 
         // Try to load _id index from .idx file if clean shutdown
         let id_index_loaded = if was_clean && !catalog.is_empty() {
@@ -628,11 +755,16 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             was_clean,
         )?;
 
-        // Load or create fuzzy indexes from persisted metadata
-        // Only load from files if clean shutdown (stale files may have tombstone entries)
+        // Load or create fuzzy indexes from persisted metadata.
+        //
+        // The file is loaded on clean shutdown (trusted as-is) OR on dirty
+        // shutdown when WAL replay is viable (`can_try_replay` — bounded pending
+        // ops). Phase A atomic flush (commit fab5d97e / 84638dea) makes the
+        // file safe to load even after a crash — any post-flush mutations are
+        // captured in the WAL and replayed per-index below.
         for fuzzy_meta in &persisted_fuzzy_indexes {
             let mut loaded = false;
-            if was_clean {
+            if was_clean || can_try_replay {
                 if let Some(loaded_index) =
                     crate::collection_core::try_load_fuzzy_index_from_file(&db_path, fuzzy_meta)
                 {
@@ -665,11 +797,13 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Load or create fulltext indexes from persisted metadata
-        // Only load from files if clean shutdown (stale files may have tombstone entries)
+        // Load or create fulltext indexes from persisted metadata.
+        // Loading rule mirrors fuzzy above: clean shutdown trusts the file,
+        // dirty shutdown also loads when WAL replay is viable so post-watermark
+        // ops can be applied without doing a full rebuild-from-catalog.
         for fts_meta in &persisted_fulltext_indexes {
             let mut loaded = false;
-            if was_clean {
+            if was_clean || can_try_replay {
                 if let Some(loaded_index) =
                     crate::collection_core::try_load_fulltext_index_from_file(&db_path, fts_meta)
                 {
@@ -706,11 +840,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
-        // Load or create vector indexes from persisted metadata
-        // Only load from files if clean shutdown (stale files may have tombstone entries)
+        // Load or create vector indexes from persisted metadata.
+        // Loading rule mirrors fuzzy/fulltext above: dirty shutdown also loads
+        // when WAL replay is viable.
         for vec_meta in &persisted_vector_indexes {
             let mut loaded = false;
-            if was_clean {
+            if was_clean || can_try_replay {
                 if let Some(loaded_index) =
                     crate::index::IndexManager::try_load_vector_index(&db_path, &vec_meta.name)
                 {
@@ -751,6 +886,53 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
             }
         }
 
+        // Task #26 phase 4b: attempt WAL replay into loaded non-btree indexes.
+        //
+        // Guardrails inside `try_wal_replay_for_collection` decide whether replay
+        // is safe and converges. On success, fulltext/fuzzy/vector indexes are
+        // consistent with the latest committed state and `rebuild_indexes_from_catalog`
+        // will skip them (its per-type filters already ignore non-empty indexes).
+        // btree indexes still follow the existing rebuild path when their .idx
+        // files weren't loaded (btree has no watermark yet — future follow-up).
+        //
+        // On guardrail failure (too many ops, legacy index without watermark,
+        // helper error), the rebuild path below runs exactly as before.
+        let wal_replay_succeeded = if can_try_replay {
+            match Self::try_wal_replay_for_collection(
+                &mut index_manager,
+                &recovered_ops_for_collection,
+                &persisted_fuzzy_indexes,
+                &persisted_fulltext_indexes,
+                &persisted_vector_indexes,
+            ) {
+                Ok(true) => {
+                    log_info!(
+                        "Collection '{}': WAL replay recovery succeeded ({} ops applied across non-btree indexes, skipping rebuild)",
+                        name,
+                        recovered_ops_for_collection.len()
+                    );
+                    true
+                }
+                Ok(false) => {
+                    log_warn!(
+                        "Collection '{}': WAL replay guardrail tripped, falling back to rebuild",
+                        name
+                    );
+                    false
+                }
+                Err(e) => {
+                    log_warn!(
+                        "Collection '{}': WAL replay error ({}), falling back to rebuild",
+                        name,
+                        e
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
         // Determine what needs rebuilding
         // (was_clean is already known from earlier)
 
@@ -779,18 +961,25 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
         let vector_indexes = index_manager.list_vector_indexes();
         let has_vector_without_cache = vector_indexes.iter().any(|idx| idx.is_empty());
 
-        // FAST PATH: If clean shutdown AND no empty indexes (ANY type), skip rebuild
-        if was_clean
+        // FAST PATH:
+        //   - clean shutdown AND no empty indexes of any type, OR
+        //   - WAL replay succeeded AND btree is OK (either loaded or no btree indexes)
+        let fast_path = (was_clean
             && !catalog.is_empty()
             && !has_btree_without_file
             && !has_fuzzy_without_file
             && !has_fulltext_without_file
-            && !has_vector_without_cache
-        {
+            && !has_vector_without_cache)
+            || (wal_replay_succeeded && !has_btree_without_file);
+
+        if fast_path {
             log_debug!(
-                "Clean shutdown detected - trusting {} indexes from files (skipping rebuild of {} docs)",
+                "Skipping index rebuild for '{}' — {} indexes trusted ({} catalog docs, was_clean={}, wal_replay={})",
+                name,
                 persisted_indexes.len() + persisted_vector_indexes.len(),
-                catalog.len()
+                catalog.len(),
+                was_clean,
+                wal_replay_succeeded
             );
         } else {
             // SLOW PATH: Rebuild indexes from document catalog

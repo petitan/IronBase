@@ -339,7 +339,6 @@ pub struct DatabaseCore<S: Storage + RawStorage> {
     /// indexes, skipping the full rebuild-from-catalog on dirty shutdown.
     ///
     /// Empty after clean shutdown or MemoryStorage (no WAL replay).
-    #[allow(dead_code)] // consumed by initialize_index_manager in a follow-up commit
     pub(crate) recovered_operations: Arc<RwLock<Vec<(TransactionId, Operation)>>>,
 }
 
@@ -577,13 +576,12 @@ impl<S: Storage + RawStorage> DatabaseCore<S> {
     /// and applies only ops whose `tx_id > index.last_flushed_tx_id()`.
     ///
     /// Returns empty Vec if the DB was opened cleanly or uses MemoryStorage.
-    #[allow(dead_code)] // consumed by initialize_index_manager in a follow-up commit
     pub(crate) fn recovered_operations_snapshot(&self) -> Vec<(TransactionId, Operation)> {
         self.recovered_operations.read().clone()
     }
 
     /// Total count of WAL-recovered operations available for replay.
-    #[allow(dead_code)] // consumed by initialize_index_manager in a follow-up commit
+    #[allow(dead_code)] // diagnostic/fallback helper, retained for future use
     pub(crate) fn recovered_operations_count(&self) -> usize {
         self.recovered_operations.read().len()
     }

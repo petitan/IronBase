@@ -12,6 +12,9 @@ mod index_replay_ops;
 mod operation_replay;
 
 pub use index_replay::{IndexOperation, IndexReplay, IndexReplayStats, RecoveredIndexChange};
+pub(crate) use index_replay_ops::{
+    apply_op_to_fulltext, apply_op_to_fuzzy, apply_op_to_hnsw, collection_of,
+};
 pub use operation_replay::{OperationReplay, ReplayStats};
 
 use std::path::Path;
