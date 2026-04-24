@@ -482,7 +482,7 @@ impl DatabaseCore<StorageEngine> {
         Ok(db)
     }
 
-    /// Simulate an unclean (kill -9) shutdown. **Testing only.**
+    /// Simulate an unclean (kill -9) shutdown. **Test-only.**
     ///
     /// Releases the `StorageEngine` file lock so the same process can reopen
     /// the database, marks the in-memory handle as closed so `Drop` is a no-op,
@@ -491,11 +491,13 @@ impl DatabaseCore<StorageEngine> {
     /// (false after any prior write or first open), making the next open see
     /// `was_clean_shutdown() == false` and take the recovery path.
     ///
-    /// Hidden from public docs (`#[doc(hidden)]`) because production code
-    /// must never call this — it deliberately leaks the `StorageEngine`.
-    /// Exposed as `pub` only so integration tests in `tests/` can reach it.
-    #[doc(hidden)]
-    pub fn __simulate_crash_for_test(self) {
+    /// Gated on `#[cfg(test)]` so the symbol never appears in a production
+    /// binary — previous incarnations (`__simulate_crash_for_test`,
+    /// `#[doc(hidden)] pub`) were reachable from callers of this crate
+    /// outside of test builds, which deliberately leaks a `StorageEngine`
+    /// and can keep a file lock alive for the rest of the process.
+    #[cfg(test)]
+    fn simulate_crash_for_test(self) {
         self.is_closed.store(true, Ordering::SeqCst);
         if let Some(storage) = self.storage.try_read() {
             let _ = storage.release_lock();
@@ -1416,5 +1418,252 @@ mod tests {
 
         let result = db.delete_one("users", &json!({}));
         assert!(matches!(result, Err(IronBaseError::DatabaseClosed)));
+    }
+}
+
+#[cfg(test)]
+mod wal_replay_tests {
+    //! End-to-end crash recovery tests for task #26 phase 4/5.
+    //!
+    //! Scenario shape:
+    //!   1. Create DB, create non-btree index, insert batch A.
+    //!   2. Explicit `checkpoint()` — index file flushed with watermark=W.
+    //!   3. Insert batch B (in WAL only, not yet in index file).
+    //!   4. Simulate crash via `simulate_crash_for_test` — releases the file
+    //!      lock and `mem::forget`s the DB so Drop never runs
+    //!      `mark_clean_shutdown`.
+    //!   5. Reopen — `initialize_index_manager` takes either the WAL-replay
+    //!      path (load file at W, apply ops with tx_id > W) or the
+    //!      rebuild-from-catalog fallback when a guardrail trips.
+    //!   6. Verify every doc from batch A ∪ B is findable.
+    //!
+    //! Asserts end state only — both the replay path and the rebuild fallback
+    //! converge to the same correct result. The replay path is additionally
+    //! covered by `recovery::index_replay_ops::tests`.
+    //!
+    //! Previously lived in `tests/wal_replay_recovery_test.rs` and required
+    //! `__simulate_crash_for_test` to be `pub #[doc(hidden)]` in the lib.
+    //! Moved inline so `simulate_crash_for_test` can be `#[cfg(test)] fn`
+    //! — never reachable from production callers.
+
+    use super::*;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
+
+    fn doc(tag: &str, content: &str) -> HashMap<String, serde_json::Value> {
+        let mut m = HashMap::new();
+        m.insert("tag".to_string(), serde_json::json!(tag));
+        m.insert("content".to_string(), serde_json::json!(content));
+        m
+    }
+
+    #[test]
+    fn fulltext_wal_replay_recovery_preserves_all_docs() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fts_replay.mlite");
+
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+
+            for i in 0..10 {
+                db.insert_one(
+                    "docs",
+                    doc(&format!("a{}", i), &format!("alpha document number {}", i)),
+                )
+                .unwrap();
+            }
+
+            db.checkpoint().unwrap();
+
+            for i in 0..5 {
+                db.insert_one(
+                    "docs",
+                    doc(&format!("b{}", i), &format!("beta document number {}", i)),
+                )
+                .unwrap();
+            }
+
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+
+        let alpha = coll
+            .fulltext_search("content", "alpha", Some(100), None, None, None)
+            .unwrap();
+        assert_eq!(
+            alpha.len(),
+            10,
+            "batch-A docs lost after crash: expected 10, got {}",
+            alpha.len()
+        );
+
+        let beta = coll
+            .fulltext_search("content", "beta", Some(100), None, None, None)
+            .unwrap();
+        assert_eq!(
+            beta.len(),
+            5,
+            "batch-B WAL-only docs lost after crash: expected 5, got {}",
+            beta.len()
+        );
+
+        assert_eq!(
+            db.count_documents("docs", &serde_json::json!({})).unwrap(),
+            15
+        );
+    }
+
+    #[test]
+    fn fuzzy_wal_replay_recovery_preserves_all_docs() {
+        use crate::index::fuzzy::FuzzyAlgorithm;
+
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fz_replay.mlite");
+
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("names").unwrap();
+            coll.create_fuzzy_index("name".to_string(), FuzzyAlgorithm::JaroWinkler, 0.7)
+                .unwrap();
+
+            for n in &["Alice", "Bob", "Charles", "Diana", "Eve"] {
+                let mut d = HashMap::new();
+                d.insert("name".to_string(), serde_json::json!(n));
+                db.insert_one("names", d).unwrap();
+            }
+
+            db.checkpoint().unwrap();
+
+            for n in &["Frank", "Grace", "Henry"] {
+                let mut d = HashMap::new();
+                d.insert("name".to_string(), serde_json::json!(n));
+                db.insert_one("names", d).unwrap();
+            }
+
+            db.simulate_crash_for_test();
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("names").unwrap();
+
+        for exact in &[
+            "Alice", "Bob", "Charles", "Diana", "Eve", "Frank", "Grace", "Henry",
+        ] {
+            let found = coll
+                .find(&serde_json::json!({ "name": { "$fuzzy": exact } }))
+                .unwrap();
+            assert!(
+                !found.is_empty(),
+                "Fuzzy search for '{}' returned 0 results post-crash",
+                exact
+            );
+        }
+
+        assert_eq!(
+            db.count_documents("names", &serde_json::json!({})).unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn fulltext_survives_checkpoint_then_crash_no_post_inserts() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fts_cp_crash.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..5 {
+                db.insert_one("docs", doc(&format!("n{}", i), "alpha here"))
+                    .unwrap();
+            }
+            db.checkpoint().unwrap();
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let hits = coll
+            .fulltext_search("content", "alpha", Some(100), None, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 5);
+    }
+
+    #[test]
+    fn fulltext_survives_checkpoint_then_clean_close() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fts_cp.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..5 {
+                db.insert_one("docs", doc(&format!("n{}", i), "alpha here"))
+                    .unwrap();
+            }
+            db.checkpoint().unwrap();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let hits = coll
+            .fulltext_search("content", "alpha", Some(100), None, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 5);
+    }
+
+    #[test]
+    fn fulltext_survives_normal_reopen_no_checkpoint() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fts_plain.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..5 {
+                db.insert_one("docs", doc(&format!("n{}", i), "word alpha here"))
+                    .unwrap();
+            }
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let post = coll
+            .fulltext_search("content", "alpha", Some(100), None, None, None)
+            .unwrap();
+        assert_eq!(post.len(), 5);
+    }
+
+    #[test]
+    fn clean_shutdown_does_not_trigger_replay_path() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("fts_clean.mlite");
+
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+
+            for i in 0..5 {
+                db.insert_one(
+                    "docs",
+                    doc(&format!("c{}", i), &format!("clean shutdown doc {}", i)),
+                )
+                .unwrap();
+            }
+        }
+
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let hits = coll
+            .fulltext_search("content", "clean", Some(100), None, None, None)
+            .unwrap();
+        assert_eq!(hits.len(), 5);
     }
 }
