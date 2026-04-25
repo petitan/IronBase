@@ -2832,21 +2832,21 @@ mod wal_replay_tests {
 
         let coll = db.collection("docs").unwrap();
 
-        // Each empty logical array MUST surface as an Err on `find()`,
-        // not silently match all 5 docs (dangerous on delete_many /
-        // update_many). Note: `count_documents` currently swallows
-        // matcher errors (`unwrap_or(false)` in count.rs:862,890) — a
-        // separate finding tracked in audit-task-28 memo. `find()`
-        // propagates the Err correctly because it doesn't go through
-        // the same swallow path.
+        // Each empty logical array MUST surface as an Err on BOTH
+        // `find()` and `count_documents()` (audit-#28 follow-up also
+        // fixed `count_with_scan` to propagate matcher errors instead
+        // of swallowing them via `.unwrap_or(false)`).
         for op in &["$and", "$or", "$nor"] {
             let filter = serde_json::json!({ *op: [] });
-            let result = coll.find(&filter);
             assert!(
-                result.is_err(),
-                "empty {} array must error on find(); got Ok({:?})",
-                op,
-                result
+                coll.find(&filter).is_err(),
+                "empty {} array must error on find()",
+                op
+            );
+            assert!(
+                db.count_documents("docs", &filter).is_err(),
+                "empty {} array must error on count_documents()",
+                op
             );
         }
 
@@ -2855,6 +2855,10 @@ mod wal_replay_tests {
             .find(&serde_json::json!({"$or": [{"n": 1}, {"n": 2}]}))
             .unwrap();
         assert_eq!(docs.len(), 2);
+        let n = db
+            .count_documents("docs", &serde_json::json!({"$or": [{"n": 1}, {"n": 2}]}))
+            .unwrap();
+        assert_eq!(n, 2);
     }
 
     /// Audit #28 finding C — `$all: []` (empty array) currently matches

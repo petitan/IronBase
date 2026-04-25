@@ -835,35 +835,43 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                 .collect();
 
             // Phase 2: Parallel parse + match (CPU bound)
+            //
+            // Parser/document errors (malformed bytes, bad UTF-8) are SKIPPED
+            // — corrupt-data robustness. Matcher errors (e.g. an invalid
+            // query like an empty `$and: []` array) are PROPAGATED so the
+            // caller sees the malformed query instead of a silent zero
+            // (audit #28 follow-up: previously `.unwrap_or(false)` swallowed
+            // every matcher Err and the count silently undershot).
             #[cfg(feature = "parallel")]
             {
                 use rayon::prelude::*;
 
-                total_count += raw_docs
+                let chunk_count: u64 = raw_docs
                     .par_iter()
-                    .filter(|doc_bytes| {
-                        // Parse document
+                    .map(|doc_bytes| -> Result<u64> {
                         let doc: Value = match serde_json::from_slice(doc_bytes) {
                             Ok(d) => d,
-                            Err(_) => return false,
+                            Err(_) => return Ok(0), // malformed JSON, skip
                         };
-
-                        // Skip tombstones
                         if doc
                             .get("_tombstone")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false)
                         {
-                            return false;
+                            return Ok(0);
                         }
-
-                        // Apply query filter
-                        match Document::from_value_owned(doc) {
-                            Ok(document) => parsed_query.matches(&document).unwrap_or(false),
-                            Err(_) => false,
+                        let document = match Document::from_value_owned(doc) {
+                            Ok(d) => d,
+                            Err(_) => return Ok(0), // malformed document, skip
+                        };
+                        if parsed_query.matches(&document)? {
+                            Ok(1)
+                        } else {
+                            Ok(0)
                         }
                     })
-                    .count() as u64;
+                    .try_reduce(|| 0u64, |a, b| Ok(a + b))?;
+                total_count += chunk_count;
             }
 
             #[cfg(not(feature = "parallel"))]
@@ -887,7 +895,9 @@ impl<S: Storage + RawStorage> CollectionCore<S> {
                         Err(_) => continue,
                     };
 
-                    if parsed_query.matches(&document).unwrap_or(false) {
+                    // Matcher errors propagate (audit #28 follow-up — no more
+                    // `.unwrap_or(false)` swallowing of malformed-query errors).
+                    if parsed_query.matches(&document)? {
                         total_count += 1;
                     }
                 }
