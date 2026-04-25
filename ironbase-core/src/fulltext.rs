@@ -869,7 +869,15 @@ pub(crate) struct FulltextFlushSnapshot {
     pub doc_tokens_offsets: HashMap<DocumentId, u64>,
     /// Deleted document IDs for filtering (cloned)
     pub deleted_doc_ids: HashSet<DocumentId>,
-    /// Current write position (start of index data region)
+    /// Current write position (start of index data region).
+    ///
+    /// NOTE: unused since the audit-#15 finding-B refactor switched
+    /// `serialize_flush` to a temp+rename atomic write that always lays out
+    /// the new file fresh starting at `FTIDX_HEADER_SIZE`. The field stays
+    /// on the snapshot to keep the commit minimal-risk; future cleanup can
+    /// drop both the field here and the `write_offset: self.write_offset`
+    /// line in `take_flush_snapshot`.
+    #[allow(dead_code)]
     pub write_offset: u64,
     /// Whether lazy mode was active
     pub lazy_mode: bool,
@@ -2851,16 +2859,48 @@ impl FulltextIndex {
         })
     }
 
-    /// Phase 2: Serialize flush snapshot to .ftidx file (NO lock held).
+    /// Phase 2: Serialize flush snapshot to a fresh `.ftidx.tmp` and atomically
+    /// rename over the live file (NO lock held during this).
     ///
-    /// Opens its own file handle, writes the complete index data (V3 format),
-    /// and returns the new offsets for commit. Uses the same serialization
-    /// logic as flush() but operates on snapshot data.
+    /// Atomic temp+rename pattern (audit #15 finding B):
+    ///   1. Open OLD file readonly to read existing token entries via
+    ///      `snapshot.token_offsets`.
+    ///   2. Open `<storage_path>.ftidx.tmp` fresh (create+truncate+write).
+    ///   3. Reserve 64-byte header at offset 0, write all data starting at
+    ///      `FTIDX_HEADER_SIZE`, compute final offsets as we go.
+    ///   4. fsync the data, seek back to 0, write the V3 header,
+    ///      flush + fsync, drop both file handles.
+    ///   5. `atomic_rename_and_sync(temp, orig)` — POSIX-atomic on the same
+    ///      filesystem, parent-dir fsync ensures the directory entry update
+    ///      itself is durable.
+    ///
+    /// Crash scenarios:
+    ///   * Crash before rename: temp file is stale/corrupt, OLD file untouched
+    ///     → readers keep using OLD; startup cleanup removes the orphan temp.
+    ///   * Crash during rename: kernel guarantees atomicity (one entry visible).
+    ///   * Crash after rename: NEW file is live and self-consistent (header +
+    ///     data both fsynced before rename).
+    ///
+    /// Disk-space cost: a transient ~2× peak (temp + orig coexist for the
+    /// duration of the flush). The OLD file's blocks are reclaimed by the
+    /// kernel after rename once any open fd to its inode is dropped.
+    ///
+    /// Returns offsets RELATIVE TO THE NEW FILE for `commit_flush` to install.
     pub(crate) fn serialize_flush(snapshot: &FulltextFlushSnapshot) -> Result<FulltextFlushResult> {
-        let mut file = OpenOptions::new()
-            .read(true)
+        // OLD file: read-only handle for snapshot.token_offsets lookups.
+        let mut old_file = OpenOptions::new().read(true).open(&snapshot.storage_path)?;
+
+        // TEMP file: fresh, will become the live file after rename.
+        let temp_path = snapshot.storage_path.with_extension("ftidx.tmp");
+        let mut temp = OpenOptions::new()
+            .create(true)
+            .truncate(true)
             .write(true)
-            .open(&snapshot.storage_path)?;
+            .open(&temp_path)?;
+
+        // Reserve header (64 bytes) — written last with the real offsets.
+        let zero_header = [0u8; FTIDX_HEADER_SIZE as usize];
+        temp.write_all(&zero_header)?;
 
         // Build sorted token list from memory snapshot + disk offsets
         let mut tokens: Vec<String> = snapshot.inverted.keys().cloned().collect();
@@ -2870,12 +2910,11 @@ impl FulltextIndex {
         tokens.sort();
         tokens.dedup();
 
-        // Write doc_tokens offset table
-        let offsets_offset = snapshot.write_offset;
+        // Write doc_tokens offset table starting right after the header.
+        let offsets_offset = FTIDX_HEADER_SIZE;
         let offsets_vec: Vec<(&DocumentId, &u64)> = snapshot.doc_tokens_offsets.iter().collect();
         let offsets_bytes = serde_json::to_vec(&offsets_vec)?;
-        file.seek(SeekFrom::Start(offsets_offset))?;
-        file.write_all(&offsets_bytes)?;
+        temp.write_all(&offsets_bytes)?;
 
         // Write V3 token entries with TF embedded
         let token_entries_offset = offsets_offset + offsets_bytes.len() as u64;
@@ -2891,8 +2930,9 @@ impl FulltextIndex {
 
             if snapshot.lazy_mode {
                 if let Some((offset, _count)) = snapshot.token_offsets.get(token) {
+                    // Read existing entries from OLD file at the snapshot's offsets.
                     let disk_entries = Self::read_token_entries_from_file(
-                        &mut file,
+                        &mut old_file,
                         *offset,
                         snapshot.file_version,
                     );
@@ -2917,11 +2957,11 @@ impl FulltextIndex {
             let token_bytes = token.as_bytes();
             let entries_bytes = serde_json::to_vec(&entries)?;
             let entries_len = checked_len_u32(&entries_bytes, "token entries (serialize_flush)")?;
-            file.seek(SeekFrom::Start(current_offset))?;
-            file.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
-            file.write_all(token_bytes)?;
-            file.write_all(&entries_len.to_le_bytes())?;
-            file.write_all(&entries_bytes)?;
+            // Sequential append to temp — no seek needed.
+            temp.write_all(&(token_bytes.len() as u32).to_le_bytes())?;
+            temp.write_all(token_bytes)?;
+            temp.write_all(&entries_len.to_le_bytes())?;
+            temp.write_all(&entries_bytes)?;
 
             new_token_offsets.insert(token.clone(), (current_offset, entries.len() as u32));
             current_offset += 4 + token_bytes.len() as u64 + 4 + entries_bytes.len() as u64;
@@ -2931,8 +2971,7 @@ impl FulltextIndex {
         let token_offsets_offset = current_offset;
         let token_offsets_vec: Vec<(&String, &(u64, u32))> = new_token_offsets.iter().collect();
         let token_offsets_bytes = serde_json::to_vec(&token_offsets_vec)?;
-        file.seek(SeekFrom::Start(token_offsets_offset))?;
-        file.write_all(&token_offsets_bytes)?;
+        temp.write_all(&token_offsets_bytes)?;
 
         // Write metadata
         let metadata_offset = token_offsets_offset + token_offsets_bytes.len() as u64;
@@ -2955,27 +2994,35 @@ impl FulltextIndex {
             last_flushed_tx_id: snapshot.last_flushed_tx_id,
         };
         let metadata_bytes = serde_json::to_vec(&metadata)?;
-        file.write_all(&metadata_bytes)?;
+        temp.write_all(&metadata_bytes)?;
 
-        // Write barrier: payload sections must be durable on disk before the
-        // header is rewritten to point at them. Without this fsync, the kernel
-        // could persist the header first and crash before the data lands, so
-        // a reopen would see a header pointing at un-persisted bytes and load
-        // "successfully" with garbage. Same pattern as the single-phase
-        // flush() fix.
-        file.sync_all()?;
+        // Write barrier: data must be durable before we rewrite the header.
+        // Without this, the rename could expose a file whose header points
+        // at un-persisted bytes (the kernel may persist the header first).
+        temp.sync_all()?;
 
-        // Update V3 header
-        file.seek(SeekFrom::Start(8))?; // After magic
-        file.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
-        file.write_all(&(snapshot.doc_tokens_offsets.len() as u64).to_le_bytes())?;
-        file.write_all(&offsets_offset.to_le_bytes())?;
-        file.write_all(&token_entries_offset.to_le_bytes())?;
-        file.write_all(&token_offsets_offset.to_le_bytes())?;
-        file.write_all(&metadata_offset.to_le_bytes())?;
+        // Now seek back and write the real V3 header at offset 0.
+        temp.seek(SeekFrom::Start(0))?;
+        temp.write_all(FTIDX_MAGIC)?;
+        temp.write_all(&FTIDX_VERSION_V3.to_le_bytes())?;
+        temp.write_all(&(snapshot.doc_tokens_offsets.len() as u64).to_le_bytes())?;
+        temp.write_all(&offsets_offset.to_le_bytes())?;
+        temp.write_all(&token_entries_offset.to_le_bytes())?;
+        temp.write_all(&token_offsets_offset.to_le_bytes())?;
+        temp.write_all(&metadata_offset.to_le_bytes())?;
 
-        file.flush()?;
-        file.sync_all()?;
+        temp.flush()?;
+        temp.sync_all()?;
+
+        // Drop file handles before rename to release any held fds.
+        // (POSIX permits rename with open fds, but explicit drop keeps the
+        // ordering obvious and matches the HNSW pattern at manager.rs:930.)
+        drop(temp);
+        drop(old_file);
+
+        // Atomic rename + parent-dir fsync. POSIX-atomic on the same
+        // filesystem; on crash either OLD or NEW is visible, never partial.
+        crate::fs_utils::atomic_rename_and_sync(&temp_path, &snapshot.storage_path)?;
 
         let new_write_offset = metadata_offset + metadata_bytes.len() as u64;
 

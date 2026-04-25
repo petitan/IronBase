@@ -618,6 +618,7 @@ impl StorageEngine {
         // Clean up orphaned index temp files from interrupted atomic commits.
         // `.idx.tmp`   — b+ tree two-phase commit (btree.rs::commit_prepared_changes)
         // `.fzidx.tmp` — fuzzy flush (fuzzy.rs::flush)
+        // `.ftidx.tmp` — fulltext two-phase serialize_flush (fulltext.rs::serialize_flush)
         // `.hnsw.tmp`  — HNSW flush (index/manager.rs::persist_hnsw_to_file)
         if let Some(db_dir) = Path::new(&path_str).parent() {
             if let Ok(entries) = std::fs::read_dir(db_dir) {
@@ -626,6 +627,7 @@ impl StorageEngine {
                     let name = p.to_string_lossy();
                     if name.ends_with(".idx.tmp")
                         || name.ends_with(".fzidx.tmp")
+                        || name.ends_with(".ftidx.tmp")
                         || name.ends_with(".hnsw.tmp")
                     {
                         log_warn!(

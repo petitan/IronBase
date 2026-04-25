@@ -2804,6 +2804,100 @@ mod wal_replay_tests {
         );
     }
 
+    /// Audit #15 finding B — orphaned `.ftidx.tmp` cleanup.
+    ///
+    /// Mirrors `task11_fzidx_tmp_orphan_cleanup` and `task18_hnsw_tmp_orphan_cleanup`
+    /// for the new fulltext atomic flush. Pre-plant a stray `.ftidx.tmp`
+    /// in the DB directory, open the DB, assert it is removed.
+    #[test]
+    fn audit15_finding_b_ftidx_tmp_orphan_cleanup() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("orphan_ft.mlite");
+        DatabaseCore::<StorageEngine>::open(&db_path)
+            .unwrap()
+            .close()
+            .unwrap();
+
+        let orphan = tmp.path().join("foo_content_fts.ftidx.tmp");
+        std::fs::write(&orphan, b"crash-leftover").unwrap();
+        assert!(orphan.exists());
+
+        let _db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        assert!(!orphan.exists(), ".ftidx.tmp should be removed on open");
+    }
+
+    /// Audit #15 finding B — fulltext atomic flush leaves no `.ftidx.tmp` after
+    /// success (same shape as `task16_17_fulltext_flush_leaves_no_tmp`, but
+    /// runs through the FULL two-phase batch flush so the rename path is
+    /// exercised end to end).
+    #[test]
+    fn audit15_finding_b_serialize_flush_leaves_no_tmp() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("ft_atomic_full.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        coll.create_fulltext_index("content".to_string(), "english", None, None)
+            .unwrap();
+
+        // First insert + checkpoint to seed disk state, then second batch
+        // + checkpoint to exercise the merge-from-disk path inside
+        // serialize_flush (lazy_mode=true, snapshot.token_offsets points into
+        // the OLD .ftidx file while we write a fresh temp).
+        for i in 0..10 {
+            let mut d = std::collections::HashMap::new();
+            d.insert(
+                "content".to_string(),
+                serde_json::json!(format!("alpha document {}", i)),
+            );
+            db.insert_one("docs", d).unwrap();
+        }
+        db.checkpoint().unwrap();
+
+        for i in 10..20 {
+            let mut d = std::collections::HashMap::new();
+            d.insert(
+                "content".to_string(),
+                serde_json::json!(format!("beta document {}", i)),
+            );
+            db.insert_one("docs", d).unwrap();
+        }
+        db.checkpoint().unwrap();
+
+        // No .ftidx.tmp must survive a successful flush.
+        let leftover: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.path()
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with(".ftidx.tmp"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "unexpected .ftidx.tmp survived flush: {:?}",
+            leftover.iter().map(|e| e.path()).collect::<Vec<_>>()
+        );
+
+        // Sanity: after the full atomic two-phase flush the index is still
+        // searchable (alpha and beta both findable). Validates that the
+        // rename produced a coherent file with both batches' content.
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(50), None, None, None)
+                .unwrap()
+                .len(),
+            10
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(50), None, None, None)
+                .unwrap()
+                .len(),
+            10
+        );
+    }
+
     /// Audit #15 finding A — full DB integration test for the
     /// Phase-2-delete-only sibling bug.
     ///
