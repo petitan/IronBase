@@ -733,9 +733,15 @@ fn test_empty_and() {
 
     let collection = db.collection("users").unwrap();
 
-    // Empty $and should match all documents
-    let results = collection.find(&json!({"$and": []})).unwrap();
-    assert_eq!(results.len(), 1);
+    // Audit #28 finding D (commit f4eabe34): empty `$and: []` is a
+    // malformed query (MongoDB error code 2). Pre-fix: silent match-all
+    // → data-loss risk on delete_many / update_many. Now: surface as Err.
+    let result = collection.find(&json!({"$and": []}));
+    assert!(
+        result.is_err(),
+        "empty $and array must error (MongoDB-compat); got Ok({:?})",
+        result
+    );
 }
 
 #[test]
@@ -748,9 +754,13 @@ fn test_empty_or() {
 
     let collection = db.collection("users").unwrap();
 
-    // Empty $or should match no documents
-    let results = collection.find(&json!({"$or": []})).unwrap();
-    assert_eq!(results.len(), 0);
+    // Audit #28 finding D: empty `$or: []` also rejected (MongoDB-compat).
+    let result = collection.find(&json!({"$or": []}));
+    assert!(
+        result.is_err(),
+        "empty $or array must error (MongoDB-compat); got Ok({:?})",
+        result
+    );
 }
 
 #[test]
