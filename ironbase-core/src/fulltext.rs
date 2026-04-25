@@ -3049,14 +3049,26 @@ impl FulltextIndex {
         Ok(())
     }
 
-    /// Check if the index has entries in the in-memory inverted_index
-    /// that have not yet been flushed to disk.
+    /// Check if the index has state that has not yet been flushed to disk.
     ///
     /// Used by IndexManager after commit_flush() to decide whether to
-    /// clear the dirty flag. If Phase 2 concurrent inserts added entries
-    /// to inverted_index, they still need a subsequent flush to persist.
+    /// clear the dirty flag. Returns true when EITHER:
+    ///   * `inverted_index` holds entries from concurrent Phase 2 inserts
+    ///     that still need to be persisted, OR
+    ///   * `deleted_doc_ids` holds Phase 2 deletes that the just-finished
+    ///     `serialize_flush` did NOT exclude from the new disk file
+    ///     (those doc_ids weren't in the snapshot's deleted set, so they
+    ///     are still in the freshly-written token_offsets and must keep
+    ///     being filtered until the next full flush actually drops them).
+    ///
+    /// Without the `deleted_doc_ids` half of this check, a Phase-2-delete-
+    /// only sequence (no inserts) would clear the dirty flag, the
+    /// follow-up checkpoint / close would skip the flush, and after
+    /// restart `deleted_doc_ids` would reload empty (it is not persisted
+    /// to disk) — causing every Phase-2 deleted doc to reappear in
+    /// search results. (Audit #15 finding A.)
     pub(crate) fn has_pending_entries(&self) -> bool {
-        !self.inverted_index.is_empty()
+        !self.inverted_index.is_empty() || !self.deleted_doc_ids.is_empty()
     }
 
     /// Rollback a failed two-phase flush (under write lock — brief).
@@ -4384,5 +4396,71 @@ mod tests {
         assert!(terms.contains(&"hello".to_string()));
         assert!(terms.contains(&"world".to_string()));
         assert!(terms.contains(&"other".to_string()));
+    }
+
+    /// Audit #15 — sibling bug check.
+    ///
+    /// Scenario: a Phase 2 delete (between `take_flush_snapshot` and
+    /// `commit_flush`) lands a doc_id in `self.deleted_doc_ids` that the
+    /// snapshot did NOT contain. After `commit_flush` runs:
+    ///   * the doc is still in the freshly-persisted token_offsets on disk
+    ///     (serialize_flush only excluded snapshot.deleted_doc_ids);
+    ///   * `self.deleted_doc_ids` still holds the doc so live searches
+    ///     filter it correctly;
+    ///   * BUT `inverted_index` is empty, so `has_pending_entries()`
+    ///     returns false → caller (`IndexManager::commit_fulltext_flush`)
+    ///     CLEARS the dirty flag → next checkpoint / close skips the
+    ///     fulltext flush → restart loads disk state with empty
+    ///     deleted_doc_ids → the deleted doc reappears in search.
+    ///
+    /// Pinning the bug here as a *failing* test until the fix lands so
+    /// regressions are caught immediately.
+    #[test]
+    fn audit15_phase2_delete_only_marks_pending() {
+        use std::path::PathBuf;
+        let temp_dir = std::env::temp_dir().join(format!(
+            "audit15_p2del_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let path: PathBuf = temp_dir.join("fts.ftidx");
+
+        let mut idx =
+            FulltextIndex::new_with_storage("fts", "content", FtsOptions::default(), path.clone())
+                .unwrap();
+
+        // Seed: insert two docs, full flush so they hit disk in token_offsets.
+        idx.insert(&DocumentId::Int(1), "alpha doc one").unwrap();
+        idx.insert(&DocumentId::Int(2), "alpha doc two").unwrap();
+        idx.flush().unwrap();
+        assert_eq!(idx.doc_count(), 2);
+
+        // Now make the index dirty with one more insert (so a checkpoint
+        // would actually try to flush it), then take the Phase-1 snapshot.
+        idx.insert(&DocumentId::Int(3), "alpha doc three").unwrap();
+        let snapshot = idx.take_flush_snapshot().expect("snapshot");
+
+        // Phase 2: simulate a concurrent delete of doc 1 — its id is NOT
+        // in `snapshot.deleted_doc_ids` (snapshot was taken before the
+        // delete), so serialize_flush will keep doc 1 in the new file.
+        idx.remove(&DocumentId::Int(1)).unwrap();
+        assert!(idx.deleted_doc_ids.contains(&DocumentId::Int(1)));
+
+        let result = FulltextIndex::serialize_flush(&snapshot).unwrap();
+        idx.commit_flush(result).unwrap();
+
+        // After commit_flush, the live index still has doc 1 in
+        // deleted_doc_ids — it MUST be reported as pending so the dirty
+        // flag stays set and a follow-up checkpoint propagates the delete.
+        assert!(
+            idx.has_pending_entries(),
+            "Phase-2 delete with empty inverted_index returned has_pending_entries=false → \
+             dirty flag would be cleared and the delete lost on restart"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }
