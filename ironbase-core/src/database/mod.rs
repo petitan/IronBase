@@ -1707,9 +1707,10 @@ mod wal_replay_tests {
         let tmp = TempDir::new().unwrap();
 
         // Scenario A: crash-and-replay path.
-        //   checkpoint writes a V4 .ftidx with watermark, so the reopen
-        //   takes the load+replay branch and only the 500 post-checkpoint
-        //   docs are re-applied from the WAL.
+        //   checkpoint writes a V3 .ftidx whose JSON metadata now carries
+        //   `last_flushed_tx_id` (the watermark added in `b71957fe`), so
+        //   the reopen takes the load+replay branch and only the 500
+        //   post-checkpoint docs are re-applied from the WAL.
         let replay_path = tmp.path().join("replay.mlite");
         {
             let db = DatabaseCore::<StorageEngine>::open(&replay_path).unwrap();
