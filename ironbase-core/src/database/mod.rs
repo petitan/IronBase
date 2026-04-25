@@ -2805,6 +2805,58 @@ mod wal_replay_tests {
         );
     }
 
+    /// Audit #28 follow-up — `$and: []` / `$or: []` / `$nor: []` must
+    /// be rejected as malformed (MongoDB-compat).
+    ///
+    /// Pre-fix:
+    ///   * `$and: []` ran the for-loop zero times → Ok(true) → MATCH ALL
+    ///     (silent data-loss risk on delete_many / update_many).
+    ///   * `$or: []` → Ok(false) → match nothing (safer but still silent).
+    ///   * `$nor: []` → Ok(true) → MATCH ALL (same risk as `$and: []`).
+    ///
+    /// MongoDB returns `error code 2: $and/$or/$nor must be a nonempty
+    /// array`. We mirror that to surface accidental empty arrays
+    /// (e.g. dynamically-built filter that ended up empty) instead of
+    /// silently matching all docs.
+    #[test]
+    fn audit28_empty_logical_arrays_error() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("audit28_logical.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+
+        for i in 0..5 {
+            let mut d = std::collections::HashMap::new();
+            d.insert("n".to_string(), serde_json::json!(i));
+            db.insert_one("docs", d).unwrap();
+        }
+
+        let coll = db.collection("docs").unwrap();
+
+        // Each empty logical array MUST surface as an Err on `find()`,
+        // not silently match all 5 docs (dangerous on delete_many /
+        // update_many). Note: `count_documents` currently swallows
+        // matcher errors (`unwrap_or(false)` in count.rs:862,890) — a
+        // separate finding tracked in audit-task-28 memo. `find()`
+        // propagates the Err correctly because it doesn't go through
+        // the same swallow path.
+        for op in &["$and", "$or", "$nor"] {
+            let filter = serde_json::json!({ *op: [] });
+            let result = coll.find(&filter);
+            assert!(
+                result.is_err(),
+                "empty {} array must error on find(); got Ok({:?})",
+                op,
+                result
+            );
+        }
+
+        // Sanity: non-empty logical arrays still work.
+        let docs = coll
+            .find(&serde_json::json!({"$or": [{"n": 1}, {"n": 2}]}))
+            .unwrap();
+        assert_eq!(docs.len(), 2);
+    }
+
     /// Audit #28 finding C — `$all: []` (empty array) currently matches
     /// every doc that has an array field, because
     /// `required.iter().all(...)` is vacuously true on an empty iterator.

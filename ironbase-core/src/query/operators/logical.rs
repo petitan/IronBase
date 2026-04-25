@@ -35,6 +35,18 @@ impl OperatorMatcher for AndOperator {
         })?;
 
         if let Value::Array(conditions) = filter_value {
+            // MongoDB-compat: `$and: []` is a malformed query
+            // ("$and/$or/$nor must be a nonempty array", error code 2).
+            // Pre-fix the empty array fell through the for-loop and
+            // returned Ok(true), silently matching every document — a
+            // data-loss risk on delete_many / update_many with a
+            // dynamically-built filter that ended up empty
+            // (audit #28 follow-up).
+            if conditions.is_empty() {
+                return Err(IronBaseError::InvalidQuery(
+                    "$and operator requires a nonempty array".to_string(),
+                ));
+            }
             for condition in conditions {
                 // Recursively evaluate each condition
                 if !matches_filter(doc, condition)? {
@@ -77,6 +89,12 @@ impl OperatorMatcher for OrOperator {
         })?;
 
         if let Value::Array(conditions) = filter_value {
+            // MongoDB-compat: `$or: []` is malformed (audit #28 follow-up).
+            if conditions.is_empty() {
+                return Err(IronBaseError::InvalidQuery(
+                    "$or operator requires a nonempty array".to_string(),
+                ));
+            }
             for condition in conditions {
                 // If any condition matches, return true
                 if matches_filter(doc, condition)? {
@@ -121,6 +139,14 @@ impl OperatorMatcher for NorOperator {
         })?;
 
         if let Value::Array(conditions) = filter_value {
+            // MongoDB-compat: `$nor: []` is malformed. Same data-loss
+            // risk as `$and: []` — empty array would otherwise return
+            // Ok(true) and match all docs (audit #28 follow-up).
+            if conditions.is_empty() {
+                return Err(IronBaseError::InvalidQuery(
+                    "$nor operator requires a nonempty array".to_string(),
+                ));
+            }
             for condition in conditions {
                 // If any condition matches, return false
                 if matches_filter(doc, condition)? {
