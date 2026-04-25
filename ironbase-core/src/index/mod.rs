@@ -818,8 +818,42 @@ mod tests {
 
         // Unknown value should use uniform distribution over remaining
         let sel_unknown = mcv.estimate_selectivity(&IndexKey::String("unknown".into()), 3);
-        // All distinct values are in MCV, remaining = 0, so should return 0
+        // remaining_keys == 0 (every key is in MCV) → value cannot exist
+        // → 0.0 is correct regardless of `distinct_count` freshness.
         assert_eq!(sel_unknown, 0.0);
+    }
+
+    /// Audit #27 finding E — when `remaining_distinct == 0` but
+    /// `remaining_keys > 0` (the stale-`distinct_count` window between
+    /// a recent insert and the next MCV rebuild), we MUST NOT return
+    /// a hard `0.0` selectivity. The new value exists in the index, so
+    /// returning 0 would cement this index as the cheapest possible
+    /// cost and starve other candidates.
+    #[test]
+    fn audit27_mcv_stale_distinct_count_avoids_zero_selectivity() {
+        use crate::index::btree::MostCommonValues;
+
+        // 2 distinct values captured in MCV (active=900, deleted=100,
+        // sum=1000). Then a third value got inserted: total_keys jumped
+        // to 1010 but `distinct_count` stale at 2 — remaining_distinct
+        // wraps to 0 even though remaining_keys = 10 > 0.
+        let mcv = MostCommonValues {
+            values: vec![
+                (IndexKey::String("active".into()), 900),
+                (IndexKey::String("deleted".into()), 100),
+            ],
+            total_keys: 1010, // 10 keys not in MCV
+            mcv_frequency_sum: 1000,
+        };
+
+        let sel = mcv.estimate_selectivity(&IndexKey::String("new_value".into()), 2);
+        assert!(
+            sel > 0.0,
+            "stale-`distinct_count` selectivity must not be 0.0 when remaining_keys > 0; got {}",
+            sel
+        );
+        // 10 / 1010 ≈ 0.0099 — sanity bound, must not exceed 1.0
+        assert!(sel <= 1.0);
     }
 
     #[test]

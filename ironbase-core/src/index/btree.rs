@@ -534,9 +534,28 @@ impl MostCommonValues {
         let remaining_keys = self.total_keys.saturating_sub(self.mcv_frequency_sum);
         let remaining_distinct = distinct_count.saturating_sub(self.values.len() as u64);
 
-        if remaining_distinct == 0 || remaining_keys == 0 {
-            // All distinct values are in MCV - value doesn't exist
+        if remaining_keys == 0 {
+            // Every key is captured in MCV — the queried value cannot
+            // be in the index, regardless of `distinct_count` freshness.
+            // 0 rows is correct.
             return 0.0;
+        }
+
+        if remaining_distinct == 0 {
+            // `remaining_distinct == 0` but `remaining_keys > 0` is the
+            // stale-`distinct_count` window: a recent insert pushed the
+            // total key count past the MCV-captured frequency sum, but
+            // `distinct_count` still reports the pre-insert distinct
+            // total so the subtraction wraps to zero. The new value DOES
+            // exist; returning a hard 0 here would cement this index as
+            // the cheapest possible cost and starve any other candidate
+            // (audit #27 finding E).
+            //
+            // Conservative fallback: pretend the missing values are
+            // distributed across `remaining_keys`, which (in this stale
+            // window) is the count of post-MCV-rebuild inserts. Cap by
+            // `total_keys` to never exceed 1.0.
+            return (remaining_keys as f64 / self.total_keys as f64).min(1.0);
         }
 
         // Assume uniform distribution among non-MCV values
