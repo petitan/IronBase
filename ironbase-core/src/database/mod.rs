@@ -2501,4 +2501,306 @@ mod wal_replay_tests {
             "rebuild must reproduce beta docs after .ftidx loss"
         );
     }
+
+    // ========================================================================
+    // Completed-task EDGE CASES
+    //
+    // One test per completed TODO entry from this week (excluding #26 which
+    // is exhaustively covered by the rest of this module). Each test pins
+    // the specific behavior the fix landed.
+    // ========================================================================
+
+    /// Task #11: orphaned `.fzidx.tmp` left by an interrupted fuzzy flush
+    /// must be removed by `StorageEngine::open` so the next flush starts
+    /// from a clean slate. Test creates a stray `.fzidx.tmp` before opening
+    /// the DB and verifies it is gone afterwards.
+    #[test]
+    fn task11_fzidx_tmp_orphan_cleanup() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("orphan.mlite");
+
+        // Create an empty DB so the directory exists.
+        DatabaseCore::<StorageEngine>::open(&db_path)
+            .unwrap()
+            .close()
+            .unwrap();
+
+        // Plant an orphan `.fzidx.tmp` (mimics a fuzzy flush that crashed
+        // mid-rename). Same dir as the .mlite, arbitrary content.
+        let orphan = tmp.path().join("docs_collection_field_fuzzy.fzidx.tmp");
+        std::fs::write(&orphan, b"crash-leftover").unwrap();
+        assert!(orphan.exists());
+
+        // Reopen — the storage engine must clean it up.
+        let _db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        assert!(!orphan.exists(), ".fzidx.tmp should be removed on open");
+    }
+
+    /// Task #18 + storage cleanup: orphaned `.hnsw.tmp` from an interrupted
+    /// HNSW atomic flush is removed by `StorageEngine::open`.
+    #[test]
+    fn task18_hnsw_tmp_orphan_cleanup() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("orphan_hnsw.mlite");
+        DatabaseCore::<StorageEngine>::open(&db_path)
+            .unwrap()
+            .close()
+            .unwrap();
+
+        let orphan = tmp.path().join("foo_vec_embedding.hnsw.tmp");
+        std::fs::write(&orphan, b"crash-leftover").unwrap();
+        assert!(orphan.exists());
+
+        let _db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        assert!(!orphan.exists(), ".hnsw.tmp should be removed on open");
+    }
+
+    /// Task #18: HNSW flush should leave NO `.hnsw.tmp` behind (atomic
+    /// rename completed). Insert vectors, checkpoint, scan dir for stragglers.
+    #[test]
+    fn task18_hnsw_flush_leaves_no_tmp() {
+        use crate::vector::{DistanceMetric, VectorIndexConfig};
+
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("hnsw_atomic.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        coll.create_vector_index(
+            "embedding",
+            VectorIndexConfig {
+                dim: 8,
+                metric: DistanceMetric::Cosine,
+                ..VectorIndexConfig::default()
+            },
+        )
+        .unwrap();
+
+        for i in 0..10 {
+            let mut d = std::collections::HashMap::new();
+            let vec: Vec<f32> = (0..8).map(|j| ((i * 8 + j) as f32).sin()).collect();
+            d.insert("embedding".to_string(), serde_json::json!(vec));
+            db.insert_one("docs", d).unwrap();
+        }
+        db.checkpoint().unwrap();
+
+        let leftover = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == "tmp")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(
+            leftover, 0,
+            ".hnsw.tmp should not survive a successful flush"
+        );
+    }
+
+    /// Task #16 / #17: fulltext flush leaves NO `.ftidx.tmp` (atomic
+    /// commit completed). Same shape as the HNSW test above for fulltext.
+    #[test]
+    fn task16_17_fulltext_flush_leaves_no_tmp() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("ft_atomic.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        coll.create_fulltext_index("content".to_string(), "english", None, None)
+            .unwrap();
+        for i in 0..20 {
+            let mut d = std::collections::HashMap::new();
+            d.insert(
+                "content".to_string(),
+                serde_json::json!(format!("alpha document {}", i)),
+            );
+            db.insert_one("docs", d).unwrap();
+        }
+        db.checkpoint().unwrap();
+
+        let leftover = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == "tmp")
+                    .unwrap_or(false)
+            })
+            .count();
+        assert_eq!(leftover, 0, "no .tmp files should survive flush");
+    }
+
+    /// Task #8 + #10: `commit_flush` is retry-safe and prunes
+    /// `deleted_doc_ids`. Concretely: insert → delete → checkpoint →
+    /// reopen — the deleted doc must not appear in search results, and
+    /// the on-disk state must reflect the deletion (no ghost via stale
+    /// `deleted_doc_ids` entry).
+    #[test]
+    fn task8_10_commit_flush_drain_and_prune() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("commit_flush.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..10 {
+                let mut d = std::collections::HashMap::new();
+                d.insert("_id".to_string(), serde_json::json!(format!("d{}", i)));
+                d.insert(
+                    "content".to_string(),
+                    serde_json::json!(format!("alpha document {}", i)),
+                );
+                db.insert_one("docs", d).unwrap();
+            }
+            db.checkpoint().unwrap();
+
+            // Now delete half — the in-memory index records this in
+            // `deleted_doc_ids` (lazy mode); commit_flush must prune them.
+            for i in 0..5 {
+                db.delete_one("docs", &serde_json::json!({"_id": format!("d{}", i)}))
+                    .unwrap();
+            }
+            db.checkpoint().unwrap();
+            db.close().unwrap();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        let hits = coll
+            .fulltext_search("content", "alpha", Some(50), None, None, None)
+            .unwrap();
+        assert_eq!(
+            hits.len(),
+            5,
+            "fulltext should reflect deletion after commit_flush"
+        );
+        // Spot-check the survivors — every hit must be d5..d9.
+        for (doc, _, _) in &hits {
+            let id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                id.starts_with("d")
+                    && id != "d0"
+                    && id != "d1"
+                    && id != "d2"
+                    && id != "d3"
+                    && id != "d4",
+                "deleted doc {} reappeared after flush",
+                id
+            );
+        }
+    }
+
+    /// Task #12: `batch_update_indexes` no longer issues a redundant
+    /// remove for the fulltext index (refactor). Behavioral check:
+    /// update changes the indexed field's value once → old text drops
+    /// out of search results, new text shows up — no double counting,
+    /// no leftover ghost doc with the old text.
+    #[test]
+    fn task12_update_keeps_index_consistent() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("update.mlite");
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        coll.create_fulltext_index("content".to_string(), "english", None, None)
+            .unwrap();
+        let mut d = std::collections::HashMap::new();
+        d.insert("_id".to_string(), serde_json::json!("d1"));
+        d.insert("content".to_string(), serde_json::json!("alpha original"));
+        db.insert_one("docs", d).unwrap();
+
+        // Confirm baseline.
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "renamed", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            0
+        );
+
+        // Update the indexed field's content.
+        db.update_one(
+            "docs",
+            &serde_json::json!({"_id": "d1"}),
+            &serde_json::json!({"$set": {"content": "renamed entry"}}),
+        )
+        .unwrap();
+
+        // Old token must be gone (single remove worked); new token must
+        // be present (single insert worked).
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            0,
+            "old fulltext token survived update — possible redundant or missing remove"
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "renamed", Some(10), None, None, None)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    /// Task #14 (architectural): WAL did not protect non-btree indexes.
+    /// Resolution = task #26 watermark + replay infrastructure. This test
+    /// stays here as a regression net even though the heavy-lifting tests
+    /// live in the wal_replay_tests/edge sections — it verifies the
+    /// integrated guarantee in a single line: a fulltext index loses
+    /// nothing across a dirty shutdown that was missing this protection
+    /// before this week's work landed.
+    #[test]
+    fn task14_fulltext_survives_dirty_shutdown_with_post_checkpoint_writes() {
+        let tmp = TempDir::new().unwrap();
+        let db_path = tmp.path().join("task14.mlite");
+        {
+            let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+            let coll = db.collection("docs").unwrap();
+            coll.create_fulltext_index("content".to_string(), "english", None, None)
+                .unwrap();
+            for i in 0..6 {
+                let mut d = std::collections::HashMap::new();
+                d.insert(
+                    "content".to_string(),
+                    serde_json::json!(format!("alpha doc {}", i)),
+                );
+                db.insert_one("docs", d).unwrap();
+            }
+            db.checkpoint().unwrap();
+            for i in 6..9 {
+                let mut d = std::collections::HashMap::new();
+                d.insert(
+                    "content".to_string(),
+                    serde_json::json!(format!("beta doc {}", i)),
+                );
+                db.insert_one("docs", d).unwrap();
+            }
+            db.simulate_crash_for_test();
+        }
+        let db = DatabaseCore::<StorageEngine>::open(&db_path).unwrap();
+        let coll = db.collection("docs").unwrap();
+        // Before this week: beta docs would be lost (WAL didn't protect fulltext).
+        // After: every doc is recoverable via replay or rebuild fallback.
+        assert_eq!(
+            coll.fulltext_search("content", "alpha", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            6
+        );
+        assert_eq!(
+            coll.fulltext_search("content", "beta", Some(20), None, None, None)
+                .unwrap()
+                .len(),
+            3
+        );
+    }
 }
